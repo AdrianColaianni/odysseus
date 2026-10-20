@@ -41,11 +41,10 @@ def test_fastembed_threads_can_be_bounded(monkeypatch, tmp_path):
     ]
 
 
-@pytest.mark.parametrize("value", ["0", "257", "not-a-number"])
-def test_fastembed_threads_rejects_invalid_values(monkeypatch, tmp_path, value):
+def test_fastembed_threads_rejects_invalid_values(monkeypatch, tmp_path):
     _install_fastembed(monkeypatch)
-    monkeypatch.setenv("FASTEMBED_THREADS", value)
     monkeypatch.setattr(embeddings, "FASTEMBED_CACHE_DIR", str(tmp_path))
-
-    with pytest.raises(ValueError, match="FASTEMBED_THREADS"):
-        embeddings.FastEmbedClient(model="test-model")
+    for value in ("0", "257", "not-a-number"):
+        monkeypatch.setenv("FASTEMBED_THREADS", value)
+        with pytest.raises(ValueError, match="FASTEMBED_THREADS"):
+            embeddings.FastEmbedClient(model="test-model")

@@ -13,6 +13,9 @@ from fastapi import FastAPI
 from starlette.requests import Request
 
 from routes import skills_routes as routes
+from services.skills import agent_runner, audit_workflow, evaluation, publication
+from services.skills.dependencies import default_dependencies
+from tests.helpers.routes import route_endpoint
 
 
 FIXTURES = Path(__file__).parent / 'fixtures'
@@ -131,8 +134,7 @@ def _assert_openapi_matches_baseline(schema):
 
 
 def endpoint(method, path, manager=None):
-    return next(r.endpoint for r in routes.setup_skills_routes(manager).routes
-                if method in r.methods and r.path == '/api/skills' + path)
+    return route_endpoint(routes.setup_skills_routes(manager), '/api/skills' + path, method)
 
 
 def request(owner='alice', body=None):
@@ -164,76 +166,76 @@ def test_signature_contract_ignores_annotated_repr(monkeypatch):
     assert _signature_contract(target) == before
 
 
-@pytest.mark.parametrize('change', ['name', 'order', 'kind', 'default', 'annotation', 'return'])
-def test_signature_contract_detects_interface_changes(change):
-    def original(first: str, second: int = 1) -> bool:
-        pass
-    signature = inspect.signature(original)
-    first, second = signature.parameters.values()
-    parameters = [first, second]
-    if change == 'order':
-        parameters = [second.replace(default=inspect.Parameter.empty),
-                      first.replace(default='')]
-    elif change == 'return':
-        signature = signature.replace(return_annotation=str)
-    else:
-        changes = {
-            'name': {'name': 'renamed'},
-            'kind': {'kind': inspect.Parameter.KEYWORD_ONLY},
-            'default': {'default': 2},
-            'annotation': {'annotation': float},
-        }
-        parameters[1] = second.replace(**changes[change])
-    def changed():
-        pass
-    changed.__signature__ = signature.replace(parameters=parameters)
-    assert _signature_contract(changed) != _signature_contract(original)
+def test_signature_contract_detects_interface_changes():
+    for change in ('name', 'order', 'kind', 'default', 'annotation', 'return'):
+        def original(first: str, second: int = 1) -> bool:
+            pass
+        signature = inspect.signature(original)
+        first, second = signature.parameters.values()
+        parameters = [first, second]
+        if change == 'order':
+            parameters = [second.replace(default=inspect.Parameter.empty),
+                          first.replace(default='')]
+        elif change == 'return':
+            signature = signature.replace(return_annotation=str)
+        else:
+            changes = {
+                'name': {'name': 'renamed'},
+                'kind': {'kind': inspect.Parameter.KEYWORD_ONLY},
+                'default': {'default': 2},
+                'annotation': {'annotation': float},
+            }
+            parameters[1] = second.replace(**changes[change])
+        def changed():
+            pass
+        changed.__signature__ = signature.replace(parameters=parameters)
+        assert _signature_contract(changed) != _signature_contract(original)
 
 
-@pytest.mark.parametrize('change', ['constraint', 'factory'])
-def test_signature_contract_detects_model_changes(change):
+def test_signature_contract_detects_model_changes():
     from pydantic import BaseModel, Field
+    for change in ('constraint', 'factory'):
 
-    class Original(BaseModel):
-        text: str = Field(max_length=8)
-        tags: list[str] = Field(default_factory=list)
+        class Original(BaseModel):
+            text: str = Field(max_length=8)
+            tags: list[str] = Field(default_factory=list)
 
-    class Changed(BaseModel):
-        text: str = Field(max_length=9 if change == 'constraint' else 8)
-        tags: list[str] = Field(default_factory=tuple if change == 'factory' else list)
+        class Changed(BaseModel):
+            text: str = Field(max_length=9 if change == 'constraint' else 8)
+            tags: list[str] = Field(default_factory=tuple if change == 'factory' else list)
 
-    assert _signature_contract(Changed) != _signature_contract(Original)
+        assert _signature_contract(Changed) != _signature_contract(Original)
 
 
-@pytest.mark.parametrize('validated_data', [False, True])
-def test_signature_contract_rejects_custom_factories_without_calling_them(validated_data):
+def test_signature_contract_rejects_custom_factories_without_calling_them():
     from pydantic import BaseModel, Field
+    for validated_data in (False, True):
 
-    calls = []
-    def make_factory(value):
-        def plain():
-            calls.append(value)
-            return [value]
-        def with_data(data):
-            calls.append(value)
-            return [data['prefix'], value]
-        return with_data if validated_data else plain
+        calls = []
+        def make_factory(value):
+            def plain():
+                calls.append(value)
+                return [value]
+            def with_data(data):
+                calls.append(value)
+                return [data['prefix'], value]
+            return with_data if validated_data else plain
 
-    class Before(BaseModel):
-        prefix: str = 'validated'
-        tags: list[str] = Field(default_factory=make_factory('before'))
+        class Before(BaseModel):
+            prefix: str = 'validated'
+            tags: list[str] = Field(default_factory=make_factory('before'))
 
-    class After(BaseModel):
-        prefix: str = 'validated'
-        tags: list[str] = Field(default_factory=make_factory('after'))
+        class After(BaseModel):
+            prefix: str = 'validated'
+            tags: list[str] = Field(default_factory=make_factory('after'))
 
-    assert Before().tags != After().tags
-    assert Before.model_fields['tags'].default_factory_takes_validated_data is validated_data
-    calls.clear()
-    for model in (Before, After):
-        with pytest.raises(TypeError, match='Unsupported default factory'):
-            _signature_contract(model)
-    assert calls == []
+        assert Before().tags != After().tags
+        assert Before.model_fields['tags'].default_factory_takes_validated_data is validated_data
+        calls.clear()
+        for model in (Before, After):
+            with pytest.raises(TypeError, match='Unsupported default factory'):
+                _signature_contract(model)
+        assert calls == []
 
 
 def test_signature_contract_detects_default_validation_outside_signature_and_openapi():
@@ -276,24 +278,24 @@ def test_signature_contract_detects_validation_alias_paths():
     assert _signature_contract(Before) != _signature_contract(After)
 
 
-@pytest.mark.parametrize('setting', ['validate_default', 'strict'])
-def test_signature_contract_detects_model_validation_configuration(setting):
+def test_signature_contract_detects_model_validation_configuration():
     from pydantic import BaseModel, ConfigDict, ValidationError
+    for setting in ('validate_default', 'strict'):
 
-    class Before(BaseModel):
-        model_config = ConfigDict({setting: False})
-        count: int = 'invalid' if setting == 'validate_default' else 1
+        class Before(BaseModel):
+            model_config = ConfigDict({setting: False})
+            count: int = 'invalid' if setting == 'validate_default' else 1
 
-    class After(BaseModel):
-        model_config = ConfigDict({setting: True})
-        count: int = 'invalid' if setting == 'validate_default' else 1
+        class After(BaseModel):
+            model_config = ConfigDict({setting: True})
+            count: int = 'invalid' if setting == 'validate_default' else 1
 
-    data = {} if setting == 'validate_default' else {'count': '1'}
-    Before(**data)
-    with pytest.raises(ValidationError):
-        After(**data)
-    assert inspect.signature(Before) == inspect.signature(After)
-    assert _signature_contract(Before) != _signature_contract(After)
+        data = {} if setting == 'validate_default' else {'count': '1'}
+        Before(**data)
+        with pytest.raises(ValidationError):
+            After(**data)
+        assert inspect.signature(Before) == inspect.signature(After)
+        assert _signature_contract(Before) != _signature_contract(After)
 
 
 def test_openapi_golden_is_canonical():
@@ -302,25 +304,25 @@ def test_openapi_golden_is_canonical():
     assert golden == _canonical_openapi(schema)
 
 
-@pytest.mark.parametrize('section, key', [
-    ('paths', '/api/skills/add'), ('schemas', 'SkillAddRequest'),
-])
-def test_openapi_failure_identifies_changed_endpoint_or_schema(section, key):
-    schema = json.loads((FIXTURES / 'skills_openapi_baseline.json').read_text(encoding='utf-8'))
-    target = schema['paths'] if section == 'paths' else schema['components']['schemas']
-    if section == 'paths':
-        target[key]['post']['responses']['200']['description'] = 'changed contract'
-    else:
-        target[key]['properties']['solution']['anyOf'][0]['maxLength'] = 4999
-    with pytest.raises(pytest.fail.Exception) as failure:
-        _assert_openapi_matches_baseline(schema)
-    diagnostic = str(failure.value)
-    assert '--- skills_openapi_baseline.json' in diagnostic
-    assert '+++ generated OpenAPI' in diagnostic
-    assert f'Changed {section}: {key}' in diagnostic
-    expected_change = '"description": "changed contract"' if section == 'paths' else '"maxLength": 4999'
-    assert any(line.startswith('+') and expected_change in line
-               for line in diagnostic.splitlines())
+def test_openapi_failure_identifies_changed_endpoint_or_schema():
+    for section, key in (
+        ('paths', '/api/skills/add'), ('schemas', 'SkillAddRequest'),
+    ):
+        schema = json.loads((FIXTURES / 'skills_openapi_baseline.json').read_text(encoding='utf-8'))
+        target = schema['paths'] if section == 'paths' else schema['components']['schemas']
+        if section == 'paths':
+            target[key]['post']['responses']['200']['description'] = 'changed contract'
+        else:
+            target[key]['properties']['solution']['anyOf'][0]['maxLength'] = 4999
+        with pytest.raises(pytest.fail.Exception) as failure:
+            _assert_openapi_matches_baseline(schema)
+        diagnostic = str(failure.value)
+        assert '--- skills_openapi_baseline.json' in diagnostic
+        assert '+++ generated OpenAPI' in diagnostic
+        assert f'Changed {section}: {key}' in diagnostic
+        expected_change = '"description": "changed contract"' if section == 'paths' else '"maxLength": 4999'
+        assert any(line.startswith('+') and expected_change in line
+                   for line in diagnostic.splitlines())
 
 
 @pytest.mark.parametrize('raw, expected', [
@@ -336,8 +338,8 @@ async def test_run_verdict_parsing_and_retry(monkeypatch, raw, expected):
         calls.append((messages, kwargs))
         return raw
     monkeypatch.setattr('src.llm_core.llm_call_async', call)
-    monkeypatch.setattr(routes, 'effort_for_call', lambda url, model, owner: 'high' if owner == 'alice' else None)
-    result = await routes._eval_skill_run('md', 'task', 'transcript', 'url', 'm', {},
+    monkeypatch.setattr(evaluation, 'effort_for_call', lambda url, model, owner: 'high' if owner == 'alice' else None)
+    result = await evaluation.evaluate_run('md', 'task', 'transcript', 'url', 'm', {},
                                           workload='background', owner='alice')
     assert result['verdict'] == expected
     assert len(calls) == (2 if expected == 'unknown' else 1)
@@ -360,7 +362,7 @@ async def test_review_transient_failure_and_result_coercion(monkeypatch):
                            'issues': ['y' * 250] * 10, 'baseline_verdict': 'invalid',
                            'usefulness': '2', 'saved_turns': '-2', 'saved_tool_calls': 'bad'})
     monkeypatch.setattr('src.llm_core.llm_call_async', call)
-    result = await routes._eval_skill_run('', '', '', 'url', 'm', None)
+    result = await evaluation.evaluate_run('', '', '', 'url', 'm', None)
     assert result == {'verdict': 'pass', 'confidence': 0.0, 'summary': 'x' * 400,
                       'issues': ['y' * 200] * 8, 'baseline_verdict': 'unknown',
                       'usefulness': 1.0, 'saved_turns': -2, 'saved_tool_calls': 0}
@@ -372,7 +374,7 @@ async def test_review_failure_schema_and_transcript_tail(monkeypatch):
         seen.append(messages)
         raise RuntimeError('offline')
     monkeypatch.setattr('src.llm_core.llm_call_async', call)
-    result = await routes._eval_skill_run('m' * 5000, 'TASK', 'HEAD' + 'x' * 30000 + 'TAIL', 'url', 'm', None)
+    result = await evaluation.evaluate_run('m' * 5000, 'TASK', 'HEAD' + 'x' * 30000 + 'TAIL', 'url', 'm', None)
     assert result == {'verdict': 'unknown', 'confidence': 0,
                       'summary': 'Review call failed: offline', 'issues': []}
     assert len(seen) == 2
@@ -381,12 +383,12 @@ async def test_review_failure_schema_and_transcript_tail(monkeypatch):
 
 
 @pytest.mark.parametrize('name, raw, expected, tokens, timeout', [
-    ('_eval_skill_necessity', '<think>x</think>{"necessary":false,"redundant_with":["demo"],"reason":"duplicate",}',
+    ('evaluate_necessity', '<think>x</think>{"necessary":false,"redundant_with":["demo"],"reason":"duplicate",}',
      {'necessary': False, 'redundant_with': ['demo'], 'reason': 'duplicate'}, 8192, 120),
-    ('_eval_skill_retrieval_precision', '{"ok":false,"summary":"broad","issues":["metadata: retrieval: narrow"]}',
+    ('evaluate_retrieval_precision', '{"ok":false,"summary":"broad","issues":["metadata: retrieval: narrow"]}',
      {'ok': False, 'summary': 'broad', 'issues': ['metadata: retrieval: narrow']}, 4096, 90),
-    ('_eval_skill_necessity', '<think>unfinished', None, 8192, 120),
-    ('_eval_skill_retrieval_precision', '[]', None, 4096, 90),
+    ('evaluate_necessity', '<think>unfinished', None, 8192, 120),
+    ('evaluate_retrieval_precision', '[]', None, 4096, 90),
 ])
 async def test_advisory_schema_budget_and_owner(monkeypatch, name, raw, expected, tokens, timeout):
     async def call(*args, **kwargs):
@@ -395,17 +397,17 @@ async def test_advisory_schema_budget_and_owner(monkeypatch, name, raw, expected
         assert kwargs['reasoning_effort'] == 'medium'
         return raw
     monkeypatch.setattr('src.llm_core.llm_call_async', call)
-    monkeypatch.setattr(routes, 'effort_for_call', lambda url, model, owner: 'medium' if owner == 'alice' else None)
-    assert await getattr(routes, name)('md', [], 'url', 'm', None, owner='alice') == expected
+    monkeypatch.setattr(evaluation, 'effort_for_call', lambda url, model, owner: 'medium' if owner == 'alice' else None)
+    assert await getattr(evaluation, name)('md', [], 'url', 'm', None, owner='alice') == expected
 
 
-@pytest.mark.parametrize('name', ['_eval_skill_necessity', '_eval_skill_retrieval_precision', '_improve_skill_md'])
+@pytest.mark.parametrize('name', ['evaluate_necessity', 'evaluate_retrieval_precision', 'improve_markdown'])
 async def test_advisory_exceptions_return_none(monkeypatch, name):
     async def call(*args, **kwargs):
         raise TimeoutError('offline')
     monkeypatch.setattr('src.llm_core.llm_call_async', call)
-    args = ('md', {}, '', 'url', 'm', None) if name == '_improve_skill_md' else ('md', [], 'url', 'm', None)
-    assert await getattr(routes, name)(*args) is None
+    args = ('md', {}, '', 'url', 'm', None) if name == 'improve_markdown' else ('md', [], 'url', 'm', None)
+    assert await getattr(evaluation, name)(*args) is None
 
 
 async def test_cancelled_audit_closes_stream_in_originating_context(monkeypatch):
@@ -422,7 +424,7 @@ async def test_cancelled_audit_closes_stream_in_originating_context(monkeypatch)
             bound.reset(token)
             closed.append(asyncio.current_task())
     monkeypatch.setattr('src.agent_loop.stream_agent_loop', stream)
-    task = asyncio.create_task(routes._run_skill_audit_arm([], 'url', 'm', {}, 'alice'))
+    task = asyncio.create_task(agent_runner.run_audit_arm([], 'url', 'm', {}, 'alice'))
     await opened.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -441,10 +443,10 @@ async def test_cancelled_batch_skips_finalization_and_cleans_task(monkeypatch):
             assert owner == 'alice'
             return [{'name': 'demo'}]
     job = {'status': 'running', 'log': [], 'results': [], 'done': 0}
-    monkeypatch.setattr(routes, '_skill_audit_jobs', {('alice',): job})
-    monkeypatch.setattr(routes, '_audit_one_skill', audit)
-    monkeypatch.setattr(routes, '_finalize_audit_batch', lambda *args: pytest.fail('cancelled batch finalized'))
-    task = asyncio.create_task(routes._run_audit_all_job(('alice',), Manager(), ['demo'], 'url', 'm', {}, None, 'alice'))
+    monkeypatch.setattr(audit_workflow, '_skill_audit_jobs', {('alice',): job})
+    monkeypatch.setattr(audit_workflow, 'audit_one_skill', audit)
+    monkeypatch.setattr(publication, 'finalize_batch', lambda *args: pytest.fail('cancelled batch finalized'))
+    task = asyncio.create_task(default_dependencies().run_batch(('alice',), Manager(), ['demo'], 'url', 'm', {}, None, 'alice'))
     job['task'] = task
     await opened.wait()
     task.cancel()
@@ -462,7 +464,7 @@ async def test_test_polling_is_owner_scoped_and_hides_continuation(monkeypatch):
     job = {'status': 'awaiting_approval', 'task': 'task', 'model': 'm', 'log': [],
            'verdict': None, 'approval': {'approval_id': 'id'},
            '_run': {'headers': {'Authorization': 'secret'}}, '_transcript': ['private']}
-    monkeypatch.setattr(routes, '_skill_test_jobs', {('alice', 'demo'): job})
+    monkeypatch.setattr(agent_runner, '_skill_test_jobs', {('alice', 'demo'): job})
     poll = endpoint('GET', '/{skill_id}/test-status', Manager())
     assert await poll(request('bob'), 'demo') == {'status': 'none'}
     assert await poll(request(), 'demo') == {k: job[k] for k in ('status', 'task', 'model', 'log', 'verdict', 'approval')}
@@ -478,8 +480,8 @@ def test_batch_finalizer_protects_approval_required_and_unprocessed_skills(monke
                      'audit_verdict': 'fail', 'confidence': .9} for name in ('demo', 'demo-1', 'demo-2')]
         def update_skill(self, name, fields, owner=None):
             self.updated.append((name, fields, owner))
-    monkeypatch.setattr(routes, '_audit_auto_publish_policy', lambda owner: (True, .8))
+    monkeypatch.setattr(publication, 'auto_publish_policy', lambda owner: (True, .8))
     manager = Manager()
-    routes._finalize_audit_batch(manager, [{'skill': 'demo', 'result': 'approval_required'},
+    default_dependencies().finalize_batch(manager, [{'skill': 'demo', 'result': 'approval_required'},
                                           {'skill': 'demo-1', 'result': 'flagged'}], 'alice', lambda msg: None)
     assert manager.updated == [('demo-1', {'status': 'draft'}, 'alice')]

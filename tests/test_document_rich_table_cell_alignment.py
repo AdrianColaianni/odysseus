@@ -1,26 +1,7 @@
 """Browser coverage for contextual Rich Text table-cell vertical alignment."""
 
-import json
-import subprocess
-from pathlib import Path
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source, function_body
-
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-
-
-def test_table_cell_alignment_uses_contextual_undoable_table_path():
-    actions = function_body("_applyRichTableAction")
-    state = function_body("_richDropdownCurrentActions")
-
-    for alignment in ("top", "middle", "bottom"):
-        assert f"table:cell-align:{alignment}" in DOC_JS
-    assert "target.style.verticalAlign = alignment" in actions
-    assert "target.style.removeProperty('vertical-align')" in actions
-    assert "current.add(`table:cell-align:" in state
-    assert "tableCellAlignment" in DOC_JS
+from tests.helpers.node import run_node_module
 
 
 def test_mobile_table_cell_alignment_tracks_state_and_native_history():
@@ -121,15 +102,7 @@ def test_mobile_table_cell_alignment_tracks_state_and_native_history():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
 
     tags = [["TH", "TH"], ["TH", "TD"]]
     assert "Align cell top" in data["initialCurrent"]

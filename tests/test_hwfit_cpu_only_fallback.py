@@ -62,18 +62,13 @@ AARCH64_SYSTEM = {
 QUANT = "Q4_K_M"
 
 
-@pytest.mark.parametrize(
-    "non_cpu_system",
-    [CUDA_SYSTEM, ROCM_SYSTEM],
-    ids=["cuda", "rocm"],
-)
-def test_cpu_only_on_non_cpu_backend_uses_cpu_x86_fallback(non_cpu_system):
+def test_cpu_only_on_non_cpu_backend_uses_cpu_x86_fallback():
     """cpu_only must ignore discrete GPU backends and use the x86 CPU fallback constant."""
-    non_cpu_tps = _estimate_speed(DENSE_MODEL, QUANT, "cpu_only", non_cpu_system)
     cpu_tps = _estimate_speed(DENSE_MODEL, QUANT, "cpu_only", CPU_X86_SYSTEM)
-
-    assert non_cpu_tps == pytest.approx(cpu_tps, rel=1e-9, abs=1e-9)
-    assert non_cpu_tps > 0
+    assert cpu_tps > 0
+    for non_cpu_system in (CUDA_SYSTEM, ROCM_SYSTEM):
+        non_cpu_tps = _estimate_speed(DENSE_MODEL, QUANT, "cpu_only", non_cpu_system)
+        assert non_cpu_tps == pytest.approx(cpu_tps, rel=1e-9, abs=1e-9)
 
 
 def test_cpu_only_on_metal_apple_silicon_uses_cpu_arm_fallback():
@@ -95,18 +90,13 @@ def test_cpu_only_on_gpu_backend_uses_detected_arm64_cpu_arch():
     assert cuda_arm64_tps > 0
 
 
-@pytest.mark.parametrize(
-    "arm_alias_system",
-    [ARM64_SYSTEM, AARCH64_SYSTEM, CPU_ARM_SYSTEM],
-    ids=["arm64", "aarch64", "cpu_arm"],
-)
-def test_cpu_only_preserves_arm_backends(arm_alias_system):
-    """ARM CPU backends and their aliases must stay on the ARM CPU fallback."""
-    alias_tps = _estimate_speed(DENSE_MODEL, QUANT, "cpu_only", arm_alias_system)
+def test_cpu_only_preserves_arm_backends():
+    """ARM CPU backend aliases must stay on the ARM CPU fallback."""
     arm_tps = _estimate_speed(DENSE_MODEL, QUANT, "cpu_only", CPU_ARM_SYSTEM)
-
-    assert alias_tps == pytest.approx(arm_tps, rel=1e-9, abs=1e-9)
-    assert alias_tps > 0
+    assert arm_tps > 0
+    for arm_alias_system in (ARM64_SYSTEM, AARCH64_SYSTEM):
+        alias_tps = _estimate_speed(DENSE_MODEL, QUANT, "cpu_only", arm_alias_system)
+        assert alias_tps == pytest.approx(arm_tps, rel=1e-9, abs=1e-9)
 
 
 def test_cpu_only_does_not_treat_plain_arm_as_arm64_fallback():

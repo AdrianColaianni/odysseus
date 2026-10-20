@@ -6,15 +6,16 @@ except that fell back to `[]`, so a non-JSON Args value registered the
 server as "Connected" while forwarding no arguments to the spawned stdio
 subprocess at all, with no error surfaced anywhere.
 """
+import sys
 import asyncio
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
 
 from routes.mcp import mcp_routes
+from tests.helpers.route_call import with_db
 
 
 class _FakeSession:
@@ -53,13 +54,12 @@ def _add_server(monkeypatch):
     # every call, so take the LAST "add_server" route: the one just registered
     # with our fake manager, not an earlier registration from importing app.py.
     route = [r for r in router.routes if getattr(r, "name", None) == "add_server"][-1]
-    return route.endpoint, manager
+    return with_db(route.endpoint), manager
 
 
 def test_add_server_rejects_malformed_args_instead_of_defaulting(monkeypatch):
     add_server, manager = _add_server(monkeypatch)
-    monkeypatch.setattr(mcp_routes, "SessionLocal", lambda: (_ for _ in ()).throw(
-        AssertionError("must not reach the DB when args is rejected")))
+    db = MagicMock()
 
     with pytest.raises(HTTPException) as exc:
         asyncio.run(add_server(
@@ -72,17 +72,19 @@ def test_add_server_rejects_malformed_args_instead_of_defaulting(monkeypatch):
             url=None,
             oauth_file=None,
             oauth_config=None,
+            db=db,
         ))
 
     assert exc.value.status_code == 400
     manager.connect_server.assert_not_called()
+    assert not db.method_calls
 
 
 def test_add_server_still_accepts_valid_json_args(monkeypatch):
     add_server, manager = _add_server(monkeypatch)
     fake_session = _FakeSession()
-    monkeypatch.setattr(mcp_routes, "SessionLocal", lambda: fake_session)
-
+    monkeypatch.setattr(mcp_routes, "SessionLocal", lambda: fake_session, raising=False)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", lambda: fake_session)
     result = asyncio.run(add_server(
         request=None,
         name="filesystem",
@@ -106,8 +108,7 @@ def test_add_server_rejects_valid_json_args_that_is_not_a_list(monkeypatch):
     StdioServerParameters(args=5), which raises an unhandled TypeError when
     the error formatter later does " ".join([command, *args])."""
     add_server, manager = _add_server(monkeypatch)
-    monkeypatch.setattr(mcp_routes, "SessionLocal", lambda: (_ for _ in ()).throw(
-        AssertionError("must not reach the DB when args has the wrong shape")))
+    db = MagicMock()
 
     with pytest.raises(HTTPException) as exc:
         asyncio.run(add_server(
@@ -120,18 +121,20 @@ def test_add_server_rejects_valid_json_args_that_is_not_a_list(monkeypatch):
             url=None,
             oauth_file=None,
             oauth_config=None,
+            db=db,
         ))
 
     assert exc.value.status_code == 400
     manager.connect_server.assert_not_called()
+    assert not db.method_calls
 
 
 def test_add_server_still_defaults_empty_args_to_empty_list(monkeypatch):
     """No behavior change for the common case of an empty Args field."""
     add_server, manager = _add_server(monkeypatch)
     fake_session = _FakeSession()
-    monkeypatch.setattr(mcp_routes, "SessionLocal", lambda: fake_session)
-
+    monkeypatch.setattr(mcp_routes, "SessionLocal", lambda: fake_session, raising=False)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", lambda: fake_session)
     result = asyncio.run(add_server(
         request=None,
         name="no-args-server",
@@ -146,29 +149,3 @@ def test_add_server_still_defaults_empty_args_to_empty_list(monkeypatch):
 
     assert result["connected"] is True
     assert manager.connect_server.call_args.kwargs["args"] == []
-
-
-# ---------------------------------------------------------------------------
-# The two forms that post to this endpoint
-# ---------------------------------------------------------------------------
-#
-# The route now answers 400 with a message naming the expected shape. That is
-# only worth anything if the form the user is looking at prints it, and the two
-# forms did not agree: admin.js reads `data.detail`, settings.js printed the
-# bare status code. Read as source, because the artifact under test is the
-# string in the file and neither form is reachable without a browser.
-
-_REPO = Path(__file__).resolve().parents[1]
-
-
-def test_admin_form_reports_the_reason_the_route_gave():
-    source = (_REPO / "static" / "js" / "admin.js").read_text(encoding="utf-8")
-    assert "msg.textContent = data.detail || `Failed (${res.status})`;" in source
-
-
-def test_unified_integrations_form_reports_the_reason_the_route_gave():
-    source = (_REPO / "static" / "js" / "settings.js").read_text(encoding="utf-8")
-    assert (
-        "el('uf-mcp-msg').textContent = data.detail || `Failed (${r.status})`;"
-        in source
-    ), "settings.js drops the route's message and prints only the status code"

@@ -13,24 +13,24 @@ import time
 from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
 
+from src.constants import APP_PORT
+
 logger = logging.getLogger(__name__)
 
 
 def _resolve_redirect_base() -> str:
     """Origin the browser is sent back to after authorizing.
 
-    Falls back to the port the app binds natively (APP_PORT, read the same way
-    by app.py and launcher.py) rather than a fixed 7000: the macOS launcher
-    defaults to 7860, and a callback on the wrong port reaches nothing. The
-    hostname stays `localhost` rather than internal_api_base()'s 127.0.0.1 —
-    this URI is registered with the authorization server (via DCR, or by hand
-    for Google clients), so changing the host invalidates registrations that
-    already exist.
+    Falls back to APP_PORT, the port the app binds: a callback on the wrong
+    port reaches nothing. The hostname stays `localhost` rather than
+    internal_api_base()'s 127.0.0.1 because this URI is registered with the
+    authorization server (via DCR, or by hand for Google clients), so changing
+    the host invalidates registrations that already exist.
     """
     return (
         os.environ.get("OAUTH_REDIRECT_BASE_URL")
         or os.environ.get("APP_PUBLIC_URL")
-        or f"http://localhost:{os.environ.get('APP_PORT', '7000')}"
+        or f"http://localhost:{APP_PORT}"
     ).rstrip("/")
 
 

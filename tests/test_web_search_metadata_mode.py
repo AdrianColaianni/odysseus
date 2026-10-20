@@ -2,7 +2,7 @@ import asyncio
 import json
 import pytest
 
-import src.search as search
+import services.search as search
 from src.agent_tools.web_tools import (
     WebSearchTool,
     _is_official_site_metadata_query,
@@ -31,32 +31,34 @@ def test_long_report_preserves_late_source_through_tool_and_runtime(monkeypatch)
     assert json.loads(result['output'].split('<!-- SOURCES:')[1].split(' -->')[0]) == sources
 
 
-@pytest.mark.parametrize('sources,status', [([], 'empty'),
-    ([{'title': 'Example', 'url': 'https://example.org'}], 'available')])
-def test_search_reports_evidence_availability_independently_of_execution(monkeypatch, sources, status):
-    monkeypatch.setattr(search, 'comprehensive_web_search',
-        lambda *args, **kwargs: ('Search completed.', sources))
-    result = asyncio.run(WebSearchTool().execute(json.dumps({'query': 'example query'}), {}))
-    assert result['exit_code'] == 0
-    assert result['evidence_status'] == status
+def test_search_reports_evidence_availability_independently_of_execution(monkeypatch):
+    for sources, status in [
+        ([], 'empty'),
+        ([{'title': 'Example', 'url': 'https://example.org'}], 'available'),
+    ]:
+        monkeypatch.setattr(search, 'comprehensive_web_search',
+            lambda *args, **kwargs: ('Search completed.', sources))
+        result = asyncio.run(WebSearchTool().execute(json.dumps({'query': 'example query'}), {}))
+        assert result['exit_code'] == 0
+        assert result['evidence_status'] == status
 
 
-@pytest.mark.parametrize('query', [
-    'Norway current events',
-    "What's happening in Norway",
-])
-def test_current_event_phrasing_uses_recent_search_mode(monkeypatch, query):
-    seen = {}
+def test_current_event_phrasing_uses_recent_search_mode(monkeypatch):
+    for query in [
+        'Norway current events',
+        "What's happening in Norway",
+    ]:
+        seen = {}
 
-    def search_call(*args, **kwargs):
-        seen.update(kwargs)
-        return 'Current reporting.', [{'title': 'Report', 'url': 'https://example.org/news'}]
+        def search_call(*args, **kwargs):
+            seen.update(kwargs)
+            return 'Current reporting.', [{'title': 'Report', 'url': 'https://example.org/news'}]
 
-    monkeypatch.setattr(search, 'comprehensive_web_search', search_call)
-    result = asyncio.run(WebSearchTool().execute(json.dumps({'query': query}), {}))
+        monkeypatch.setattr(search, 'comprehensive_web_search', search_call)
+        result = asyncio.run(WebSearchTool().execute(json.dumps({'query': query}), {}))
 
-    assert result['evidence_status'] == 'available'
-    assert seen['time_filter'] == 'day'
+        assert result['evidence_status'] == 'available'
+        assert seen['time_filter'] == 'day'
 
 
 

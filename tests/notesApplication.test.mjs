@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createNotesState } from '../frontend/src/features/notes/application/state.js';
-import { createNotesWorkflows } from '../frontend/src/features/notes/application/workflows.js';
-import { createLayout } from '../frontend/src/features/notes/ui/layout.js';
+import { createNotesState } from '../static/js/features/notes/application/state.js';
+import { createNotesWorkflows } from '../static/js/features/notes/application/workflows.js';
+import { createLayout } from '../static/js/features/notes/ui/layout.js';
 
 test('views cannot mutate Notes state, but captured identities observe application updates', () => {
   const app = createNotesState();

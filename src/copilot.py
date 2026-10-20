@@ -1,20 +1,8 @@
-# src/copilot.py
-"""GitHub Copilot provider support.
+"""GitHub Copilot provider: constants and pure helpers.
 
-Copilot exposes an OpenAI-compatible API at ``https://api.githubcopilot.com``
-(``/chat/completions`` + ``/models``). Authentication is a GitHub OAuth
-**device flow**: the user authorises a device code in their browser and we
-receive a long-lived ``access_token`` that is sent directly as
-``Authorization: Bearer <token>`` — there is no separate Copilot-token
-exchange and no refresh (mirrors how editors / opencode talk to Copilot).
-
-The only provider-specific wrinkle beyond the bearer token is a handful of
-required request headers (API version, intent, an editor-style User-Agent,
-and ``x-initiator`` for agent-vs-user request accounting). Those live in
-:func:`copilot_headers`.
-
-This module holds the constants + pure helpers; the HTTP device-flow calls
-live in :mod:`routes.copilot_routes` so they can be auth-gated.
+Auth is a GitHub OAuth device flow whose access_token is sent directly as the
+bearer (no Copilot-token exchange, no refresh). The device-flow HTTP calls live
+in routes.copilot_routes so they can be auth-gated.
 """
 
 import os

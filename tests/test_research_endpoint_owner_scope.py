@@ -11,21 +11,10 @@ reach whatever internal base_url they configured. Mirrors the
 webhook `_first_enabled_endpoint` (#1045) and session `_owned_endpoint` fixes.
 """
 
-import sys
-import types
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 import pytest
 
-# The helper resolves `from src.database import ModelEndpoint` at call time.
-# Stub the module so we can hand it a fake declarative class whose column
-# comparisons return inspectable predicates (the real one is a SQLAlchemy
-# class, MagicMock'd to oblivion by conftest). owner_filter stays REAL.
-_sd = types.ModuleType("src.database")
-_sd.ModelEndpoint = MagicMock()
-sys.modules.setdefault("src.database", _sd)
-
-from routes.research_routes import _owned_enabled_endpoint, _resolve_endpoint_runtime  # noqa: E402
+from routes.research.research_routes import _owned_enabled_endpoint, _resolve_endpoint_runtime
 
 
 class _Predicate:

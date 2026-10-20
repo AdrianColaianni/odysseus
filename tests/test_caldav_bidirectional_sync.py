@@ -33,53 +33,13 @@ def test_event_to_ical_serializes_core_fields_and_rrule():
 
 
 def test_caldav_pull_prune_skips_unsynced_or_pending_local_rows():
+    """Source text on purpose: the prune is inline in `_sync_blocking`, which needs a live CalDAV client (#2704)."""
     source = Path("src/caldav_sync.py").read_text()
 
+    assert 'CalendarEvent.origin == "caldav"' in source
     assert 'existing.caldav_sync_pending in {"create", "update"}' in source
     assert "CalendarEvent.remote_href.isnot(None)" in source
     assert "CalendarEvent.caldav_sync_pending.is_(None)" in source
-
-
-def test_http_calendar_writes_mark_pending_and_push_after_commit():
-    source = Path("routes/calendar_routes.py").read_text()
-
-    assert 'caldav_sync_pending="create" if cal.source == "caldav" else None' in source
-    assert 'ev.caldav_sync_pending = "update"' in source
-    assert 'await _push_caldav_event_after_commit(owner, uid, "create")' in source
-    assert 'await _push_caldav_event_after_commit(owner, base_uid, "update")' in source
-    assert 'await _push_caldav_event_after_commit(owner, base_uid, "delete")' in source
-    assert "_record_caldav_delete_tombstone(db, ev, owner)" in source
-    assert 'not result.get("ok")' in source
-
-
-def test_agent_calendar_writes_share_caldav_push_path():
-    source = Path("src/tools/calendar.py").read_text()
-
-    assert "_push_caldav_event_after_commit" in source
-    assert 'caldav_sync_pending="create" if cal.source == "caldav" else None' in source
-    assert 'ev.caldav_sync_pending = "update"' in source
-    assert 'await _push_caldav_event_after_commit(owner, uid, "create")' in source
-    assert 'await _push_caldav_event_after_commit(owner, base_uid, "update")' in source
-    assert 'await _push_caldav_event_after_commit(owner, base_uid, "delete")' in source
-    assert "_record_caldav_delete_tombstone(db, ev, owner)" in source
-
-
-def test_database_declares_and_migrates_caldav_remote_metadata():
-    source = Path("core/database.py").read_text()
-
-    for needle in [
-        "class CalendarDeletedEvent",
-        "remote_href = Column(String, nullable=True)",
-        "remote_etag = Column(String, nullable=True)",
-        "caldav_sync_pending = Column(String, nullable=True)",
-        "caldav_base_url = Column(String, nullable=True)",
-        "ALTER TABLE calendar_events ADD COLUMN remote_href TEXT",
-        "ALTER TABLE calendar_events ADD COLUMN remote_etag TEXT",
-        "ALTER TABLE calendar_events ADD COLUMN caldav_sync_pending TEXT",
-        "ALTER TABLE calendars ADD COLUMN caldav_base_url TEXT",
-        "_migrate_add_caldav_sync_columns()",
-    ]:
-        assert needle in source
 
 
 def test_failed_remote_delete_leaves_tombstone_and_later_retry_cleans_up(tmp_path, monkeypatch):
@@ -90,6 +50,7 @@ def test_failed_remote_delete_leaves_tombstone_and_later_retry_cleans_up(tmp_pat
     dbmod = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, "core.database", dbmod)
     spec.loader.exec_module(dbmod)
+    dbmod.init_db()
 
     CalendarCal = dbmod.CalendarCal
     CalendarDeletedEvent = dbmod.CalendarDeletedEvent

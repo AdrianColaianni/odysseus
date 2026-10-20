@@ -1,7 +1,7 @@
 """Memory routes must owner-scope caller-supplied session ids.
 
 SessionManager.get_session returns any session by id (no owner scoping). The
-/api/memory extract, audit, import, and by-session handlers accept a
+/api/memory extract, audit and import handlers accept a
 caller-supplied session id, so without an ownership gate a user could target
 another tenant's session and leak their chat history, session-scoped LLM
 credentials, or session title.
@@ -16,15 +16,9 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException, UploadFile
 
-import routes.memory_routes as mr
+import routes.memory.memory_routes as mr
 from src.request_models import MemoryAddRequest
-
-
-def _route(router, path, method):
-    for r in router.routes:
-        if r.path == path and method in getattr(r, "methods", set()):
-            return r.endpoint
-    raise AssertionError(path)
+from tests.helpers.routes import route_endpoint
 
 
 def _router(monkeypatch, caller):
@@ -62,25 +56,10 @@ def _allow_memory_management(monkeypatch):
 
 def test_extract_rejects_other_users_session(monkeypatch):
     router = _router(monkeypatch, caller="bob")
-    extract = _route(router, "/api/memory/extract", "POST")
+    extract = route_endpoint(router, "/api/memory/extract", "POST")
     with pytest.raises(HTTPException) as exc:
         asyncio.run(extract(request=None, session="alice-sess"))
     assert exc.value.status_code == 404
-
-
-def test_by_session_rejects_other_users_session(monkeypatch):
-    router = _router(monkeypatch, caller="bob")
-    gbs = _route(router, "/api/memory/by-session/{session_id}", "GET")
-    with pytest.raises(HTTPException) as exc:
-        gbs(request=None, session_id="alice-sess")
-    assert exc.value.status_code == 404
-
-
-def test_owner_can_access_own_session(monkeypatch):
-    router = _router(monkeypatch, caller="alice")
-    gbs = _route(router, "/api/memory/by-session/{session_id}", "GET")
-    out = gbs(request=None, session_id="alice-sess")
-    assert out["session_name"] == "Secret project"
 
 
 def test_audit_session_fallback_uses_resolver_without_manual_default(monkeypatch):
@@ -97,7 +76,7 @@ def test_audit_session_fallback_uses_resolver_without_manual_default(monkeypatch
         headers=session_headers,
     )
     router = mr.setup_memory_routes(memory_manager, session_manager, memory_vector)
-    audit_route = _route(router, "/api/memory/audit", "POST")
+    audit_route = route_endpoint(router, "/api/memory/audit", "POST")
 
     resolver_calls = []
     audit_calls = []
@@ -129,11 +108,6 @@ def test_audit_session_fallback_uses_resolver_without_manual_default(monkeypatch
     monkeypatch.setattr(task_endpoint, "resolve_task_endpoint", fake_resolve_task_endpoint)
     monkeypatch.setattr(mr, "audit_memories", fake_audit_memories)
     monkeypatch.setitem(sys.modules, "routes.model_routes", fake_model_routes)
-    monkeypatch.setattr(
-        mr,
-        "SessionLocal",
-        lambda: (_ for _ in ()).throw(AssertionError("manual default branch should not run")),
-    )
 
     out = asyncio.run(audit_route(request=_request("alice"), session="session-1"))
 
@@ -164,7 +138,7 @@ def test_add_memory_rejects_other_users_session(monkeypatch):
         session_manager=session_manager,
         memory_vector=memory_vector,
     )
-    add_memory = _route(router, "/api/memory/add", "POST")
+    add_memory = route_endpoint(router, "/api/memory/add", "POST")
 
     memory_manager.load.return_value = []
     memory_manager.find_duplicates.return_value = False
@@ -191,28 +165,6 @@ def test_add_memory_rejects_other_users_session(monkeypatch):
     memory_vector.add.assert_not_called()
 
 
-def test_timeline_does_not_expose_other_users_session_name():
-    memory_manager = MagicMock()
-    session_manager = MagicMock()
-    session_manager.sessions = {"bob-session": object()}
-    session_manager.get_session.return_value = SimpleNamespace(owner="bob", name="Bob roadmap")
-    memory_manager.load.return_value = [
-        {
-            "id": "m1",
-            "text": "Alice note",
-            "owner": "alice",
-            "session_id": "bob-session",
-            "timestamp": 1,
-        }
-    ]
-    router = mr.setup_memory_routes(memory_manager, session_manager)
-    timeline = _route(router, "/api/memory/timeline", "GET")
-
-    out = timeline(request=_request("alice"))
-
-    assert out["timeline"][0]["session_name"] == "Unknown"
-
-
 def test_import_missing_session_uses_utility_fallback(monkeypatch):
     _allow_memory_management(monkeypatch)
     memory_manager = MagicMock()
@@ -223,7 +175,7 @@ def test_import_missing_session_uses_utility_fallback(monkeypatch):
     monkeypatch.setattr(mr, "resolve_endpoint", resolve_endpoint)
     monkeypatch.setattr(mr, "resolve_task_endpoint", resolve_task_endpoint)
     router = mr.setup_memory_routes(memory_manager, session_manager)
-    import_memories = _route(router, "/api/memory/import", "POST")
+    import_memories = route_endpoint(router, "/api/memory/import", "POST")
 
     out = asyncio.run(import_memories(request=_request("alice"), session="missing-session", file=_upload()))
 
@@ -250,7 +202,7 @@ def test_import_foreign_session_uses_same_utility_fallback(monkeypatch):
     monkeypatch.setattr(mr, "resolve_endpoint", resolve_endpoint)
     monkeypatch.setattr(mr, "resolve_task_endpoint", resolve_task_endpoint)
     router = mr.setup_memory_routes(memory_manager, session_manager)
-    import_memories = _route(router, "/api/memory/import", "POST")
+    import_memories = route_endpoint(router, "/api/memory/import", "POST")
 
     out = asyncio.run(import_memories(request=_request("alice"), session="bob-session", file=_upload()))
 
@@ -274,7 +226,7 @@ def test_import_owned_session_uses_session_endpoint(monkeypatch):
     monkeypatch.setattr(mr, "resolve_endpoint", resolve_endpoint)
     monkeypatch.setattr(mr, "resolve_task_endpoint", resolve_task_endpoint)
     router = mr.setup_memory_routes(memory_manager, session_manager)
-    import_memories = _route(router, "/api/memory/import", "POST")
+    import_memories = route_endpoint(router, "/api/memory/import", "POST")
 
     out = asyncio.run(import_memories(request=_request("alice"), session="alice-session", file=_upload()))
 

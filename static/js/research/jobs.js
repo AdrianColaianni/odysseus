@@ -99,7 +99,7 @@ async function _reconnectActive(options = {}) {
   _activePollInFlight = true;
   try {
     // Reconnect to running tasks
-    const res = await fetch(`${_apiBase}/api/research/active`, { credentials: 'same-origin' });
+    const res = await fetch(`${_apiBase}/api/research/active`);
     if (res.ok) {
       const data = await res.json();
       for (const task of (data.active || [])) {
@@ -138,7 +138,7 @@ async function _syncLibrary(options = {}) {
   if (!options.force && now - _lastLibrarySyncAt < _LIBRARY_SYNC_MIN_MS) return;
   _librarySyncInFlight = true;
   try {
-    const libRes = await fetch(`${_apiBase}/api/research/library?sort=recent&limit=20`, { credentials: 'same-origin' });
+    const libRes = await fetch(`${_apiBase}/api/research/library?sort=recent&limit=20`);
     if (libRes.ok) {
       const libData = await libRes.json();
       const dismissed = _loadDismissed();
@@ -257,7 +257,7 @@ export async function cancelJob(id) {
   const job = _jobs.find(j => j.id === id);
   if (!job) return;
   if (job.status === 'queued') { job.status = 'cancelled'; _notify(); return; }
-  try { await fetch(`${_apiBase}/api/research/cancel/${id}`, { method: 'POST', credentials: 'same-origin' }); } catch {}
+  try { await fetch(`${_apiBase}/api/research/cancel/${id}`, { method: 'POST' }); } catch (e) { console.warn('Research cancel failed:', e); }
   _finishJob(job, 'cancelled');
 }
 
@@ -326,7 +326,7 @@ async function _launchJob(job) {
   let data;
   try {
     const res = await fetch(`${_apiBase}/api/research/start`, {
-      method: 'POST', credentials: 'same-origin',
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
@@ -395,7 +395,7 @@ function _connectStream(job) {
 async function _pollFallback(job) {
   if (job.status !== 'running') return;
   try {
-    const res = await fetch(`${_apiBase}/api/research/status/${job.id}`, { credentials: 'same-origin' });
+    const res = await fetch(`${_apiBase}/api/research/status/${job.id}`);
     if (!res.ok) { _finishJob(job, 'error'); return; }
     const d = await res.json();
     job.progress = d.progress || {};
@@ -436,7 +436,7 @@ export function onComplete(cb) { _onCompleteCb = cb; }
 async function _fetchResult(job) {
   try {
     const res = await fetch(`${_apiBase}/api/research/result-peek/${job.id}`, {
-      method: 'POST', credentials: 'same-origin',
+      method: 'POST',
     });
     if (!res.ok) return;
     const d = await res.json();

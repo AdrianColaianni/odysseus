@@ -1,8 +1,3 @@
-// ============================================
-// COOKBOOK HWFIT SUB-MODULE
-// "What Fits?" hardware model fitting UI
-// ============================================
-
 import {
   _envState,
   _persistEnvState,
@@ -28,6 +23,10 @@ import {
   _applyServerSelectColor,
   _syncServerSelectColors,
   _copyText,
+  fetchWithTimeout,
+  _normalizeCookbookModelDir,
+  _firstGgufSource,
+  _looksLikeGgufRepo,
   // Import cookbook.js WITHOUT a ?v= query — the same plain specifier every other
   // importer uses. A query mismatch loads cookbook.js twice as two separate modules
   // (two _envState objects), which silently sent downloads to the wrong server.
@@ -42,30 +41,11 @@ import { openCookbookDependencies } from './cookbook-diagnosis.js';
 // on the target server" before firing a launch.
 const _BACKEND_PKG = { vllm: 'vllm', sglang: 'sglang', llamacpp: 'llama_cpp', mlx: 'mlx_lm', mlx_image: 'mflux', diffusers: 'diffusers' };
 
-function _fetchHwfitWithTimeout(input, init = {}, timeoutMs = 20000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const parentSignal = init.signal;
-  const abortFromParent = () => controller.abort();
-  if (parentSignal) {
-    if (parentSignal.aborted) controller.abort();
-    else parentSignal.addEventListener('abort', abortFromParent, { once: true });
-  }
-  return fetch(input, { ...init, signal: controller.signal }).finally(() => {
-    clearTimeout(timer);
-    parentSignal?.removeEventListener('abort', abortFromParent);
-  });
-}
 function _dependencyPkgForModel(runBackend, modelData = {}) {
   // A catalog may explicitly declare a runtime package. Do not infer it from
   // model names: users can run new models without a frontend code change.
   const declared = typeof modelData === 'string' ? '' : String(modelData?.dependency_package || '').trim();
   return declared || _BACKEND_PKG[runBackend];
-}
-
-function _normalizeCookbookModelDir(dir) {
-  const d = String(dir || '').replaceAll('\u2715', '').replaceAll('\u2716', '').trim();
-  return /^(home|mnt|media|data|opt|srv|var)\//.test(d) ? `/${d}` : d;
 }
 
 function _wireServerColorPicker(entry) {
@@ -135,7 +115,7 @@ async function _ensureBackendInstalled(runBackend, host, port, envPath, modelDat
       if (port) params.set('ssh_port', String(port));
       if (envPath) params.set('venv', envPath);
     }
-    const r = await _fetchHwfitWithTimeout('/api/cookbook/packages' + (params.toString() ? '?' + params : ''));
+    const r = await fetchWithTimeout('/api/cookbook/packages' + (params.toString() ? '?' + params : ''));
     if (!r.ok) return true; // An unavailable probe must not falsely block launch.
     const d = await r.json();
     const pkg = (d.packages || []).find(p => p.name === pkgName);
@@ -154,8 +134,6 @@ async function _ensureBackendInstalled(runBackend, host, port, envPath, modelDat
   return false;
 }
 
-// ── What Fits? (hardware model fitting) ──
-
 export let _hwfitCache = null;
 export let _hwfitDebounce = null;
 export let _cachedModelIds = null; // repo IDs already downloaded
@@ -172,16 +150,6 @@ let _dismissedHwChips = new Set();
 let _removedHwChips = new Set();
 
 export let _gpuToggleTotal = 0; // real GPU count from first scan, never overridden
-
-function _firstGgufSource(model) {
-  const sources = Array.isArray(model?.gguf_sources) ? model.gguf_sources : [];
-  return sources.find(src => src && src.repo) || null;
-}
-
-function _looksLikeGgufRepo(model) {
-  const haystack = `${model?.quant_repo || ''} ${model?.repo_id || ''} ${model?.path || ''} ${model?.name || ''}`.toLowerCase();
-  return !!model?.is_gguf || haystack.includes('gguf') || haystack.includes('.gguf');
-}
 
 function _downloadSourceRepo(model, backend) {
   if (backend === 'llamacpp') {
@@ -250,11 +218,8 @@ export function _renderGpuToggles(system) {
     _gpuToggleTotal = 0;
     return;
   }
-  // Update on every scan that returns a positive total — previously this
-   // only set on the first scan, so switching servers (e.g. local 1-GPU
-   // first, then a 4-GPU remote) left the Run-panel GPU buttons stuck on
-   // the original count. Zero/missing totals still don't clobber a known
-   // good value (avoids flicker during an in-flight re-probe).
+  // Update on every positive total so switching servers updates the GPU
+  // buttons; a zero total mid re-probe must not clobber a known count.
   if (total > 0) _gpuToggleTotal = total;
 
   container._groups = groups;
@@ -284,9 +249,7 @@ export function _renderGpuToggles(system) {
   const validCounts = _validTpCounts(poolSize);
   const maxGpu = validCounts.length ? validCounts[validCounts.length - 1] : 0;
   // Commit the data layer to maxGpu on initial render so it matches the
-  // visual highlight. Before this, _activeCount stayed undefined → no
-  // gpu_count param sent → backend's fallback could rank against RAM on
-  // mixed-resource boxes ("tightest" sorted by RAM instead of GPU).
+  // visual highlight; without gpu_count the backend may rank against RAM.
   //
   // On boxes where total RAM > total VRAM, default to RAM (count=0) instead
   // — RAM is the dominant pool so it's the better starting filter.
@@ -459,10 +422,7 @@ function _manualDisplaySystem(sys, manual) {
   const base = { ...(sys || {}) };
   if (!manual) return base;
   base.manual_hardware = true;
-  // REPLACE detected RAM with the manual total. Previously this added
-  // on top of detected, which (a) contradicted the new server-side
-  // "replace" behavior and (b) made the chip's displayed total not
-  // match what was actually being ranked against.
+  // The manual total replaces detected RAM, matching the server side.
   if (manual.ramGb) {
     base.available_ram_gb = Number(manual.ramGb);
     base.total_ram_gb = Number(manual.ramGb);
@@ -615,7 +575,7 @@ async function _ensureOllamaLib() {
   if (_ollamaLibInFlight) return _ollamaLibInFlight;
   const pending = (async () => {
     try {
-      const res = await _fetchHwfitWithTimeout('/api/cookbook/ollama/library');
+      const res = await fetchWithTimeout('/api/cookbook/ollama/library');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       _ollamaLibCache = Array.isArray(data?.models) ? data.models : [];
@@ -804,7 +764,7 @@ export async function _hwfitFetch(fresh = false, opts = {}) {
       if (_cachePort) _cacheParams.set('ssh_port', _cachePort);
       if (_cacheSrv?.platform) _cacheParams.set('platform', _cacheSrv.platform);
     }
-    _fetchHwfitWithTimeout(`/api/model/cached?${_cacheParams}`, { credentials: 'same-origin' }, 20000)
+    fetchWithTimeout(`/api/model/cached?${_cacheParams}`, { credentials: 'same-origin' }, 20000)
       .then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
@@ -885,7 +845,7 @@ export async function _hwfitFetch(fresh = false, opts = {}) {
       if (_fitOnly) params.set('fit_only', '1');
     }
     const endpoint = isImageMode ? `/api/hwfit/image-models?${params}` : `/api/hwfit/models?${params}`;
-    const res = await _fetchHwfitWithTimeout(endpoint, { signal: _requestController.signal }, 30000);
+    const res = await fetchWithTimeout(endpoint, { signal: _requestController.signal }, 30000);
     // A newer scan started while this one was in flight (user switched servers
     // mid-probe) — drop this stale response so it can't clobber the new one.
     if (_tk !== _hwfitFetchToken) { try { wp.destroy(); } catch {} return; }
@@ -906,7 +866,7 @@ export async function _hwfitFetch(fresh = false, opts = {}) {
     if (!isImageMode && quantPref && !data.error && Array.isArray(data.models) && data.models.length === 0) {
       const fallbackParams = new URLSearchParams(params);
       fallbackParams.delete('quant');
-      const fallbackRes = await _fetchHwfitWithTimeout(`/api/hwfit/models?${fallbackParams}`, { signal: _requestController.signal }, 30000);
+      const fallbackRes = await fetchWithTimeout(`/api/hwfit/models?${fallbackParams}`, { signal: _requestController.signal }, 30000);
       if (_tk !== _hwfitFetchToken) { try { wp.destroy(); } catch {} return; }
       if (fallbackRes.ok) {
         const fallbackData = await fallbackRes.json();
@@ -1140,11 +1100,8 @@ export function _hwfitRenderHw(el, sys) {
   };
   let gpuChip;
   if (sys.gpu_name) {
-    // Mixed-GPU boxes (#711): `${gpuCount}x ${gpu_name}` uses gpus[0].name for
-    // every card, so a 4090+3060 reads as "2x RTX 4090". Use gpu_groups (the
-    // backend already groups identical cards) to render each pool separately
-    // and put the per-card index+VRAM into the tooltip so it's actually
-    // useful for picking CUDA_VISIBLE_DEVICES.
+    // gpus[0].name would label a 4090+3060 box "2x RTX 4090", so render each
+    // gpu_groups pool separately, with per-card index and VRAM in the tooltip.
     const groups = Array.isArray(sys.gpu_groups) ? sys.gpu_groups : [];
     // Shorten vendor prefixes so a mixed-GPU label fits in the chip row
     // without overflowing. Single-GPU label still shows the full name
@@ -1326,7 +1283,7 @@ function _wireManualHardwareControls(el) {
   syncManualButton();
 }
 
-export const _fitColors = { perfect: 'var(--green, #50fa7b)', good: 'var(--yellow, #f1fa8c)', marginal: 'var(--orange, #ffb86c)', too_tight: 'var(--red, #ff5555)' };
+export const _fitColors = { perfect: 'var(--green)', good: 'var(--yellow, #f1fa8c)', marginal: 'var(--orange, #ffb86c)', too_tight: 'var(--red)' };
 
 function _requiresAcceleratorBackend(model) {
   const q = String(model?.quant || model?.quantization || '').toUpperCase();
@@ -1441,8 +1398,6 @@ export function _hwfitRenderList(el, models) {
     if (col.cls === 'hwfit-fit') {
       const _fitOnly = (() => { try { return localStorage.getItem('hwfit_fit_only_v1') === '1'; } catch { return false; } })();
       label = `<span class="hwfit-fit-dot${_fitOnly ? ' active' : ''}" title="${_fitOnly ? 'Showing only models that fit. Click to also show too-tight rows.' : 'Click to show only models that fit your hardware.'}" data-fit-dot>●</span>${col.label}`;
-      // (Budget tag removed — the GPU/RAM/N-GPU suffix next to "Fit" was noise;
-      // the toggle row already shows which budget is active.)
     }
     // The Model column's "(newest)" / "(oldest)" suffix flips with the sort
     // direction so the user can see at a glance which way they're sorted.
@@ -1527,14 +1482,6 @@ export function _hwfitRenderList(el, models) {
       const modelData = (_hwfitCache?.models || []).find(m => m.name === name);
       if (!modelData) return;
       if (modelData._isOllama) {
-        // Force-open the Download card if it's been collapsed — otherwise
-        // filling the (hidden) input silently swallows the click.
-        const dlBody = document.getElementById('cookbook-download-card-body');
-        const dlArrow = document.getElementById('cookbook-download-card-arrow');
-        if (dlBody && dlBody.style.display === 'none') {
-          dlBody.style.display = 'block';
-          if (dlArrow) dlArrow.style.transform = 'rotate(90deg)';
-        }
         const dlInput = document.getElementById('cookbook-dl-repo');
         if (dlInput) {
           dlInput.value = modelData.name;
@@ -1787,10 +1734,8 @@ export function _expandModelRow(row, modelData) {
       const _qrRunBackend = _qrBackendDetect.backend || 'vllm';
       const _qrPort = _nextAvailablePort();
 
-      // ─── Pre-launch: stop colliding serves on the same port ───────
-      // Different ports coexist fine (e.g. vLLM on 8000 + Qwen VL on
-      // 8001). Only block when the new model's port genuinely collides
-      // with a running serve. (Issue #4507)
+      // Only block when the new model's port collides with a running serve;
+      // different ports coexist.
       try {
         const _qrHostStr = _envState.remoteHost || '';
         const _allServes = _loadTasks().filter(t =>
@@ -1818,7 +1763,7 @@ export function _expandModelRow(row, modelData) {
                 if (_stopBtn) {
                   _stopBtn.click();
                 } else {
-                  await _fetchHwfitWithTimeout('/api/shell/exec', {
+                  await fetchWithTimeout('/api/shell/exec', {
                     method: 'POST',
                     credentials: 'same-origin',
                     headers: { 'Content-Type': 'application/json' },
@@ -1872,7 +1817,7 @@ export function _expandModelRow(row, modelData) {
           const _wrappedCheck = _qrHostStr
             ? `ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new ${_qrHostStr} "bash -lc ${JSON.stringify(_coreCheck)}"`
             : `bash -lc ${JSON.stringify(_coreCheck)}`;
-          const _chkRes = await _fetchHwfitWithTimeout('/api/shell/exec', {
+          const _chkRes = await fetchWithTimeout('/api/shell/exec', {
             method: 'POST',
             credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
@@ -2024,7 +1969,7 @@ export function _expandModelRow(row, modelData) {
       };
 
       try {
-        const res = await _fetchHwfitWithTimeout('/api/model/serve', {
+        const res = await fetchWithTimeout('/api/model/serve', {
           method: 'POST', credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
@@ -2261,7 +2206,6 @@ export function _hwfitInit() {
   const ctx = document.getElementById('hwfit-context');
   const ctxLabel = document.getElementById('hwfit-context-label');
   const search = document.getElementById('hwfit-search');
-  const remote = document.getElementById('hwfit-host');
   _syncCtxControl();
   if (uc) _bindHwfitUsecasePicker(uc);
   if (uc && !uc.dataset.hwfitScanBound) {
@@ -2315,38 +2259,6 @@ export function _hwfitInit() {
       }
       _hwfitCache = null;
       _hwfitFetch();
-    });
-  }
-  // Rescan — force a fresh hardware probe (bypasses the per-host cache).
-  const rescan = document.getElementById('hwfit-rescan');
-  if (rescan && !rescan.dataset.bound) {
-    rescan.dataset.bound = '1';
-    rescan.addEventListener('click', async () => {
-      if (rescan.dataset.scanning) return;   // ignore re-clicks mid-scan
-      rescan.dataset.scanning = '1';
-      const orig = rescan.innerHTML;
-      rescan.disabled = true;
-      rescan.style.opacity = '0.85';
-      // Swap the ↻ glyph for a live whirlpool so the click feels responsive
-      // during the (often slow) SSH hardware probe.
-      const wp = spinnerModule.createWhirlpool(12);
-      wp.element.style.marginRight = '4px';
-      wp.element.style.position = 'relative';
-      wp.element.style.top = '-2px';   // sit a touch higher, aligned with the label
-      rescan.innerHTML = '';
-      rescan.appendChild(wp.element);
-      rescan.appendChild(document.createTextNode('RESCAN'));
-      // Reset toggle state (no flicker — buttons stay until the fresh scan swaps them).
-      _resetGpuToggleState();
-      try {
-        await _hwfitFetch(true);
-      } finally {
-        try { wp.destroy(); } catch {}
-        rescan.innerHTML = orig;
-        rescan.disabled = false;
-        rescan.style.opacity = '';
-        delete rescan.dataset.scanning;
-      }
     });
   }
   if (search && !search.dataset.hwfitScanBound) {
@@ -2457,7 +2369,7 @@ export function _hwfitInit() {
     setMsg('Testing SSH...');
     const t0 = Date.now();
     try {
-      const res = await _fetchHwfitWithTimeout('/api/cookbook/test-ssh', {
+      const res = await fetchWithTimeout('/api/cookbook/test-ssh', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ host, ssh_port: port || undefined }),
@@ -2471,17 +2383,17 @@ export function _hwfitInit() {
       if (data.exit_code === 0 && out.startsWith('ok')) {
         dot.className = 'cookbook-srv-status ok';
         dot.title = `Reachable · ${ms} ms · use Dependencies to check tmux/HF setup`;
-        setMsg(`Connected · ${ms} ms`, 'var(--green,#50fa7b)');
+        setMsg(`Connected · ${ms} ms`, 'var(--green)');
       } else {
         dot.className = 'cookbook-srv-status fail';
         const err = (data.stderr || data.stdout || (data.exit_code == null ? 'no exit code' : `exit ${data.exit_code}`)).toString().trim().slice(0, 240);
         dot.title = `SSH failed: ${err}`;
-        setMsg(`Failed · ${err}`, 'var(--red,#e06c75)');
+        setMsg(`Failed · ${err}`, 'var(--red)');
       }
     } catch (e) {
       dot.className = 'cookbook-srv-status fail';
       dot.title = `Test failed: ${e.message || e}`;
-      setMsg(`Failed · ${e.message || e}`, 'var(--red,#e06c75)');
+      setMsg(`Failed · ${e.message || e}`, 'var(--red)');
     }
   }
 
@@ -2503,7 +2415,7 @@ export function _hwfitInit() {
   }
 
   async function _fetchCookbookSshKey(generate = false) {
-    const res = await _fetchHwfitWithTimeout('/api/cookbook/ssh-key', {
+    const res = await fetchWithTimeout('/api/cookbook/ssh-key', {
       method: generate ? 'POST' : 'GET',
       credentials: 'same-origin',
     });
@@ -2556,8 +2468,7 @@ export function _hwfitInit() {
     // twice). Bind each entry exactly once.
     if (entry.dataset.wired) return;
     entry.dataset.wired = '1';
-    // Inject the status dot once if missing — into the card header next to the
-    // server name (was previously the first child of the input row).
+    // Inject the status dot once, into the card header next to the server name.
     const row = entry.querySelector('.cookbook-server-row');
     const titleEl = entry.querySelector('.cookbook-server-title');
     if (!entry.querySelector('.cookbook-srv-status')) {
@@ -2760,7 +2671,7 @@ export function _hwfitInit() {
         const origText = setupBtn.textContent;
         setupBtn.textContent = 'Installing...';
         try {
-          const res = await _fetchHwfitWithTimeout('/api/cookbook/setup', {
+          const res = await fetchWithTimeout('/api/cookbook/setup', {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ host, ssh_port: port || undefined }),
@@ -2779,7 +2690,7 @@ export function _hwfitInit() {
               if (existingBadge) existingBadge.remove();
               const badge = document.createElement('span');
               badge.className = 'cookbook-platform-badge';
-              badge.style.cssText = 'font-size:8px;padding:1px 5px;border-radius:3px;border:1px solid ' + (data.platform === 'windows' ? 'var(--cyan,#56b6c2)' : 'var(--green,#98c379)') + ';color:' + (data.platform === 'windows' ? 'var(--cyan,#56b6c2)' : 'var(--green,#98c379)') + ';opacity:0.7;white-space:nowrap;flex-shrink:0;';
+              badge.style.cssText = 'font-size:8px;padding:1px 5px;border-radius:3px;border:1px solid ' + (data.platform === 'windows' ? 'var(--cyan,#56b6c2)' : 'var(--green)') + ';color:' + (data.platform === 'windows' ? 'var(--cyan,#56b6c2)' : 'var(--green)') + ';opacity:0.7;white-space:nowrap;flex-shrink:0;';
               badge.textContent = data.platform;
               setupBtn.parentNode.insertBefore(badge, setupBtn);
             }

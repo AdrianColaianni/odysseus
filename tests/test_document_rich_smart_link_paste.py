@@ -1,12 +1,7 @@
 """Browser coverage for undoable and protocol-safe Rich Text URL paste."""
 
-import json
-import subprocess
-from pathlib import Path
 from tests.helpers.stylesheets import stylesheet_link_tags
-
-
-ROOT = Path(__file__).resolve().parents[1]
+from tests.helpers.node import run_node_module
 
 
 def test_rich_url_paste_links_selections_and_plain_urls_without_unsafe_autolinks():
@@ -135,15 +130,7 @@ def test_rich_url_paste_links_selections_and_plain_urls_without_unsafe_autolinks
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
 
     assert data["selectedLink"] == {
         "href": "https://example.com/reference",

@@ -1,7 +1,7 @@
 import json
-import subprocess
 import textwrap
 from pathlib import Path
+from tests.helpers.node import run_node_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,14 +17,7 @@ def run_node(body: str):
         {body}
         """
     )
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
+    return run_node_module(script)
 
 
 def test_pan_intent_covers_hand_space_and_middle_mouse():
@@ -87,24 +80,3 @@ def test_apply_pan_updates_state_canvas_overlay_and_cursor_classes():
     assert result["overlay"] == result["main"]
     assert result["ready"] == ["ge-pan-ready"]
     assert result["panning"] == ["ge-panning"]
-
-
-def test_hand_navigation_is_wired_to_toolbar_keyboard_and_offline_graph():
-    toolbar = (ROOT / "static/js/editor/build/toolbar.js").read_text(encoding="utf-8")
-    shortcuts = (ROOT / "static/js/editor/tool-shortcuts.js").read_text(encoding="utf-8")
-    keyboard = (ROOT / "static/js/editor/keyboard-shortcuts.js").read_text(encoding="utf-8")
-    events = (ROOT / "static/js/editor/canvas-events.js").read_text(encoding="utf-8")
-    editor = (ROOT / "static/js/galleryEditor.js").read_text(encoding="utf-8")
-    service_worker = (ROOT / "static/sw.js").read_text(encoding="utf-8")
-
-    assert "{ id: 'hand', label: 'Hand'" in toolbar
-    assert "t.key = TOOL_SHORTCUTS[t.id]" in toolbar
-    assert "hand: 'H'" in shortcuts
-    assert "e.code === 'Space'" in keyboard
-    assert "setTemporaryPan?.(true)" in keyboard
-    assert "isDirectPanIntent(state.tool, state.spacePanActive" in events
-    assert "transformPointerId = e.pointerId" in events
-    assert "canvasArea.setPointerCapture(transformPointerId)" in events
-    assert "continueDraw(e)" in events
-    assert "canvasNavigation?.updateCursor()" in editor
-    assert "/static/js/editor/canvas-navigation.js" in service_worker

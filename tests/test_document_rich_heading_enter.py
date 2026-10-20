@@ -1,26 +1,7 @@
 """Browser coverage for predictable Rich Text heading Enter behavior."""
 
-import json
-import subprocess
-from pathlib import Path
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source, function_body
-
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-
-
-def test_heading_enter_uses_single_native_history_commands():
-    helper = function_body("_handleRichHeadingEnter")
-
-    assert "selection.isCollapsed" in helper
-    assert "h1, h2, h3, h4, h5, h6" in helper
-    assert "document.execCommand('defaultParagraphSeparator', false, 'p')" in helper
-    assert "document.execCommand('insertParagraph')" in helper
-    assert "document.execCommand('formatBlock', false, 'p')" in helper
-    assert "headingHasContent && !caretAtEnd" in helper
-    assert "_handleRichHeadingEnter(rich)" in DOC_JS
+from tests.helpers.node import run_node_module
 
 
 def test_mobile_heading_enter_exits_cleanly_and_is_one_step_undoable():
@@ -74,15 +55,7 @@ def test_mobile_heading_enter_exits_cleanly_and_is_one_step_undoable():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
 
     assert data["entered"]["tags"] == ["H2", "P", "P"]
     assert data["entered"]["heading"] == "<strong>Project title</strong>"
@@ -154,15 +127,7 @@ def test_heading_enter_preserves_shift_middle_and_empty_heading_semantics():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
 
     assert "<br>" in data["h3"]
     assert [value.replace("\xa0", " ") for value in data["h4"]] == ["Split", " here"]

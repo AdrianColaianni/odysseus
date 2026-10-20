@@ -9,7 +9,7 @@ This spec covers media surfaces in:
 - app route registration and generated-file serving in `app.py`;
 - canonical models in `core/database.py`, with `src.database` as a compatibility import path;
 - canonical route package `routes/gallery/gallery_routes.py` and `routes/gallery/gallery_helpers.py`, with top-level `routes/gallery_routes.py` and `routes/gallery_helpers.py` compatibility shims;
-- generated-image writers in `src/ai_interaction.py` and `mcp_servers/image_gen_server.py`;
+- the generated-image writer in `src/ai_interaction.py`, which `mcp_servers/image_gen_server.py` calls;
 - local MLX image compatibility server `scripts/mlx_image_server.py`;
 - image tool schemas/dispatch/implementations in `src/tool_schemas.py`, `src/tool_execution.py`, and `src/tool_implementations.py`;
 - `routes/editor_draft_routes.py`;
@@ -144,7 +144,7 @@ Known boundaries:
 - Missing generated files are skipped in ZIP downloads; if all are missing, the route returns no files found.
 - Soft delete commits the gallery row state before removing the disk file, so a failed DB write does not orphan a missing image row.
 - AI tagging can fail when disk files are missing.
-- Static assets revalidate; most editor modules remain static ES modules, while `frontend/modules.json` and the committed generated-output freshness gate govern the manifest-selected native ES modules published by byte-for-byte copying to committed deployment outputs.
+- Static assets revalidate; editor modules are static ES modules.
 - Gallery/editor frontend state includes stale-while-revalidate and listener cleanup to avoid stale handlers.
 - `src/tools/image.py` implements `edit_image` in-process: prompt edits call the model adapter, upscale creates a 2x/4x Lanczos copy, and rembg creates a copy when the optional package is installed. It checks exact gallery owner and confined source path; uploaded attachment URIs support prompt edits after owner-aware resolution.
 

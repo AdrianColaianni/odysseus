@@ -15,6 +15,7 @@ import uuid
 from typing import Dict, Optional
 
 from src.ai_interaction import get_session_manager, _resolve_model, AI_CHAT_TIMEOUT
+from src.agent_tools.document_tools import _relative_age
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +102,7 @@ async def list_sessions(content: str, session_id: Optional[str] = None, owner: O
 
     try:
         from core.database import SessionLocal, Session as DbSession
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         # Pull every session's last_accessed from the DB so we can sort
         # by recency. In-memory sessions hold name + model + msg_count;
@@ -132,22 +133,6 @@ async def list_sessions(content: str, session_id: Optional[str] = None, owner: O
         # Sort by timestamp DESC; rows without a timestamp sink to the bottom.
         rows.sort(key=lambda r: r[0] or datetime.min, reverse=True)
 
-        def _rel(ts):
-            if not ts:
-                return 'never'
-            now = datetime.utcnow()
-            try:
-                if ts.tzinfo is not None:
-                    now = datetime.now(timezone.utc)
-                diff = (now - ts).total_seconds()
-            except Exception:
-                return 'unknown'
-            if diff < 60: return 'just now'
-            if diff < 3600: return f'{int(diff / 60)}m ago'
-            if diff < 86400: return f'{int(diff / 3600)}h ago'
-            if diff < 86400 * 7: return f'{int(diff / 86400)}d ago'
-            return ts.strftime('%Y-%m-%d')
-
         lines = []
         for i, (ts, sid, sess) in enumerate(rows):
             if i >= 50:
@@ -157,7 +142,7 @@ async def list_sessions(content: str, session_id: Optional[str] = None, owner: O
             msg_count = getattr(sess, "message_count", 0) or 0
             model = getattr(sess, "model", "unknown")
             marker = " ← current chat" if sid == session_id else (" ← most recent" if i == 0 else "")
-            lines.append(f"- **[{safe_name}](#session-{sid})** (id: `{sid}`, model: {model}, {msg_count} msgs, last active {_rel(ts)}){marker}")
+            lines.append(f"- **[{safe_name}](#session-{sid})** (id: `{sid}`, model: {model}, {msg_count} msgs, last active {_relative_age(ts)}){marker}")
 
         if not lines:
             return {"results": "No sessions found" + (f" matching '{keyword}'" if keyword else "") + "."}
@@ -491,26 +476,3 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
     finally:
         db.close()
 
-
-# ---------------------------------------------------------------------------
-# Handler classes registered in TOOL_HANDLERS
-# ---------------------------------------------------------------------------
-
-class CreateSessionTool:
-    async def execute(self, content: str, ctx: dict) -> Dict:
-        return await create_session(content, ctx.get("session_id"), owner=ctx.get("owner"))
-
-
-class ListSessionsTool:
-    async def execute(self, content: str, ctx: dict) -> Dict:
-        return await list_sessions(content, ctx.get("session_id"), owner=ctx.get("owner"))
-
-
-class SendToSessionTool:
-    async def execute(self, content: str, ctx: dict) -> Dict:
-        return await send_to_session(content, ctx.get("session_id"), owner=ctx.get("owner"))
-
-
-class ManageSessionTool:
-    async def execute(self, content: str, ctx: dict) -> Dict:
-        return await manage_session(content, ctx.get("session_id"), owner=ctx.get("owner"))

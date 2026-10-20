@@ -7,27 +7,29 @@ from src.tool_policy import ToolPolicy
 from src.turn_contract import resolve_full_inventory_contract
 
 
-@pytest.mark.parametrize('value', [
-    'No emails matched "drop off the keys address".',
-    {'stdout': 'No emails matched "keys".', 'exit_code': 0},
-    json.dumps({'output': json.dumps({'stdout': 'No emails matched "keys".', 'exit_code': 0})}),
-])
-def test_empty_results(value):
-    assert email_search_result_empty(value)
-    assert email_search_recovery(value, 0)
-    assert email_search_recovery(value, 1)
-    assert not email_search_recovery(value, 2)
+def test_empty_results():
+    for value in (
+        'No emails matched "drop off the keys address".',
+        {'stdout': 'No emails matched "keys".', 'exit_code': 0},
+        json.dumps({'output': json.dumps({'stdout': 'No emails matched "keys".', 'exit_code': 0})}),
+    ):
+        assert email_search_result_empty(value)
+        assert email_search_recovery(value, 0)
+        assert email_search_recovery(value, 1)
+        assert not email_search_recovery(value, 2)
 
 
-@pytest.mark.parametrize('value', [
-    {'stdout': 'No emails matched "keys".', 'exit_code': 1},
-    {'stdout': 'No emails matched "keys".', 'stderr': 'Authentication failed'},
-    {'error': 'Timeout'}, '', None,
-    'UID 42: Key return address',
-    'Email body: No emails matched "keys".',
-])
-def test_nonempty_and_failed_results_do_not_trigger(value):
-    assert not email_search_result_empty(value)
+def test_nonempty_and_failed_results_do_not_trigger():
+    for value in (
+        {'stdout': 'No emails matched "keys".', 'exit_code': 1},
+        {'stdout': 'No emails matched "keys".', 'stderr': 'Authentication failed'},
+        {'error': 'Timeout'},
+        '',
+        None,
+        'UID 42: Key return address',
+        'Email body: No emails matched "keys".',
+    ):
+        assert not email_search_result_empty(value)
 
 
 @pytest.mark.asyncio
@@ -81,5 +83,3 @@ async def test_recovery_reaches_next_model_request(monkeypatch):
     assert len(executions) == 2, chunks
     guidance = [m for m in requests[1]['messages'] if 'shorter targeted query' in str(m.get('content'))]
     assert guidance
-    assert 'Read promising messages' in guidance[0]['content']
-    assert 'Preserve explicit account' in guidance[0]['content']

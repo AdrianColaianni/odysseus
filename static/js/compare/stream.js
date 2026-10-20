@@ -6,10 +6,10 @@ import markdownModule from '../markdown.js';
 import spinnerModule from '../spinner.js';
 import uiModule from '../ui.js?v=20260916largetoolscroll1';
 import presetsModule from '../presets.js?v=20260908personaname1';
+import { readSseData } from '../util/sse.js';
+import { WAVE_FRAMES } from './icons.js?v=20260908compareprompts1';
 
 var escapeHtml = uiModule.esc;
-
-const WAVE_FRAMES = ['▁▂▃', '▂▃▄', '▃▄▅', '▄▅▆', '▅▆▇', '▆▅▄', '▅▄▃', '▄▃▂'];
 
 function _safeHttpHref(raw) {
   try {
@@ -304,33 +304,24 @@ async function _runSynthForPane(modelToUse, synthPrompt, synthBody, spinner, his
 
     if (spinner) spinner.stop();
     synthBody.innerHTML = '';
-    const reader = streamRes.body.getReader();
-    const decoder = new TextDecoder();
     let synthText = '';
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunk = decoder.decode(value);
-      const lines = chunk.split('\n');
-      for (const line of lines) {
-        if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-          try {
-            const d = JSON.parse(line.slice(6));
-            if (d.delta) {
-              synthText += d.delta;
-              if (markdownModule && synthText.trim()) {
-                synthBody.innerHTML = markdownModule.processWithThinking(
-                  markdownModule.squashOutsideCode(synthText)
-                );
-              } else {
-                synthBody.textContent = synthText;
-              }
-              hist.scrollTop = hist.scrollHeight;
-            }
-          } catch (e) {}
+    for await (const data of readSseData(streamRes)) {
+      if (data === '[DONE]') continue;
+      try {
+        const d = JSON.parse(data);
+        if (d.delta) {
+          synthText += d.delta;
+          if (markdownModule && synthText.trim()) {
+            synthBody.innerHTML = markdownModule.processWithThinking(
+              markdownModule.squashOutsideCode(synthText)
+            );
+          } else {
+            synthBody.textContent = synthText;
+          }
+          hist.scrollTop = hist.scrollHeight;
         }
-      }
+      } catch (e) { console.warn('Compare synthesis parse error:', e); }
     }
 
     // Final highlight
@@ -472,236 +463,221 @@ async function streamToPane(paneIdx, sessionId, message, aiMsgEl, opts) {
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
+    for await (const data of readSseData(response)) {
+      _resetIdleTimeout();
+      if (data === '[DONE]') continue;
+      try {
+        const json = JSON.parse(data);
+        if (json.type === 'metrics') {
+          metrics = json.data;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      _resetIdleTimeout();  // any chunk = stream is alive
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6);
-        if (data === '[DONE]') break;
-        try {
-          const json = JSON.parse(data);
-          if (json.type === 'metrics') {
-            metrics = json.data;
-
-          // ── Research progress (spinner updates) ──
-          } else if (json.type === 'research_progress') {
-            const rp = json.data;
-            const spinner = aiMsgEl._spinner;
-            if (spinner) {
-              if (rp.phase === 'searching') {
-                const q = rp.queries ? `${rp.queries} queries` : '';
-                const s = rp.total_sources ? ` · ${rp.total_sources} sources` : '';
-                spinner.updateMessage(`R${rp.round || '?'}: Searching${q ? ' (' + q + ')' : ''}${s}`);
-              } else if (rp.phase === 'reading') {
-                spinner.updateMessage(`R${rp.round || '?'}: Reading ${rp.new_sources || ''} pages`);
-              } else if (rp.phase === 'analyzing') {
-                spinner.updateMessage(`R${rp.round || '?'}: Analyzing ${rp.total_findings || 0} findings`);
-              } else if (rp.phase === 'writing') {
-                spinner.updateMessage(`Writing report · ${rp.total_sources || 0} sources`);
-              } else if (rp.phase === 'error') {
-                spinner.updateMessage(rp.message || 'Research error');
-              }
+        // ── Research progress (spinner updates) ──
+        } else if (json.type === 'research_progress') {
+          const rp = json.data;
+          const spinner = aiMsgEl._spinner;
+          if (spinner) {
+            if (rp.phase === 'searching') {
+              const q = rp.queries ? `${rp.queries} queries` : '';
+              const s = rp.total_sources ? ` · ${rp.total_sources} sources` : '';
+              spinner.updateMessage(`R${rp.round || '?'}: Searching${q ? ' (' + q + ')' : ''}${s}`);
+            } else if (rp.phase === 'reading') {
+              spinner.updateMessage(`R${rp.round || '?'}: Reading ${rp.new_sources || ''} pages`);
+            } else if (rp.phase === 'analyzing') {
+              spinner.updateMessage(`R${rp.round || '?'}: Analyzing ${rp.total_findings || 0} findings`);
+            } else if (rp.phase === 'writing') {
+              spinner.updateMessage(`Writing report · ${rp.total_sources || 0} sources`);
+            } else if (rp.phase === 'error') {
+              spinner.updateMessage(rp.message || 'Research error');
             }
-
-          // ── Research sources / Web sources (compact sources box) ──
-          } else if (json.type === 'research_sources' || json.type === 'web_sources') {
-            const sources = json.data || [];
-            if (sources.length > 0) {
-              const label = json.type === 'research_sources' ? 'Research' : 'Web';
-              const box = document.createElement('div');
-              box.className = 'compare-sources-box';
-              box.innerHTML = '<span class="sources-label">' + sources.length + ' ' + label + ' sources</span>';
-              box.title = sources.map(s => s.title || s.url).join('\n');
-              // Replace spinner with sources + new spinner
-              aiBody.innerHTML = '';
-              aiBody.appendChild(box);
-              if (spinnerModule) {
-                const newSpinner = spinnerModule.create('Generating response...', 'right');
-                aiBody.appendChild(newSpinner.createElement());
-                newSpinner.start();
-                aiMsgEl._spinner = newSpinner;
-              }
-            }
-
-          // ── Pane-local question / approval selector ──
-          } else if (json.type === 'ask_user') {
-            awaitingChoice = true;
-            const paneEl = document.querySelector(`.compare-pane[data-pane="${paneIdx}"]`);
-            if (paneEl) paneEl.classList.add('is-awaiting-input');
-            _renderPaneAskUserCard(
-              paneIdx,
-              sessionId,
-              json.data || {},
-              hist,
-              aiMsgEl,
-              ac,
-            );
-            if (hist) hist.scrollTop = hist.scrollHeight;
-
-          // Deny ends as a tiny resolution-only stream, so replace the
-          // continuation spinner with an explicit pane-local result.
-          } else if (json.type === 'tool_approval_resolved') {
-            if (aiMsgEl._spinner) {
-              if (aiMsgEl._spinner.element) aiMsgEl._spinner.destroy();
-              aiMsgEl._spinner = null;
-            }
-            accumulated = json.decision === 'deny' ? 'Denied.' : 'Approval recorded.';
-            let target = aiMsgEl._textEl;
-            if (!target) {
-              target = document.createElement('div');
-              target.className = 'compare-text-content';
-              aiBody.appendChild(target);
-              aiMsgEl._textEl = target;
-            }
-            target.textContent = accumulated;
-
-          // ── Tool start (bash, web search agent tool) ──
-          } else if (json.type === 'tool_start') {
-            // Finalize any accumulated text before the tool block
-            if (accumulated.trim() && aiMsgEl._textEl) {
-              if (markdownModule) {
-                aiMsgEl._textEl.innerHTML = markdownModule.processWithThinking(
-                  markdownModule.squashOutsideCode(accumulated));
-                if (window.hljs) aiMsgEl._textEl.querySelectorAll('pre code:not(.hljs)').forEach(b => window.hljs.highlightElement(b));
-              }
-            }
-            // Destroy spinner if still present
-            if (aiMsgEl._spinner && aiMsgEl._spinner.element) {
-              aiMsgEl._spinner.destroy();
-              aiMsgEl._spinner = null;
-              // Clean up spinner element but keep sources box + text
-              const spinnerEl = aiBody.querySelector('.spinner-wrapper, .mini-spinner');
-              if (spinnerEl) spinnerEl.remove();
-            }
-            const toolName = json.tool || 'tool';
-            const cmd = json.command || '';
-            // Image generation: show ASCII spinner instead of compact tool block
-            if (toolName === 'generate_image' && spinnerModule) {
-              aiBody.innerHTML = '';
-              const imgSpinner = spinnerModule.create('Generating image...', 'right');
-              aiBody.appendChild(imgSpinner.createElement());
-              imgSpinner.start();
-              aiMsgEl._imgSpinner = imgSpinner;
-              currentToolBlock = null;
-            } else {
-              // Agent thread node — matches main chat style
-              const _toolLabels = { bash: 'Terminal', python: 'Python', web_search: 'Web Search', read_file: 'Read File', write_file: 'Write File' };
-              const toolLabel = _toolLabels[toolName.toLowerCase()] || toolName;
-              const cmdHtml = cmd ? `<pre class="agent-thread-cmd">${escapeHtml(cmd)}</pre>` : '';
-              const node = document.createElement('div');
-              node.className = 'agent-thread-node running';
-              node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">\u25B6</span><span class="agent-thread-tool">${escapeHtml(toolLabel)}</span><span class="agent-thread-wave">▁▂▃</span></div><div class="agent-thread-content">${cmdHtml}</div>`;
-              node.querySelector('.agent-thread-header').addEventListener('click', () => node.classList.toggle('open'));
-              // Animate wave
-              const waveEl = node.querySelector('.agent-thread-wave');
-              if (waveEl) {
-                const waveFrames = WAVE_FRAMES;
-                let waveIdx = 0;
-                node._waveInterval = setInterval(() => { waveIdx = (waveIdx + 1) % waveFrames.length; waveEl.textContent = waveFrames[waveIdx]; }, 100);
-              }
-              aiBody.appendChild(node);
-              currentToolBlock = node;
-            }
-            if (hist) hist.scrollTop = hist.scrollHeight;
-
-          // ── Tool output (image or non-image) ──
-          } else if (json.type === 'tool_output') {
-            if (json.image_url) {
-              // Stop image spinner and render generated image in pane
-              if (aiMsgEl._imgSpinner) { aiMsgEl._imgSpinner.destroy(); aiMsgEl._imgSpinner = null; }
-              const safeImageUrl = safeDisplayImageSrc(json.image_url);
-              aiBody.innerHTML = '';
-              if (!safeImageUrl) {
-                aiBody.textContent = '[Image unavailable]';
-              } else {
-                const img = document.createElement('img');
-                img.className = 'compare-gen-image';
-                img.src = safeImageUrl;
-                img.alt = json.image_prompt || '';
-                img.title = json.image_prompt || '';
-                img.addEventListener('click', () => window.open(safeImageUrl, '_blank', 'noopener,noreferrer'));
-                aiBody.appendChild(img);
-                if (json.image_prompt) {
-                  const caption = document.createElement('div');
-                  caption.style.cssText = 'font-size:0.82em;color:color-mix(in srgb, var(--fg) 55%, transparent);margin-top:6px;line-height:1.4;';
-                  caption.textContent = json.image_prompt;
-                  aiBody.appendChild(caption);
-                }
-                // Show model name below image (hidden in blind mode until vote)
-                if (json.image_model && !state._blindMode) {
-                  const modelLabel = document.createElement('div');
-                  modelLabel.style.cssText = 'font-size:0.75em;color:color-mix(in srgb, var(--fg) 40%, transparent);margin-top:4px;';
-                  modelLabel.textContent = json.image_model;
-                  aiBody.appendChild(modelLabel);
-                }
-                aiMsgEl._imageData = { url: safeImageUrl, prompt: json.image_prompt, model: json.image_model, size: json.image_size, quality: json.image_quality };
-              }
-            } else if (currentToolBlock) {
-              // Stop wave animation
-              if (currentToolBlock._waveInterval) { clearInterval(currentToolBlock._waveInterval); currentToolBlock._waveInterval = null; }
-              const ok = (json.exit_code === 0 || json.exit_code == null);
-              const cmd = json.command || '';
-              const _toolLabels2 = { bash: 'Terminal', python: 'Python', web_search: 'Web Search', read_file: 'Read File', write_file: 'Write File' };
-              const tLabel = _toolLabels2[(json.tool || '').toLowerCase()] || json.tool || '';
-              let outHtml = '';
-              if (json.output && json.output.trim()) {
-                outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${escapeHtml(json.output)}</pre></details>`;
-              }
-              const cmdHtml = cmd ? `<pre class="agent-thread-cmd">${escapeHtml(cmd)}</pre>` : '';
-              currentToolBlock.className = 'agent-thread-node' + (ok ? '' : ' error');
-              // The chevron is drawn by CSS; leaving a literal ▶ here created
-              // two arrows in the completed tool rows.
-              currentToolBlock.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${escapeHtml(tLabel)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron"></span></div><div class="agent-thread-content">${cmdHtml}${outHtml}</div>`;
-              currentToolBlock.querySelector('.agent-thread-header').addEventListener('click', () => currentToolBlock.classList.toggle('open'));
-              currentToolBlock = null;
-              // Reset text element so next deltas create a fresh container
-              aiMsgEl._textEl = null;
-              accumulated = '';
-            }
-            if (hist) hist.scrollTop = hist.scrollHeight;
-          } else if (json.delta) {
-            // Skip text deltas if we already rendered an image
-            if (aiMsgEl._imageData) continue;
-            // Capture TTFT on very first text delta
-            if (!accumulated && !_ttft) _ttft = performance.now() - _timerStart;
-            // On first delta, destroy spinner and prepare text area
-            if (!accumulated && aiMsgEl._spinner) {
-              if (aiMsgEl._spinner.element) aiMsgEl._spinner.destroy();
-              aiMsgEl._spinner = null;
-              // Keep sources box if present, clear everything else
-              const srcBox = aiBody.querySelector('.compare-sources-box');
-              aiBody.innerHTML = '';
-              if (srcBox) aiBody.appendChild(srcBox);
-              // Add text container
-              const textEl = document.createElement('div');
-              textEl.className = 'compare-text-content';
-              aiBody.appendChild(textEl);
-              aiMsgEl._textEl = textEl;
-            }
-            // After a tool block, create a new text container for continuing text
-            if (!accumulated && !aiMsgEl._textEl) {
-              const textEl = document.createElement('div');
-              textEl.className = 'compare-text-content';
-              aiBody.appendChild(textEl);
-              aiMsgEl._textEl = textEl;
-            }
-            accumulated += json.delta;
-            const target = aiMsgEl._textEl || aiBody;
-            _scheduleLiveRender(target);
           }
-        } catch (e) { console.warn('Compare stream render error:', e); }
-      }
+
+        // ── Research sources / Web sources (compact sources box) ──
+        } else if (json.type === 'research_sources' || json.type === 'web_sources') {
+          const sources = json.data || [];
+          if (sources.length > 0) {
+            const label = json.type === 'research_sources' ? 'Research' : 'Web';
+            const box = document.createElement('div');
+            box.className = 'compare-sources-box';
+            box.innerHTML = '<span class="sources-label">' + sources.length + ' ' + label + ' sources</span>';
+            box.title = sources.map(s => s.title || s.url).join('\n');
+            // Replace spinner with sources + new spinner
+            aiBody.innerHTML = '';
+            aiBody.appendChild(box);
+            if (spinnerModule) {
+              const newSpinner = spinnerModule.create('Generating response...', 'right');
+              aiBody.appendChild(newSpinner.createElement());
+              newSpinner.start();
+              aiMsgEl._spinner = newSpinner;
+            }
+          }
+
+        // ── Pane-local question / approval selector ──
+        } else if (json.type === 'ask_user') {
+          awaitingChoice = true;
+          const paneEl = document.querySelector(`.compare-pane[data-pane="${paneIdx}"]`);
+          if (paneEl) paneEl.classList.add('is-awaiting-input');
+          _renderPaneAskUserCard(
+            paneIdx,
+            sessionId,
+            json.data || {},
+            hist,
+            aiMsgEl,
+            ac,
+          );
+          if (hist) hist.scrollTop = hist.scrollHeight;
+
+        // Deny ends as a tiny resolution-only stream, so replace the
+        // continuation spinner with an explicit pane-local result.
+        } else if (json.type === 'tool_approval_resolved') {
+          if (aiMsgEl._spinner) {
+            if (aiMsgEl._spinner.element) aiMsgEl._spinner.destroy();
+            aiMsgEl._spinner = null;
+          }
+          accumulated = json.decision === 'deny' ? 'Denied.' : 'Approval recorded.';
+          let target = aiMsgEl._textEl;
+          if (!target) {
+            target = document.createElement('div');
+            target.className = 'compare-text-content';
+            aiBody.appendChild(target);
+            aiMsgEl._textEl = target;
+          }
+          target.textContent = accumulated;
+
+        // ── Tool start (bash, web search agent tool) ──
+        } else if (json.type === 'tool_start') {
+          // Finalize any accumulated text before the tool block
+          if (accumulated.trim() && aiMsgEl._textEl) {
+            if (markdownModule) {
+              aiMsgEl._textEl.innerHTML = markdownModule.processWithThinking(
+                markdownModule.squashOutsideCode(accumulated));
+              if (window.hljs) aiMsgEl._textEl.querySelectorAll('pre code:not(.hljs)').forEach(b => window.hljs.highlightElement(b));
+            }
+          }
+          // Destroy spinner if still present
+          if (aiMsgEl._spinner && aiMsgEl._spinner.element) {
+            aiMsgEl._spinner.destroy();
+            aiMsgEl._spinner = null;
+            // Clean up spinner element but keep sources box + text
+            const spinnerEl = aiBody.querySelector('.spinner-wrapper, .mini-spinner');
+            if (spinnerEl) spinnerEl.remove();
+          }
+          const toolName = json.tool || 'tool';
+          const cmd = json.command || '';
+          // Image generation: show ASCII spinner instead of compact tool block
+          if (toolName === 'generate_image' && spinnerModule) {
+            aiBody.innerHTML = '';
+            const imgSpinner = spinnerModule.create('Generating image...', 'right');
+            aiBody.appendChild(imgSpinner.createElement());
+            imgSpinner.start();
+            aiMsgEl._imgSpinner = imgSpinner;
+            currentToolBlock = null;
+          } else {
+            // Agent thread node — matches main chat style
+            const _toolLabels = { bash: 'Terminal', python: 'Python', web_search: 'Web Search', read_file: 'Read File', write_file: 'Write File' };
+            const toolLabel = _toolLabels[toolName.toLowerCase()] || toolName;
+            const cmdHtml = cmd ? `<pre class="agent-thread-cmd">${escapeHtml(cmd)}</pre>` : '';
+            const node = document.createElement('div');
+            node.className = 'agent-thread-node running';
+            node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">\u25B6</span><span class="agent-thread-tool">${escapeHtml(toolLabel)}</span><span class="agent-thread-wave">▁▂▃</span></div><div class="agent-thread-content">${cmdHtml}</div>`;
+            node.querySelector('.agent-thread-header').addEventListener('click', () => node.classList.toggle('open'));
+            // Animate wave
+            const waveEl = node.querySelector('.agent-thread-wave');
+            if (waveEl) {
+              const waveFrames = WAVE_FRAMES;
+              let waveIdx = 0;
+              node._waveInterval = setInterval(() => { waveIdx = (waveIdx + 1) % waveFrames.length; waveEl.textContent = waveFrames[waveIdx]; }, 100);
+            }
+            aiBody.appendChild(node);
+            currentToolBlock = node;
+          }
+          if (hist) hist.scrollTop = hist.scrollHeight;
+
+        // ── Tool output (image or non-image) ──
+        } else if (json.type === 'tool_output') {
+          if (json.image_url) {
+            // Stop image spinner and render generated image in pane
+            if (aiMsgEl._imgSpinner) { aiMsgEl._imgSpinner.destroy(); aiMsgEl._imgSpinner = null; }
+            const safeImageUrl = safeDisplayImageSrc(json.image_url);
+            aiBody.innerHTML = '';
+            if (!safeImageUrl) {
+              aiBody.textContent = '[Image unavailable]';
+            } else {
+              const img = document.createElement('img');
+              img.className = 'compare-gen-image';
+              img.src = safeImageUrl;
+              img.alt = json.image_prompt || '';
+              img.title = json.image_prompt || '';
+              img.addEventListener('click', () => window.open(safeImageUrl, '_blank', 'noopener,noreferrer'));
+              aiBody.appendChild(img);
+              if (json.image_prompt) {
+                const caption = document.createElement('div');
+                caption.style.cssText = 'font-size:0.82em;color:color-mix(in srgb, var(--fg) 55%, transparent);margin-top:6px;line-height:1.4;';
+                caption.textContent = json.image_prompt;
+                aiBody.appendChild(caption);
+              }
+              // Show model name below image (hidden in blind mode until vote)
+              if (json.image_model && !state._blindMode) {
+                const modelLabel = document.createElement('div');
+                modelLabel.style.cssText = 'font-size:0.75em;color:color-mix(in srgb, var(--fg) 40%, transparent);margin-top:4px;';
+                modelLabel.textContent = json.image_model;
+                aiBody.appendChild(modelLabel);
+              }
+              aiMsgEl._imageData = { url: safeImageUrl, prompt: json.image_prompt, model: json.image_model, size: json.image_size, quality: json.image_quality };
+            }
+          } else if (currentToolBlock) {
+            // Stop wave animation
+            if (currentToolBlock._waveInterval) { clearInterval(currentToolBlock._waveInterval); currentToolBlock._waveInterval = null; }
+            const ok = (json.exit_code === 0 || json.exit_code == null);
+            const cmd = json.command || '';
+            const _toolLabels2 = { bash: 'Terminal', python: 'Python', web_search: 'Web Search', read_file: 'Read File', write_file: 'Write File' };
+            const tLabel = _toolLabels2[(json.tool || '').toLowerCase()] || json.tool || '';
+            let outHtml = '';
+            if (json.output && json.output.trim()) {
+              outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${escapeHtml(json.output)}</pre></details>`;
+            }
+            const cmdHtml = cmd ? `<pre class="agent-thread-cmd">${escapeHtml(cmd)}</pre>` : '';
+            currentToolBlock.className = 'agent-thread-node' + (ok ? '' : ' error');
+            // The chevron is drawn by CSS; leaving a literal ▶ here created
+            // two arrows in the completed tool rows.
+            currentToolBlock.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${escapeHtml(tLabel)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron"></span></div><div class="agent-thread-content">${cmdHtml}${outHtml}</div>`;
+            currentToolBlock.querySelector('.agent-thread-header').addEventListener('click', () => currentToolBlock.classList.toggle('open'));
+            currentToolBlock = null;
+            // Reset text element so next deltas create a fresh container
+            aiMsgEl._textEl = null;
+            accumulated = '';
+          }
+          if (hist) hist.scrollTop = hist.scrollHeight;
+        } else if (json.delta) {
+          // Skip text deltas if we already rendered an image
+          if (aiMsgEl._imageData) continue;
+          // Capture TTFT on very first text delta
+          if (!accumulated && !_ttft) _ttft = performance.now() - _timerStart;
+          // On first delta, destroy spinner and prepare text area
+          if (!accumulated && aiMsgEl._spinner) {
+            if (aiMsgEl._spinner.element) aiMsgEl._spinner.destroy();
+            aiMsgEl._spinner = null;
+            // Keep sources box if present, clear everything else
+            const srcBox = aiBody.querySelector('.compare-sources-box');
+            aiBody.innerHTML = '';
+            if (srcBox) aiBody.appendChild(srcBox);
+            // Add text container
+            const textEl = document.createElement('div');
+            textEl.className = 'compare-text-content';
+            aiBody.appendChild(textEl);
+            aiMsgEl._textEl = textEl;
+          }
+          // After a tool block, create a new text container for continuing text
+          if (!accumulated && !aiMsgEl._textEl) {
+            const textEl = document.createElement('div');
+            textEl.className = 'compare-text-content';
+            aiBody.appendChild(textEl);
+            aiMsgEl._textEl = textEl;
+          }
+          accumulated += json.delta;
+          const target = aiMsgEl._textEl || aiBody;
+          _scheduleLiveRender(target);
+        }
+      } catch (e) { console.warn('Compare stream render error:', e); }
     }
 
     streamOk = true;

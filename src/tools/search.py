@@ -1,9 +1,4 @@
-"""Search-domain tool implementations.
-
-Extracted from tool_implementations.py as part of slice 1 (#4082/#4071).
-Holds the search_chats tool.
-``src.tool_implementations`` re-exports these for backward compatibility.
-"""
+"""The search_chats agent tool."""
 import logging
 from typing import Dict
 

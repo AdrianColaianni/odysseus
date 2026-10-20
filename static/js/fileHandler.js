@@ -190,7 +190,7 @@ function _getPreviewUrl(f) {
 function _revokePreviewUrl(f) {
   const url = _previewUrls.get(f);
   if (url) {
-    try { URL.revokeObjectURL(url); } catch (_) {}
+    URL.revokeObjectURL(url);
     _previewUrls.delete(f);
   }
 }
@@ -341,7 +341,7 @@ export async function uploadPending(opts = {}) {
   _uploading = true;
   const timeoutId = setTimeout(() => {
     if (_uploadAbortCtrl && !_uploadAbortCtrl.signal.aborted) {
-      try { _uploadAbortCtrl.abort(); } catch (_) {}
+      _uploadAbortCtrl.abort();
     }
   }, 120000);
 
@@ -352,11 +352,7 @@ export async function uploadPending(opts = {}) {
       signal: _uploadAbortCtrl.signal,
     });
     if (!res.ok) {
-      // Surface the failure instead of swallowing it. Previously a non-OK
-      // response (e.g. 429 rate limit, 413 too large) was ignored: the files
-      // silently vanished and the chat sent with no attachments, so the model
-      // "didn't even see them" (issue #1346). Show the server's reason and keep
-      // pendingFiles so the strip re-renders for a retry (see finally below).
+      // Keep pendingFiles so the strip re-renders for a retry (see finally below).
       let detail = '';
       try { const e = await res.json(); detail = e.detail || e.error || ''; } catch (_) {}
       _showToast('Upload failed' + (detail ? ': ' + detail : ` (HTTP ${res.status})`));
@@ -386,7 +382,7 @@ export async function uploadPending(opts = {}) {
     clearTimeout(timeoutId);
     _uploading = false;
     _uploadAbortCtrl = null;
-    _uploadSpinners.forEach(sp => { try { sp.stop && sp.stop(); } catch (_) {} });
+    _uploadSpinners.forEach(sp => sp.stop?.());
     _uploadSpinners = [];
     if (strip) strip.classList.remove('attach-uploading');
     // Re-render: empty on success (chips gone), or restored on error so the
@@ -498,7 +494,7 @@ export function wasLastUploadCancelled() {
 export function cancelUpload() {
   _lastUploadCancelled = true;
   if (_uploadAbortCtrl && !_uploadAbortCtrl.signal.aborted) {
-    try { _uploadAbortCtrl.abort(); } catch (_) {}
+    _uploadAbortCtrl.abort();
   }
 }
 

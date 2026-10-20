@@ -1,37 +1,7 @@
 """Coverage for complete heading levels and rich-text page breaks."""
 
-import json
-import subprocess
-from pathlib import Path
-from tests.helpers.stylesheets import app_css
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import declaration, document_source, function_body
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-STYLE = app_css()
-
-
-def test_heading_levels_and_page_break_are_exposed_everywhere():
-    slash = declaration("_RICH_SLASH_COMMANDS")
-    rules = declaration("_RICH_BLOCK_INPUT_RULES")
-    dropdown = DOC_JS.split("function _showMdDropdown", 1)[1].split(
-        "function initMdToolbar", 1
-    )[0]
-    exporter = function_body("_richTextExportCss")
-
-    for level in (5, 6):
-        assert f"action: 'h{level}'" in slash
-        assert f"['h{level}', 'Heading {level}', 'H{level}']" in dropdown
-        assert f"h{level}: '{'#' * level} '" in DOC_JS
-    assert "['#####', { action: 'h5' }]" in rules
-    assert "['######', { action: 'h6' }]" in rules
-    assert 'data-md="pagebreak"' in DOC_JS
-    assert "action: 'pagebreak'" in slash
-    assert "function _insertRichPageBreak" in DOC_JS
-    assert "break-after:page" in exporter
-    assert "page-break-after:always" in exporter
-    assert ".doc-email-richbody.richtext-mode hr.richtext-page-break" in STYLE
+from tests.helpers.node import run_node_module
 
 
 def test_mobile_headings_page_break_history_and_persistence():
@@ -149,15 +119,7 @@ def test_mobile_headings_page_break_history_and_persistence():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
     assert any("Heading 5" in label for label in data["menuLabels"])
     assert any("Heading 6" in label for label in data["menuLabels"])
     assert data["headingTag"] == "H6"

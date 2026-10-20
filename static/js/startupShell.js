@@ -1,11 +1,6 @@
-// Odysseus UI — startup shell sequencing
-// ES6 module — no application dependencies, DOM only.
-//
-// Revealing the application shell, retiring the boot loader, settling the
-// sidebar's own loading state, and firing a deferred URL route are separate
-// startup concerns that used to sit inline in app.js behind a single promise.
-// They live here so each step has one owner and so the whole contract can be
-// exercised directly (tests/test_startup_shell_js.py) without booting the app.
+// Odysseus UI — startup shell sequencing: reveal the shell, retire the boot
+// loader, settle the sidebar loading state and fire a deferred URL route.
+// DOM only, no application dependencies.
 
 const LOADER_ID = 'app-loader';
 const SESSION_BOOTSTRAP_ROW_ID = 'session-list-loading';

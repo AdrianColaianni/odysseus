@@ -116,7 +116,6 @@ def setup_preset_routes(preset_manager) -> APIRouter:
             logger.error(f"Expand prompt failed: {e}")
             return {"success": False, "message": str(e)}
 
-    # ── Group presets ──
     @router.get("/api/presets/groups")
     async def get_group_presets():
         """Get saved group chat presets."""

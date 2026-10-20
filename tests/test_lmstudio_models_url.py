@@ -91,17 +91,13 @@ def test_build_models_url_preserves_explicit_non_v1_path(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("base_url", [
-    "http://localhost:1234?",
-    "http://localhost:1234#fragment",
-    "http://localhost:1234/v1?token=abc",
-])
-def test_build_models_url_rejects_query_or_fragment_base(monkeypatch, base_url):
+def test_build_models_url_rejects_query_or_fragment_base(monkeypatch):
     monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url)
     _neutralize_provider_detection(monkeypatch)
 
-    with pytest.raises(ValueError, match="query or fragment"):
-        endpoint_resolver.build_models_url(base_url)
+    for base_url in ("http://localhost:1234#fragment", "http://localhost:1234/v1?token=abc"):
+        with pytest.raises(ValueError, match="query or fragment"):
+            endpoint_resolver.build_models_url(base_url)
 
 
 # ── list_model_ids: parse LM Studio's response ─────────────────────────

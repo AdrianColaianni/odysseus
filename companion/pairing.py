@@ -1,8 +1,4 @@
-"""Shared pairing helpers for the companion bridge.
-
-Token minting + LAN discovery + QR rendering, kept here as small, importable
-units so the route layer stays thin and the logic is directly testable.
-"""
+"""Pairing helpers for the companion bridge: LAN discovery, address validation, QR."""
 
 from __future__ import annotations
 
@@ -10,14 +6,8 @@ import ipaddress
 import json
 import os
 import re
-import secrets
 import socket
-import uuid
 from urllib.parse import urlsplit
-
-import bcrypt
-
-from src.constants import AUTH_FILE
 
 PAIRING_VERSION = 1
 COMPANION_SCOPE = "chat"
@@ -119,15 +109,6 @@ def configured_companion_origin() -> tuple[str, int] | None:
     return parse_companion_base_url(value)
 
 
-def default_port() -> int:
-    """Best guess at the port the server is reachable on. Callers that know the
-    real request port should pass it explicitly."""
-    try:
-        return int(os.environ.get("APP_PORT", "7000"))
-    except ValueError:
-        return 7000
-
-
 def lan_ip_candidates() -> list[str]:
     """Likely LAN IPv4 addresses for this host, best candidate first.
 
@@ -157,52 +138,6 @@ def lan_ip_candidates() -> list[str]:
         pass
 
     return candidates
-
-
-def find_admin_user() -> str | None:
-    """Resolve an admin username from data/auth.json (schema uses is_admin),
-    falling back to the first user."""
-    auth_path = AUTH_FILE
-    try:
-        with open(auth_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    users = data.get("users") or {}
-    if not isinstance(users, dict):
-        return None
-    for uname, udata in users.items():
-        if isinstance(udata, dict) and udata.get("is_admin") is True:
-            return uname
-    return next(iter(users), None)
-
-
-def mint_token(owner: str, name: str = "companion") -> tuple[str, str]:
-    """Create a chat-scoped API token row and return (token_id, raw_token).
-
-    The raw token is returned ONCE -- only its bcrypt hash + an 8-char prefix
-    are persisted. Mirrors routes/api_token_routes.py so cookie- and
-    companion-minted tokens are indistinguishable to the auth middleware.
-    """
-    from core.database import get_db_session, ApiToken
-
-    raw_token = "ody_" + secrets.token_urlsafe(32)
-    token_hash = bcrypt.hashpw(raw_token.encode(), bcrypt.gensalt()).decode()
-    token_id = str(uuid.uuid4())[:8]
-
-    with get_db_session() as db:
-        db.add(ApiToken(
-            id=token_id,
-            owner=owner,
-            name=name,
-            token_hash=token_hash,
-            token_prefix=raw_token[:8],
-            scopes=COMPANION_SCOPE,
-            is_active=True,
-        ))
-    return token_id, raw_token
 
 
 def pairing_payload(host: str, port: int, token: str) -> dict:

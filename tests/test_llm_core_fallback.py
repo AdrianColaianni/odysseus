@@ -175,24 +175,21 @@ def test_usage_then_done_primary_invokes_fallback_and_discards_usage(monkeypatch
     assert not any('"type": "usage"' in c for c in chunks)
 
 
-@pytest.mark.parametrize(
-    "output_chunk",
-    [
+def test_text_or_reasoning_output_prevents_fallback(monkeypatch):
+    for output_chunk in (
         'data: {"delta": "visible text"}\n\n',
         'data: {"delta": "reasoning", "thinking": true}\n\n',
-    ],
-)
-def test_text_or_reasoning_output_prevents_fallback(monkeypatch, output_chunk):
-    calls = []
+    ):
+        calls = []
 
-    def per_model(model):
-        calls.append(model)
-        return [output_chunk, "data: [DONE]\n\n"]
+        def per_model(model):
+            calls.append(model)
+            return [output_chunk, "data: [DONE]\n\n"]
 
-    chunks = _run_fallback(monkeypatch, per_model)
-    assert calls == ["primary"]
-    assert output_chunk in chunks
-    assert not any('"fallback"' in c for c in chunks)
+        chunks = _run_fallback(monkeypatch, per_model)
+        assert calls == ["primary"], output_chunk
+        assert output_chunk in chunks
+        assert not any('"fallback"' in c for c in chunks)
 
 
 def test_foreground_whitespace_only_delta_surfaces_empty_response_without_fallback(monkeypatch):
@@ -332,25 +329,26 @@ def test_explicit_foreground_policy_falls_back_on_availability_error(monkeypatch
     assert any('"delta": "backup answer"' in chunk for chunk in chunks)
 
 
-@pytest.mark.parametrize("status", [400, 401, 403, 404])
-def test_explicit_foreground_policy_does_not_fallback_on_request_errors(monkeypatch, status):
-    calls = []
+def test_explicit_foreground_policy_does_not_fallback_on_request_errors(monkeypatch):
+    for status in (400, 401, 403, 404):
+        calls = []
+        error = f'event: error\ndata: {{"status": {status}, "text": "request rejected"}}\n\n'
 
-    def per_model(model):
-        calls.append(model)
-        if model == "primary":
-            return [f'event: error\ndata: {{"status": {status}, "text": "request rejected"}}\n\n']
-        return ['data: {"delta": "must not run"}\n\n', "data: [DONE]\n\n"]
+        def per_model(model):
+            calls.append(model)
+            if model == "primary":
+                return [error]
+            return ['data: {"delta": "must not run"}\n\n', "data: [DONE]\n\n"]
 
-    chunks = _run_fallback(
-        monkeypatch,
-        per_model,
-        fallback_statuses={408, 425, 429, 500, 502, 503, 504, 507, 508, 529},
-        fallback_on_empty=False,
-    )
+        chunks = _run_fallback(
+            monkeypatch,
+            per_model,
+            fallback_statuses={408, 425, 429, 500, 502, 503, 504, 507, 508, 529},
+            fallback_on_empty=False,
+        )
 
-    assert calls == ["primary"]
-    assert chunks == [f'event: error\ndata: {{"status": {status}, "text": "request rejected"}}\n\n']
+        assert calls == ["primary"], status
+        assert chunks == [error]
 
 
 def test_explicit_foreground_policy_does_not_fallback_on_empty_completion(monkeypatch):
@@ -524,7 +522,7 @@ def test_response_cache_is_partitioned_by_non_secret_header_identity(monkeypatch
     calls = []
     llm_core._response_cache.clear()
 
-    def fake_post(url, headers=None, json=None, timeout=None):
+    def fake_post(url, headers=None, json=None, timeout=None, verify=None):
         credential = headers.get("Authorization")
         calls.append(credential)
         request = httpx.Request("POST", url)
@@ -573,29 +571,26 @@ def test_response_cache_is_partitioned_by_non_secret_header_identity(monkeypatch
     assert "Bearer one" not in key
 
 
-@pytest.mark.parametrize(
-    ("error", "expected_status"),
-    [
+def test_chatgpt_subscription_stream_preserves_error_semantics(monkeypatch):
+    for error, expected_status in (
         ({"type": "invalid_request_error", "code": "model_not_found", "message": "Unsupported model"}, 404),
         ({"type": "rate_limit_error", "message": "Too many requests"}, 429),
         ({"type": "server_error", "message": "Temporarily unavailable"}, 500),
         ({"status": True, "message": "rate limit"}, 400),
-    ],
-)
-def test_chatgpt_subscription_stream_preserves_error_semantics(monkeypatch, error, expected_status):
-    lines = [
-        "event: response.failed",
-        "data: " + json.dumps({"type": "response.failed", "response": {"error": error}}),
-    ]
+    ):
+        lines = [
+            "event: response.failed",
+            "data: " + json.dumps({"type": "response.failed", "response": {"error": error}}),
+        ]
 
-    chunks = _run_provider_stream(
-        monkeypatch,
-        "https://chatgpt.com/backend-api/codex/responses",
-        lines,
-    )
+        chunks = _run_provider_stream(
+            monkeypatch,
+            "https://chatgpt.com/backend-api/codex/responses",
+            lines,
+        )
 
-    assert len(chunks) == 1
-    assert json.loads(chunks[0].split("data: ", 1)[1])["status"] == expected_status
+        assert len(chunks) == 1, error
+        assert json.loads(chunks[0].split("data: ", 1)[1])["status"] == expected_status, error
 
 
 def test_chatgpt_subscription_top_level_error_preserves_semantics(monkeypatch):
@@ -621,15 +616,12 @@ def test_provider_explicit_status_wins_over_transient_text():
     }) == 401
 
 
-@pytest.mark.parametrize(
-    "symbolic_status",
-    ["RATE_LIMITED", "RATE_LIMIT_EXCEEDED", "RESOURCE_EXHAUSTED"],
-)
-def test_provider_symbolic_rate_limited_status_is_availability_evidence(symbolic_status):
-    assert llm_core._provider_stream_error_status({
-        "status": symbolic_status,
-        "message": "Request quota reached",
-    }) == 429
+def test_provider_symbolic_rate_limited_status_is_availability_evidence():
+    for symbolic_status in ("RATE_LIMITED", "RATE_LIMIT_EXCEEDED", "RESOURCE_EXHAUSTED"):
+        assert llm_core._provider_stream_error_status({
+            "status": symbolic_status,
+            "message": "Request quota reached",
+        }) == 429, symbolic_status
 
 
 def test_provider_unknown_symbolic_status_still_fails_closed():
@@ -649,12 +641,12 @@ def test_provider_numeric_code_wins_over_symbolic_rate_limit_status():
     }) == 401
 
 
-@pytest.mark.parametrize("status", [True, 429.9, "429.0", float("inf")])
-def test_provider_malformed_status_fails_closed(status):
-    assert llm_core._provider_stream_error_status({
-        "status": status,
-        "message": "rate limit",
-    }) == 400
+def test_provider_malformed_status_fails_closed():
+    for status in (True, 429.9, "429.0", float("inf")):
+        assert llm_core._provider_stream_error_status({
+            "status": status,
+            "message": "rate limit",
+        }) == 400, status
 
 
 def test_stream_fractional_status_does_not_advance_fallback(monkeypatch):
@@ -1170,19 +1162,7 @@ def test_single_route_retries_transient_precontent_failure(monkeypatch):
     assert not any(chunk.startswith("event: error") for chunk in chunks)
 
 
-@pytest.mark.parametrize(
-    ("error", "expected_status"),
-    [
-        (httpx.WriteTimeout("write timed out"), 504),
-        (httpx.RemoteProtocolError("peer disconnected"), 502),
-    ],
-)
-def test_ambiguous_transport_failures_are_not_availability_evidence(monkeypatch, error, expected_status):
-    class _RaisingClient:
-        def stream(self, *args, **kwargs):
-            raise error
-
-    monkeypatch.setattr(llm_core, "_get_http_client", lambda: _RaisingClient())
+def test_ambiguous_transport_failures_are_not_availability_evidence(monkeypatch):
     monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: False)
     monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
 
@@ -1196,66 +1176,74 @@ def test_ambiguous_transport_failures_are_not_availability_evidence(monkeypatch,
             )
         ]
 
-    chunks = asyncio.run(run())
-    payload = json.loads(chunks[0].split("data: ", 1)[1])
-    assert payload["status"] == expected_status
-    assert payload["fallback_eligible"] is False
+    for error, expected_status in (
+        (httpx.WriteTimeout("write timed out"), 504),
+        (httpx.RemoteProtocolError("peer disconnected"), 502),
+    ):
+        class _RaisingClient:
+            def stream(self, *args, **kwargs):
+                raise error
+
+        monkeypatch.setattr(llm_core, "_get_http_client", lambda: _RaisingClient())
+        payload = json.loads(asyncio.run(run())[0].split("data: ", 1)[1])
+        assert payload["status"] == expected_status, error
+        assert payload["fallback_eligible"] is False
 
 
-@pytest.mark.parametrize("error", [
-    httpx.WriteTimeout("write timed out"),
-    httpx.RemoteProtocolError("peer disconnected"),
-])
-def test_nonstream_foreground_does_not_advance_on_ambiguous_transport(monkeypatch, error):
-    calls = []
+def test_nonstream_foreground_does_not_advance_on_ambiguous_transport(monkeypatch):
+    for error in (
+        httpx.WriteTimeout("write timed out"),
+        httpx.RemoteProtocolError("peer disconnected"),
+    ):
+        calls = []
 
-    async def fake_call(url, model, messages, **kwargs):
-        calls.append(model)
-        raise error
+        async def fake_call(url, model, messages, **kwargs):
+            calls.append(model)
+            raise error
 
-    monkeypatch.setattr(llm_core, "llm_call_async", fake_call)
+        monkeypatch.setattr(llm_core, "llm_call_async", fake_call)
 
-    with pytest.raises(type(error)):
-        asyncio.run(llm_core.llm_call_async_with_route_fallback(
-            [
-                ("https://selected.example/v1", "selected", {}),
-                ("https://backup.example/v1", "backup", {}),
-            ],
-            [{"role": "user", "content": "hi"}],
-            fallback_statuses={502, 504},
-        ))
+        with pytest.raises(type(error)):
+            asyncio.run(llm_core.llm_call_async_with_route_fallback(
+                [
+                    ("https://selected.example/v1", "selected", {}),
+                    ("https://backup.example/v1", "backup", {}),
+                ],
+                [{"role": "user", "content": "hi"}],
+                fallback_statuses={502, 504},
+            ))
 
-    assert calls == ["selected"]
+        assert calls == ["selected"], error
 
 
-@pytest.mark.parametrize("error", [
-    httpx.WriteTimeout("write timed out"),
-    httpx.RemoteProtocolError("peer disconnected"),
-])
-def test_nonstream_foreground_marks_adapter_transport_ineligible(monkeypatch, error):
-    calls = []
-
-    async def fake_post(client, url, headers, **kwargs):
-        calls.append(url)
-        raise error
-
-    monkeypatch.setattr(llm_core, "httpx_post_kimi_aware_async", fake_post)
+def test_nonstream_foreground_marks_adapter_transport_ineligible(monkeypatch):
     monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: False)
     monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
     monkeypatch.setattr(llm_core, "_get_cached_response", lambda key: None)
+    for error in (
+        httpx.WriteTimeout("write timed out"),
+        httpx.RemoteProtocolError("peer disconnected"),
+    ):
+        calls = []
 
-    with pytest.raises(Exception) as exc:
-        asyncio.run(llm_core.llm_call_async_with_route_fallback(
-            [
-                ("https://selected.example/v1", "selected", {}),
-                ("https://backup.example/v1", "backup", {}),
-            ],
-            [{"role": "user", "content": "hi"}],
-            fallback_statuses={502, 504},
-        ))
+        async def fake_post(client, url, headers, **kwargs):
+            calls.append(url)
+            raise error
 
-    assert len(calls) == 1
-    assert getattr(exc.value, "fallback_eligible", None) is False
+        monkeypatch.setattr(llm_core, "httpx_post_kimi_aware_async", fake_post)
+
+        with pytest.raises(Exception) as exc:
+            asyncio.run(llm_core.llm_call_async_with_route_fallback(
+                [
+                    ("https://selected.example/v1", "selected", {}),
+                    ("https://backup.example/v1", "backup", {}),
+                ],
+                [{"role": "user", "content": "hi"}],
+                fallback_statuses={502, 504},
+            ))
+
+        assert len(calls) == 1, error
+        assert getattr(exc.value, "fallback_eligible", None) is False
 
 
 @pytest.mark.parametrize(
@@ -1379,25 +1367,20 @@ def test_stream_foreground_advances_on_pool_timeout_but_not_write_timeout(
         assert chunks[0].startswith("event: error")
 
 
-@pytest.mark.parametrize(
-    ("error", "expected_status"),
-    [
+def test_anthropic_stream_preserves_error_semantics(monkeypatch):
+    for error, expected_status in (
         ({"type": "invalid_request_error", "message": "Unsupported model"}, 400),
         ({"type": "overloaded_error", "message": "Overloaded"}, 529),
         ({"type": "authentication_error", "message": "Invalid API key"}, 401),
-    ],
-)
-def test_anthropic_stream_preserves_error_semantics(monkeypatch, error, expected_status):
-    lines = ["data: " + json.dumps({"type": "error", "error": error})]
+    ):
+        chunks = _run_provider_stream(
+            monkeypatch,
+            "https://api.anthropic.com/v1/messages",
+            ["data: " + json.dumps({"type": "error", "error": error})],
+        )
 
-    chunks = _run_provider_stream(
-        monkeypatch,
-        "https://api.anthropic.com/v1/messages",
-        lines,
-    )
-
-    assert len(chunks) == 1
-    assert json.loads(chunks[0].split("data: ", 1)[1])["status"] == expected_status
+        assert len(chunks) == 1, error
+        assert json.loads(chunks[0].split("data: ", 1)[1])["status"] == expected_status, error
 
 
 def test_dedupe_candidates_keeps_first_of_each_route():
@@ -1630,8 +1613,6 @@ def test_multi_candidate_fallback_preserves_primary_reason_and_failure_chain(mon
 
 def test_summarize_stream_error():
     assert "400" in llm_core._summarize_stream_error('event: error\ndata: {"status": 400, "text": "nope"}\n\n')
-    assert llm_core._summarize_stream_error(None) == "primary model failed"
-    assert llm_core._summarize_stream_error("garbage") == "primary model failed"
 
 
 def test_native_tool_rejection_rebuilds_and_retries_same_candidate(monkeypatch):

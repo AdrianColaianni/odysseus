@@ -1090,7 +1090,7 @@ async function showModelSelector() {
           return { status: 'ok', model: m.model, skipped: true, skipReason: 'No model' };
         }
         const res = await fetch(`${state.API_BASE}/api/probe-selected`, {
-          method: 'POST', credentials: 'same-origin',
+          method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ models: [{ endpoint_id: m.endpointId || '', model: m.model, endpoint: m.endpoint || '', with_tools: state._compareMode === 'agent' }] }),
         });
@@ -1302,7 +1302,7 @@ async function showModelSelector() {
                 fd.append('query', 'test');
                 fd.append('provider', p.id);
                 fd.append('count', '1');
-                const r = await fetch(`${state.API_BASE}/api/search/query`, { method: 'POST', body: fd, credentials: 'same-origin' });
+                const r = await fetch(`${state.API_BASE}/api/search/query`, { method: 'POST', body: fd });
                 const d = await r.json();
                 return { status: d.error ? 'fail' : 'ok', error: d.error };
               } catch (e) {

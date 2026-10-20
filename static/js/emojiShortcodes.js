@@ -1,20 +1,9 @@
 // static/js/emojiShortcodes.js
 //
-// Emoji shortcode → Unicode conversion (issue #345).
-//
-// Chat models frequently emit GitHub/Slack-style `:shortcode:` text — e.g.
-// `:blush:`, `:fire:`, `:microphone:` — instead of the actual emoji character.
-// Nothing in the render pipeline used to translate these, so they showed up as
-// literal `:blush:` text in the chat bubble.
-//
-// This module turns the common shortcode set into the real Unicode emoji. The
-// chat renderer (markdown.js → svgifyEmoji) runs this BEFORE its existing
-// Unicode-emoji → monochrome-SVG pass, so a converted `:blush:` renders as the
-// same theme-tinted single-color line icon as any other emoji (project rule:
-// never colorful emoji), not as a colored system glyph.
-//
-// Pure and browser-free on purpose: no DOM, no imports, so it can be unit
-// tested with plain `node` (see tests/test_emoji_shortcodes_js.py).
+// Turns GitHub/Slack-style `:shortcode:` text from models into Unicode emoji.
+// markdown.js runs this before its emoji → monochrome-SVG pass, so a converted
+// shortcode renders as the same theme-tinted icon as any other emoji. Pure and
+// browser-free so it can be tested with plain `node`.
 
 // Canonical map of common shortcode → Unicode emoji. Names follow the GitHub
 // convention (lowercase, underscore-separated). A handful of well-known aliases

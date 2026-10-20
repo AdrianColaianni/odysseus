@@ -19,7 +19,6 @@ from core.models import ChatMessage
 from src.request_models import ChatRequest
 from src.llm_core import (
     _normalize_http_status,
-    llm_call_async,
     llm_call_async_with_route_fallback,
     stream_llm,
     stream_llm_with_fallback,
@@ -30,7 +29,6 @@ from src.agent_loop import (
     _local_media_needs_browser_render,
     _looks_like_workspace_coding_request,
 )
-from src.agent_loop import _normalize_ody_qwen_text_artifacts
 from src import agent_runs
 from src.model_context import estimate_tokens
 from src.context_compactor import (
@@ -39,7 +37,7 @@ from src.context_compactor import (
     trim_for_context,
 )
 from src.chat_helpers import coerce_message_and_session
-from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_url
+from src.endpoint_resolver import build_chat_url, session_url_matches_endpoint
 from src.foreground_model_routing import (
     build_foreground_model_candidates,
     build_foreground_route_descriptors,
@@ -56,12 +54,12 @@ from src.auth_helpers import (
     require_chat_api_token_scope,
 )
 from routes.session_routes import _verify_session_owner
-from routes.document_helpers import _owner_session_filter
+from routes.document.document_helpers import _owner_session_filter
 from core.database import SessionLocal, get_session_mode, set_session_mode
 from core.database import Session as DBSession, ChatMessage as DBChatMessage, Note
 from core.database import Document as DBDocument, ModelEndpoint
 from core.log_safety import redact_url
-from routes.research_routes import _resolve_research_endpoint
+from routes.research.research_routes import _resolve_research_endpoint
 from routes.model_routes import _visible_models
 from routes.chat_helpers import (
     resolve_session_auth,
@@ -77,7 +75,6 @@ from routes.chat_helpers import (
 from src.action_intents import ToolIntent, classify_tool_intent as _classify_tool_intent
 from src.image_model_ids import looks_like_image_generation_model
 from src.tool_policy import (
-    WEB_ACCESS_TOOL_NAMES,
     WEB_TOOL_NAMES,
     build_effective_tool_policy,
     is_web_search_explicitly_denied,
@@ -410,8 +407,17 @@ def _parse_client_tools(raw: Any) -> List[Dict[str, str]]:
     return result
 
 
+def _decode_client_runtime_context(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
 def _parse_legacy_client_runtime_context(raw: Any) -> Dict[str, Any]:
-    """Parse the retired TUI runtime contract for private-branch tests."""
+    """Sanitize the surface-specific fields of a TUI or native runtime context."""
     def clean_skill_name(value: Any) -> str:
         text = str(value or "").strip().strip("`")
         return text if _re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,80}", text) else ""
@@ -525,20 +531,14 @@ def _parse_legacy_client_runtime_context(raw: Any) -> Dict[str, Any]:
             cleaned["guidance"] = guidance
         return cleaned
 
-    if isinstance(raw, dict):
-        data = raw
-    elif isinstance(raw, str) and raw.strip():
-        try:
-            parsed = json.loads(raw)
-        except Exception:
-            return {}
-        data = parsed if isinstance(parsed, dict) else {}
-    else:
-        return {}
+    data = _decode_client_runtime_context(raw)
     surface = str(data.get("surface") or "")
     if surface not in {"odysseus-tui", "odysseus-native"}:
         return {}
     result: Dict[str, Any] = {"surface": surface}
+    client_tools = _parse_client_tools(data.get("client_tools"))
+    if client_tools:
+        result["client_tools"] = client_tools
     if surface == "odysseus-native":
         # Native terminal callers may declare workspace artifacts for the
         # evidence ledger, but may not inject verifier shell commands or host
@@ -609,9 +609,6 @@ def _parse_legacy_client_runtime_context(raw: Any) -> Dict[str, Any]:
         if workspace_root:
             result["completion_requirements"]["workspace_root"] = workspace_root
         return result
-    client_tools = _parse_client_tools(data.get("client_tools"))
-    if client_tools:
-        result["client_tools"] = client_tools
     for key in (
         "interaction_mode",
         "terminal_agent",
@@ -718,29 +715,10 @@ def _native_context_has_workspace_inputs(context: Dict[str, Any] | None) -> bool
 
 def _parse_client_runtime_context(raw: Any) -> Dict[str, Any]:
     """Parse and validate the TUI runtime contract used for host-local tools."""
-    context = _parse_legacy_client_runtime_context(raw)
+    data = _decode_client_runtime_context(raw)
+    context = _parse_legacy_client_runtime_context(data)
     if not context:
         return {}
-
-    data = raw
-    if isinstance(raw, str) and raw.strip():
-        try:
-            data = json.loads(raw)
-        except Exception:
-            return {}
-    if not isinstance(data, dict):
-        return {}
-
-    client_tools = []
-    allowed_client_tools = TUI_CLIENT_TOOL_NAMES
-    for item in data.get("client_tools") or []:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "").strip()
-        if name in allowed_client_tools and name not in client_tools:
-            client_tools.append(name)
-    if client_tools:
-        context["client_tools"] = [{"name": name} for name in client_tools]
 
     if data.get("unattended_mode") is True:
         context["unattended_mode"] = True
@@ -1752,19 +1730,6 @@ def _resolve_workspace_from_message_path(request, message: str) -> tuple[str, st
     return "", ""
 
 
-def _session_url_matches_endpoint(session_url: str, endpoint_base: str) -> bool:
-    if not session_url or not endpoint_base:
-        return False
-    sess = session_url.rstrip("/")
-    base = _normalize_base(endpoint_base).rstrip("/")
-    variants = {
-        base,
-        base + "/chat/completions",
-        build_chat_url(base).rstrip("/"),
-    }
-    return sess in variants or sess.startswith(base + "/")
-
-
 def _clear_orphaned_session_endpoint(sess, owner: str | None = None) -> bool:
     """Clear a session model if its endpoint was deleted from ModelEndpoint."""
     if not getattr(sess, "endpoint_url", ""):
@@ -1780,7 +1745,7 @@ def _clear_orphaned_session_endpoint(sess, owner: str | None = None) -> bool:
         for ep in endpoints:
             if bound_id and ep.id != bound_id:
                 continue
-            if _session_url_matches_endpoint(sess.endpoint_url or "", ep.base_url or ""):
+            if session_url_matches_endpoint(sess.endpoint_url or "", ep.base_url or ""):
                 return False
         if bound_id:
             # Keep the identity so re-enabling/reconnecting A can recover A.
@@ -1856,7 +1821,7 @@ def _is_image_generation_session(sess, owner: str | None = None) -> bool:
         for endpoint in endpoints:
             if (getattr(endpoint, "model_type", None) or "llm") != "image":
                 continue
-            if not _session_url_matches_endpoint(endpoint_url, getattr(endpoint, "base_url", "") or ""):
+            if not session_url_matches_endpoint(endpoint_url, getattr(endpoint, "base_url", "") or ""):
                 continue
             if _endpoint_cache_contains_model(endpoint, model):
                 return True
@@ -1934,12 +1899,12 @@ def _recover_empty_session_model(sess, session_id: str, owner: str | None = None
             bound_id = getattr(sess, "endpoint_id", None) or None
             if bound_id:
                 for cand in endpoints:
-                    if cand.id == bound_id and _session_url_matches_endpoint(sess.endpoint_url or "", cand.base_url or ""):
+                    if cand.id == bound_id and session_url_matches_endpoint(sess.endpoint_url or "", cand.base_url or ""):
                         ep = cand
                         break
             if ep is None and not bound_id:
                 for cand in sorted(endpoints, key=lambda row: (_ts_or_zero(getattr(row, "created_at", None)), str(row.id))):
-                    if _session_url_matches_endpoint(sess.endpoint_url or "", cand.base_url or ""):
+                    if session_url_matches_endpoint(sess.endpoint_url or "", cand.base_url or ""):
                         ep = cand
                         break
         if not ep:
@@ -2054,7 +2019,7 @@ def _reconcile_selected_route_from_request(
                 if owner:
                     q = owner_filter(q, ModelEndpoint, owner)
                 if selected_endpoint_url and not selected_endpoint_id:
-                    candidates = [row for row in q.all() if _session_url_matches_endpoint(selected_endpoint_url, row.base_url or "")]
+                    candidates = [row for row in q.all() if session_url_matches_endpoint(selected_endpoint_url, row.base_url or "")]
                     bound_id = getattr(sess, "endpoint_id", None)
                     if bound_id:
                         candidates = [row for row in candidates if row.id == bound_id]
@@ -2066,7 +2031,7 @@ def _reconcile_selected_route_from_request(
                 for cand in candidates:
                     if not cand:
                         continue
-                    if selected_endpoint_id or _session_url_matches_endpoint(selected_endpoint_url, cand.base_url or ""):
+                    if selected_endpoint_id or session_url_matches_endpoint(selected_endpoint_url, cand.base_url or ""):
                         ep = cand
                         break
                 if not ep:
@@ -2125,6 +2090,43 @@ def _reconcile_selected_route_from_request(
         headers_changed,
     )
     return True
+
+
+def _session_generation_settings(sess, thinking_mode, reasoning_effort):
+    """Fill the thinking mode and reasoning effort the request left unset from the session's stored mode."""
+    session_mode = str(getattr(sess, "thinking_mode", "") or "off").lower()
+    if thinking_mode is None and session_mode in {"on", "off"}:
+        thinking_mode = session_mode
+    from src.model_profiles import supports_user_thinking_toggle
+    if not supports_user_thinking_toggle(sess.model):
+        thinking_mode = "off"
+    if reasoning_effort is None and session_mode.startswith("effort:"):
+        reasoning_effort = session_mode[7:].strip()
+    from src.chatgpt_subscription import validate_reasoning_effort
+    return thinking_mode, validate_reasoning_effort(sess.model, reasoning_effort)
+
+
+def _prepare_session_for_turn(request, sess, session_id: str, selection: dict, *, owner, thinking_mode):
+    """Settle the session's model route, auth and privileges before any LLM work; return the thinking mode."""
+    _reconcile_selected_route_from_request(request, sess, session_id, selection, owner=owner)
+    if _clear_orphaned_session_endpoint(sess, owner=owner):
+        raise HTTPException(400, "Selected model endpoint was removed. Pick another model in Settings.")
+    # Issue #587: the picker can show a cached model that never reached the session row.
+    _recover_empty_session_model(sess, session_id, owner=owner)
+    if not getattr(sess, "model", "").strip():
+        raise HTTPException(
+            400,
+            "No model selected for this chat. Open the model picker and choose one before sending.",
+        )
+    if not (getattr(sess, "endpoint_url", "") or "").strip():
+        raise HTTPException(400, "Selected model endpoint is not configured")
+    # Reconciliation can switch models, so a thinking toggle the new model lacks must not carry over.
+    from src.model_profiles import supports_user_thinking_toggle
+    if not supports_user_thinking_toggle(sess.model):
+        thinking_mode = "off"
+    _enforce_chat_privileges(request, sess)
+    resolve_session_auth(sess, session_id, owner=owner)
+    return thinking_mode
 
 
 def _set_user_time_from_request(request: Request) -> None:
@@ -2260,7 +2262,6 @@ def setup_chat_routes(
         use_research = chat_request.use_research
         time_filter = chat_request.time_filter
         preset_id = chat_request.preset_id
-        thinking_mode = None
 
         # Verify the caller owns this session before loading it.
         # Without this, any authenticated user can post into another user's chat.
@@ -2270,45 +2271,14 @@ def setup_chat_routes(
             sess = session_manager.get_session(session)
         except KeyError:
             raise HTTPException(404, f"Session '{session}' not found")
-        session_mode = str(getattr(sess, "thinking_mode", "") or "off").lower()
-        if session_mode in {"on", "off"}:
-            thinking_mode = session_mode
-        from src.model_profiles import supports_user_thinking_toggle
-        if not supports_user_thinking_toggle(sess.model):
-            thinking_mode = "off"
-        reasoning_effort = None
-        req_effort = getattr(chat_request, "reasoning_effort", None)
-        if req_effort:
-            reasoning_effort = str(req_effort).strip().lower()
-        elif session_mode.startswith("effort:"):
-            reasoning_effort = session_mode[7:].strip()
-        from src.chatgpt_subscription import validate_reasoning_effort
-        reasoning_effort = validate_reasoning_effort(sess.model, reasoning_effort)
+        thinking_mode, reasoning_effort = _session_generation_settings(
+            sess, None, str(chat_request.reasoning_effort or "").strip().lower() or None,
+        )
         owner = effective_user(request)
-        _reconcile_selected_route_from_request(request, sess, session, {
+        thinking_mode = _prepare_session_for_turn(request, sess, session, {
             "selected_model": sess.model,
             "selected_endpoint_id": chat_request.selected_endpoint_id,
-        }, owner=owner)
-        if _clear_orphaned_session_endpoint(sess, owner=owner):
-            raise HTTPException(400, "Selected model endpoint was removed. Pick another model in Settings.")
-
-        # Empty model + live endpoint = setup race (Issue #587). Repair from
-        # the endpoint's cached model list before privilege checks, which
-        # otherwise see "" and behave inconsistently with the allowlist.
-        _recover_empty_session_model(sess, session, owner=owner)
-        if not getattr(sess, "model", "").strip():
-            raise HTTPException(
-                400,
-                "No model selected for this chat. Open the model picker and choose one before sending.",
-            )
-        if not (getattr(sess, "endpoint_url", "") or "").strip():
-            raise HTTPException(400, "Selected model endpoint is not configured")
-
-        resolve_session_auth(sess, session, owner=owner)
-
-        # Same allowed_models + daily-cap gate as chat_stream (mirror so the
-        # non-streaming path can't be used to bypass).
-        _enforce_chat_privileges(request, sess)
+        }, owner=owner, thinking_mode=thinking_mode)
 
         tool_policy = build_effective_tool_policy(last_user_message=message)
         allow_tool_preprocessing = not tool_policy.block_all_tool_calls
@@ -2719,7 +2689,7 @@ def setup_chat_routes(
             # block can quote them. Best-effort: a stale cache is fine, a
             # missing email just means we pass uid/folder/account only.
             try:
-                from routes.email_routes import _read_cache_get, _read_cache_key
+                from routes.email.email_routes import _read_cache_get, _read_cache_key
                 _ck = _read_cache_key(active_email_account or None, active_email_folder, active_email_uid, owner=get_current_user(request))
                 _cached_email = _read_cache_get(_ck)
                 if _cached_email and isinstance(_cached_email, dict):
@@ -2767,21 +2737,7 @@ def setup_chat_routes(
             # but BEFORE loading. Prevents cross-user session hijack.
             _verify_session_owner(request, session)
             sess = session_manager.get_session(session)
-            session_mode = str(getattr(sess, "thinking_mode", "") or "off").lower()
-            # An explicit request-scoped mode (headless eval, API client, or
-            # UI override) wins over the persisted session default. The old
-            # unconditional assignment made `thinking_mode=off` impossible
-            # for an existing session and silently changed evaluation/model
-            # contracts.
-            if thinking_mode is None and session_mode in {"on", "off"}:
-                thinking_mode = session_mode
-            from src.model_profiles import supports_user_thinking_toggle
-            if not supports_user_thinking_toggle(sess.model):
-                thinking_mode = "off"
-            if reasoning_effort is None and session_mode.startswith("effort:"):
-                reasoning_effort = session_mode[7:].strip()
-            from src.chatgpt_subscription import validate_reasoning_effort
-            reasoning_effort = validate_reasoning_effort(sess.model, reasoning_effort)
+            thinking_mode, reasoning_effort = _session_generation_settings(sess, thinking_mode, reasoning_effort)
             if getattr(sess, "temperature_override", None) is not None:
                 temperature_override = float(sess.temperature_override)
             # A resumed session may omit workspace/cwd from the new request.
@@ -2899,31 +2855,9 @@ def setup_chat_routes(
                 external_untrusted_context_seen = (
                     external_untrusted_context_seen or retired_tool_approval_taint
                 )
-            _reconcile_selected_route_from_request(request, sess, session, form_data, owner=owner)
-            if _clear_orphaned_session_endpoint(sess, owner=owner):
-                raise HTTPException(400, "Selected model endpoint was removed. Pick another model in Settings.")
-            # Issue #587: picker shows a model from the endpoint cache but
-            # s.model never made it onto the DB row (first-send race after
-            # endpoint setup, or a previous endpoint delete/recreate). Pull
-            # the first cached model off the matching endpoint so the
-            # upstream isn't called with model="" (which surfaces as a
-            # generic 401/503).
-            _recover_empty_session_model(sess, session, owner=owner)
-            if not getattr(sess, "model", "").strip():
-                raise HTTPException(
-                    400,
-                    "No model selected for this chat. Open the model picker and choose one before sending.",
-                )
-            if not (getattr(sess, "endpoint_url", "") or "").strip():
-                raise HTTPException(400, "Selected model endpoint is not configured")
-            # Route reconciliation above can switch models after the request's
-            # generation settings were parsed. Do not carry a stale thinking
-            # toggle from the previously selected model into one that does not
-            # expose that control (notably OpenRouter Grok 4.5, where enabling
-            # reasoning can put the complete answer in reasoning_content).
-            from src.model_profiles import supports_user_thinking_toggle
-            if not supports_user_thinking_toggle(sess.model):
-                thinking_mode = "off"
+            thinking_mode = _prepare_session_for_turn(
+                request, sess, session, form_data, owner=owner, thinking_mode=thinking_mode,
+            )
             # Both picker entries point at the same fine-tuned model. Clean
             # harness ownership follows that model, not the endpoint alias;
             # every other model continues through the legacy RAG path.
@@ -2989,19 +2923,6 @@ def setup_chat_routes(
             raise HTTPException(404, str(e))
         except (ValueError, ValidationError):
             raise HTTPException(400, "Invalid request parameters")
-
-        # ------------------------------------------------------------------ #
-        # Privilege gates that must fire BEFORE any LLM work / token spend.
-        #   1. allowed_models — reject if session.model isn't in the user's
-        #      configured allowlist (empty list = "no restriction").
-        #   2. max_messages_per_day — count user-role ChatMessage rows owned
-        #      by this user in the last UTC day; 429 if at/over the cap.
-        # Admins always have full privileges via get_privileges (returns
-        # ADMIN_PRIVILEGES wholesale) so this is a no-op for them.
-        _enforce_chat_privileges(request, sess)
-
-        # Ensure session has auth headers
-        resolve_session_auth(sess, session, owner=effective_user(request))
 
         # Check for research_pending BEFORE mode persist overwrites it
         # An approval response resumes the sealed agent action.  Do not let
@@ -3142,16 +3063,9 @@ def setup_chat_routes(
                         )
                         active_doc = None
                     else:
-                        # NOTE: previously dropped the doc when doc.session_id
-                        # != current chat session — but that broke the common
-                        # case of "open an email draft from one chat, ask a
-                        # different chat to write into it". The frontend only
-                        # sends active_doc_id only for the currently visible
-                        # active editor tab,
-                        # the UI, and we already owner-checked above, so trust
-                        # the explicit signal. We just log the mismatch and
-                        # re-bind the doc to the current session for ownership
-                        # and document-history continuity.
+                        # A doc opened from another chat stays usable here: the
+                        # frontend sends active_doc_id only for the visible editor
+                        # tab and the owner was checked above, so re-bind it.
                         if doc_session and doc_session != session:
                             logger.info(
                                 "[doc-inject] cross-session active_doc_id %s (was session %s, now %s) — accepting and rebinding",
@@ -3774,22 +3688,6 @@ def setup_chat_routes(
                         )
                     ),
                 )
-                from src.tool_routing_experiment import experiment_mode, select_experiment_inventory
-                _experiment_mode = experiment_mode(
-                    request.headers.get('x-odysseus-routing-experiment'), _user,
-                    model=getattr(sess, 'model', ''),
-                )
-                if _experiment_mode != 'baseline':
-                    _turn_contract = select_experiment_inventory(
-                        replace(resolve_full_inventory_contract(
-                            schemas=[s for s in _contract_schemas
-                                     if canonical(s['function']['name']) in _clean_runtime_tools],
-                            policy=_contract_policy,
-                        ), selection_mode=MODE),
-                        _routed_turn_contract, _turn_history, _experiment_mode,
-                        user_text=message,
-                        browser_requested=_explicit_browser_intent,
-                    )
             # Every recovery path receives the same scope denial. The central
             # dispatcher also checks the immutable contract after rewrites.
             disabled_tools.update(
@@ -3836,8 +3734,6 @@ def setup_chat_routes(
             set_session_mode(session, _effective_mode)
 
         async def stream_with_save() -> AsyncGenerator[str, None]:
-            # _effective_mode is read-only here; closure captures it from
-            # the outer scope. (Was `nonlocal` but never reassigned.)
             research_sources = None
             web_sources = ctx.web_sources
 

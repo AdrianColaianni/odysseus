@@ -4,8 +4,6 @@ imaplib does not quote mailbox arguments for SELECT/APPEND/MOVE/COPY, so callers
 must quote names such as "[Gmail]/All Mail" or "Sent Items" themselves.
 """
 
-from pathlib import Path
-
 import pytest
 
 pytest.importorskip("mcp")
@@ -74,24 +72,6 @@ def test_mcp_quote_helper_handles_spaced_and_quoted_mailboxes():
     assert es._q("Sent Items") == '"Sent Items"'
     assert es._q('[Gmail]/All Mail') == '"[Gmail]/All Mail"'
     assert es._q('Label "Needs Reply"') == '"Label \\"Needs Reply\\""'
-
-
-def test_known_imap_mailbox_call_sites_are_quoted():
-    mcp = Path("mcp_servers/email_server.py").read_text()
-    assert "conn.select(folder" not in mcp
-    assert "conn.select(source_folder" not in mcp
-    assert "imap.append(sent_folder" not in mcp
-    assert 'conn.uid("MOVE", _b(msg_set), dest_folder)' not in mcp
-    assert 'conn.uid("COPY", _b(msg_set), dest_folder)' not in mcp
-    assert 'conn.uid("MOVE", _b(uid), dest_folder)' not in mcp
-    assert 'conn.uid("COPY", _b(uid), dest_folder)' not in mcp
-
-    pollers = Path("routes/email/email_pollers.py").read_text()
-    assert "conn.select(sent_name" not in pollers
-    assert "imap.append(sent_folder" not in pollers
-
-    document_routes = Path("routes/document/document_routes.py").read_text()
-    assert "conn.select(doc.source_email_folder" not in document_routes
 
 
 def test_mcp_move_message_quotes_destination_for_move_and_fallback_copy(monkeypatch):

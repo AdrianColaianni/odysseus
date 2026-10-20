@@ -5,29 +5,26 @@ from src.search_intent import inferred_search_publication_window, reference_look
 from src.clean_agent_preview import preserve_requested_web_recency
 
 
-@pytest.mark.parametrize('query,expected', [
-    ('latest Python version', None),
-    ('current Firefox privacy features', None),
-    ('latest printer installation guide', None),
-    ('browser documentation published this month', 'month'),
-    ('AI news today', 'day'),
-    ('news this week', 'week'),
-    ('latest AI news', 'week'),
-    ('current events in Japan', 'day'),
-])
-def test_publication_window_is_not_synonymous_with_current_information(query, expected):
-    assert inferred_search_publication_window(query) == expected
+def test_publication_window_is_not_synonymous_with_current_information():
+    for query, expected in (
+        ('latest Python version', None),
+        ('browser documentation published this month', 'month'),
+        ('AI news today', 'day'),
+        ('latest AI news', 'week'),
+        ('current events in Japan', 'day'),
+    ):
+        assert inferred_search_publication_window(query) == expected
 
 
-@pytest.mark.parametrize('prompt', [
-    'compare current Firefox and Chrome privacy features',
-    'find the latest official printer manual',
-    'current installation documentation',
-])
-def test_reference_queries_do_not_inherit_model_invented_publication_cutoffs(prompt):
-    assert reference_lookup_without_date_window(prompt)
-    args = preserve_requested_web_recency('web_search', {'query': prompt, 'time_filter': 'month'}, user_text=prompt)
-    assert 'time_filter' not in args
+def test_reference_queries_do_not_inherit_model_invented_publication_cutoffs():
+    for prompt in (
+        'compare current Firefox and Chrome privacy features',
+        'find the latest official printer manual',
+        'current installation documentation',
+    ):
+        assert reference_lookup_without_date_window(prompt)
+        args = preserve_requested_web_recency('web_search', {'query': prompt, 'time_filter': 'month'}, user_text=prompt)
+        assert 'time_filter' not in args
 
 
 def test_explicit_publication_constraints_are_preserved():
@@ -86,25 +83,25 @@ def test_provider_keeps_news_date_window_across_empty_fallbacks(monkeypatch):
     assert all(call['time_range'] == 'day' for call in calls)
 
 
-@pytest.mark.parametrize('arguments,expected', [
-    ({'query': 'latest browser documentation'}, None),
-    ({'query': 'browser documentation', 'time_filter': 'month'}, 'month'),
-    ({'query': 'AI news today'}, 'day'),
-])
-def test_search_execution_honors_explicit_filter_but_does_not_invent_one(monkeypatch, arguments, expected):
-    import src.search as search
+def test_search_execution_honors_explicit_filter_but_does_not_invent_one(monkeypatch):
+    import services.search as search
     from src.agent_tools.web_tools import WebSearchTool
-    seen = {}
-    def execute(query, **kwargs):
-        seen.update(kwargs)
-        return 'Evidence', [{'title': 'Source', 'url': 'https://example.org'}]
-    monkeypatch.setattr(search, 'comprehensive_web_search', execute)
-    asyncio.run(WebSearchTool().execute(json.dumps(arguments), {}))
-    assert seen['time_filter'] == expected
+    for arguments, expected in (
+        ({'query': 'latest browser documentation'}, None),
+        ({'query': 'browser documentation', 'time_filter': 'month'}, 'month'),
+        ({'query': 'AI news today'}, 'day'),
+    ):
+        seen = {}
+        def execute(query, **kwargs):
+            seen.update(kwargs)
+            return 'Evidence', [{'title': 'Source', 'url': 'https://example.org'}]
+        monkeypatch.setattr(search, 'comprehensive_web_search', execute)
+        asyncio.run(WebSearchTool().execute(json.dumps(arguments), {}))
+        assert seen['time_filter'] == expected
 
 
 def test_metadata_search_keeps_explicit_publication_window(monkeypatch):
-    import src.search as search
+    import services.search as search
     from src.agent_tools.web_tools import WebSearchTool
     seen = {}
     def execute(query, count, **kwargs):

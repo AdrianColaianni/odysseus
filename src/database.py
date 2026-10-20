@@ -27,11 +27,7 @@ from core.database import (  # explicit re-exports for IDE/type-checker visibili
     init_db,
     get_db,
     get_db_session,
-    bulk_insert_messages,
-    cleanup_old_sessions,
     get_session_stats,
     get_detailed_stats,
     update_session_last_accessed,
-    get_session_by_id,
-    archive_session,
 )

@@ -1,7 +1,4 @@
-// static/js/calendar/utils.js
-//
-// Pure constants + zero-state helpers for the calendar UI.
-// No DOM, no fetch, no global mutable state — safe to import anywhere.
+import { hexToRgb } from '../color/hex.js';
 
 export const WEEKDAYS     = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 export const WEEKDAYS_SUN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -55,7 +52,6 @@ export const _trashIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill=
 export const _moreIcon  = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>';
 export const _bellIcon  = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>';
 
-// ── background CSS helpers ──
 
 export function _isCalBgImage(c) {
   return typeof c === 'string' && c.startsWith('bg:');
@@ -88,20 +84,6 @@ export function _calBgCss(c, fallback) {
   return c || fallback || 'var(--accent)';
 }
 
-function _hexToRgb(c) {
-  if (typeof c !== 'string') return null;
-  const m = c.trim().match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
-  if (!m) return null;
-  const hex = m[1].length === 3
-    ? m[1].split('').map(ch => ch + ch).join('')
-    : m[1];
-  return {
-    r: parseInt(hex.slice(0, 2), 16),
-    g: parseInt(hex.slice(2, 4), 16),
-    b: parseInt(hex.slice(4, 6), 16),
-  };
-}
-
 function _relativeLuminance({ r, g, b }) {
   return [r, g, b].map(v => {
     const c = v / 255;
@@ -116,7 +98,7 @@ function _contrastRatio(a, b) {
 }
 
 export function _calReadableTextColor(bg) {
-  const rgb = _hexToRgb(bg);
+  const rgb = hexToRgb(bg);
   if (!rgb) return 'var(--fg)';
   const lum = _relativeLuminance(rgb);
   const white = _contrastRatio(lum, 1);
@@ -124,9 +106,18 @@ export function _calReadableTextColor(bg) {
   return ink >= white ? '#111820' : '#ffffff';
 }
 
-// ── date helpers ──
 
 // `YYYY-MM-DD` string from a Date.
+export function hhmmToMin(v) {
+  if (!v || !/^\d{2}:\d{2}$/.test(v)) return null;
+  const [h, m] = v.split(':').map(n => parseInt(n, 10));
+  return h * 60 + m;
+}
+
+export function minToHHMM(mins) {
+  return `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+}
+
 export function _ds(d) {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }

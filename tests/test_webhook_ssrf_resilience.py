@@ -106,9 +106,9 @@ async def test_webhook_delivery_uses_naive_utc_timestamps(monkeypatch):
     # the connect); the captured content proves the body/headers are built.
     captured = {}
 
-    async def _fake_send(url, body, headers, ip):
+    async def _fake_send(url, body, headers, ips):
         captured["content"] = body
-        captured["ip"] = str(ip)
+        captured["ip"] = str(ips[0])
         assert headers["X-Odysseus-Event"] == "webhook.test"
         return _Response()
 

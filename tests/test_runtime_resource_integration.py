@@ -65,16 +65,16 @@ async def test_producer_rejects_changed_command_after_admission(workspace, monke
     assert result["blocked"]
 
 
-@pytest.mark.parametrize("ctx", [{"owner": "bob", "session_id": "thread"},
-                                 {"owner": "alice", "session_id": "replacement"}])
-async def test_native_producer_rechecks_application_binding(workspace, monkeypatch, ctx):
-    admitted = authority(workspace)
-    operation = ExactOperation.normalize("bash", "printf admitted")
-    bound = resources.resolve_process_operation(admitted, operation, NativeBackendResource("bash"))
-    monkeypatch.setattr(containment, "acquire", lambda *a, **k: pytest.fail("Rebound producer acquired boundary"))
-    with bind_request_authority(admitted), resources.bind_process_operation(bound):
-        result = await BashTool().execute(operation.input, ctx)
-    assert result["exit_code"] == 1 and "owner or session changed" in result["error"]
+async def test_native_producer_rechecks_application_binding(workspace, monkeypatch):
+    for ctx in [{"owner": "bob", "session_id": "thread"},
+    {"owner": "alice", "session_id": "replacement"}]:
+        admitted = authority(workspace)
+        operation = ExactOperation.normalize("bash", "printf admitted")
+        bound = resources.resolve_process_operation(admitted, operation, NativeBackendResource("bash"))
+        monkeypatch.setattr(containment, "acquire", lambda *a, **k: pytest.fail("Rebound producer acquired boundary"))
+        with bind_request_authority(admitted), resources.bind_process_operation(bound):
+            result = await BashTool().execute(operation.input, ctx)
+        assert result["exit_code"] == 1 and "owner or session changed" in result["error"]
 
 
 async def test_scheduled_local_runner_uses_exact_launch_ceiling(workspace):
@@ -162,14 +162,14 @@ async def test_cancellation_at_native_spawn_restores_all_context(workspace, monk
     assert containment.active_grants() == []
 
 
-@pytest.mark.parametrize("field,value", [("owner", "bob"), ("request_id", "replacement"), ("session_id", "other-thread")])
-async def test_exact_launch_binding_substitution_fails(workspace, field, value):
-    original = authority(workspace)
-    approval = approval_for(original, "bash", "printf exact")
-    changed = replace(original, **{field: value}, resource_roots=None, backend_resources=None,
-                      owned_scopes=None, launch_scopes=None)
-    _, denied = await dispatch(changed, "bash", "printf exact", approval)
-    assert denied["exit_code"] == 1 and not approval._claimed
+async def test_exact_launch_binding_substitution_fails(workspace):
+    for field, value in [("owner", "bob"), ("request_id", "replacement"), ("session_id", "other-thread")]:
+        original = authority(workspace)
+        approval = approval_for(original, "bash", "printf exact")
+        changed = replace(original, **{field: value}, resource_roots=None, backend_resources=None,
+                          owned_scopes=None, launch_scopes=None)
+        _, denied = await dispatch(changed, "bash", "printf exact", approval)
+        assert denied["exit_code"] == 1 and not approval._claimed
 
 
 async def test_exact_launch_replaced_workspace_fails_before_claim(workspace):
@@ -181,42 +181,42 @@ async def test_exact_launch_replaced_workspace_fails_before_claim(workspace):
     assert result["failure_kind"] == "resource_identity_denied" and not approval._claimed
 
 
-@pytest.mark.parametrize("phase", ["success", "error", "cancel", "nested"])
-async def test_process_context_restores(workspace, phase):
-    original = authority(workspace)
-    bound = resources.resolve_process_operation(original, ExactOperation.normalize("bash", "pwd"), NativeBackendResource("bash"))
-    async def call():
-        with resources.bind_process_operation(bound):
-            assert resources.active_process_operation() is bound
-            if phase == "error":
-                raise RuntimeError("ordinary")
-            if phase == "cancel":
-                raise asyncio.CancelledError()
-            if phase == "nested":
-                with resources.bind_process_operation(None):
-                    assert resources.active_process_operation() is None
+async def test_process_context_restores(workspace):
+    for phase in ["success", "error", "cancel", "nested"]:
+        original = authority(workspace)
+        bound = resources.resolve_process_operation(original, ExactOperation.normalize("bash", "pwd"), NativeBackendResource("bash"))
+        async def call():
+            with resources.bind_process_operation(bound):
                 assert resources.active_process_operation() is bound
-    try:
-        await call()
-    except (RuntimeError, asyncio.CancelledError):
-        pass
-    assert resources.active_process_operation() is None
+                if phase == "error":
+                    raise RuntimeError("ordinary")
+                if phase == "cancel":
+                    raise asyncio.CancelledError()
+                if phase == "nested":
+                    with resources.bind_process_operation(None):
+                        assert resources.active_process_operation() is None
+                    assert resources.active_process_operation() is bound
+        try:
+            await call()
+        except (RuntimeError, asyncio.CancelledError):
+            pass
+        assert resources.active_process_operation() is None
 
 
-@pytest.mark.parametrize("publication", ["launch", "sidecar", "job"])
-def test_detached_publication_failure_cannot_release_workload(workspace, monkeypatch, publication):
-    effect = workspace / "effect"
-    if publication == "launch":
-        monkeypatch.setattr(resources, "publish_launch", lambda *a, **k: (_ for _ in ()).throw(OSError("publication failed")))
-    elif publication == "sidecar":
-        monkeypatch.setattr("src.agent_runtime.authority.save_background_authority", lambda *a, **k: (_ for _ in ()).throw(OSError("sidecar failed")))
-    else:
-        monkeypatch.setattr(bg_jobs, "_save", lambda *a: (_ for _ in ()).throw(OSError("job failed")))
-    with launch_authority("printf unsafe > effect", workspace):
-        with pytest.raises(OSError):
-            bg_jobs.launch("printf unsafe > effect", "chat", cwd=str(workspace))
-    assert not effect.exists()
-    assert containment.active_grants() == []
+def test_detached_publication_failure_cannot_release_workload(workspace, monkeypatch):
+    for publication in ["launch", "sidecar", "job"]:
+        effect = workspace / "effect"
+        if publication == "launch":
+            monkeypatch.setattr(resources, "publish_launch", lambda *a, **k: (_ for _ in ()).throw(OSError("publication failed")))
+        elif publication == "sidecar":
+            monkeypatch.setattr("src.agent_runtime.authority.save_background_authority", lambda *a, **k: (_ for _ in ()).throw(OSError("sidecar failed")))
+        else:
+            monkeypatch.setattr(bg_jobs, "_save", lambda *a: (_ for _ in ()).throw(OSError("job failed")))
+        with launch_authority("printf unsafe > effect", workspace):
+            with pytest.raises(OSError):
+                bg_jobs.launch("printf unsafe > effect", "chat", cwd=str(workspace))
+        assert not effect.exists()
+        assert containment.active_grants() == []
 
 
 def test_detached_release_observes_complete_durable_linkage(workspace, monkeypatch):
@@ -281,11 +281,11 @@ async def test_job_approval_revalidates_exact_resource_before_claim(workspace, m
     assert result["failure_kind"] == "resource_identity_denied" and not approval._claimed
 
 
-@pytest.mark.parametrize("request_text", ["Transcribe /workspace/audio.wav", "OCR this image", "List my tasks"])
-async def test_new_resources_do_not_expand_turn_contract_classes(workspace, request_text):
-    admitted = create_request_authority(request_text, owner="alice", session_id="thread", workspace=str(workspace))
-    _, denied = await dispatch(admitted, "bash", "pwd")
-    assert denied["failure_kind"] == "request_authority_denied"
+async def test_new_resources_do_not_expand_turn_contract_classes(workspace):
+    for request_text in ["Transcribe /workspace/audio.wav", "OCR this image", "List my tasks"]:
+        admitted = create_request_authority(request_text, owner="alice", session_id="thread", workspace=str(workspace))
+        _, denied = await dispatch(admitted, "bash", "pwd")
+        assert denied["failure_kind"] == "request_authority_denied"
 
 
 def test_internal_shell_control_has_no_admin_floor_even_without_auth(monkeypatch):
@@ -299,16 +299,16 @@ def test_internal_shell_control_has_no_admin_floor_even_without_auth(monkeypatch
     assert error.value.status_code == 403
 
 
-@pytest.mark.parametrize("mode", ["auth_disabled", "missing_manager"])
-def test_unlabelled_loopback_cannot_gain_native_control(monkeypatch, mode):
+def test_unlabelled_loopback_cannot_gain_native_control(monkeypatch):
     from routes import shell_routes
     from fastapi import HTTPException
-    request = SimpleNamespace(headers={}, state=SimpleNamespace(current_user=None),
-                              app=SimpleNamespace(state=SimpleNamespace(auth_manager=None)))
-    monkeypatch.setattr(shell_routes, "_auth_disabled", lambda: mode == "auth_disabled")
-    with pytest.raises(HTTPException) as error:
-        shell_routes._require_admin(request)
-    assert error.value.status_code == 403
+    for mode in ["auth_disabled", "missing_manager"]:
+        request = SimpleNamespace(headers={}, state=SimpleNamespace(current_user=None),
+                                  app=SimpleNamespace(state=SimpleNamespace(auth_manager=None)))
+        monkeypatch.setattr(shell_routes, "_auth_disabled", lambda: mode == "auth_disabled")
+        with pytest.raises(HTTPException) as error:
+            shell_routes._require_admin(request)
+        assert error.value.status_code == 403
 
 
 def test_authenticated_human_administration_is_not_an_internal_tool_floor(monkeypatch):
@@ -319,27 +319,27 @@ def test_authenticated_human_administration_is_not_an_internal_tool_floor(monkey
     shell_routes._require_admin(request)
 
 
-@pytest.mark.parametrize("path,payload", [("/api/cookbook/kill-pid", {"pid": 4321}),
-    ("/api/cookbook/state", {"tasks": []}), ("/api/model/serve", {}), ("/api/model/download", {})])
-async def test_anonymous_native_cookbook_control_rejected_before_producer(monkeypatch, path, payload):
+async def test_anonymous_native_cookbook_control_rejected_before_producer(monkeypatch):
     from routes import cookbook_routes, shell_routes
     from fastapi import FastAPI
     import httpx
-    monkeypatch.setattr(shell_routes, "_auth_disabled", lambda: True)
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", lambda *a, **k: pytest.fail("Anonymous producer reached"))
-    monkeypatch.setattr(asyncio, "create_subprocess_shell", lambda *a, **k: pytest.fail("Anonymous producer reached"))
-    app = FastAPI()
-    app.include_router(cookbook_routes.setup_cookbook_routes())
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=("192.0.2.1", 123)), base_url="http://local") as client:
-        result = await client.post(path, json=payload)
-    assert result.status_code == 403
+    for path, payload in [("/api/cookbook/kill-pid", {"pid": 4321}),
+    ("/api/cookbook/state", {"tasks": []}), ("/api/model/serve", {}), ("/api/model/download", {})]:
+        monkeypatch.setattr(shell_routes, "_auth_disabled", lambda: True)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", lambda *a, **k: pytest.fail("Anonymous producer reached"))
+        monkeypatch.setattr(asyncio, "create_subprocess_shell", lambda *a, **k: pytest.fail("Anonymous producer reached"))
+        app = FastAPI()
+        app.include_router(cookbook_routes.setup_cookbook_routes())
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=("192.0.2.1", 123)), base_url="http://local") as client:
+            result = await client.post(path, json=payload)
+        assert result.status_code == 403
 
 
-@pytest.mark.parametrize("path", ["/api/shell/exec", "/api/model/serve", "/api/cookbook/kill-pid", "/api/cookbook/state", "/api/shell/../cookbook/kill-pid"])
-def test_generic_loopback_cannot_bypass_process_resources(path):
+def test_generic_loopback_cannot_bypass_process_resources():
     from src.agent_runtime.owned_resources import needs_owned_binding
-    with pytest.raises(ResourceIdentityError):
-        needs_owned_binding(ExactOperation.normalize("app_api", json.dumps({"path": path})))
+    for path in ["/api/shell/exec", "/api/model/serve", "/api/cookbook/kill-pid", "/api/cookbook/state", "/api/shell/../cookbook/kill-pid"]:
+        with pytest.raises(ResourceIdentityError):
+            needs_owned_binding(ExactOperation.normalize("app_api", json.dumps({"path": path})))
 
 
 async def test_direct_local_cookbook_control_does_not_enroll_discovered_processes(monkeypatch):

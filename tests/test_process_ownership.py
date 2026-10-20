@@ -193,7 +193,6 @@ def test_ps_covers_hosts_with_no_procfs(monkeypatch, tmp_path):
     monkeypatch.setattr(po.shutil, "which", lambda name: "/bin/ps" if name == "ps" else None)
 
     assert po.inspection_mechanism() == po.MECHANISM_PS
-    assert po.inspection_available()
 
 
 def test_a_host_with_neither_reports_none(monkeypatch, tmp_path):
@@ -202,7 +201,6 @@ def test_a_host_with_neither_reports_none(monkeypatch, tmp_path):
     monkeypatch.setattr(po.shutil, "which", lambda _name: None)
 
     assert po.inspection_mechanism() == po.MECHANISM_NONE
-    assert not po.inspection_available()
 
 
 def test_the_procfs_token_reads_a_comm_containing_spaces_and_parens(monkeypatch, tmp_path):

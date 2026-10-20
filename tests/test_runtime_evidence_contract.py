@@ -15,7 +15,7 @@ def standalone_dispatch_authority(monkeypatch):
     monkeypatch.setattr(tool_execution, "execute_tool_block",
                         server_authorized_executor(tool_execution.execute_tool_block))
 
-from src.agent_evidence import CompletionRequirements, EvidenceLedger, EvidenceKind
+from src.agent_evidence import CompletionRequirements, EvidenceLedger
 from src.agent_runtime.completion import completion_answer, with_completion_gate
 from src.agent_runtime.identity import artifact_identity, artifact_version, is_test_command, is_validation_command
 from src.agent_runtime.journal import (
@@ -25,23 +25,23 @@ from src.agent_runtime.journal import (
 from src.tool_types import ToolBlock
 
 
-@pytest.mark.parametrize('command', [
-    'python -m unittest discover -s tests -v', 'python3.12 -I -m unittest tests.test_app',
-    'cd /workspace && python3 -m unittest', 'pytest -q tests/test_app.py',
-    '/usr/bin/python3 -m pytest', 'PYTHONPATH=. python -m unittest', 'npm run test',
-])
-def test_actual_foreground_test_commands(command):
-    assert is_test_command(command)
+def test_actual_foreground_test_commands():
+    for command in [
+        'python -m unittest discover -s tests -v', 'python3.12 -I -m unittest tests.test_app',
+        'cd /workspace && python3 -m unittest', 'pytest -q tests/test_app.py',
+        '/usr/bin/python3 -m pytest', 'PYTHONPATH=. python -m unittest', 'npm run test',
+    ]:
+        assert is_test_command(command)
 
 
-@pytest.mark.parametrize('command', [
-    'echo python -m unittest', 'echo "pytest passed"', 'false && pytest',
-    'pytest; true', 'pytest || true', 'pytest | cat', 'python -c "print(\'pytest\')"',
-    'printf "python -m unittest"', 'pytest --help', 'pytest --collect-only',
-    'python -m unittest --help', 'if false; then pytest; fi', 'echo $(pytest)',
-])
-def test_non_execution_or_masked_status_is_not_verifier(command):
-    assert not is_test_command(command)
+def test_non_execution_or_masked_status_is_not_verifier():
+    for command in [
+        'echo python -m unittest', 'echo "pytest passed"', 'false && pytest',
+        'pytest; true', 'pytest || true', 'pytest | cat', 'python -c "print(\'pytest\')"',
+        'printf "python -m unittest"', 'pytest --help', 'pytest --collect-only',
+        'python -m unittest --help', 'if false; then pytest; fi', 'echo $(pytest)',
+    ]:
+        assert not is_test_command(command)
 
 
 def test_echoed_readback_is_not_validation():
@@ -84,15 +84,15 @@ def test_fifo_artifact_observation_is_nonblocking(tmp_path):
     assert artifact_version('pipe', str(tmp_path)) == 'unobserved'
 
 
-@pytest.mark.parametrize('nested', [True, False])
-def test_native_argument_shapes_are_preserved_without_mutable_aliases(nested):
-    function = {'name': 'provider_tool', 'arguments': {'value': 'original'}}
-    native = {'function': function} if nested else function
-    journal = ActionJournal()
-    action = journal.propose(ToolBlock('normalized_tool', '{}'), native_call=native)
-    function['arguments']['value'] = 'changed later'
-    assert action.provider_arguments == {'value': 'original'}
-    assert action.provider_tool == 'provider_tool'
+def test_native_argument_shapes_are_preserved_without_mutable_aliases():
+    for nested in [True, False]:
+        function = {'name': 'provider_tool', 'arguments': {'value': 'original'}}
+        native = {'function': function} if nested else function
+        journal = ActionJournal()
+        action = journal.propose(ToolBlock('normalized_tool', '{}'), native_call=native)
+        function['arguments']['value'] = 'changed later'
+        assert action.provider_arguments == {'value': 'original'}
+        assert action.provider_tool == 'provider_tool'
 
 
 def test_large_artifact_hashing_is_bounded(tmp_path):
@@ -132,14 +132,14 @@ def test_readback_does_not_substitute_for_required_executable_tests():
     assert not ledger.evaluate().can_complete
 
 
-@pytest.mark.parametrize('claim', ['All tests passed.', 'Tests: PASS', 'unittest succeeded',
-                                  'Test suite ran successfully', 'No failures.', 'Done.',
-                                  'I executed the command.', 'Successfully created the file.'])
-def test_no_execution_receipts_cannot_support_adversarial_success_claims(claim):
-    ledger = EvidenceLedger(CompletionRequirements(verifier_required=True))
-    answer, reason = completion_answer(claim, ledger, ledger.evaluate())
-    assert reason
-    assert answer.startswith('The task is incomplete:')
+def test_no_execution_receipts_cannot_support_adversarial_success_claims():
+    for claim in ['All tests passed.', 'Tests: PASS', 'unittest succeeded',
+        'Test suite ran successfully', 'No failures.', 'Done.',
+    'I executed the command.', 'Successfully created the file.']:
+        ledger = EvidenceLedger(CompletionRequirements(verifier_required=True))
+        answer, reason = completion_answer(claim, ledger, ledger.evaluate())
+        assert reason
+        assert answer.startswith('The task is incomplete:')
 
 
 def test_declared_execution_contract_does_not_publish_invented_test_counts():
@@ -178,20 +178,20 @@ def test_unattested_statistics_removed_without_erasing_explanation():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('thinking', [True, 'Checking the result'])
-async def test_mixed_thinking_delta_cannot_publish_success_before_gate(thinking):
-    @with_completion_gate
-    async def stream(messages):
-        yield 'data: ' + json.dumps({'delta': 'All tests passed.', 'thinking': thinking}) + '\n\n'
-        yield 'data: {"type":"tool_start","tool":"bash"}\n\n'
-        yield 'data: {"type":"metrics","data":{"thinking":"All tests passed."}}\n\n'
-        yield 'data: [DONE]\n\n'
-    events = decode([chunk async for chunk in stream([{'role': 'user', 'content': 'Run the tests.'}])])
-    assert events[0] == {'type': 'tool_start', 'tool': 'bash'}
-    assert events[1]['type'] == 'completion_decision'
-    assert not events[1]['data']['can_complete']
-    assert 'All tests passed.' not in json.dumps(events)
-    assert any(e.get('type') == 'final_response' and e['content'].startswith('The task is incomplete:') for e in events)
+async def test_mixed_thinking_delta_cannot_publish_success_before_gate():
+    for thinking in [True, 'Checking the result']:
+        @with_completion_gate
+        async def stream(messages):
+            yield 'data: ' + json.dumps({'delta': 'All tests passed.', 'thinking': thinking}) + '\n\n'
+            yield 'data: {"type":"tool_start","tool":"bash"}\n\n'
+            yield 'data: {"type":"metrics","data":{"thinking":"All tests passed."}}\n\n'
+            yield 'data: [DONE]\n\n'
+        events = decode([chunk async for chunk in stream([{'role': 'user', 'content': 'Run the tests.'}])])
+        assert events[0] == {'type': 'tool_start', 'tool': 'bash'}
+        assert events[1]['type'] == 'completion_decision'
+        assert not events[1]['data']['can_complete']
+        assert 'All tests passed.' not in json.dumps(events)
+        assert any(e.get('type') == 'final_response' and e['content'].startswith('The task is incomplete:') for e in events)
 
 
 @pytest.mark.asyncio
@@ -242,27 +242,28 @@ async def test_corrected_answer_preserves_safe_reasoning():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('declare_before_verification', [True, False])
-async def test_late_artifact_obligations_cannot_reuse_unobserved_versions(tmp_path, declare_before_verification):
-    (tmp_path / 'app.py').write_text('original')
-    declaration = 'data: ' + json.dumps({'type': 'metrics', 'data': {
-        'completion_requirements': {'required_artifacts': ['app.py']}}}) + '\n\n'
-    @with_completion_gate
-    async def stream(messages, workspace=None):
-        if declare_before_verification:
-            yield declaration
-        await successful_backend(ToolBlock('write_file', '{"path":"app.py"}'))
-        await successful_backend(ToolBlock('bash', 'python -m unittest'))
-        (tmp_path / 'app.py').write_text('changed after verification')
-        if not declare_before_verification:
-            yield declaration
-        yield 'data: {"delta":"Tests passed."}\n\n'
-        yield 'data: [DONE]\n\n'
-    events = decode([chunk async for chunk in stream([], workspace=str(tmp_path))])
-    decision = next(e['data'] for e in events if e.get('type') == 'completion_decision')
-    assert not decision['can_complete']
-    assert decision['status'] == 'blocked'
-    assert 'Tests passed.' not in json.dumps(events)
+async def test_late_artifact_obligations_cannot_reuse_unobserved_versions(tmp_path_factory):
+    for declare_before_verification in [True, False]:
+        tmp_path = tmp_path_factory.mktemp("case")
+        (tmp_path / 'app.py').write_text('original')
+        declaration = 'data: ' + json.dumps({'type': 'metrics', 'data': {
+            'completion_requirements': {'required_artifacts': ['app.py']}}}) + '\n\n'
+        @with_completion_gate
+        async def stream(messages, workspace=None):
+            if declare_before_verification:
+                yield declaration
+            await successful_backend(ToolBlock('write_file', '{"path":"app.py"}'))
+            await successful_backend(ToolBlock('bash', 'python -m unittest'))
+            (tmp_path / 'app.py').write_text('changed after verification')
+            if not declare_before_verification:
+                yield declaration
+            yield 'data: {"delta":"Tests passed."}\n\n'
+            yield 'data: [DONE]\n\n'
+        events = decode([chunk async for chunk in stream([], workspace=str(tmp_path))])
+        decision = next(e['data'] for e in events if e.get('type') == 'completion_decision')
+        assert not decision['can_complete']
+        assert decision['status'] == 'blocked'
+        assert 'Tests passed.' not in json.dumps(events)
 
 
 @pytest.mark.asyncio
@@ -408,49 +409,49 @@ async def test_unknown_tool_never_creates_dispatch_identity(monkeypatch):
     assert not journal.actions[0].outcome['authoritative']
 
 
-@pytest.mark.parametrize('tool,command,claim', [
-    ('read_file', 'README.md', 'I ran the tests.'),
-    ('bash', 'printf observation', 'The tests passed.'),
-    ('read_file', 'README.md', 'I updated config.py.'),
-    ('bash', 'printf observation', 'I created the file.'),
-    ('write_file', '{"path":"other.py"}', 'I updated config.py.'),
-    ('write_file', '{"path":"nested/config.py"}', 'I updated config.py.'),
-    ('bash', 'python -m unittest', 'I ran pytest and the tests passed.'),
-    ('bash', 'pytest tests/test_other.py', 'I ran pytest tests/test_config.py.'),
-    ('bash', 'pytest', 'I updated config.py and the tests passed.'),
-    ('write_file', '{"path":"config.py"}', 'I updated config.py and ran pytest.'),
-    ('bash', 'python -m unittest pytest', 'I ran pytest.'),
-    ('write_file', '{"path":"config.py"}', 'I updated "settings.py".'),
-    ('bash', 'pytest', 'Created config.py and ran pytest.'),
-])
-def test_slice2_unrelated_receipt_cannot_support_claim(tool, command, claim):
-    ledger = EvidenceLedger.from_tool_events([
-        {'tool': tool, 'command': command, 'exit_code': 0},
-    ])
-    answer, reason = completion_answer(claim, ledger, ledger.evaluate())
-    assert reason
-    assert claim not in answer
+def test_slice2_unrelated_receipt_cannot_support_claim():
+    for tool, command, claim in [
+        ('read_file', 'README.md', 'I ran the tests.'),
+        ('bash', 'printf observation', 'The tests passed.'),
+        ('read_file', 'README.md', 'I updated config.py.'),
+        ('bash', 'printf observation', 'I created the file.'),
+        ('write_file', '{"path":"other.py"}', 'I updated config.py.'),
+        ('write_file', '{"path":"nested/config.py"}', 'I updated config.py.'),
+        ('bash', 'python -m unittest', 'I ran pytest and the tests passed.'),
+        ('bash', 'pytest tests/test_other.py', 'I ran pytest tests/test_config.py.'),
+        ('bash', 'pytest', 'I updated config.py and the tests passed.'),
+        ('write_file', '{"path":"config.py"}', 'I updated config.py and ran pytest.'),
+        ('bash', 'python -m unittest pytest', 'I ran pytest.'),
+        ('write_file', '{"path":"config.py"}', 'I updated "settings.py".'),
+        ('bash', 'pytest', 'Created config.py and ran pytest.'),
+    ]:
+        ledger = EvidenceLedger.from_tool_events([
+            {'tool': tool, 'command': command, 'exit_code': 0},
+        ])
+        answer, reason = completion_answer(claim, ledger, ledger.evaluate())
+        assert reason
+        assert claim not in answer
 
 
-@pytest.mark.parametrize('claim', ['I ran pytest.', 'The tests passed.', 'Tests: PASS'])
-def test_slice2_matching_verifier_supports_test_claim(claim):
-    ledger = EvidenceLedger.from_tool_events([
-        {'tool': 'bash', 'command': 'python3 -m pytest -q', 'exit_code': 0},
-    ])
-    answer, reason = completion_answer(claim, ledger, ledger.evaluate())
-    assert claim in answer
-    assert not reason
+def test_slice2_matching_verifier_supports_test_claim():
+    for claim in ['I ran pytest.', 'The tests passed.', 'Tests: PASS']:
+        ledger = EvidenceLedger.from_tool_events([
+            {'tool': 'bash', 'command': 'python3 -m pytest -q', 'exit_code': 0},
+        ])
+        answer, reason = completion_answer(claim, ledger, ledger.evaluate())
+        assert claim in answer
+        assert not reason
 
 
-@pytest.mark.parametrize('claim', ['I updated config.py.', 'I updated `./config.py` successfully.',
-                                  'I updated "config.py".'])
-def test_slice2_matching_mutation_supports_artifact_claim(claim):
-    ledger = EvidenceLedger.from_tool_events([
-        {'tool': 'edit_file', 'command': '{"path":"config.py"}', 'exit_code': 0},
-    ], CompletionRequirements(required_artifacts=('config.py',)))
-    answer, reason = completion_answer(claim, ledger, ledger.evaluate())
-    assert claim in answer
-    assert not reason
+def test_slice2_matching_mutation_supports_artifact_claim():
+    for claim in ['I updated config.py.', 'I updated `./config.py` successfully.',
+    'I updated "config.py".']:
+        ledger = EvidenceLedger.from_tool_events([
+            {'tool': 'edit_file', 'command': '{"path":"config.py"}', 'exit_code': 0},
+        ], CompletionRequirements(required_artifacts=('config.py',)))
+        answer, reason = completion_answer(claim, ledger, ledger.evaluate())
+        assert claim in answer
+        assert not reason
 
 
 def test_slice2_one_matching_path_does_not_support_multiple_artifact_claims():
@@ -484,34 +485,34 @@ def test_slice2_matching_artifact_and_verifier_support_combined_claim():
     assert not reason
 
 
-@pytest.mark.parametrize('structured', [False, True])
-def test_native_patch_transport_retains_mutation_evidence(structured):
-    patch = '*** Begin Patch\n*** Update File: config.py\n@@\n-old\n+new\n*** End Patch'
-    command = json.dumps({'patch': patch}) if structured else patch
-    ledger = EvidenceLedger.from_tool_events([
-        {'tool': 'apply_patch', 'command': command, 'exit_code': 0},
-        {'tool': 'bash', 'command': 'pytest tests/test_config.py', 'exit_code': 0},
-    ], CompletionRequirements(required_artifacts=('config.py',), verifier_required=True))
-    assert ledger.evaluate().status.value == 'verified'
-    answer, reason = completion_answer('I updated config.py and ran pytest tests/test_config.py.',
-                                      ledger, ledger.evaluate())
-    assert not reason
-    assert 'I updated config.py' in answer
+def test_native_patch_transport_retains_mutation_evidence():
+    for structured in [False, True]:
+        patch = '*** Begin Patch\n*** Update File: config.py\n@@\n-old\n+new\n*** End Patch'
+        command = json.dumps({'patch': patch}) if structured else patch
+        ledger = EvidenceLedger.from_tool_events([
+            {'tool': 'apply_patch', 'command': command, 'exit_code': 0},
+            {'tool': 'bash', 'command': 'pytest tests/test_config.py', 'exit_code': 0},
+        ], CompletionRequirements(required_artifacts=('config.py',), verifier_required=True))
+        assert ledger.evaluate().status.value == 'verified'
+        answer, reason = completion_answer('I updated config.py and ran pytest tests/test_config.py.',
+                                          ledger, ledger.evaluate())
+        assert not reason
+        assert 'I updated config.py' in answer
 
 
-@pytest.mark.parametrize('verifier', ['passing', 'absent', 'before_edit', 'failed'])
-def test_pre_edit_inspection_requires_current_passing_executable_verification(verifier):
-    events = [{'tool': 'read_file', 'command': 'config.py', 'exit_code': 0}]
-    if verifier == 'before_edit':
-        events.append({'tool': 'bash', 'command': 'pytest', 'exit_code': 0})
-    events.append({'tool': 'edit_file', 'command': '{"path":"config.py"}', 'exit_code': 0})
-    if verifier in {'passing', 'failed'}:
-        events.append({'tool': 'bash', 'command': 'pytest', 'exit_code': 0 if verifier == 'passing' else 1})
-    ledger = EvidenceLedger.from_tool_events(events, CompletionRequirements(
-        required_artifacts=('config.py',), verifier_required=True, executable_verifier_available=True))
-    decision = ledger.evaluate()
-    assert decision.can_complete is (verifier == 'passing')
-    assert (decision.status.value == 'verified') is (verifier == 'passing')
+def test_pre_edit_inspection_requires_current_passing_executable_verification():
+    for verifier in ['passing', 'absent', 'before_edit', 'failed']:
+        events = [{'tool': 'read_file', 'command': 'config.py', 'exit_code': 0}]
+        if verifier == 'before_edit':
+            events.append({'tool': 'bash', 'command': 'pytest', 'exit_code': 0})
+        events.append({'tool': 'edit_file', 'command': '{"path":"config.py"}', 'exit_code': 0})
+        if verifier in {'passing', 'failed'}:
+            events.append({'tool': 'bash', 'command': 'pytest', 'exit_code': 0 if verifier == 'passing' else 1})
+        ledger = EvidenceLedger.from_tool_events(events, CompletionRequirements(
+            required_artifacts=('config.py',), verifier_required=True, executable_verifier_available=True))
+        decision = ledger.evaluate()
+        assert decision.can_complete is (verifier == 'passing')
+        assert (decision.status.value == 'verified') is (verifier == 'passing')
 
 
 def test_failed_post_edit_inspection_is_not_hidden_by_passing_tests():
@@ -524,18 +525,18 @@ def test_failed_post_edit_inspection_is_not_hidden_by_passing_tests():
     assert ledger.evaluate().status.value == 'failed'
 
 
-@pytest.mark.parametrize('command, expected', [
-    ('"$runner" -m pytest -q tests/test_config.py', True),
-    ('"$runner" -m unittest', True),
-    ('"$runner" -m pytest --collect-only', False),
-    ('"$runner" -m pytest || true', False),
-    ('"$runner" -m pytest; echo passed', False),
-    ('"$runner" -m pytest $FLAGS', False),
-    ('echo pytest passed', False),
-])
-def test_exact_tui_interpreter_selection_preserves_foreground_verifier_status(command, expected):
+def test_exact_tui_interpreter_selection_preserves_foreground_verifier_status():
     from src.agent_loop import _tui_python_runner_setup
-    assert is_test_command(_tui_python_runner_setup() + command) is expected
+    for command, expected in [
+        ('"$runner" -m pytest -q tests/test_config.py', True),
+        ('"$runner" -m unittest', True),
+        ('"$runner" -m pytest --collect-only', False),
+        ('"$runner" -m pytest || true', False),
+        ('"$runner" -m pytest; echo passed', False),
+        ('"$runner" -m pytest $FLAGS', False),
+        ('echo pytest passed', False),
+    ]:
+        assert is_test_command(_tui_python_runner_setup() + command) is expected
 
 
 def test_tui_discovery_fallback_cannot_attest_that_tests_executed():
@@ -543,9 +544,9 @@ def test_tui_discovery_fallback_cannot_attest_that_tests_executed():
     assert not is_test_command(_tui_local_test_runner_command())
 
 
-@pytest.mark.parametrize('command, expected', [('pytest -q', True), ('pytest || true', False)])
-def test_host_shell_native_arguments_use_the_same_verifier_classification(command, expected):
+def test_host_shell_native_arguments_use_the_same_verifier_classification():
     from src.agent_evidence import command_is_test, command_is_validation
-    encoded = json.dumps({'command': command, 'timeout': 120})
-    assert command_is_test(encoded) is expected
-    assert command_is_validation(encoded) is expected
+    for command, expected in [('pytest -q', True), ('pytest || true', False)]:
+        encoded = json.dumps({'command': command, 'timeout': 120})
+        assert command_is_test(encoded) is expected
+        assert command_is_validation(encoded) is expected

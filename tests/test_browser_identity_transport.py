@@ -48,15 +48,15 @@ async def test_sidecar_allowlist_has_no_enable_mutation_or_arbitrary_cdp():
         with pytest.raises(ValueError): await client.call(method)
 
 
-@pytest.mark.parametrize("envelope", [[], None, {"id": True, "result": {}}, {"id": "1", "result": {}}, {"id": 1, "error": {}, "result": {}}])
-async def test_sidecar_rejects_malformed_identity_envelopes(monkeypatch, envelope):
-    client = browser.CDPSidecar("ws://127.0.0.1:1234/devtools/browser/12345678-1234-1234-1234-123456789abc")
-    async def send(*args): pass
-    async def receive(): return envelope
-    monkeypatch.setattr(client, "_send", send)
-    monkeypatch.setattr(client, "_message", receive)
-    with pytest.raises(ResourceIdentityError):
-        await client.call("Target.getTargets")
+async def test_sidecar_rejects_malformed_identity_envelopes(monkeypatch):
+    for envelope in [[], None, {"id": True, "result": {}}, {"id": "1", "result": {}}, {"id": 1, "error": {}, "result": {}}]:
+        client = browser.CDPSidecar("ws://127.0.0.1:1234/devtools/browser/12345678-1234-1234-1234-123456789abc")
+        async def send(*args): pass
+        async def receive(envelope=envelope): return envelope
+        monkeypatch.setattr(client, "_send", send)
+        monkeypatch.setattr(client, "_message", receive)
+        with pytest.raises(ResourceIdentityError):
+            await client.call("Target.getTargets")
 
 
 @pytest.mark.parametrize("field", ["namespace", "runtimeError", "restoreKey"])
@@ -149,10 +149,10 @@ def test_raw_global_playwright_and_native_backend_are_not_substitutable():
         ExternalResource("mcp", "endpoint", "server", "tool", "epoch"))
 
 
-@pytest.mark.parametrize("tool", ["browser_click", "browser_snapshot", "browser_evaluate", "browser_navigate", "browser_run_code"])
-async def test_raw_mcp_browser_execution_cannot_evade_disabled_page_contract(tool):
+async def test_raw_mcp_browser_execution_cannot_evade_disabled_page_contract():
     from src.agent_runtime.authority import RequestAuthority, OperationGrant
-    name = "mcp__builtin_browser__" + tool
-    current = RequestAuthority("request", "alice", "thread", "", (OperationGrant(name),))
-    _, result = await dispatch(current, name, '{}')
-    assert result["failure_kind"] == browser.PAGE_FAILURE and result["executed"] is False
+    for tool in ["browser_click", "browser_snapshot", "browser_evaluate", "browser_navigate", "browser_run_code"]:
+        name = "mcp__builtin_browser__" + tool
+        current = RequestAuthority("request", "alice", "thread", "", (OperationGrant(name),))
+        _, result = await dispatch(current, name, '{}')
+        assert result["failure_kind"] == browser.PAGE_FAILURE and result["executed"] is False, tool

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from src import integrations
+from tests.helpers.routes import route_endpoint
 
 
 def test_load_integrations_skips_non_object_rows(tmp_path, monkeypatch):
@@ -31,14 +32,7 @@ def integrations_routes(tmp_path, monkeypatch):
             return user == "admin"
 
     router = auth_routes.setup_auth_routes(_AuthManager())
-
-    def endpoint(path, method):
-        for route in router.routes:
-            if getattr(route, "path", "") == path and method in getattr(route, "methods", set()):
-                return route.endpoint
-        raise AssertionError(f"{method} {path} route not registered")
-
-    return endpoint, auth_routes.SESSION_COOKIE, fastapi.HTTPException
+    return router, auth_routes.SESSION_COOKIE, fastapi.HTTPException
 
 
 class _JsonRequest(SimpleNamespace):
@@ -53,127 +47,37 @@ class _JsonRequest(SimpleNamespace):
         return self._body
 
 
-@pytest.mark.parametrize("blank_name", ["", "   "])
-def test_create_integration_rejects_blank_name_without_persisting(integrations_routes, blank_name):
-    endpoint, session_cookie, http_exception = integrations_routes
-    create_integration = endpoint("/api/auth/integrations", "POST")
+INVALID_FIELDS = [
+    {"name": "   "},
+    {"base_url": ""},
+    {"base_url": "ftp://example.test"},
+    {"base_url": "https://example.test/api?token=abc"},
+]
 
-    with pytest.raises(http_exception) as exc:
-        asyncio.run(create_integration(
-            _JsonRequest({"name": blank_name, "base_url": "https://example.test"}, session_cookie)
-        ))
 
-    assert exc.value.status_code == 400
-    assert exc.value.detail == "Integration name is required"
+def test_create_integration_rejects_invalid_fields_without_persisting(integrations_routes):
+    router, session_cookie, http_exception = integrations_routes
+    create_integration = route_endpoint(router, "/api/auth/integrations", "POST")
+
+    for invalid in INVALID_FIELDS:
+        body = {"name": "Example", "base_url": "https://example.test", **invalid}
+        with pytest.raises(http_exception) as exc:
+            asyncio.run(create_integration(_JsonRequest(body, session_cookie)))
+        assert exc.value.status_code == 400, invalid
     assert integrations.load_integrations() == []
 
 
-@pytest.mark.parametrize("blank_base_url", ["", "   "])
-def test_create_integration_rejects_blank_base_url_without_persisting(integrations_routes, blank_base_url):
-    endpoint, session_cookie, http_exception = integrations_routes
-    create_integration = endpoint("/api/auth/integrations", "POST")
+def test_update_integration_rejects_invalid_fields_without_changing_existing(integrations_routes):
+    router, session_cookie, http_exception = integrations_routes
+    update_integration = route_endpoint(router, "/api/auth/integrations/{integration_id}", "PUT")
+    existing = {"id": "existing", "name": "Original", "base_url": "https://example.test"}
+    integrations.save_integrations([existing])
 
-    with pytest.raises(http_exception) as exc:
-        asyncio.run(create_integration(
-            _JsonRequest({"name": "Example", "base_url": blank_base_url}, session_cookie)
-        ))
-
-    assert exc.value.status_code == 400
-    assert exc.value.detail == "Integration base URL is required"
-    assert integrations.load_integrations() == []
-
-
-@pytest.mark.parametrize(("base_url", "message"), [
-    ("ftp://example.test", "Integration base URL must be an HTTP(S) URL"),
-    ("https://example.test/api?token=abc", "Integration base URL must not include query or fragment"),
-    ("https://example.test/api#fragment", "Integration base URL must not include query or fragment"),
-])
-def test_create_integration_rejects_invalid_base_url_without_persisting(
-    integrations_routes, base_url, message
-):
-    endpoint, session_cookie, http_exception = integrations_routes
-    create_integration = endpoint("/api/auth/integrations", "POST")
-
-    with pytest.raises(http_exception) as exc:
-        asyncio.run(create_integration(
-            _JsonRequest({"name": "Example", "base_url": base_url}, session_cookie)
-        ))
-
-    assert exc.value.status_code == 400
-    assert exc.value.detail == message
-    assert integrations.load_integrations() == []
-
-
-@pytest.mark.parametrize("blank_name", ["", "   "])
-def test_update_integration_rejects_blank_name_without_changing_existing(integrations_routes, blank_name):
-    endpoint, session_cookie, http_exception = integrations_routes
-    update_integration = endpoint("/api/auth/integrations/{integration_id}", "PUT")
-    integrations.save_integrations([
-        {
-            "id": "existing",
-            "name": "Original",
-            "base_url": "https://example.test",
-        }
-    ])
-
-    with pytest.raises(http_exception) as exc:
-        asyncio.run(update_integration(
-            integration_id="existing",
-            request=_JsonRequest({"name": blank_name}, session_cookie),
-        ))
-
-    assert exc.value.status_code == 400
-    assert exc.value.detail == "Integration name is required"
-    assert integrations.load_integrations()[0]["name"] == "Original"
-
-
-@pytest.mark.parametrize("blank_base_url", ["", "   "])
-def test_update_integration_rejects_blank_base_url_without_changing_existing(integrations_routes, blank_base_url):
-    endpoint, session_cookie, http_exception = integrations_routes
-    update_integration = endpoint("/api/auth/integrations/{integration_id}", "PUT")
-    integrations.save_integrations([
-        {
-            "id": "existing",
-            "name": "Original",
-            "base_url": "https://example.test",
-        }
-    ])
-
-    with pytest.raises(http_exception) as exc:
-        asyncio.run(update_integration(
-            integration_id="existing",
-            request=_JsonRequest({"base_url": blank_base_url}, session_cookie),
-        ))
-
-    assert exc.value.status_code == 400
-    assert exc.value.detail == "Integration base URL is required"
-    assert integrations.load_integrations()[0]["base_url"] == "https://example.test"
-
-
-@pytest.mark.parametrize(("base_url", "message"), [
-    ("ftp://example.test", "Integration base URL must be an HTTP(S) URL"),
-    ("https://example.test/api?token=abc", "Integration base URL must not include query or fragment"),
-    ("https://example.test/api#fragment", "Integration base URL must not include query or fragment"),
-])
-def test_update_integration_rejects_invalid_base_url_without_changing_existing(
-    integrations_routes, base_url, message
-):
-    endpoint, session_cookie, http_exception = integrations_routes
-    update_integration = endpoint("/api/auth/integrations/{integration_id}", "PUT")
-    integrations.save_integrations([
-        {
-            "id": "existing",
-            "name": "Original",
-            "base_url": "https://example.test",
-        }
-    ])
-
-    with pytest.raises(http_exception) as exc:
-        asyncio.run(update_integration(
-            integration_id="existing",
-            request=_JsonRequest({"base_url": base_url}, session_cookie),
-        ))
-
-    assert exc.value.status_code == 400
-    assert exc.value.detail == message
-    assert integrations.load_integrations()[0]["base_url"] == "https://example.test"
+    for invalid in INVALID_FIELDS:
+        with pytest.raises(http_exception) as exc:
+            asyncio.run(update_integration(
+                integration_id="existing",
+                request=_JsonRequest(invalid, session_cookie),
+            ))
+        assert exc.value.status_code == 400, invalid
+    assert integrations.load_integrations() == [existing]

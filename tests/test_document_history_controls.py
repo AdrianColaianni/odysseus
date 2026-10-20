@@ -1,23 +1,7 @@
 """Browser coverage for native rich-text undo and redo controls."""
 
-import json
-import subprocess
-from pathlib import Path
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source
-
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-
-
-def test_history_buttons_start_disabled_and_follow_native_history():
-    assert 'id="doc-undo-btn"' in DOC_JS
-    assert 'aria-label="Undo" aria-disabled="true" disabled' in DOC_JS
-    assert 'aria-label="Redo" aria-disabled="true" disabled' in DOC_JS
-    assert "document.queryCommandEnabled('undo')" in DOC_JS
-    assert "document.queryCommandEnabled('redo')" in DOC_JS
-    assert "_setDocumentHistoryControlState(false, false);" in DOC_JS
+from tests.helpers.node import run_node_module
 
 
 def test_mobile_rich_text_history_state_and_document_switch():
@@ -88,15 +72,7 @@ def test_mobile_rich_text_history_state_and_document_switch():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
     assert data["initial"]["undoDisabled"] is True
     assert data["initial"]["redoDisabled"] is True
     assert data["typed"]["html"] == "<p>Start!</p>"

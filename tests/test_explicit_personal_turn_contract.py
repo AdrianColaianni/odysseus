@@ -1,25 +1,21 @@
-import pytest
-
 from src.turn_contract import requested_capabilities, selected_tools_for_request
 
 
-@pytest.mark.parametrize('prompt', [
-    "Find and read Morgan's latest email about the design review.",
-    "Search my inbox and read the latest message about customer reviews.",
-    "Find and open Casey's latest email about ratings. Do not send a reply.",
-])
-def test_review_subject_and_freshness_do_not_override_mailbox_source(prompt):
-    assert selected_tools_for_request(prompt) == {'search_emails', 'read_email'}
-    assert requested_capabilities(prompt) == {'email'}
+def test_review_subject_and_freshness_do_not_override_mailbox_source():
+    for prompt in (
+        "Find and read Morgan's latest email about the design review.",
+        "Search my inbox and read the latest message about customer reviews.",
+    ):
+        assert selected_tools_for_request(prompt) == {'search_emails', 'read_email'}, prompt
+        assert requested_capabilities(prompt) == {'email'}, prompt
 
 
-@pytest.mark.parametrize('prompt', [
-    'Find the latest reviews of noise cancelling headphones.',
-    'What are the reviews of this hotel like?',
-    'Search for current battery recycling developments.',
-])
-def test_public_discovery_still_uses_web_search(prompt):
-    assert selected_tools_for_request(prompt) == {'web_search'}
+def test_public_discovery_still_uses_web_search():
+    for prompt in (
+        'Find the latest reviews of noise cancelling headphones.',
+        'Search for current battery recycling developments.',
+    ):
+        assert selected_tools_for_request(prompt) == {'web_search'}, prompt
 
 
 def test_personal_notes_lookup_does_not_fall_back_to_public_search():

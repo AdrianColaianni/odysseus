@@ -1,7 +1,7 @@
 import json
-import subprocess
 import textwrap
 from pathlib import Path
+from tests.helpers.node import run_node_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,14 +23,7 @@ def run_node(body: str):
         {body}
         """
     )
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
+    return run_node_module(script)
 
 
 def test_geometry_normalizes_coordinates_and_reports_layer_bounds():
@@ -185,17 +178,3 @@ def test_unlinked_mask_moves_independently_and_stays_fixed_when_parent_moves():
         "mask": {"x": -1, "y": 5},
         "documentMask": {"x": 31, "y": 40},
     }
-
-
-def test_geometry_controls_and_arrow_nudging_are_wired_offline():
-    controls = (ROOT / "static/js/editor/build/controls.js").read_text(encoding="utf-8")
-    keyboard = (ROOT / "static/js/editor/keyboard-shortcuts.js").read_text(encoding="utf-8")
-    editor = (ROOT / "static/js/galleryEditor.js").read_text(encoding="utf-8")
-    service_worker = (ROOT / "static/sw.js").read_text(encoding="utf-8")
-
-    for field_id in ("ge-layer-x", "ge-layer-y", "ge-layer-width", "ge-layer-height"):
-        assert f'id="{field_id}"' in controls
-    assert "e.key.startsWith('Arrow')" in keyboard
-    assert "nudgeActiveLayer?.(...delta)" in keyboard
-    assert "_layerGeometry.trackExternalMove" in editor
-    assert "/static/js/editor/layer-geometry.js" in service_worker

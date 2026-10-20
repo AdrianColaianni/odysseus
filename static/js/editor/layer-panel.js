@@ -34,7 +34,6 @@
  *   lassoToMask:                     () => void,
  *   wandToMask:                      () => void,
  *   getActiveMaskLayer:              () => object | null,
- *   syncFxPanelToActiveLayerIfPresent: () => void,
  *   dragSortModule:                  object | null,
  *   uiModule:                        object | null,
  * }} deps
@@ -45,6 +44,7 @@ import { rasterizeShapeLayer } from './shape-layer.js';
 import {
   clonePlacedData,
   createPlacedData,
+  makeCanvas,
   rasterizePlacedLayer as rasterizePlacedPixels,
   renderPlacedLayer,
 } from './placed-layer.js';
@@ -102,7 +102,7 @@ export function createLayerPanelRenderer(deps) {
     openFxPopup, openLayerStyles, editAdjLayer, editRetainedEffect, addEffectMask, rasterizeEffects,
     createLayer, renderLayer, replacePlacedLayer, rasterizePlacedLayer,
     lassoToMask, wandToMask, getActiveMaskLayer,
-    syncFxPanelToActiveLayerIfPresent, onSelectLayer,
+    onSelectLayer,
     dragSortModule, uiModule,
   } = deps;
 
@@ -190,9 +190,7 @@ export function createLayerPanelRenderer(deps) {
   function applyLayerMask(layer, mask) {
     if (!layer?.canvas || !mask?.canvas || mask.mode !== 'layer') return;
     saveState(`Apply mask "${mask.name || 'Layer Mask'}"`);
-    const baked = document.createElement('canvas');
-    baked.width = layer.canvas.width;
-    baked.height = layer.canvas.height;
+    const baked = makeCanvas(layer.canvas.width, layer.canvas.height);
     const ctx = baked.getContext('2d');
     if (!ctx) return;
     ctx.drawImage(layer.canvas, 0, 0);
@@ -807,9 +805,7 @@ export function createLayerPanelRenderer(deps) {
     maskButton.addEventListener('click', event => {
       event.stopPropagation();
       saveState(`Add group mask to "${group.name}"`);
-      const canvas = document.createElement('canvas');
-      canvas.width = state.imgWidth;
-      canvas.height = state.imgHeight;
+      const canvas = makeCanvas(state.imgWidth, state.imgHeight);
       const ctx = canvas.getContext('2d');
       ctx.fillStyle = '#fff';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -1052,9 +1048,6 @@ export function createLayerPanelRenderer(deps) {
   }
 
   function render() {
-    // FX panel mirrors the active layer's adjustments — re-sync on
-    // every layer event (activation, add, delete, etc).
-    try { syncFxPanelToActiveLayerIfPresent(); } catch {}
     const list = document.getElementById('ge-layers-list');
     if (!list) return;
     const sharedTools = document.getElementById('ge-layer-tools');
@@ -1461,8 +1454,7 @@ export function createLayerPanelRenderer(deps) {
         state.layerOffsets.set(copy.id, { x: srcOff.x, y: srcOff.y });
         if (Array.isArray(layer.masks) && layer.masks.length) {
           copy.masks = layer.masks.map(m => {
-            const c = document.createElement('canvas');
-            c.width = m.canvas.width; c.height = m.canvas.height;
+            const c = makeCanvas(m.canvas.width, m.canvas.height);
             c.getContext('2d').drawImage(m.canvas, 0, 0);
             return {
               id: 'mask-' + (state.nextLayerId++),
@@ -1576,9 +1568,7 @@ export function createLayerPanelRenderer(deps) {
           wandToMask();
         } else {
           saveState(`Add mask to "${layer.name}"`);
-          const c = document.createElement('canvas');
-          c.width = state.imgWidth;
-          c.height = state.imgHeight;
+          const c = makeCanvas(state.imgWidth, state.imgHeight);
           if (!layer.masks) layer.masks = [];
           const mask = {
             id: 'mask-' + (state.nextLayerId++),
@@ -1606,9 +1596,7 @@ export function createLayerPanelRenderer(deps) {
       layerMaskBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         saveState(`Add layer mask to "${layer.name}"`);
-        const c = document.createElement('canvas');
-        c.width = layer.canvas.width;
-        c.height = layer.canvas.height;
+        const c = makeCanvas(layer.canvas.width, layer.canvas.height);
         const ctx = c.getContext('2d');
         const selection = getDocumentSelection?.();
         if (selection) {

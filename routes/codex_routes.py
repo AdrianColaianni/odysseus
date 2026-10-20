@@ -276,7 +276,7 @@ def setup_codex_routes(
         limit = max(1, min(int(limit or 10), 50))
         offset = max(0, int(offset or 0))
         if account_id:
-            from routes.email_helpers import _assert_owns_account
+            from routes.email.email_helpers import _assert_owns_account
 
             _assert_owns_account(account_id, owner)
         return await email_list_endpoint(
@@ -303,7 +303,7 @@ def setup_codex_routes(
         if email_read_endpoint is None:
             raise HTTPException(503, "Email integration is not available")
         if account_id:
-            from routes.email_helpers import _assert_owns_account
+            from routes.email.email_helpers import _assert_owns_account
 
             _assert_owns_account(account_id, owner)
         return await email_read_endpoint(
@@ -314,8 +314,7 @@ def setup_codex_routes(
             owner=owner,
         )
 
-    # ── Email draft + send ────────────────────────────────────────────────
-    # Both handlers in routes/email_routes.py already accept `owner=` via
+    # Both handlers in routes/email/email_routes.py already accept `owner=` via
     # FastAPI Depends, so we call them directly without patching state.
 
     def _email_draft_document_content(body: dict[str, Any]) -> str:
@@ -354,7 +353,7 @@ def setup_codex_routes(
             raise HTTPException(403, "API token owner mismatch")
         if documents_create_endpoint is None:
             raise HTTPException(503, "Documents integration is not available")
-        from routes.document_routes import DocumentCreate
+        from routes.document.document_routes import DocumentCreate
 
         subject = str(body.get("subject") or "Email draft").strip() or "Email draft"
         title = str(body.get("title") or subject).strip() or "Email draft"
@@ -376,7 +375,7 @@ def setup_codex_routes(
         owner = _scope_owner(request, EMAIL_DRAFT_SCOPES)
         if email_draft_endpoint is None:
             raise HTTPException(503, "Email integration is not available")
-        from routes.email_routes import SendEmailRequest
+        from routes.email.email_routes import SendEmailRequest
 
         try:
             req = SendEmailRequest(**body)
@@ -389,7 +388,7 @@ def setup_codex_routes(
         owner = _scope_owner(request, EMAIL_SEND_SCOPES)
         if email_send_endpoint is None:
             raise HTTPException(503, "Email integration is not available")
-        from routes.email_routes import SendEmailRequest
+        from routes.email.email_routes import SendEmailRequest
 
         try:
             req = SendEmailRequest(**body)
@@ -397,7 +396,6 @@ def setup_codex_routes(
             raise HTTPException(400, f"Invalid send payload: {exc}")
         return await email_send_endpoint(req=req, background_tasks=BackgroundTasks(), owner=owner)
 
-    # ── Memory ────────────────────────────────────────────────────────────
 
     @router.get("/memory")
     async def codex_memory_list(request: Request):
@@ -426,7 +424,6 @@ def setup_codex_routes(
             raise HTTPException(400, "Empty memory text")
         return await _as_owner(request, owner, memory_add_endpoint, request, memory_data)
 
-    # ── Calendar ──────────────────────────────────────────────────────────
 
     @router.get("/calendar/events")
     async def codex_calendar_list(request: Request, start: str, end: str, calendar: str = ""):
@@ -448,7 +445,6 @@ def setup_codex_routes(
             raise HTTPException(400, f"Invalid event payload: {exc}")
         return await _as_owner(request, owner, calendar_create_event, request, data)
 
-    # ── Documents ─────────────────────────────────────────────────────────
 
     @router.get("/documents")
     async def codex_documents_library(
@@ -483,7 +479,6 @@ def setup_codex_routes(
             raise HTTPException(503, "Documents integration is not available")
         return await _as_owner(request, owner, documents_get_endpoint, request, doc_id)
 
-    # ── DELETE endpoints so agents can clean up after themselves ──────────
 
     memory_delete_endpoint = _find_endpoint(memory_router, "DELETE", "/api/memory/{memory_id}")
     calendar_delete_event = _find_endpoint(calendar_router, "DELETE", "/api/calendar/events/{uid}")
@@ -515,7 +510,7 @@ def setup_codex_routes(
         owner = _scope_owner(request, DOCS_WRITE_SCOPES)
         if documents_create_endpoint is None:
             raise HTTPException(503, "Documents integration is not available")
-        from routes.document_routes import DocumentCreate
+        from routes.document.document_routes import DocumentCreate
 
         try:
             req = DocumentCreate(**body)
@@ -523,7 +518,6 @@ def setup_codex_routes(
             raise HTTPException(400, f"Invalid document payload: {exc}")
         return await _as_owner(request, owner, documents_create_endpoint, request, req)
 
-    # ── Cookbook surface ──
     # Lets the agent run the same launch / monitor / kill loop the user
     # would do by hand in the Cookbook UI: read the current task list +
     # tmux output, launch a serve task, stop one.  Two scopes:
@@ -914,6 +908,9 @@ def setup_claude_routes() -> APIRouter:
                 if path.is_dir() or "__pycache__" in path.parts or path.suffix == ".pyc":
                     continue
                 zf.write(path, path.relative_to(bundle_root))
+            # The Codex bundle holds the one copy of the API client both plugins ship.
+            zf.write(bundle_root.parent / "codex" / "scripts" / "odysseus_api.py",
+                     "skills/odysseus/scripts/odysseus_api.py")
         buf.seek(0)
         headers = {"Content-Disposition": 'attachment; filename="odysseus-claude-skill.zip"'}
         return StreamingResponse(buf, media_type="application/zip", headers=headers)

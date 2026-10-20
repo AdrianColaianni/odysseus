@@ -5,7 +5,6 @@ import uiModule from './ui.js?v=20260916largetoolscroll1';
 import sessionModule from './sessions.js';
 import spinnerModule from './spinner.js';
 import { makeWindowDraggable } from './windowDrag.js';
-import { snapModalToZone } from './tileManager.js?v=20260910responsivebounds1';
 import { topPortalZ } from './toolWindowZOrder.js';
 import { orderActionMenuItems, actionMenuRank, SELECT_MENU_ICON } from './actionMenuOrder.js';
 import { bindMenuDismiss } from './escMenuStack.js';
@@ -133,17 +132,6 @@ function _wireMemoryDrag() {
     skipSelector: 'button, input, select, label',
     enableDock: true,
     enableLeftDock: true,
-    onEnterFullscreen: () => {
-      snapModalToZone(modal, {
-        name: 'fullscreen',
-        rect: {
-          left: 0,
-          top: 0,
-          width: window.innerWidth || document.documentElement.clientWidth || 0,
-          height: window.innerHeight || document.documentElement.clientHeight || 0,
-        },
-      });
-    },
   });
 }
 
@@ -345,6 +333,34 @@ function syncToggleDim(toggle) {
   }
 }
 
+// GET /api/prefs/<key>: the stored value (null when unset), or undefined when
+// the load failed so the control keeps its markup default.
+async function _loadPref(key) {
+  try {
+    const res = await fetch(`/api/prefs/${key}`);
+    if (res.ok) return (await res.json()).value ?? null;
+  } catch (e) {
+    console.error(`Failed to load ${key} pref:`, e);
+  }
+  return undefined;
+}
+
+async function _savePref(key, value) {
+  try {
+    const res = await fetch(`/api/prefs/${key}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value })
+    });
+    if (res.ok) return true;
+    console.error(`PUT ${key} returned ${res.status}`);
+  } catch (e) {
+    console.error(`Failed to save ${key} pref:`, e);
+  }
+  showError('Failed to save preference');
+  return false;
+}
+
 /** Load/save a confidence slider backed by a float pref (0 = "All", else
  *  0.50–1.00). Slider position is the percent; the MAX position means "All"
  *  (no minimum), and sliding down sets the bar to 95%, 90%, 85%… */
@@ -354,18 +370,12 @@ async function syncPrefSlider(elementId, prefKey, labelId, defaultVal) {
   const label = labelId ? document.getElementById(labelId) : null;
   const maxPos = Number(slider.max);
   const fmt = (pos) => (Number(pos) >= maxPos ? 'All' : `≥ ${pos}%`);
-  try {
-    const res = await fetch(`${window.location.origin}/api/prefs/${prefKey}`);
-    if (res.ok) {
-      const data = await res.json();
-      let pref = (data.value === undefined || data.value === null) ? defaultVal : Number(data.value);
-      // pref 0 (or falsy) = "All" → max slider position; else percent.
-      let pos = (!pref || pref <= 0) ? maxPos : Math.round(pref * 100);
-      pos = Math.max(Number(slider.min), Math.min(maxPos, pos));
-      slider.value = String(pos);
-    }
-  } catch (e) {
-    console.error(`Failed to load ${prefKey} pref:`, e);
+  const stored = await _loadPref(prefKey);
+  if (stored !== undefined) {
+    const pref = stored === null ? defaultVal : Number(stored);
+    // pref 0 (or falsy) = "All" → max slider position; else percent.
+    const pos = (!pref || pref <= 0) ? maxPos : Math.round(pref * 100);
+    slider.value = String(Math.max(Number(slider.min), Math.min(maxPos, pos)));
   }
   if (label) label.textContent = fmt(slider.value);
   if (!slider.dataset.bound) {
@@ -374,17 +384,8 @@ async function syncPrefSlider(elementId, prefKey, labelId, defaultVal) {
     slider.addEventListener('change', async () => {
       const pos = Number(slider.value);
       const pref = pos >= maxPos ? 0 : pos / 100;
-      try {
-        const res = await fetch(`${window.location.origin}/api/prefs/${prefKey}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ value: pref })
-        });
-        if (!res.ok) { showError('Failed to save preference'); return; }
+      if (await _savePref(prefKey, pref)) {
         showToast(pref === 0 ? 'Skill confidence: All' : `Skill confidence ≥ ${Math.round(pref * 100)}%`);
-      } catch (e) {
-        console.error(`Failed to save ${prefKey} pref:`, e);
-        showError('Failed to save preference');
       }
     });
   }
@@ -402,31 +403,15 @@ async function syncPrefNumber(elementId, prefKey, defaultVal) {
     if (!isNaN(hi)) v = Math.min(hi, v);
     return v;
   };
-  try {
-    const res = await fetch(`${window.location.origin}/api/prefs/${prefKey}`);
-    if (res.ok) {
-      const data = await res.json();
-      input.value = String((data.value === undefined || data.value === null) ? defaultVal : clamp(data.value));
-    }
-  } catch (e) {
-    console.error(`Failed to load ${prefKey} pref:`, e);
-  }
+  const stored = await _loadPref(prefKey);
+  if (stored !== undefined) input.value = String(stored === null ? defaultVal : clamp(stored));
   if (!input.dataset.bound) {
     input.dataset.bound = '1';
     input.addEventListener('change', async () => {
       const v = clamp(input.value);
       input.value = String(v);
-      try {
-        const res = await fetch(`${window.location.origin}/api/prefs/${prefKey}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ value: v })
-        });
-        if (!res.ok) { showError('Failed to save preference'); return; }
+      if (await _savePref(prefKey, v)) {
         showToast(v === 0 ? 'No skills injected' : `Max injected skills: ${v}`);
-      } catch (e) {
-        console.error(`Failed to save ${prefKey} pref:`, e);
-        showError('Failed to save preference');
       }
     });
   }
@@ -435,40 +420,19 @@ async function syncPrefNumber(elementId, prefKey, defaultVal) {
 async function syncPrefToggle(elementId, prefKey, onMsg, offMsg, dimBelow = true) {
   const toggle = document.getElementById(elementId);
   if (!toggle) return;
-  try {
-    const res = await fetch(`${window.location.origin}/api/prefs/${prefKey}`);
-    if (res.ok) {
-      const data = await res.json();
-      toggle.checked = data.value !== false;
-    }
-  } catch (e) {
-    console.error(`Failed to load ${prefKey} pref:`, e);
-  }
+  const stored = await _loadPref(prefKey);
+  if (stored !== undefined) toggle.checked = stored !== false;
   if (dimBelow) syncToggleDim(toggle);
   if (!toggle.dataset.bound) {
     toggle.dataset.bound = '1';
     toggle.addEventListener('change', async () => {
       if (dimBelow) syncToggleDim(toggle);
-      try {
-        const res = await fetch(`${window.location.origin}/api/prefs/${prefKey}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ value: toggle.checked })
-        });
-        if (!res.ok) {
-          console.error(`PUT ${prefKey} returned ${res.status}`);
-          toggle.checked = !toggle.checked; // revert
-          if (dimBelow) syncToggleDim(toggle);
-          showError('Failed to save preference');
-          return;
-        }
+      if (await _savePref(prefKey, toggle.checked)) {
         showToast(toggle.checked ? onMsg : offMsg);
-      } catch (e) {
-        console.error(`Failed to save ${prefKey} pref:`, e);
-        toggle.checked = !toggle.checked; // revert
-        if (dimBelow) syncToggleDim(toggle);
-        showError('Failed to save preference');
+        return;
       }
+      toggle.checked = !toggle.checked; // revert
+      if (dimBelow) syncToggleDim(toggle);
     });
   }
 }
@@ -479,7 +443,7 @@ export async function loadMemories() {
   renderMemoryList();
   updateMemoryCount();
   try {
-    const response = await fetch(`${window.location.origin}/api/memory`);
+    const response = await fetch(`/api/memory`);
 
     if (!response.ok) {
       console.error('Memory fetch failed with status:', response.status);
@@ -586,7 +550,7 @@ async function bulkDelete() {
   const deletedIds = [];
   for (const id of selectedIds) {
     try {
-      const res = await fetch(`${window.location.origin}/api/memory/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/memory/${id}`, { method: 'DELETE' });
       if (res.ok) {
         deleted++;
         deletedIds.push(id);
@@ -626,7 +590,7 @@ export async function tidyMemories() {
   const beforeMap = new Map(memories.map(m => [m.id, { ...m }]));
 
   try {
-    const res = await fetch(`${window.location.origin}/api/memory/audit`, {
+    const res = await fetch(`/api/memory/audit`, {
       method: 'POST',
     });
 
@@ -644,7 +608,7 @@ export async function tidyMemories() {
     }
 
     // Fetch the new state
-    const freshRes = await fetch(`${window.location.origin}/api/memory`);
+    const freshRes = await fetch(`/api/memory`);
     const freshData = await freshRes.json();
     const afterList = freshData.memory || freshData || [];
     const afterMap = new Map(afterList.map(m => [m.id, m]));
@@ -1192,7 +1156,7 @@ async function saveInlineEdit(id, newText, newCategory) {
     const params = new URLSearchParams({ text: newText });
     if (newCategory) params.append('category', newCategory);
 
-    const response = await fetch(`${window.location.origin}/api/memory/${id}`, {
+    const response = await fetch(`/api/memory/${id}`, {
       method: 'PUT',
       body: params
     });
@@ -1250,7 +1214,7 @@ export async function addNewMemory() {
   }
 
   try {
-    const response = await fetch(`${window.location.origin}/api/memory/add`, {
+    const response = await fetch(`/api/memory/add`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1276,19 +1240,9 @@ export async function addNewMemory() {
   }
 }
 
-export async function editMemory(id) {
-  const memory = memories.find(m => m.id === id);
-  if (!memory) return;
-
-  const newText = prompt('Edit memory:', memory.text);
-  if (!newText || newText === memory.text) return;
-
-  await saveInlineEdit(id, newText);
-}
-
 async function togglePin(id, pinned) {
   try {
-    const res = await fetch(`${window.location.origin}/api/memory/${id}/pin`, {
+    const res = await fetch(`/api/memory/${id}/pin`, {
       method: 'POST',
       body: new URLSearchParams({ pinned: pinned.toString() })
     });
@@ -1311,7 +1265,7 @@ export async function deleteMemory(id) {
   if (!await uiModule.styledConfirm(`Delete this memory?\n"${memory.text}"`, { confirmText: 'Delete', danger: true })) return;
 
   try {
-    const response = await fetch(`${window.location.origin}/api/memory/${id}`, {
+    const response = await fetch(`/api/memory/${id}`, {
       method: 'DELETE'
     });
 
@@ -1328,7 +1282,7 @@ export async function deleteMemory(id) {
 }
 
 export async function extractMemory(sessionId) {
-  const res = await fetch(`${window.location.origin}/api/memory/extract`, {
+  const res = await fetch(`/api/memory/extract`, {
     method: 'POST',
     body: new URLSearchParams({ session: sessionId })
   });
@@ -1379,7 +1333,7 @@ export async function extractMemory(sessionId) {
       btn.className = 'memory-item-btn save';
       btn.textContent = 'save';
       btn.addEventListener('click', async () => {
-        await fetch(`${window.location.origin}/api/memory/add`, {
+        await fetch(`/api/memory/add`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: s })
@@ -1447,7 +1401,7 @@ async function handleImportFile(file) {
         formData.append('session', sessionId);
     }
 
-    const res = await fetch(`${window.location.origin}/api/memory/import`, {
+    const res = await fetch(`/api/memory/import`, {
       method: 'POST',
       body: formData
     });
@@ -1507,7 +1461,7 @@ async function handleImportFile(file) {
         for (const s of reviewItems) {
           if (!s.active || !s.text) continue;
           try {
-            await fetch(`${window.location.origin}/api/memory/add`, {
+            await fetch(`/api/memory/add`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ text: s.text, category: s.category })
@@ -1549,7 +1503,7 @@ async function handleImportFile(file) {
         btn.className = 'memory-item-btn save';
         btn.textContent = 'save';
         btn.addEventListener('click', async () => {
-          await fetch(`${window.location.origin}/api/memory/add`, {
+          await fetch(`/api/memory/add`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text: item.text, category: item.category })
@@ -1673,7 +1627,6 @@ const memoryModule = {
   renderMemoryList,
   updateMemoryCount,
   addNewMemory,
-  editMemory,
   deleteMemory,
   extractMemory,
   buildCategoryChips,

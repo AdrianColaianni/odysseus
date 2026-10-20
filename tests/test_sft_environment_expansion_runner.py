@@ -57,14 +57,14 @@ def test_mcp_expected_tool_name_matches_runtime_short_name():
     assert score_turn(turn, events, "Found it.") == []
 
 
-@pytest.mark.parametrize("expected,observed", [
-    ("edit_document", "update_document"),
-    ("update_document", "edit_document"),
-])
-def test_active_document_writers_are_scored_by_function_not_name(expected, observed):
-    turn = {"prompt": "Expand this active draft.", "expected_tools": [expected]}
-    events = [{"type": "tool_start", "tool": observed, "command": "{}"}]
-    assert score_turn(turn, events, "Updated.") == []
+def test_active_document_writers_are_scored_by_function_not_name():
+    for expected, observed in (
+        ("edit_document", "update_document"),
+        ("update_document", "edit_document"),
+    ):
+        turn = {"prompt": "Expand this active draft.", "expected_tools": [expected]}
+        events = [{"type": "tool_start", "tool": observed, "command": "{}"}]
+        assert score_turn(turn, events, "Updated.") == []
 
 
 def test_corrected_tool_retry_does_not_remain_a_functional_failure():

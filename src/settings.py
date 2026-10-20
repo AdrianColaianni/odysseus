@@ -1,4 +1,3 @@
-# src/settings.py
 """Centralized settings and features management.
 
 Single source of truth for reading/writing data/settings.json and data/features.json.
@@ -98,38 +97,22 @@ DEFAULT_SETTINGS = {
     "research_search_provider": "",
     "research_max_tokens": 16384,
     "research_extraction_timeout_seconds": 90,
-    # Lightweight planning/query LLM calls happen before any search starts.
-    # Keep them separately tunable so slow local backends are not capped by
-    # the old 30s/60s per-call defaults.
+    # Planning/query LLM calls run before any search; tunable for slow local backends.
     "research_planning_timeout_seconds": 90,
     "research_query_timeout_seconds": 90,
     "research_extraction_concurrency": 3,
-    # Hard wall-clock cap on a single deep-research run. The previous 600s
-    # (10 min) default cut off slow local / edge LLMs mid-synthesis; 1800s
-    # (30 min) is comfortable for most local setups while still bounding
-    # runaway jobs. Set to 0 to disable the cap entirely (unlimited) — only
-    # for very long deep-research runs, since a stalled job then runs an
-    # unbounded model/API bill. Other values are bounded to [60, 86400].
-    # Tune via Settings or by editing data/settings.json.
+    # Wall-clock cap on one deep-research run. 0 disables it (a stalled job
+    # then bills without bound); other values are clamped to [60, 86400].
     "research_run_timeout_seconds": 1800,
     "agent_max_tool_calls": 0,
     "agent_max_rounds": 20,  # per-message agent step cap (clamped 1..200)
-    # Soft input-token budget for the agent loop. The DEFAULT value (6000) is the
-    # "auto" sentinel: it means "scale the budget to the model's context window"
-    # (#1230) — so long-context models aren't capped at 6000. Set ANY OTHER value
-    # to enforce an explicit cap (clamped to the window only — hard_max does not
-    # apply to explicit budgets, #1230); set 0 to disable soft-trimming. The
-    # default is treated as auto because the settings-save path materializes
-    # defaults, so a persisted 6000 can't be told apart from a deliberate 6000 —
-    # to pin a budget near the default, use a nearby value (e.g. 5999).
+    # Soft input-token budget. The default 6000 is the "auto" sentinel (scale to
+    # the context window) because saving settings materializes defaults, so a
+    # stored 6000 cannot be told from a chosen one; use 5999 to pin near it.
+    # Any other value is an explicit cap clamped to the window; 0 disables trimming.
     "agent_input_token_budget": 6000,
-    # Ceiling on the *auto-derived* input budget; a configurable setting since #1273
-    # (the merged #1230 left it a module constant). No effect on an explicit budget
-    # — a deliberate value is honoured (#1230). Default matches
-    # `src.context_budget.DEFAULT_HARD_MAX`; lower this for
-    # cost-paranoid setups, raise it on premium APIs with very large windows you
-    # want to actually use (e.g. 900_000 to fill a 1M-context model). See
-    # `compute_input_token_budget`.
+    # Ceiling on the auto-derived budget only; must match
+    # src.context_budget.DEFAULT_HARD_MAX.
     "agent_input_token_hard_max": 200_000,
     "agent_stream_timeout_seconds": 300,
     "auto_compact_threshold_percent": 85,
@@ -262,24 +245,6 @@ def save_settings(settings: dict):
 def get_setting(key: str, default: Any = None) -> Any:
     """Read a single setting value."""
     return load_settings().get(key, default)
-
-
-def is_setting_overridden(key: str) -> bool:
-    """True if ``key`` is explicitly present in the saved settings file.
-
-    ``load_settings`` merges DEFAULT_SETTINGS with the saved file, so a value
-    equal to its default is indistinguishable from "never set" via get_setting.
-    Callers that must distinguish an explicit user choice from a default read
-    the raw saved file via this. (Note: a materialized default is also "present",
-    so value-sensitive callers should compare against the default — see
-    ``context_budget.budget_is_explicit``.)
-    """
-    try:
-        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-            saved = json.load(f)
-        return isinstance(saved, dict) and key in saved
-    except (FileNotFoundError, json.JSONDecodeError):
-        return False
 
 
 # Per-user settings (user prefs override the global admin default). Used for

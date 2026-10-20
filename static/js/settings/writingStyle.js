@@ -1,12 +1,9 @@
 // Document writing-style settings panel.
-// Extracted verbatim from static/js/settings.js. Behaviour is unchanged: the
-// functions moved, their bodies did not. settings.js imports them and calls
-// them from the same places, so load order and init sequence are untouched.
 
 import { byId as el } from './dom.js';
 import { postSettings as _postSettings } from './api.js';
 
-export async function initDocumentWritingStyle() {
+export async function initDocumentWritingStyle(settingsLoad) {
   const styleEl = el('set-document-style');
   const saveBtn = el('set-document-style-save');
   const extractBtn = el('set-document-style-extract');
@@ -14,8 +11,7 @@ export async function initDocumentWritingStyle() {
   const msg = el('set-document-style-msg');
   if (!styleEl || !saveBtn) return;
   try {
-    const res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    const data = await res.json();
+    const data = await settingsLoad;
     styleEl.value = String(data.document_writing_style || '');
   } catch (_) {
     if (msg) msg.textContent = 'Failed to load';

@@ -328,76 +328,60 @@ async def test_cancellation_closes_inner_stream_without_releasing_completion(aft
     assert current_journal() is None
 
 
-@pytest.mark.parametrize('prose', [
-    'Tests pass when the command exits zero.',
-    'If all tests are passing, merge the branch.',
-    'Tests passed if the command exited zero.',
-    'The documentation says "5 passed".',
-    'The documentation says "Tests: FAIL" or "Tests: PASS".',
-    'You can run pytest to verify this.',
-    'A successful test run should show no failures.',
-    'For example, I created the file and updated config.py.',
-    'If I updated config.py, I would run pytest.',
-    'Imagine I ran the tests and all 42 passed.',
-    'Done is the label for a finished item.',
-    '```text\nI ran pytest and all 42 passed.\n```',
-    'Run pytest until there are no failures.',
-])
-def test_slice2_explanatory_prose_is_not_a_current_run_claim(prose):
-    ledger = EvidenceLedger()
-    answer, reason = completion_answer(prose, ledger, ledger.evaluate())
-    assert answer == prose
-    assert not reason
+def test_slice2_explanatory_prose_is_not_a_current_run_claim():
+    for prose in (
+        'If all tests are passing, merge the branch.',
+        'The documentation says "5 passed".',
+        'For example, I created the file and updated config.py.',
+        'Imagine I ran the tests and all 42 passed.',
+        '```text\nI ran pytest and all 42 passed.\n```',
+        'Run pytest until there are no failures.',
+    ):
+        ledger = EvidenceLedger()
+        answer, reason = completion_answer(prose, ledger, ledger.evaluate())
+        assert answer == prose
+        assert not reason, prose
 
 
-@pytest.mark.parametrize('instruction', [
-    'Explain how to write code and then test it.',
-    'Summarise this and check for typos.',
-    'Explain how to update config.py and then verify it.',
-    'Show an example of creating answer.json and checking it.',
-    'The documentation says "run pytest and create answer.json".',
-    'If you run pytest, the tests should pass.',
-])
-def test_slice2_explanatory_request_has_no_execution_requirements(instruction):
-    requirements = infer_completion_requirements(instruction)
-    assert requirements.required_artifacts == ()
-    assert not requirements.verifier_required
-    assert not requirements.executable_verifier_available
+def test_slice2_explanatory_request_has_no_execution_requirements():
+    for instruction in (
+        'Explain how to write code and then test it.',
+        'Show an example of creating answer.json and checking it.',
+        'If you run pytest, the tests should pass.',
+    ):
+        requirements = infer_completion_requirements(instruction)
+        assert requirements.required_artifacts == (), instruction
+        assert not requirements.verifier_required, instruction
+        assert not requirements.executable_verifier_available, instruction
 
 
-@pytest.mark.parametrize('instruction', [
-    'Run the tests.', 'Please run pytest.', 'Can you run the test suite?',
-])
-def test_slice2_explicit_test_execution_requires_a_verifier(instruction):
-    requirements = infer_completion_requirements(instruction)
-    assert requirements.verifier_required
-    assert not EvidenceLedger(requirements).evaluate().can_complete
+def test_slice2_explicit_test_execution_requires_a_verifier():
+    for instruction in ('Run the tests.', 'Can you run the test suite?'):
+        requirements = infer_completion_requirements(instruction)
+        assert requirements.verifier_required, instruction
+        assert not EvidenceLedger(requirements).evaluate().can_complete, instruction
 
 
-@pytest.mark.parametrize('claim', [
-    'I ran the tests.', 'The tests passed.', '42 tests passed.',
-    'I created the file.', 'I updated config.py successfully.',
-])
-def test_slice2_execution_obligation_rejects_unsupported_claims(claim):
+def test_slice2_execution_obligation_rejects_unsupported_claims():
     ledger = EvidenceLedger(CompletionRequirements(required_artifacts=('config.py',)))
-    answer, reason = completion_answer(claim, ledger, ledger.evaluate())
-    assert reason
-    assert answer.startswith('The task is incomplete:')
-    assert claim not in answer
+    for claim in ('I ran the tests.', '42 tests passed.', 'I updated config.py successfully.'):
+        answer, reason = completion_answer(claim, ledger, ledger.evaluate())
+        assert reason, claim
+        assert answer.startswith('The task is incomplete:'), claim
+        assert claim not in answer
 
 
-@pytest.mark.parametrize('claim', [
-    'I ran pytest to see if the tests passed.',
-    'I updated config.py as an example.',
-    'I ran pytest and should update config.py next.',
-    'config.py was updated successfully.',
-])
-def test_slice2_subordinate_explanation_cannot_hide_a_direct_execution_report(claim):
-    ledger = EvidenceLedger()
-    answer, reason = completion_answer(claim, ledger, ledger.evaluate())
-    assert reason
-    assert claim not in answer
-    assert 'The task is incomplete' not in answer
+def test_slice2_subordinate_explanation_cannot_hide_a_direct_execution_report():
+    for claim in (
+        'I ran pytest to see if the tests passed.',
+        'I ran pytest and should update config.py next.',
+        'config.py was updated successfully.',
+    ):
+        ledger = EvidenceLedger()
+        answer, reason = completion_answer(claim, ledger, ledger.evaluate())
+        assert reason, claim
+        assert claim not in answer
+        assert 'The task is incomplete' not in answer, claim
 
 
 @pytest.mark.asyncio

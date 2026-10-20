@@ -136,7 +136,7 @@ python -m pytest -q -n 4 -p no:cacheprovider --max-worker-restart=0
 python -m pytest -q -n 0 -p no:cacheprovider  # full serial release oracle
 ```
 
-See [the Wave 6 measurements](WAVE6_TEST_PERFORMANCE_REPORT.md) before choosing
+See [the Wave 6 measurements](../plans/wave6-test-performance-report.md) before choosing
 a worker count. `-n auto` uses physical cores through xdist's psutil extra; it
 still needs enough memory for each worker's collection and application imports.
 
@@ -360,6 +360,58 @@ Use for small import-time `core.database` stubs with a placeholder
 - Set `install_core_package=True` only when the test also needs a fake parent
   `core` module stub.
 - Keep custom fake sessions and route-specific database behavior local.
+
+### `tests.helpers.node.run_node_module`
+
+Use when a test imports a `static/js` module under Node and asserts on the JSON
+a snippet prints.
+
+- Runs the snippet as an ES module from the repo root and parses the last
+  non-empty stdout line as JSON.
+- Skips the test when `node` is not on PATH, and fails with Node's stderr on a
+  nonzero exit.
+- Not for browser tests, stdin-fed scripts, or tests that expect Node to fail.
+
+### `tests.helpers.routes.route_endpoint`
+
+Use when a test calls a route's endpoint function directly.
+
+- Returns the endpoint for a path and method on a router or app, and fails the
+  test when no route matches.
+- Not for routes whose behavior depends on middleware or dependency
+  resolution: drive those through `TestClient`.
+
+### `tests.helpers.agent_stream`
+
+Use when a test drives the real `stream_agent_loop` with a fake provider.
+
+- `collect_chunks(gen)` drains the async generator; `sse_events(chunks)` parses
+  the `data:` JSON chunks and skips `[DONE]`; `delta_chunk(text)` builds one
+  provider text chunk.
+- `patch_agent_loop_basics(monkeypatch)` stubs `get_setting`,
+  `get_mcp_manager` and `estimate_tokens` only. Patch the executor, the
+  provider stream and the approval gate in the test.
+- Not for `stream_preview`, whose fake sits at the httpx layer.
+
+### `tests.helpers.fake_llm_stream.sse_client`
+
+Use when code under test calls `httpx.AsyncClient().stream(...)` and reads
+`aiter_lines()`.
+
+- Each item in `responses` is one provider response: a dict is one `data:`
+  line, a list of dicts is one line each, and `[DONE]` follows.
+- Pass a `requests` list to record each request's JSON body.
+- Not for `client.post`, `aiter_bytes`, or a response that must raise from
+  `raise_for_status`: keep those fakes local.
+
+### `tests.helpers.workspace.workspace_at`
+
+Use when a test needs the agent's active workspace bound to a path.
+
+- Context manager: sets `_active_workspace` to the real path and resets it on
+  exit. A fixture cannot do this, because its teardown runs in another context.
+- Binds `src.tool_execution` at import. A test that reloads that module needs
+  its own lookup.
 
 ## What not to abstract yet
 

@@ -1,19 +1,3 @@
-/* 08-skills - part of the former static/style.css.
- *
- * The stylesheet is split by area, but the split is mechanical: rules were
- * moved verbatim and NOT regrouped. The numeric prefix is the load order, and
- * that order is what preserves the cascade. A rule sits in the file its
- * original position fell into, so an area's rules are not all in its file and
- * a file is not only that area's rules.
- *
- * Do not reorder the <link> tags in static/index.html, and do not move a rule
- * between files: with 1,151 redeclarations and 1,886 !important in this
- * cascade, either can change which declaration wins.
- *
- * static/index.html and the PRECACHE list in static/sw.js must agree on this
- * order. tests/test_static_stylesheet_manifest.py and
- * tests/test_css_computed_style_snapshot.py fail if that drifts.
- */
 /* Document cards can be expanded in the normal windowed library, where the
    grid has no definite height. A zero-basis <pre> then collapses to nothing
    while the footer remains visible. Keep the document text's intrinsic height
@@ -305,8 +289,8 @@
   border-color: color-mix(in srgb, var(--fg) 18%, transparent);
 }
 .skills-summary-chip.active {
-  background: color-mix(in srgb, var(--accent, var(--red)) 13%, transparent);
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 28%, transparent);
+  background: color-mix(in srgb, var(--red) 13%, transparent);
+  border-color: color-mix(in srgb, var(--red) 28%, transparent);
   color: var(--fg);
 }
 .skills-summary-chip strong {
@@ -419,7 +403,7 @@
   border-radius: 50%;
   box-sizing: border-box;
   background: color-mix(in srgb, var(--bg) 86%, var(--fg) 14%);
-  color: var(--accent, var(--red));
+  color: var(--red);
   box-shadow: 0 6px 18px rgba(0,0,0,0.16);
   font-size: 18px;
   line-height: 18px;
@@ -495,16 +479,6 @@
   position: relative;
   top: -2px;
 }
-#hwfit-cache-select {
-  top: -4px;
-}
-/* Calendar previously framed its tags as a separate card. It now follows the
-   same unframed placement as the other filter strips. */
-.cal-filters {
-  border: 0;
-  background: none;
-  box-shadow: none;
-}
 .skill-duplicate-keep {
   background: color-mix(in srgb, var(--color-success, #4ade80) 22%, transparent);
   color: var(--color-success, #4ade80);
@@ -552,7 +526,7 @@
   min-width: 4ch;
   text-align: right;
   font-weight: 700;
-  color: var(--accent, var(--red));
+  color: var(--red);
 }
 .skill-verified,
 .skill-teachermark,
@@ -562,18 +536,18 @@
   vertical-align: middle;
   margin-right: 3px;
 }
-.skill-verified { color: var(--accent, #4ade80); }
+.skill-verified { color: #4ade80; }
 .skill-teachermark { color: var(--color-warning, #f0ad4e); }
 .skill-needsmark { color: var(--color-danger, #e06c75); cursor: help; }
 
 /* The card currently being processed by an "Audit now" run glows + pulses so
    it's obvious which one the audit is on. */
 @keyframes skill-audit-pulse {
-  0%, 100% { box-shadow: 0 0 6px 0 color-mix(in srgb, var(--accent, #4ade80) 55%, transparent); }
-  50%      { box-shadow: 0 0 16px 3px color-mix(in srgb, var(--accent, #4ade80) 85%, transparent); }
+  0%, 100% { box-shadow: 0 0 6px 0 color-mix(in srgb, #4ade80 55%, transparent); }
+  50%      { box-shadow: 0 0 16px 3px color-mix(in srgb, #4ade80 85%, transparent); }
 }
 .skill-card.skill-audit-active {
-  border-color: var(--accent, #4ade80) !important;
+  border-color: #4ade80 !important;
   animation: skill-audit-pulse 1.3s ease-in-out infinite;
 }
 
@@ -587,16 +561,10 @@
   align-items: center;
   justify-content: center;
   background: none;
-  border: none;
-  padding: 4px;
   margin: 0;
   cursor: pointer;
-  color: var(--fg);
-  opacity: 0.5;
-  border-radius: 5px;
   flex-shrink: 0;
   position: relative;
-  top: -2px;
 }
 .skill-kebab-btn:hover { opacity: 1; background: color-mix(in srgb, var(--fg) 10%, transparent); }
 .skill-chevron-up { display: none; align-items: center; opacity: 0.5; flex-shrink: 0; }
@@ -759,7 +727,7 @@
 .skills-audit-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .skills-audit-title { font-size: 12px; font-weight: 600; }
 .skills-audit-bar { height: 4px; border-radius: 2px; background: color-mix(in srgb, var(--fg) 12%, transparent); margin: 6px 0; overflow: hidden; }
-.skills-audit-fill { height: 100%; background: var(--accent, var(--red)); transition: width 0.3s ease; }
+.skills-audit-fill { height: 100%; background: var(--red); transition: width 0.3s ease; }
 .skills-audit-summary { font-size: 11px; opacity: 0.7; margin-bottom: 4px; }
 .skills-audit-log {
   max-height: 22vh; overflow-y: auto;
@@ -785,9 +753,9 @@
 }
 .skill-test-log > div { margin: 1px 0; }
 .skill-test-meta  { opacity: 0.5; }
-.skill-test-task  { color: var(--accent, var(--red)); font-weight: 500; font-size: 9px; opacity: 0.85; }
+.skill-test-task  { color: var(--red); font-weight: 500; font-size: 9px; opacity: 0.85; }
 .skill-test-round { opacity: 0.6; margin-top: 6px !important; }
-.skill-test-tool  { color: var(--accent, var(--red)); opacity: 0.85; }
+.skill-test-tool  { color: var(--red); opacity: 0.85; }
 .skill-test-out   { opacity: 0.7; padding-left: 10px; }
 .skill-test-say   { white-space: pre-wrap; }
 .skill-test-err   { color: var(--color-danger, #e06c75); }
@@ -832,7 +800,7 @@
 }
 /* Textarea: align the hint to the first line instead of vertical-centering. */
 .skill-rich-ph-top { top: 7px; transform: none; }
-.skill-rich-ph .k { color: var(--accent, var(--red)); }
+.skill-rich-ph .k { color: var(--red); }
 /* Keep the memory-input enter hint pinned to the field's right edge instead
    of letting it drift after the example text. */
 #new-memory-input ~ .skill-rich-ph > svg {
@@ -893,7 +861,7 @@
   letter-spacing: 0.01em;
 }
 .pdf-loading-state .ai-spinner-whirlpool {
-  color: var(--accent, var(--red));
+  color: var(--red);
   opacity: 0.95;
 }
 .pdf-loading-state .ai-spinner-whirlpool canvas {
@@ -943,42 +911,6 @@
   line-height: 1.2 !important;
 }
 
-/* Document library toolbar buttons */
-.doclib-toolbar-btn {
-  background: none;
-  border: 1px solid var(--border);
-  color: var(--fg-muted);
-  font-size: 11px;
-  padding: 5px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: all 0.15s;
-  white-space: nowrap;
-  font-family: inherit;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-}
-.doclib-toolbar-btn:hover {
-  color: var(--fg);
-  border-color: var(--fg);
-}
-.doclib-toolbar-btn.active {
-  background: color-mix(in srgb, var(--red) 15%, transparent);
-  border-color: color-mix(in srgb, var(--red) 40%, transparent);
-  color: var(--red);
-}
-.doclib-toolbar-btn.danger {
-  color: var(--color-error, #e55);
-}
-.doclib-toolbar-btn.danger:hover:not(:disabled) {
-  border-color: var(--color-error, #e55);
-}
-.doclib-toolbar-btn:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
 /* Bulk action bar */
 .doclib-bulk-bar {
   display: flex;
@@ -994,66 +926,13 @@
 .doclib-bulk-bar.hidden {
   display: none;
 }
-.doclib-bulk-check-all {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  cursor: pointer;
-  color: color-mix(in srgb, var(--fg) 60%, transparent);
-  font-size: 10px;
-}
 #doclib-bulk-bar .memory-toolbar-btn {
   position: relative;
   top: -3px;
 }
 
-/* Custom checkboxes */
-.doclib-select-cb,
-.doclib-bulk-check-all input {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 13px;
-  height: 13px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg);
-  cursor: pointer;
-  flex-shrink: 0;
-  margin: 0;
-  position: relative;
-  transition: all 0.15s;
-}
-.doclib-select-cb:hover,
-.doclib-bulk-check-all input:hover {
-  border-color: var(--red);
-}
-.doclib-select-cb:checked,
-.doclib-bulk-check-all input:checked {
-  background: var(--red);
-  border-color: var(--red);
-}
-.doclib-select-cb:checked::after,
-.doclib-bulk-check-all input:checked::after {
-  content: '';
-  position: absolute;
-  left: 3px;
-  top: 0px;
-  width: 4px;
-  height: 8px;
-  border: solid var(--bg);
-  border-width: 0 1.5px 1.5px 0;
-  transform: rotate(45deg);
-}
-
-
-/* + button outside scroll area (when doc is on right side) */
-
 @media (max-width: 600px) {
-  .doclib-toolbar {
-    flex-direction: column;
-  }
-  .doclib-card-session,
-  .doclib-card-time {
+  .doclib-card-session {
     display: none;
   }
   .doclib-card-preview {

@@ -1,5 +1,6 @@
 /* Worker implementation for retained-effect rasterization. */
 import { LAYER_STYLES, renderLayerStyle, renderDropShadow } from './layer-styles.js';
+import { hexToRgb } from '../color/hex.js';
 
 function copyCanvas(source) {
   const out = new OffscreenCanvas(source.width, source.height);
@@ -44,10 +45,8 @@ function maskedContribution(effectCanvas, mask) {
 }
 
 function gradientColor(value, alpha = 1) {
-  const raw = String(value || '').replace(/^#/, '');
-  if (!/^[0-9a-f]{6}$/i.test(raw)) return `rgba(0,0,0,${alpha})`;
-  const channels = [0, 2, 4].map(offset => parseInt(raw.slice(offset, offset + 2), 16));
-  return `rgba(${channels.join(',')},${alpha})`;
+  const rgb = hexToRgb(value);
+  return rgb ? `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha})` : `rgba(0,0,0,${alpha})`;
 }
 
 function renderEffects(source, effects, masks) {

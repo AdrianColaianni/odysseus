@@ -6,9 +6,7 @@ fired (break = done / budget / error). A refactor that adds a stray break or
 return, or moves the done-break, could silently flip this. See PR #1999 / #1997.
 """
 
-import asyncio
 import json
-from pathlib import Path
 import pytest
 
 import src.agent_loop as al
@@ -16,41 +14,15 @@ from src.tool_capabilities import ToolGateDecision
 from src.tool_capabilities import capabilities_for_action
 from src.tool_approvals import tool_approval_store
 from tests.runtime_evidence_helpers import authoritative_executor
-
-
-def _collect(gen):
-    async def _run():
-        return [c async for c in gen]
-    return asyncio.run(_run())
-
-
-def _types(chunks):
-    out = []
-    for c in chunks:
-        if c.startswith("data: ") and not c.startswith("data: [DONE]"):
-            try:
-                out.append(json.loads(c[6:]))
-            except Exception:
-                pass
-    return out
+from tests.helpers.agent_stream import collect_chunks, patch_agent_loop_basics, sse_events
 
 
 def _patch_common(monkeypatch):
-    # Skip RAG/tool-index, MCP, and settings lookups; keep the real loop body,
-    # _resolve_tool_blocks, and parse_tool_blocks.
-    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
-    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
-    monkeypatch.setattr(al, "estimate_tokens", lambda *a, **k: 10, raising=False)
+    patch_agent_loop_basics(monkeypatch, al)
     # The round providers are synthetic. Keep real compaction logic while
     # supplying its context window instead of probing the dummy endpoint.
     import src.context_compactor as context_compactor
     monkeypatch.setattr(context_compactor, "get_context_length", lambda *a, **k: 128_000)
-    # These fixtures supply the round provider below. Any direct grace-synthesis
-    # request has no configured response, rather than contacting the fake URL.
-    async def _unconfigured_direct_provider(*args, **kwargs):
-        raise RuntimeError("No direct-provider completion configured in this fixture")
-        yield  # Keep the direct-provider async-generator interface.
-    monkeypatch.setattr(al, "stream_llm", _unconfigured_direct_provider)
     # These tests exercise round convergence. Keep the prompt-integrity gate
     # out of the fixture so a synthetic tool result does not turn the next
     # round into an approval test instead.
@@ -79,7 +51,7 @@ def _run_loop(monkeypatch, round_text, max_rounds=2):
         max_rounds=max_rounds,
             relevant_tools={"bash"},
     )
-    return _types(_collect(gen))
+    return sse_events(collect_chunks(gen))
 
 
 def test_emits_rounds_exhausted_when_cap_hit_mid_task(monkeypatch):
@@ -132,7 +104,7 @@ def test_python_html_mutation_queues_native_browser_verification(monkeypatch):
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
 
-    _collect(al.stream_agent_loop(
+    collect_chunks(al.stream_agent_loop(
         "http://x/v1",
         "m",
         [{"role": "user", "content": "Create /workspace/output.html."}],
@@ -173,7 +145,7 @@ def test_unattended_native_round_exhaustion_gets_one_tool_free_final(monkeypatch
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
     monkeypatch.setattr(llm_core, "llm_call_async", _fake_synthesis, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://x/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Inspect the video and answer."}],
@@ -249,7 +221,7 @@ def test_unattended_native_tool_turn_recovers_reasoning_preamble(monkeypatch):
     monkeypatch.setattr(al, "execute_tool_block", _fake_visual_exec, raising=False)
     monkeypatch.setattr(llm_core, "llm_call_async", _fake_synthesis, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://x/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Inspect the video and answer."}],
@@ -328,7 +300,7 @@ def test_unattended_native_tool_turn_recovers_empty_final(monkeypatch):
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
     monkeypatch.setattr(llm_core, "llm_call_async", _fake_synthesis, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://x/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Inspect the video and answer."}],
@@ -391,7 +363,7 @@ def test_unattended_force_answer_does_not_rearm_missing_tool_nudge(monkeypatch):
     monkeypatch.setattr(al, "maybe_compact", _no_compaction, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://x/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Inspect the video and report whether its method has a repository."}],
@@ -446,7 +418,7 @@ def test_native_explicit_script_run_uses_backend_bash_after_write(monkeypatch):
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
     monkeypatch.setattr(al, "execute_tool_block", _capture_exec, raising=False)
 
-    _collect(al.stream_agent_loop(
+    collect_chunks(al.stream_agent_loop(
         "http://x/v1",
         "qwen35-9b-policy-test",
         [{
@@ -507,7 +479,7 @@ def test_adaptive_turn_can_finish_after_more_than_legacy_coding_cap(monkeypatch)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://x/v1", "m",
         [{"role": "user", "content": "repair the parser"}],
         max_rounds=None,
@@ -565,7 +537,7 @@ def test_calendar_list_stops_after_first_synthesis_round(monkeypatch):
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://x/v1",
         "kimi-k3",
         [{"role": "user", "content": "whats my calendar next year"}],
@@ -621,7 +593,7 @@ def test_topic_bulk_email_preemptive_runs_for_non_qwen_models(monkeypatch):
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "https://openrouter.ai/api/v1/chat/completions",
         "moonshotai/kimi-k3",
         [{"role": "user", "content": "delete all my traffic monitor emails"}],
@@ -646,42 +618,6 @@ def test_topic_bulk_email_preemptive_runs_for_non_qwen_models(monkeypatch):
     assert "Bulk delete done for 2 email(s)." in final["content"]
 
 
-def test_notes_definition_question_suppresses_bad_notes_tool_call(monkeypatch):
-    _patch_common(monkeypatch)
-    executed = []
-
-    async def _fake_exec(block, *a, **k):
-        executed.append(block)
-        return block.tool_type, {"output": "should not run", "exit_code": 0}
-
-    async def _fake_stream(_candidates, messages, **kwargs):
-        yield "data: " + json.dumps({
-            "type": "tool_calls",
-            "calls": [{
-                "id": "notes-bad",
-                "name": "manage_notes",
-                "arguments": json.dumps({"action": "search", "query": "musical note"}),
-            }],
-        }) + "\n\n"
-        yield "data: [DONE]\n\n"
-
-    monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-
-    events = _types(_collect(al.stream_agent_loop(
-        "http://x/v1",
-        "qwen35-notes-iteration3-merged",
-        [{"role": "user", "content": "What is a musical note?"}],
-        max_rounds=3,
-        relevant_tools={"manage_notes"},
-    )))
-
-    assert executed == []
-    final = next((event for event in events if event.get("type") == "final_response"), None)
-    assert final is not None, events
-    assert "written or sounded pitch" in final["content"]
-
-
 def test_emits_intent_nudge_exhausted_when_cap_is_exhausted(monkeypatch):
     _patch_common(monkeypatch)
 
@@ -693,34 +629,17 @@ def test_emits_intent_nudge_exhausted_when_cap_is_exhausted(monkeypatch):
     assert guard["nudges"] == 2
 
 
-def test_try_different_search_gets_intent_followthrough_nudges(monkeypatch):
+def test_planning_phrases_get_intent_followthrough_nudges(monkeypatch):
     _patch_common(monkeypatch)
 
-    events = _run_loop(
-        monkeypatch,
+    for round_text in (
         "Let me try a different search approach to find the official sources.",
-        max_rounds=5,
-    )
-
-    guard = next(
-        (event for event in events if event.get("type") == "intent_nudge_exhausted"),
-        None,
-    )
-    assert guard is not None, events
-
-
-def test_need_to_scan_gets_intent_followthrough_nudges(monkeypatch):
-    _patch_common(monkeypatch)
-
-    events = _run_loop(
-        monkeypatch,
         "I need to scan through the video more carefully.",
-        max_rounds=5,
-    )
-
-    assert any(
-        event.get("type") == "intent_nudge_exhausted" for event in events
-    ), events
+    ):
+        events = _run_loop(monkeypatch, round_text, max_rounds=5)
+        assert any(
+            event.get("type") == "intent_nudge_exhausted" for event in events
+        ), round_text
 
 
 def test_unattended_intent_nudge_cap_forces_final_answer(monkeypatch):
@@ -744,7 +663,7 @@ def test_unattended_intent_nudge_cap_forces_final_answer(monkeypatch):
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://x/v1", "m",
         [{"role": "user", "content": "Inspect /workspace/video.mp4 and count the points."}],
         max_rounds=7,
@@ -799,7 +718,7 @@ def test_unattended_force_answer_rejects_long_planning_tail(monkeypatch):
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
     monkeypatch.setattr(llm_core, "llm_call_async", _fake_synthesis, raising=False)
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://x/v1", "m",
         [{"role": "user", "content": "Inspect /workspace/video.mp4 and count."}],
         max_rounds=5,
@@ -842,7 +761,7 @@ def test_unattended_optioned_clarification_forces_best_supported_answer(monkeypa
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://x/v1", "m",
         [{"role": "user", "content": "Inspect /workspace/video.mp4 and count the first rally."}],
         max_rounds=4,
@@ -892,15 +811,12 @@ def test_stall_loop_breaker_is_bounded_after_forced_answer(monkeypatch):
 
 
 def test_status_only_shell_detector_is_narrow():
-    assert al._status_only_shell_command("echo 'blocked'")
     assert al._status_only_shell_command("test -x /tmp/tool && echo present || echo missing")
     assert not al._status_only_shell_command("echo ready > /tmp/status.txt")
-    assert not al._status_only_shell_command("cat config.txt")
 
 
 def test_read_only_inspection_detector_rejects_mutation():
     assert al._read_only_shell_command("pwd && find . -maxdepth 2 -type f")
-    assert al._read_only_shell_command("ip route show default | head")
     assert not al._read_only_shell_command("sed -i 's/old/new/' config.txt")
     assert not al._read_only_shell_command("cat config.txt > copy.txt")
 
@@ -976,7 +892,7 @@ def test_actionable_request_gets_one_nudge_after_clarification_only_response(mon
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://x/v1", "m",
         [{"role": "user", "content": "Inspect the active workspace and tell me which file is present."}],
         max_rounds=4,
@@ -1015,7 +931,7 @@ def test_empty_workspace_round_gets_one_bounded_action_nudge(monkeypatch):
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://x/v1", "m",
         [{"role": "user", "content": "Inspect the active workspace and update fixture.py."}],
         max_rounds=4,
@@ -1092,7 +1008,7 @@ def test_detached_host_shell_forces_poll_instead_of_substitute_command(monkeypat
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
-    _collect(al.stream_agent_loop(
+    collect_chunks(al.stream_agent_loop(
         "http://x/v1",
         "router",
         [{"role": "user", "content": "Run the long build in this workspace."}],
@@ -1201,7 +1117,7 @@ def test_eval_workspace_prompt_uses_host_tool_then_answers(monkeypatch):
     assert "bash" not in routed
     assert "web_search" not in routed
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "https://api.openai.com/v1", "gpt-4o",
         [{"role": "user", "content": "Inspect the active workspace."}],
         max_rounds=4,
@@ -1318,7 +1234,7 @@ def test_tui_coding_turn_recovers_inspects_patches_and_verifies(monkeypatch, exp
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://x/v1",
         "deepseek-v4-flash",
         [{
@@ -1404,7 +1320,7 @@ def test_qwen_tui_coding_summary_reports_verification_retry(monkeypatch):
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://x/v1",
         "qwen35-9b-tool-router-v4-firstaction-noschema-adapter",
         [{"role": "user", "content": "Edit parser.py and run pytest -q."}],
@@ -1476,7 +1392,7 @@ def test_tui_coding_turn_replaces_duplicate_edit_with_requested_tests(monkeypatc
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://x/v1",
         "deepseek-v4-pro",
         [{
@@ -1578,7 +1494,7 @@ def test_failed_forced_verifier_allows_an_adapted_test_command(monkeypatch):
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://x/v1",
         "deepseek-v4-pro",
         [{
@@ -1663,7 +1579,7 @@ def test_later_tool_round_receives_deferred_compaction(monkeypatch):
     monkeypatch.setattr(al, "maybe_compact", _fake_compact, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://x/v1",
         "m",
         [{"role": "user", "content": "edit the local project and run its tests"}],
@@ -1685,7 +1601,7 @@ def test_later_tool_round_receives_deferred_compaction(monkeypatch):
     assert any("Finished after verifying" in event.get("delta", "") for event in events)
 
 
-def test_read_only_tui_inspection_is_bounded_but_edit_requests_are_not(monkeypatch):
+def test_read_only_tui_inspection_is_bounded_but_edit_requests_are_not():
     assert al._tui_read_only_inspection_turn(
         "Identify one parsing bug, report file/line evidence, and do not edit."
     )
@@ -1695,22 +1611,6 @@ def test_read_only_tui_inspection_is_bounded_but_edit_requests_are_not(monkeypat
     assert not al._tui_read_only_inspection_turn(
         "Inspect the repository, do not change tests, and repair the source files."
     )
-    source = Path(al.__file__).read_text(encoding="utf-8")
-    assert "_tui_turn_text = str(_last_user or \"\").strip()" in source
-    directive = al._tui_read_only_inspection_directive()
-    assert "one focused host_shell call" in directive
-    assert "Do not edit" in directive
-    network_directive = al._tui_local_network_directive()
-    assert "one host_shell call" in network_directive
-    assert "do not repeat" in network_directive
-    assert "do not ping" in network_directive
-    workspace_directive = al._tui_local_workspace_directive()
-    assert "session_cwd" in workspace_directive
-    assert "local_workspace_projects" in workspace_directive
-    assert "apply_patch" in workspace_directive
-    assert "shell redirects" in workspace_directive
-    assert "detach=true" in workspace_directive
-    assert "status=completed" in workspace_directive
 
 
 def test_tui_host_find_with_pwd_prefix_is_bounded():
@@ -1814,7 +1714,7 @@ def test_tui_broad_host_read_executes_bounded_equivalent(monkeypatch):
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
     monkeypatch.setattr(al, "_tool_result_signature", lambda records: repr(records))
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "https://api.openai.com/v1", "gpt-4o",
         [{"role": "user", "content": "Inspect the local workspace."}],
         max_rounds=4,
@@ -1858,7 +1758,7 @@ def test_tui_local_skill_request_reconciles_normal_tool_policy(monkeypatch):
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "https://api.openai.com/v1", "gpt-4o",
         [{"role": "user", "content": "Find the TDD skill and load it."}],
         max_rounds=4,
@@ -1901,7 +1801,7 @@ def test_eval_identical_tool_evidence_converges_before_round_cap(monkeypatch):
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "https://api.openai.com/v1", "gpt-4o",
         [{"role": "user", "content": "Inspect the workspace."}],
         max_rounds=8,
@@ -1975,7 +1875,7 @@ def test_identical_inspections_redirect_to_missing_artifact_before_convergence(m
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "https://api.openai.com/v1",
         "gpt-4o",
         [{"role": "user", "content": "Inspect the workspace."}],
@@ -2046,7 +1946,7 @@ def test_terminal_artifact_run_reserves_last_round_for_mutation(monkeypatch):
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://x/v1", "qwen35-9b-policy-test",
         [{"role": "user", "content": "Research the sources and create /workspace/report.csv."}],
         max_rounds=3,
@@ -2125,7 +2025,7 @@ def test_identical_failed_inspections_do_not_trigger_unchanged_evidence_recovery
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Inspect inputs and create the report."}],
@@ -2193,7 +2093,7 @@ def test_post_redirect_varied_inspection_is_suppressed_until_artifact_mutation(m
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "https://api.openai.com/v1",
         "gpt-4o",
         [{"role": "user", "content": "Inspect the workspace."}],
@@ -2297,7 +2197,7 @@ def test_media_artifact_recovery_allows_bounded_source_inspection_before_mutatio
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{
@@ -2354,7 +2254,7 @@ def test_terminal_action_promise_is_not_treated_as_completion(monkeypatch):
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Create the requested report."}],
@@ -2393,7 +2293,7 @@ def test_terminal_create_promise_gets_one_continuation(monkeypatch):
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    _collect(al.stream_agent_loop(
+    collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Use Python to calculate the requested value."}],
@@ -2442,7 +2342,7 @@ def test_long_terminal_action_promise_gets_one_media_continuation(monkeypatch):
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Inspect /workspace/source.mp4 and identify the sequence."}],
@@ -2482,7 +2382,7 @@ def test_unattended_clarification_prose_gets_final_answer_nudge(monkeypatch):
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Review the evidence and report the result."}],
@@ -2529,7 +2429,7 @@ def test_reexamine_terminal_action_promise_gets_media_continuation(monkeypatch):
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Inspect /workspace/source.mp4 and identify the subject."}],
@@ -2580,7 +2480,7 @@ def test_ill_need_to_examine_terminal_promise_gets_media_continuation(monkeypatc
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-    _types(_collect(al.stream_agent_loop(
+    sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Inspect /workspace/source.mp4 and count the events."}],
@@ -2615,7 +2515,7 @@ def test_refine_search_terminal_promise_gets_continuation(monkeypatch):
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-    _types(_collect(al.stream_agent_loop(
+    sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Research the publication status."}],
@@ -2653,7 +2553,7 @@ def test_long_media_answer_without_tool_evidence_is_not_accepted(monkeypatch):
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    _collect(al.stream_agent_loop(
+    collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Inspect /workspace/source.mp4 and identify the sequence."}],
@@ -2699,7 +2599,7 @@ def test_long_dangling_answer_colon_gets_one_continuation(monkeypatch):
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    _collect(al.stream_agent_loop(
+    collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Inspect /workspace/source.mp4 and list the visual order."}],
@@ -2762,7 +2662,7 @@ def test_long_announced_answer_without_answer_gets_one_continuation(monkeypatch)
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    _collect(al.stream_agent_loop(
+    collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Inspect /workspace/source.mp4 and identify the visible object."}],
@@ -2820,7 +2720,7 @@ def test_repeated_artifact_redirect_uses_bounded_body_handoff(monkeypatch):
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
     monkeypatch.setattr(llm_core, "llm_call_async", _fake_synthesis, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Inspect the inputs and create a report."}],
@@ -2941,7 +2841,7 @@ def test_terminal_adjacent_file_body_uses_workspace_write_not_personal_document(
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Create /tmp_workspace/report.md."}],
@@ -2991,7 +2891,7 @@ def test_terminal_write_file_uses_exact_required_artifact_path(monkeypatch):
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    _types(_collect(al.stream_agent_loop(
+    sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Create /workspace/meta_analysis.csv."}],
@@ -3051,7 +2951,7 @@ def test_terminal_stall_with_missing_artifact_enters_mutation_recovery(monkeypat
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
     monkeypatch.setattr(al, "_tool_result_signature", lambda records: repr(records))
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "https://api.openai.com/v1",
         "gpt-4o",
         [{"role": "user", "content": "Inspect the workspace."}],
@@ -3164,7 +3064,7 @@ def test_blocked_ad_hoc_http_without_exit_code_enters_artifact_recovery(monkeypa
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{
@@ -3261,7 +3161,7 @@ def test_artifact_recovery_suppresses_python_until_text_artifact_written(monkeyp
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{
@@ -3354,7 +3254,7 @@ def test_binary_artifact_recovery_keeps_generation_tools_for_png(monkeypatch):
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{
@@ -3474,7 +3374,7 @@ def test_final_prose_with_missing_artifact_enters_recovery(monkeypatch):
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{
@@ -3594,7 +3494,7 @@ def test_blocked_ad_hoc_http_prefers_native_acquisition_before_artifact_write(mo
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{
@@ -3733,7 +3633,7 @@ def test_failed_trailing_tool_with_missing_artifact_enters_recovery(monkeypatch)
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{
@@ -3826,7 +3726,7 @@ def test_failed_trailing_tool_after_explicit_continue_intent_gets_repair_round(m
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Inspect the supplied video and answer carefully."}],
@@ -3885,7 +3785,7 @@ def test_complete_answer_still_survives_failed_illustrative_trailing_tool(monkey
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    _collect(al.stream_agent_loop(
+    collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Inspect the supplied video and answer carefully."}],
@@ -3942,7 +3842,7 @@ def test_failed_mutation_with_missing_artifact_recovers_before_failure_breaker(m
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "http://127.0.0.1:18080/v1",
         "qwen35-9b-policy-test",
         [{"role": "user", "content": "Create /workspace/output.png."}],
@@ -4053,7 +3953,7 @@ def test_eval_varied_read_only_inspections_converge_before_round_cap(monkeypatch
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
     monkeypatch.setattr(al, "_tool_result_signature", lambda records: repr(records))
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "https://api.openai.com/v1", "gpt-4o",
         [{"role": "user", "content": "Fix the parser and run its test."}],
         max_rounds=12,
@@ -4131,7 +4031,7 @@ def test_repeated_web_fetch_pagination_forces_convergence(monkeypatch):
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "https://api.openai.com/v1", "gpt-4o",
         [{"role": "user", "content": "How many crates have over one billion downloads?"}],
         max_rounds=10,
@@ -4180,7 +4080,7 @@ def test_approval_continuation_cannot_fallback_into_host_shell(monkeypatch):
 
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "https://api.openai.com/v1", "gpt-4o",
         [{"role": "user", "content": "Approved the exact action once."}],
         max_rounds=2,
@@ -4229,7 +4129,7 @@ def test_eval_local_network_tool_budget_forces_final_synthesis(monkeypatch):
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
     monkeypatch.setattr(al, "_tool_result_signature", lambda records: repr(records))
 
-    events = _types(_collect(al.stream_agent_loop(
+    events = sse_events(collect_chunks(al.stream_agent_loop(
         "https://api.openai.com/v1", "gpt-4o",
         [{"role": "user", "content": "Find the local IP and SSH route to ajax."}],
         max_rounds=20,

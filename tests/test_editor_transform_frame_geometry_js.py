@@ -1,7 +1,7 @@
 import json
-import subprocess
 import textwrap
 from pathlib import Path
+from tests.helpers.node import run_node_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,11 +16,7 @@ def run_node(body: str):
         {body}
         """
     )
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script], cwd=ROOT,
-        text=True, capture_output=True, check=True,
-    )
-    return json.loads(result.stdout)
+    return run_node_module(script)
 
 
 def test_frame_geometry_exposes_all_resize_handles_from_one_rotated_frame():
@@ -157,11 +153,7 @@ def test_transform_cursors_follow_edge_and_corner_screen_direction():
         }}));
         """
     )
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script], cwd=ROOT,
-        text=True, capture_output=True, check=True,
-    )
-    assert json.loads(result.stdout) == {
+    assert run_node_module(script) == {
         "right0": "ew-resize",
         "top0": "ns-resize",
         "corner0": "nwse-resize",

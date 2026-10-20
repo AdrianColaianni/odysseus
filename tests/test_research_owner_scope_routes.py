@@ -8,7 +8,8 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException
 
-from routes.research_routes import setup_research_routes
+from routes.research.research_routes import setup_research_routes
+from tests.helpers.routes import route_endpoint
 
 
 @pytest.fixture(autouse=True)
@@ -16,22 +17,13 @@ def _redirect_research_dir(tmp_path, monkeypatch):
     # Deep-research paths are resolved from an import-time constant now, so chdir
     # no longer redirects them. Point the constant the routes read at the temp dir.
     monkeypatch.setattr(
-        "routes.research_routes.DEEP_RESEARCH_DIR",
+        "routes.research.research_routes.DEEP_RESEARCH_DIR",
         str(tmp_path / "data" / "deep_research"),
     )
 
 
 def _request(user: str):
     return SimpleNamespace(state=SimpleNamespace(current_user=user))
-
-
-def _route(router, path: str, method: str):
-    for route in router.routes:
-        if getattr(route, "path", "") != path:
-            continue
-        if method in getattr(route, "methods", set()):
-            return route.endpoint
-    raise AssertionError(f"{method} {path} route not registered")
 
 
 def _write_research(data_dir, session_id: str, **data):
@@ -56,7 +48,7 @@ def test_library_returns_only_caller_owned_unarchived_reports(tmp_path, monkeypa
     _write_research(data_dir, "legacy-null", query="Legacy", completed_at=50)
 
     router = setup_research_routes(_research_handler())
-    target = _route(router, "/api/research/library", "GET")
+    target = route_endpoint(router, "/api/research/library", "GET")
 
     out = asyncio.run(target(
         request=_request("alice"),
@@ -77,7 +69,7 @@ def test_detail_rejects_cross_owner_and_null_owner_reports(tmp_path, monkeypatch
     _write_research(data_dir, "legacy-report", result="legacy secret")
 
     router = setup_research_routes(_research_handler())
-    target = _route(router, "/api/research/detail/{session_id}", "GET")
+    target = route_endpoint(router, "/api/research/detail/{session_id}", "GET")
 
     for session_id in ("bob-report", "legacy-report"):
         with pytest.raises(HTTPException) as exc:
@@ -92,7 +84,7 @@ def test_report_rejects_null_owner_before_generating_html(tmp_path, monkeypatch)
 
     handler = _research_handler()
     router = setup_research_routes(handler)
-    target = _route(router, "/api/research/report/{session_id}", "GET")
+    target = route_endpoint(router, "/api/research/report/{session_id}", "GET")
 
     with pytest.raises(HTTPException) as exc:
         asyncio.run(target(session_id="legacy-report", request=_request("alice")))
@@ -107,7 +99,7 @@ def test_archive_rejects_cross_owner_without_mutating_report(tmp_path, monkeypat
     path = _write_research(data_dir, "bob-report", owner="bob", archived=False)
 
     router = setup_research_routes(_research_handler())
-    target = _route(router, "/api/research/{session_id}/archive", "POST")
+    target = route_endpoint(router, "/api/research/{session_id}/archive", "POST")
 
     with pytest.raises(HTTPException) as exc:
         asyncio.run(target(session_id="bob-report", request=_request("alice"), archived=True))
@@ -122,7 +114,7 @@ def test_delete_rejects_cross_owner_without_unlinking_report(tmp_path, monkeypat
     path = _write_research(data_dir, "bob-report", owner="bob", result="bob secret")
 
     router = setup_research_routes(_research_handler())
-    target = _route(router, "/api/research/{session_id}", "DELETE")
+    target = route_endpoint(router, "/api/research/{session_id}", "DELETE")
 
     with pytest.raises(HTTPException) as exc:
         asyncio.run(target(session_id="bob-report", request=_request("alice")))

@@ -6,14 +6,7 @@ from starlette.requests import Request
 
 import routes.cookbook_routes as cookbook_routes
 from routes.cookbook_helpers import ServeRequest
-
-
-def _route_endpoint(path: str, method: str):
-    router = cookbook_routes.setup_cookbook_routes()
-    for route in router.routes:
-        if route.path == path and method in route.methods:
-            return route.endpoint
-    raise AssertionError(f"{method} {path} route not found")
+from tests.helpers.routes import route_endpoint
 
 
 def _admin_request() -> Request:
@@ -41,7 +34,7 @@ async def test_remote_windows_diffusers_is_rejected_before_runner_launch(monkeyp
 
     monkeypatch.setattr(asyncio, "create_subprocess_shell", fail_if_shell_runs)
 
-    endpoint = _route_endpoint("/api/model/serve", "POST")
+    endpoint = route_endpoint(cookbook_routes.setup_cookbook_routes(), "/api/model/serve", "POST")
     req = ServeRequest(
         repo_id="diffusers/example",
         cmd="python scripts/diffusion_server.py --model diffusers/example --port 8100",

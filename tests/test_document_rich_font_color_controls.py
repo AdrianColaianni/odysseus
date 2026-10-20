@@ -1,91 +1,8 @@
 """Numeric font sizes and the shared app color picker in Rich Text."""
 
-import json
-import re
-import subprocess
-from pathlib import Path
 
-from tests.helpers.stylesheets import app_css
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source, function_body
-
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-STYLE = app_css()
-
-
-def test_font_and_color_controls_use_shared_components():
-    assert re.search(r"import \{ attachColorPicker \} from './colorPicker\.js\?v=[A-Za-z0-9_-]+';", DOC_JS)
-    assert 'data-dd="textsize" title="Font size" aria-label="Font size"' in DOC_JS
-    for size, pixels in {1: 10, 2: 13, 3: 16, 4: 18, 5: 24, 6: 32, 7: 48}.items():
-        assert f"{size}: {pixels}" in DOC_JS
-    assert "slider.type = 'range'" in DOC_JS
-    assert "slider.min = '1'" in DOC_JS
-    assert "slider.max = '7'" in DOC_JS
-    assert "applyMdFormat(`fontsize:${slider.value}`)" in DOC_JS
-    assert "range.extractContents()" in DOC_JS
-    assert "span.style.fontFamily = name" in DOC_JS
-    assert "document.execCommand('fontName', false, name)" in DOC_JS
-    assert "if (!sliderPointerActive) applySliderSize();" in DOC_JS
-    assert "slider.addEventListener('change', applySliderSize);" in DOC_JS
-    assert "valueLabel.type = 'number'" in DOC_JS
-    assert "applyMdFormat(`fontsize:${pixels}px`)" in DOC_JS
-    assert "attachColorPicker(customInput);" in DOC_JS
-    assert "kind === 'color' || kind === 'highlight'" in DOC_JS
-    assert "rich-highlight-swatch" in DOC_JS
-    assert ".rich-highlight-swatch { border-radius: 50%; }" in STYLE
-
-
-def test_email_preview_does_not_strip_rich_text_font_choices():
-    assert "font-family: inherit !important;" not in STYLE[STYLE.index(".email-bubble-body *:not"):STYLE.index(".email-bubble-body *:not") + 220]
-    assert "font-size: inherit !important;" not in STYLE[STYLE.index(".email-bubble-body *:not"):STYLE.index(".email-bubble-body *:not") + 220]
-
-
-def test_horizontal_rule_is_ordered_after_clear_formatting():
-    inline_color = DOC_JS.split("name: 'inline-color'", 1)[1].split("name: 'alignment'", 1)[0]
-    assert inline_color.index("[data-dd=\"highlight\"]") < inline_color.index("#md-toolbar-sep-after-highlight")
-    assert "[data-md=\"hr\"]" not in DOC_JS
-
-
-def test_image_options_are_hidden_until_a_rich_image_is_selected():
-    clear_fn = function_body("_clearRichImageSelection")
-    select_fn = function_body("_selectRichImage")
-    assert "imageButton.style.display = 'none';" in clear_fn
-    assert "imageButton.style.display = '';" in select_fn
-
-
-def test_rich_image_insert_button_uses_image_plus_icon():
-    button = DOC_JS.split('id="md-toolbar-attach-btn"', 1)[1].split('</button>', 1)[0]
-    assert '<rect x="3" y="3" width="18" height="18"' in button
-    assert '<line x1="18" y1="4" x2="18" y2="10"' in button
-    assert 'class="md-attach-paperclip-icon"' in button
-    assert "paperclip.style.display = isEmail ? '' : 'none'" in DOC_JS
-    assert "imageIcon.style.display = isEmail ? 'none' : ''" in DOC_JS
-
-
-def test_selection_clear_formatting_only_shows_for_formatted_ranges():
-    assert "function _richSelectionHasFormatting" in DOC_JS
-    assert "clearButton.style.display = _richSelectionHasFormatting(rich, range) ? '' : 'none';" in DOC_JS
-    assert "span[style]" in DOC_JS
-
-
-def test_separator_is_a_style_dropdown_after_bullets_and_image_insert():
-    assert "separator:solid" in DOC_JS
-    assert "separator:dashed" in DOC_JS
-    assert "separator:dotted" in DOC_JS
-    assert "separator:double" in DOC_JS
-    inline_color = DOC_JS.split("name: 'inline-color'", 1)[1].split("name: 'alignment'", 1)[0]
-    paragraph = DOC_JS.split("name: 'paragraph'", 1)[1].split("name: 'inline-rich'", 1)[0]
-    assert inline_color.index("#md-toolbar-sep-after-highlight") < inline_color.index("#md-toolbar-attach-btn")
-    assert inline_color.index("#md-toolbar-attach-btn") < inline_color.index("#md-toolbar-inline-image-btn")
-    assert paragraph.index("[data-dd=\"list\"]") < paragraph.index("[data-dd=\"separator\"]")
-    assert "data-dd=\"separator\"" in DOC_JS
-    assert ".rich-toolbar-color-input.cp-swatch-input" in STYLE
-    assert ".rich-toolbar-range::-webkit-slider-thumb" in STYLE
-    assert ".rich-toolbar-slider-value::-webkit-inner-spin-button" in STYLE
-    assert "-webkit-appearance: textfield;" in STYLE
-    assert "-webkit-appearance: none;" in STYLE
+from tests.helpers.node import run_node_module
 
 
 def test_numeric_font_size_and_custom_colors_work_on_desktop_and_mobile():
@@ -193,15 +110,7 @@ def test_numeric_font_size_and_custom_colors_work_on_desktop_and_mobile():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
 
     for state in data.values():
         assert state["initialSize"] == {

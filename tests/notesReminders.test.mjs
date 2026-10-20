@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createNotesState } from '../frontend/src/features/notes/application/state.js';
-import { createNotesReminders } from '../frontend/src/features/notes/application/reminders.js';
-import { createNotesNotifications } from '../frontend/src/features/notes/infrastructure/notifications.js';
-import { createNotesPersistence, REMINDER_DISMISSED_AT_KEY } from '../frontend/src/features/notes/infrastructure/storage.js';
+import { createNotesState } from '../static/js/features/notes/application/state.js';
+import { createNotesReminders } from '../static/js/features/notes/application/reminders.js';
+import { createNotesNotifications } from '../static/js/features/notes/infrastructure/notifications.js';
+import { createNotesPersistence, REMINDER_DISMISSED_AT_KEY } from '../static/js/features/notes/infrastructure/storage.js';
 
 function harness(notes = []) {
   const now = Date.parse('2024-03-10T09:00'), app = createNotesState();

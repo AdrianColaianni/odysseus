@@ -1,13 +1,4 @@
-"""Search providers must not raise on a non-JSON response body (issue #1129).
-
-`brave_search` already wraps `response.json()` in its own try/except that catches
-`json.JSONDecodeError` and returns []. The Tavily, Serper, and Google PSE
-providers parsed JSON inside the network try block, which only caught
-`httpx.RequestError`/`RateLimitError` — so a provider returning a non-JSON body
-(an HTML error page, a truncated/empty body, a gateway error) raised an
-UNCAUGHT `json.JSONDecodeError` that aborted the search in the background. These
-pin that all four providers degrade to [] on malformed JSON, matching brave.
-"""
+"""Search providers degrade to [] on a non-JSON response body (issue #1129)."""
 
 import json
 
@@ -42,18 +33,7 @@ def _offline(monkeypatch):
     monkeypatch.setattr(providers.httpx, "get", lambda *a, **k: _BadJSONResponse())
 
 
-def test_tavily_malformed_json_returns_empty():
-    assert providers.tavily_search("hello") == []
-
-
-def test_serper_malformed_json_returns_empty():
-    assert providers.serper_search("hello") == []
-
-
-def test_google_pse_malformed_json_returns_empty():
-    assert providers.google_pse_search("hello") == []
-
-
-def test_brave_malformed_json_returns_empty():
-    # Already correct on main — guards against regressing the reference behaviour.
-    assert providers.brave_search("hello") == []
+def test_every_keyed_provider_returns_empty_on_malformed_json():
+    for search in (providers.brave_search, providers.google_pse_search,
+                   providers.tavily_search, providers.serper_search):
+        assert search("hello") == [], search.__name__

@@ -2,7 +2,7 @@
 export function createText({
   uiModule
 }) {
-  function _esc(s) { return uiModule.esc ? uiModule.esc(s || '') : (s || '').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+  const _esc = uiModule.esc;
 
   function _attrEsc(s) {
     return String(s || '')

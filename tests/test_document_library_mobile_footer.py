@@ -1,52 +1,7 @@
 """Mobile Documents-library footer remains focused and explicit."""
 
-import json
-import subprocess
-from pathlib import Path
-from tests.helpers.stylesheets import app_css
 from tests.helpers.stylesheets import stylesheet_link_tags
-
-
-ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / "static/js/documentLibrary.js").read_text(encoding="utf-8")
-STYLE = app_css()
-
-
-def test_mobile_footer_exposes_delete_open_and_more():
-    assert "doclib-expanded-open-btn" in SOURCE
-    assert "doclib-expanded-mobile-more" in SOURCE
-    assert "label: 'Open in new chat'" in SOURCE
-    assert "'Open in original' : 'Open document'" in SOURCE
-    assert "label: 'Export file ›'" in SOURCE
-    assert "label: 'Original format'" in SOURCE
-    assert "label: 'Markdown (.md)'" in SOURCE
-    assert "'Restore document' : 'Archive document'" in SOURCE
-    assert "label: 'Delete document'" in SOURCE
-
-    mobile_css = STYLE.split("On phones, keep Delete explicit", 1)[1]
-    mobile_css = mobile_css.split("/* Chat top bar", 1)[0]
-    for hidden_action in (
-        ".doclib-expanded-archive-btn",
-        ".doclib-expanded-clone-btn",
-        ".doclib-expanded-export-btn",
-    ):
-        assert hidden_action in mobile_css
-    assert ".doclib-expanded-delete-btn {\n        display: inline-flex !important" in mobile_css
-    assert ".doclib-expanded-mobile-more" in mobile_css
-    assert "display: inline-flex" in mobile_css
-    assert "box-sizing: border-box" in mobile_css
-    assert "max-width: 100%" in mobile_css
-
-
-def test_open_in_new_chat_forces_a_distinct_target_session():
-    body = SOURCE.split("async function libraryImportDocument", 1)[1].split(
-        "// ---- Library bulk operations", 1
-    )[0]
-    assert "{ newSession = false }" in body
-    assert "let sessionId = newSession ? null" in body
-    assert "sessionModule.createDirectChat" in body
-    assert "await sessionModule.materializePendingSession()" in body
-    assert "newSession ? 'Document opened in new chat' : 'Document opened here'" in body
+from tests.helpers.node import run_node_module
 
 
 def test_mobile_open_in_new_chat_copies_to_materialized_session():
@@ -109,15 +64,7 @@ def test_mobile_open_in_new_chat_copies_to_materialized_session():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
     assert data["createDirectCalls"] == 1
     assert data["currentSession"] == "new-chat"
     assert data["postedBody"]["session_id"] == "new-chat"

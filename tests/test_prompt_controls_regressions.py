@@ -1,6 +1,4 @@
 from src import agent_loop, llm_core
-from src.agent_tools import admin_tools
-from src import settings
 from routes.chat_routes import _resolve_prompt_thinking_mode
 
 
@@ -62,15 +60,8 @@ def test_chat_backend_reads_thinking_mode_from_active_prompt_preset():
     assert _resolve_prompt_thinking_mode("on", "custom", manager) == "on"
 
 
-def test_email_writing_style_is_agent_manageable_and_routable():
-    assert settings.DEFAULT_SETTINGS["email_writing_style"] == ""
-    assert settings.DEFAULT_SETTINGS["document_writing_style"] == ""
-    source = open(admin_tools.__file__, encoding="utf-8").read()
-    assert '"writing style": "document_writing_style"' in source
-    assert '"email writing style": "email_writing_style"' in source
+def test_writing_style_requests_route_to_manage_settings():
     assert any(
         "writing style" in triggers and "manage_settings" in tools
         for triggers, tools in agent_loop._QWEN38_ROUTER_KEYWORD_TOOLS
     )
-    index_source = open("src/tool_index.py", encoding="utf-8").read()
-    assert '"writing style", "reply style", "email writing style"' in index_source

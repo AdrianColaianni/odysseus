@@ -1,21 +1,8 @@
-/**
- * tileManager.js — desktop window tiling for tool modals.
- *
- * Hooks into any modal whose `.modal-header` is dragged (each tool wires its
- * own drag; we just watch pointer moves). Shows a translucent ghost preview
- * when the cursor is near a snap zone. On release, snaps the modal-content
- * to fill that zone with a springy animation.
- *
- * Snap zones:
- *   - top edge                    → maximize beside the active sidebar
- *   - left edge                   → left half
- *   - right edge                  → right half
- *
- * Mobile (≤768px) is excluded — the swipe-dismiss UX takes precedence.
- *
- * Each modal-content remembers its pre-snap geometry so dragging away restores
- * the original size.
- */
+// Desktop window tiling for tool modals: watches header drags, shows a ghost
+// preview near the top (maximize), left or right (half) edge, and snaps on
+// release. Each content remembers its pre-snap geometry for unsnap.
+
+import { clearDockSide } from './modalSnap.js';
 
 const EDGE_THRESHOLD_PX = 24;     // how close to an edge counts as "near"
 
@@ -24,30 +11,6 @@ let _activeZone = null;
 let _tracking = null; // { content, startRect }
 
 function _isDesktop() { return window.innerWidth > 768; }
-
-function _dockClassForSide(side) {
-  return side === 'left' ? 'modal-left-docked' : 'modal-right-docked';
-}
-
-function _hasOtherDockedWindow(side, owner) {
-  const cls = _dockClassForSide(side);
-  return Array.from(document.querySelectorAll(`.${cls}`)).some((el) => {
-    if (!el || el === owner) return false;
-    if (owner && el.contains && el.contains(owner)) return false;
-    if (owner && owner.contains && owner.contains(el)) return false;
-    return true;
-  });
-}
-
-function _clearDockSide(side, owner = null) {
-  if (side !== 'left' && side !== 'right') return;
-  if (_hasOtherDockedWindow(side, owner)) return;
-  document.body.classList.remove(side === 'left' ? 'left-dock-active' : 'right-dock-active');
-  document.documentElement.style.removeProperty(side === 'left' ? '--left-dock-w' : '--right-dock-w');
-  if (side === 'left') {
-    try { window._restoreSidebarIfRouteCollapsed?.(); } catch (_) {}
-  }
-}
 
 function _ensureGhost() {
   if (_ghost) return _ghost;
@@ -102,15 +65,11 @@ function _viewportSafeRect() {
   };
 }
 
-function _zoneForPointer(x, y) {
+export function _zoneForPointer(x, y) {
   const safe = _viewportSafeRect();
   const W = safe.right - safe.left;
   const H = safe.bottom - safe.top;
 
-  // The whole top-edge target means one sidebar-aware maximize state. The previous nested
-  // maximize/top-half bands made nearly identical gestures produce three
-  // different heights, including a shallow half-window and a sidebar-covering
-  // fullscreen state.
   if (y <= safe.top + EDGE_THRESHOLD_PX)
     return { name: 'maximize', rect: { left: safe.left, top: safe.top, width: W, height: H } };
 
@@ -123,7 +82,7 @@ function _zoneForPointer(x, y) {
   return null;
 }
 
-function _zoneForContent(content, x, y) {
+export function _zoneForContent(content, x, y) {
   const modal = content && content.closest && content.closest('.modal, .research-overlay');
   const zone = _zoneForPointer(x, y);
   if (!zone) return null;
@@ -146,18 +105,18 @@ function _clearEdgeDockResidue(modal, content) {
     const hadLeft = modal.classList.contains('modal-left-docked');
     const hadRight = modal.classList.contains('modal-right-docked');
     modal.classList.remove('modal-left-docked', 'modal-right-docked');
-    if (hadLeft) _clearDockSide('left', modal);
-    if (hadRight) _clearDockSide('right', modal);
+    if (hadLeft) clearDockSide('left', modal);
+    if (hadRight) clearDockSide('right', modal);
     if (modal._dockCloseWatcher) {
-      try { modal._dockCloseWatcher.obs && modal._dockCloseWatcher.obs.disconnect(); } catch (_) {}
-      try { modal._dockCloseWatcher.parentObs && modal._dockCloseWatcher.parentObs.disconnect(); } catch (_) {}
+      modal._dockCloseWatcher.obs?.disconnect();
+      modal._dockCloseWatcher.parentObs?.disconnect();
       delete modal._dockCloseWatcher;
     }
   }
   if (!content) return;
   if (content._leftDockNavObs) {
-    try { content._leftDockNavObs.navObs.disconnect(); } catch (_) {}
-    try { window.removeEventListener('resize', content._leftDockNavObs.reanchor); } catch (_) {}
+    content._leftDockNavObs.navObs.disconnect();
+    window.removeEventListener('resize', content._leftDockNavObs.reanchor);
     delete content._leftDockNavObs;
   }
   delete content._preDockSnapshot;
@@ -170,23 +129,14 @@ function _clearEdgeDockResidue(modal, content) {
 }
 
 function _applySnap(content, rect, zoneName) {
-  // A tile-snap supersedes any edge-dock on this same modal. The two
-  // systems (windowDrag→modalSnap edge-dock, and this tile manager) both
-  // fire on a left/right-edge drag-release. If we leave modalSnap's
-  // `left-dock-active` body class + `--left-dock-w` padding in place, it
-  // reserves a strip on the left AND this manager's safe-rect already
-  // accounts for the sidebar's (now padding-shifted) position — the two
-  // double-count and jam the window to the right behind a massive empty
-  // zone, which gets worse each time the sidebar is toggled. Clear the
-  // orphaned edge-dock state so only the tile-snap positions the window.
+  // Leftover edge-dock body padding would double-count with the safe rect,
+  // so a tile snap clears it first.
   const _modal = content.closest && content.closest('.modal, .research-overlay');
   const _fromRect = content.getBoundingClientRect();
   _clearEdgeDockResidue(_modal, content);
 
-  // Stash pre-snap geometry once; if we re-snap, keep the original. Capture a
-  // CONCRETE fixed position (from the rendered rect when the inline value is
-  // empty) and the position itself — otherwise un-snap restored empty left/top
-  // + no position, and the .modal flex parent re-centered the window.
+  // Stash pre-snap geometry once, as a concrete fixed position: empty
+  // left/top would let the .modal flex parent re-center the window.
   if (!content.dataset._tilePreSnap) {
     content.dataset._tilePreSnap = JSON.stringify({
       position: 'fixed',
@@ -361,9 +311,6 @@ if (document.readyState === 'loading') {
   _watchSidebar();
 }
 
-// ── Public API for other drag sources (e.g. dragging a minimized dock chip
-// to a screen edge) to reuse the same snap zones + ghost preview + apply. ──
-
 // Show the snap-zone ghost for a point and return the zone (or null).
 export function previewZoneAt(x, y, target = null) {
   if (!_isDesktop()) { _hideGhost(); _activeZone = null; return null; }
@@ -381,21 +328,12 @@ export function clearPreview() {
   _activeZone = null;
 }
 
-export function _zoneForPointerForTests(x, y) {
-  return _zoneForPointer(x, y);
-}
-
-export function _zoneForContentForTests(content, x, y) {
-  return _zoneForContent(content, x, y);
-}
-
 // Snap a modal (its .modal-content) into a previously-detected zone.
 export function snapModalToZone(modal, zone) {
   if (!modal || !zone) return;
   const content = modal.querySelector ? (modal.querySelector('.modal-content, .research-pane') || modal) : modal;
   if (!content) return;
-  // Old callers still request `fullscreen`; keep them from recreating the
-  // retired viewport-covering or half-height top states.
+  // Map the retired top states onto the sidebar-aware maximize.
   if (zone.name === 'fullscreen' || zone.name === 'top-half') {
     const safe = _viewportSafeRect();
     zone = {
@@ -411,5 +349,3 @@ export function snapModalToZone(modal, zone) {
   if (modal.id === 'settings-modal' && zone.name !== 'right-half') return;
   _applySnap(content, zone.rect, zone.name);
 }
-
-export {};

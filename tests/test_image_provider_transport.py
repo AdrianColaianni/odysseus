@@ -121,26 +121,26 @@ def test_image_provider_protocol(image_transport, editing, base):
         assert result['image_size'] == rows[0].size == '120x80'
 
 
-@pytest.mark.parametrize('status', [400, 401, 404, 422, 500])
-def test_openrouter_edit_reports_provider_error_without_local_fallback(image_transport, status):
+def test_openrouter_edit_reports_provider_error_without_local_fallback(image_transport):
     configure, source, requests, rows = image_transport
-    configure('https://openrouter.ai/api/v1', status, {'error': {'message': 'Provider rejected edit'}})
-    result = asyncio.run(ai_interaction.do_edit_image('Edit', str(source), model_spec='openai/gpt-5-image'))
-    assert f'({status}): Provider rejected edit' in result['error']
-    assert len(requests) == 1
+    for status in (400, 500):
+        requests.clear()
+        configure('https://openrouter.ai/api/v1', status, {'error': {'message': 'Provider rejected edit'}})
+        result = asyncio.run(ai_interaction.do_edit_image('Edit', str(source), model_spec='openai/gpt-5-image'))
+        assert f'({status}): Provider rejected edit' in result['error']
+        assert len(requests) == 1
     assert not rows
 
 
-@pytest.mark.parametrize('dimensions,expected', [
-    ((1920, 1080), '1536x1024'),
-    ((1080, 1920), '1024x1536'),
-    ((512, 512), '1024x1024'),
-    ((1000, 1100), '1024x1024'),
-])
-def test_edit_size_matches_closest_supported_shape(dimensions, expected):
+def test_edit_size_matches_closest_supported_shape():
     from src.image_model_ids import image_edit_size
-    assert image_edit_size('openai/gpt-5-image', *dimensions) == expected
-    assert image_edit_size('local-edit', *dimensions) == f'{dimensions[0]}x{dimensions[1]}'
+    for dimensions, expected in (
+        ((1920, 1080), '1536x1024'),
+        ((1080, 1920), '1024x1536'),
+        ((1000, 1100), '1024x1024'),
+    ):
+        assert image_edit_size('openai/gpt-5-image', *dimensions) == expected
+        assert image_edit_size('local-edit', *dimensions) == f'{dimensions[0]}x{dimensions[1]}'
 
 
 @pytest.mark.parametrize('explicit', [False, True])

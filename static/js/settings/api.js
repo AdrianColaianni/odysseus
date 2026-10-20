@@ -1,5 +1,3 @@
-// Lifted verbatim from static/js/settings.js so extracted panels can post
-// settings without importing the module they were extracted from.
 import uiModule from '../ui.js?v=20260916largetoolscroll1';
 import { invalidateSettings } from '../appConfig.js';
 
@@ -23,4 +21,27 @@ export async function postSettings(body) {
   } finally {
     invalidateSettings();
   }
+}
+
+export async function fetchSettings() {
+  const response = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+  return response.json();
+}
+
+export async function fetchModelEndpoints() {
+  const response = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const endpoints = await response.json();
+  return Array.isArray(endpoints) ? endpoints : [];
+}
+
+// Show a save result beside a control. Successes clear after clearMs.
+export function flashStatus(msgEl, text, isError, clearMs = 2000) {
+  msgEl.textContent = text;
+  msgEl.style.color = isError ? 'var(--red)' : 'var(--fg)';
+  if (!isError) setTimeout(() => { msgEl.textContent = ''; }, clearMs);
+}
+
+export function flashSaveError(msgEl, error) {
+  flashStatus(msgEl, error.status === 403 ? error.message : 'Failed to save', true);
 }

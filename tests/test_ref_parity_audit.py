@@ -70,19 +70,16 @@ def test_identical_added_lines_yield_one_probe(audit):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize(
-    "path, excluded",
-    [
+def test_default_excludes_cover_vendored_and_binary_paths(audit):
+    for path, excluded in [
         ("static/lib/marked.js", True),
         ("static/js/chat.min.js", True),
         ("package-lock.json", True),
         ("assets/logo.png", True),
         ("src/model_discovery.py", False),
         ("static/js/chat.js", False),
-    ],
-)
-def test_default_excludes_cover_vendored_and_binary_paths(audit, path, excluded):
-    assert audit.is_excluded(path, audit.DEFAULT_EXCLUDES) is excluded
+    ]:
+        assert audit.is_excluded(path, audit.DEFAULT_EXCLUDES) is excluded
 
 
 def test_added_lines_skips_headers_deletions_and_excluded_paths(audit):

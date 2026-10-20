@@ -29,7 +29,7 @@ def test_native_provider_remember_writes_native_memory_and_vector(tmp_path):
     from src.memory import MemoryManager
     from src.memory_provider import NativeMemoryProvider
 
-    manager = MemoryManager(str(tmp_path))
+    manager = MemoryManager(str(tmp_path / "memory.json"))
     vector = FakeVectorStore()
     provider = NativeMemoryProvider(manager, vector)
 
@@ -55,7 +55,7 @@ def test_native_provider_recall_filters_vector_hits_by_owner(tmp_path):
     from src.memory import MemoryManager
     from src.memory_provider import NativeMemoryProvider
 
-    manager = MemoryManager(str(tmp_path))
+    manager = MemoryManager(str(tmp_path / "memory.json"))
     vector = FakeVectorStore()
     provider = NativeMemoryProvider(manager, vector)
 
@@ -77,7 +77,7 @@ def test_native_provider_recall_accepts_legacy_vector_rows(tmp_path):
     from src.memory import MemoryManager
     from src.memory_provider import NativeMemoryProvider
 
-    manager = MemoryManager(str(tmp_path))
+    manager = MemoryManager(str(tmp_path / "memory.json"))
     vector = FakeVectorStore()
     provider = NativeMemoryProvider(manager, vector)
 
@@ -97,7 +97,7 @@ def test_native_provider_recall_falls_back_to_keyword_search(tmp_path):
     from src.memory import MemoryManager
     from src.memory_provider import NativeMemoryProvider
 
-    manager = MemoryManager(str(tmp_path))
+    manager = MemoryManager(str(tmp_path / "memory.json"))
     provider = NativeMemoryProvider(manager)
     saved = run(provider.remember(
         "Alice prefers markdown notes",

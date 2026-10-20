@@ -3,17 +3,14 @@ create_session, list_sessions, send_to_session, manage_session.
 
 The implementations now live in src/agent_tools/session_tools.py (moved out of
 src/ai_interaction.py). These assert (1) the handlers are registered in
-TOOL_HANDLERS, (2) the moved logic runs and threads owner/session from ctx
-(the session manager is fetched via ai_interaction.get_session_manager), and
-(3) tool_execution.py dispatches them through the registry rather than the
-legacy dispatch_ai_tool elif.
+TOOL_HANDLERS and (2) the moved logic runs and threads owner/session from ctx
+(the session manager is fetched via ai_interaction.get_session_manager).
 """
 import asyncio
-from pathlib import Path
 
 import src.ai_interaction as ai_interaction
 import src.database as database
-from src.agent_tools import TOOL_HANDLERS
+from src.agent_tools import TOOL_HANDLERS, _session_adapter
 from src.agent_tools import session_tools as st
 
 _SESSION_TOOLS = ("create_session", "list_sessions", "send_to_session", "manage_session")
@@ -35,7 +32,7 @@ def test_list_sessions_handler_threads_ctx(monkeypatch):
         return {"results": "ok"}
 
     monkeypatch.setattr(st, "list_sessions", spy)
-    res = asyncio.run(st.ListSessionsTool().execute("q", {"owner": "alice", "session_id": "s1"}))
+    res = asyncio.run(_session_adapter(st.list_sessions)("q", {"owner": "alice", "session_id": "s1"}))
     assert res == {"results": "ok"}
     assert seen == {"content": "q", "session_id": "s1", "owner": "alice"}
 
@@ -54,7 +51,7 @@ def test_manage_session_list_delegates_to_list_sessions(monkeypatch):
     # the src.database test double may not expose it, so provide a stand-in.
     monkeypatch.setattr(database, "Session", object, raising=False)
     monkeypatch.setattr(ai_interaction, "_session_manager", object())  # truthy: pass the guard
-    res = asyncio.run(st.ManageSessionTool().execute("list", {"owner": "carol"}))
+    res = asyncio.run(_session_adapter(st.manage_session)("list", {"owner": "carol"}))
     assert called.get("owner") == "carol"
     assert res == {"results": "ok"}
 
@@ -73,7 +70,7 @@ def test_create_session_reaches_uuid_and_creates(monkeypatch):
             return None
 
     monkeypatch.setattr(ai_interaction, "_session_manager", FakeMgr())
-    res = asyncio.run(st.CreateSessionTool().execute("My Chat\nmodel-x", {"owner": "alice"}))
+    res = asyncio.run(_session_adapter(st.create_session)("My Chat\nmodel-x", {"owner": "alice"}))
     assert res.get("name") == "My Chat" and res.get("model") == "model-x"
     assert isinstance(res.get("session_id"), str) and res["session_id"]
     assert created.get("name") == "My Chat"  # the uuid-minted id reached the manager
@@ -101,7 +98,7 @@ def test_create_session_inherits_current_working_runtime_for_same_model(monkeypa
         AssertionError("same-model child must not re-resolve a stored endpoint")
     ))
 
-    result = asyncio.run(st.CreateSessionTool().execute(
+    result = asyncio.run(_session_adapter(st.create_session)(
         "Relay\nmoonshotai/kimi-k3",
         {"owner": "alice", "session_id": "parent"},
     ))
@@ -154,7 +151,7 @@ def test_manage_session_fork_reaches_uuid(monkeypatch):
             created.update(kw)
 
     monkeypatch.setattr(ai_interaction, "_session_manager", FakeMgr())
-    res = asyncio.run(st.ManageSessionTool().execute('{"action":"fork","session_id":"abc"}', {"owner": "owner"}))
+    res = asyncio.run(_session_adapter(st.manage_session)('{"action":"fork","session_id":"abc"}', {"owner": "owner"}))
     assert res.get("action") == "fork"
     assert isinstance(res.get("session_id"), str) and res["session_id"]
     assert created.get("name") == "Fork: Orig"  # uuid-minted new session was created
@@ -164,7 +161,7 @@ def test_no_session_manager_is_handled(monkeypatch):
     # With no session manager set, the moved function must fail gracefully
     # (proves the handler reached the impl, not an "unknown tool").
     monkeypatch.setattr(ai_interaction, "_session_manager", None)
-    res = asyncio.run(st.ListSessionsTool().execute("", {"owner": "bob"}))
+    res = asyncio.run(_session_adapter(st.list_sessions)("", {"owner": "bob"}))
     assert isinstance(res, dict)
     assert "error" in res or "results" in res
 
@@ -229,15 +226,3 @@ def test_send_to_session_missing_session_returns_error_instead_of_raising(monkey
     result = asyncio.run(st.send_to_session("search\nfind traffic monitor emails", owner="alice"))
 
     assert result == {"error": "Session 'search' not found"}
-
-
-def test_dispatched_via_registry_not_dispatch_ai_tool():
-    source = (Path(__file__).resolve().parent.parent / "src" / "tool_execution.py").read_text(encoding="utf-8")
-    assert 'elif tool in ("create_session", "list_sessions", "send_to_session", "manage_session"):' in source
-
-    marker = "from src.ai_interaction import dispatch_ai_tool"
-    idx = source.index(marker)
-    branch_head = source.rfind("elif tool in (", 0, idx)
-    legacy_tuple = source[branch_head:idx]
-    for name in _SESSION_TOOLS:
-        assert f'"{name}"' not in legacy_tuple, f"{name} still routed via dispatch_ai_tool"

@@ -1,7 +1,7 @@
 import json
-import subprocess
 import textwrap
 from pathlib import Path
+from tests.helpers.node import run_node_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,14 +22,7 @@ def run_node(body: str):
         {body}
         """
     )
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
+    return run_node_module(script)
 
 
 def test_ruler_step_and_pointer_mapping_scale_with_viewport():
@@ -93,26 +86,3 @@ def test_move_modifier_inverts_persistent_snap_preference():
         """
     )
     assert result == {"defaultOn": 32, "invertedOff": 34, "temporaryOn": 32}
-
-
-def test_precision_controls_are_wired_and_cached_offline():
-    topbar = (ROOT / "static/js/editor/build/topbar.js").read_text(encoding="utf-8")
-    editor = (ROOT / "static/js/galleryEditor.js").read_text(encoding="utf-8")
-    service_worker = (ROOT / "static/sw.js").read_text(encoding="utf-8")
-
-    for action in ("rulers", "grid", "snap", "snap-grid", "clear-guides"):
-        assert f'data-view-action="{action}"' in topbar
-    assert "saveState: _saveState" in editor
-    assert "schedulePersist: _schedulePersist" in editor
-    assert "_precisionGuides?.drawDocumentOverlay" in editor
-    assert "/static/js/editor/precision-guides.js" in service_worker
-    assert "/static/js/editor/wire-view-menu.js" in service_worker
-
-
-def test_history_snapshots_include_and_restore_guides():
-    editor = (ROOT / "static/js/galleryEditor.js").read_text(encoding="utf-8")
-    assert "vertical: [...(state.guides?.vertical || [])]" in editor
-    assert "vertical: [...(snap.guides?.vertical || [])]" in editor
-    assert "saveState?.('Add guide')" in (
-        ROOT / "static/js/editor/precision-guides.js"
-    ).read_text(encoding="utf-8")

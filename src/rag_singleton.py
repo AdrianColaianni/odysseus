@@ -24,11 +24,6 @@ def get_rag_manager():
     per _RETRY_INTERVAL seconds so a missing ChromaDB doesn't busy-retry on
     every request — callers (personal-doc routes etc.) get None back and
     return a clean 503 to the user instead.
-
-    Historical note: this used to be hardcoded to ``return None`` with a
-    comment about chromadb 1.4.1 / pydantic 2.12 being mutually incompatible.
-    That compat issue is resolved in current pinned versions
-    (chromadb 1.5.x + pydantic 2.13.x), so the real initializer is back.
     """
     global rag_instance, _last_attempt
 

@@ -1,15 +1,8 @@
-"""
-event_bus.py
-
-Lightweight event bus for triggering automation tasks based on events
-like session creation, message sends, etc.
-"""
+"""Event bus: events such as session creation bump counters on event-triggered tasks and fire them."""
 
 import asyncio
 import json
 import logging
-import os
-from datetime import datetime
 from typing import Optional
 
 from src.constants import AUTH_FILE
@@ -79,13 +72,10 @@ def _resolve_event_owner(owner: Optional[str]) -> Optional[str]:
     return None
 
 
-async def _handle_event(event_name: str, owner: Optional[str] = None):
-    """Process an event: increment counters, fire tasks that hit their threshold."""
-    from core.database import SessionLocal, ScheduledTask
+def _advance_event_counters(event_name: str, owner: Optional[str]) -> list:
+    """Bump each matching task's counter; return (id, name, threshold) for tasks that hit it."""
+    from core.database import SessionLocal, ScheduledTask, utcnow_naive
 
-    resolved_owner = _resolve_event_owner(owner)
-    if not _event_automation_enabled_for_owner(resolved_owner):
-        return
     db = SessionLocal()
     try:
         filters = [
@@ -93,39 +83,42 @@ async def _handle_event(event_name: str, owner: Optional[str] = None):
             ScheduledTask.trigger_event == event_name,
             ScheduledTask.status == "active",
         ]
-        if resolved_owner:
-            filters.append(ScheduledTask.owner == resolved_owner)
+        if owner:
+            filters.append(ScheduledTask.owner == owner)
         else:
             filters.append(ScheduledTask.owner == None)  # noqa: E711
 
-        tasks = db.query(ScheduledTask).filter(*filters).all()
-        if not tasks:
-            return
-
-        for task in tasks:
+        due = []
+        for task in db.query(ScheduledTask).filter(*filters).all():
             threshold = task.trigger_count or 1
             task.trigger_counter = (task.trigger_counter or 0) + 1
-
             if task.trigger_counter >= threshold:
                 task.trigger_counter = 0
-                # Persist the trigger before handing off to the in-memory
-                # scheduler. If the process restarts while the task is queued
-                # behind a model call, `next_run <= now` makes the trigger
-                # survive reboot instead of losing the event after the counter
-                # has already reset.
-                task.next_run = datetime.utcnow()
-                db.commit()
-                # Fire the task
-                if _task_scheduler:
-                    logger.info(f"Event '{event_name}' triggered task '{task.name}' (every {threshold})")
-                    await _task_scheduler.run_task_now(task.id)
-                else:
-                    logger.warning(f"Event triggered task '{task.name}' but no scheduler available")
+                # Persisted before the in-memory handoff: if the process restarts
+                # while the task waits behind a model call, `next_run <= now`
+                # keeps the trigger alive after the counter has reset.
+                task.next_run = utcnow_naive()
+                due.append((task.id, task.name, threshold))
             else:
-                db.commit()
                 logger.debug(f"Event '{event_name}': task '{task.name}' counter {task.trigger_counter}/{threshold}")
-
-    except Exception:
-        logger.exception(f"Error handling event '{event_name}'")
+        db.commit()
+        return due
     finally:
         db.close()
+
+
+async def _handle_event(event_name: str, owner: Optional[str] = None):
+    """Process an event: increment counters, fire tasks that hit their threshold."""
+    resolved_owner = _resolve_event_owner(owner)
+    if not _event_automation_enabled_for_owner(resolved_owner):
+        return
+    try:
+        due = await asyncio.to_thread(_advance_event_counters, event_name, resolved_owner)
+        for task_id, name, threshold in due:
+            if _task_scheduler:
+                logger.info(f"Event '{event_name}' triggered task '{name}' (every {threshold})")
+                await _task_scheduler.run_task_now(task_id)
+            else:
+                logger.warning(f"Event triggered task '{name}' but no scheduler available")
+    except Exception:
+        logger.exception(f"Error handling event '{event_name}'")

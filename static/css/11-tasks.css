@@ -1,19 +1,3 @@
-/* 11-tasks - part of the former static/style.css.
- *
- * The stylesheet is split by area, but the split is mechanical: rules were
- * moved verbatim and NOT regrouped. The numeric prefix is the load order, and
- * that order is what preserves the cascade. A rule sits in the file its
- * original position fell into, so an area's rules are not all in its file and
- * a file is not only that area's rules.
- *
- * Do not reorder the <link> tags in static/index.html, and do not move a rule
- * between files: with 1,151 redeclarations and 1,886 !important in this
- * cascade, either can change which declaration wins.
- *
- * static/index.html and the PRECACHE list in static/sw.js must agree on this
- * order. tests/test_static_stylesheet_manifest.py and
- * tests/test_css_computed_style_snapshot.py fail if that drifts.
- */
 /* Snapped/narrow Settings window: move the tab rail to the top. Viewport media
    alone misses desktop right-half snapping, where the modal is narrow but the
    browser window is not. */
@@ -22,7 +6,6 @@
     flex-direction: column;
   }
   .settings-sidebar {
-    width: auto;
     max-height: none;
     flex-direction: row;
     border-right: none;
@@ -128,9 +111,6 @@ body:not(.welcome-ready) #welcome-screen {
     opacity: 0;
     transform: scaleY(0.4) translateY(8px);
   }
-}
-@keyframes model-picker-refresh-spin {
-  to { transform: rotate(360deg); }
 }
 
 @keyframes modal-enter {
@@ -442,9 +422,9 @@ body:not(.welcome-ready) #welcome-screen {
   padding: 1px 7px;
   margin-right: 4px;
   border-radius: 10px;
-  color: var(--accent, var(--red));
-  background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 35%, transparent);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
   vertical-align: 1px;
 }
 .task-log-status {
@@ -515,7 +495,7 @@ body:not(.welcome-ready) #welcome-screen {
   border-left: 2px solid color-mix(in srgb, var(--fg) 20%, transparent);
   opacity: 0.85;
 }
-.task-log-row-body a { color: var(--accent, #60a5fa); text-decoration: none; }
+.task-log-row-body a { color: #60a5fa; text-decoration: none; }
 .task-log-row-body a:hover { text-decoration: underline; }
 .task-log-row-body strong { font-weight: 650; color: var(--fg); }
 /* Email-summary tables — render compactly instead of default browser ugliness. */
@@ -581,36 +561,7 @@ body:not(.welcome-ready) #welcome-screen {
   position: relative;
   top: 0;
 }
-/* Activity filter chips — toggle-out model: ON by default (solid),
-   click to toggle OFF (dimmed + strikethrough) to hide that group. */
-.tasks-af-chip {
-  font-size: 11px;
-  padding: 3px 10px;
-  border: 1px solid color-mix(in srgb, var(--fg) 16%, transparent);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--fg) 6%, transparent);
-  color: var(--fg);
-  cursor: pointer;
-  font-family: inherit;
-  transition: opacity .12s, background .12s, border-color .12s;
-}
-.tasks-af-chip:hover { border-color: color-mix(in srgb, var(--fg) 32%, transparent); }
-.tasks-af-chip.off {
-  opacity: 0.4;
-  text-decoration: line-through;
-  background: transparent;
-}
-.tasks-af-chip.active {
-  border-color: var(--accent, var(--red));
-  background: color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
-  opacity: 1;
-}
-.tasks-af-chip-error { border-color: color-mix(in srgb, var(--red, #f87171) 45%, transparent); }
-.tasks-af-chip-error:not(.off) { color: var(--red, #f87171); }
-
-/* "Open in Deep Research" is now a regular clickable chat link (a
-   `#research-<id>` markdown anchor in the assistant's message), rendered as
-   an a.chat-link. Nudge it 4px right so it sits slightly inset. */
+/* "Open in Deep Research" is a `#research-<id>` chat link; nudge it 4px right so it sits slightly inset. */
 a.chat-link[href^="#research-"] {
   margin-left: 4px;
 }
@@ -684,11 +635,10 @@ a.chat-link[href^="#research-"] {
   position: relative;
   top: -2px;
 }
-/* Always show the per-card ⋮ kebab on task cards (the default opacity:0 +
-   hover-reveal is unreliable on touch and easy to miss on desktop).
-   pointer-events / z-index belt-and-braces against any sibling overlay,
-   margin reset undoes the global `.modal-body button { margin-top:6px }`
-   that was punting the hit-target down. */
+/* Always show the per-card ⋮ kebab on task cards: hover-reveal is
+   unreliable on touch and easy to miss on desktop. pointer-events and
+   z-index guard against sibling overlays; the margin reset undoes the
+   global `.modal-body button { margin-top:6px }`. */
 .task-card .memory-item-actions {
   opacity: 0.55;
   pointer-events: auto;
@@ -715,7 +665,7 @@ a.chat-link[href^="#research-"] {
 .task-card .memory-item-actions .memory-item-btn svg { pointer-events: none; }
 .task-ai-mark {
   flex: 0 0 auto;
-  color: var(--accent, var(--red));
+  color: var(--red);
   opacity: 0.78;
 }
 /* Per-card select checkbox rides up to the title line. The "All" checkbox is
@@ -853,7 +803,7 @@ a.chat-link[href^="#research-"] {
   color: var(--fg);
 }
 .task-preset-card:hover {
-  border-color: var(--accent, #cc6a3a); background: color-mix(in srgb, var(--accent, #cc6a3a) 8%, var(--bg));
+  border-color: #cc6a3a; background: color-mix(in srgb, #cc6a3a 8%, var(--bg));
 }
 .task-preset-icon { font-size: 20px; margin-bottom: 2px; }
 .task-preset-label { font-size: 12px; font-weight: 600; }
@@ -913,8 +863,8 @@ a.chat-link[href^="#research-"] {
   transition: background 0.15s, border-color 0.15s;
 }
 .task-form-notif-toggle input:checked + .task-form-notif-switch {
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 58%, transparent);
-  background: color-mix(in srgb, var(--accent, var(--red)) 20%, transparent);
+  border-color: color-mix(in srgb, var(--red) 58%, transparent);
+  background: color-mix(in srgb, var(--red) 20%, transparent);
 }
 .task-form-notif-copy {
   display: flex;
@@ -1037,8 +987,8 @@ input.settings-select::placeholder { color: color-mix(in srgb, var(--fg) 35%, tr
   border-color: var(--red);
 }
 
-/* Deep Research uses long labels and previously fixed-width fields. Keep
-   every control constrained by the card at intermediate desktop widths too. */
+/* Deep Research uses long labels; keep every control constrained by the
+   card at intermediate desktop widths too. */
 .admin-card:has(#set-researchSearch) .settings-row { min-width: 0; }
 .admin-card:has(#set-researchSearch) .settings-row > .settings-label { flex: 0 0 112px; min-width: 0; }
 #set-researchSearch,
@@ -1311,11 +1261,11 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
   background: color-mix(in srgb, var(--accent) 10%, transparent) !important;
 }
 .sort-dropdown-item.ai-sort-option {
-  color: var(--accent, var(--red));
-  background: color-mix(in srgb, var(--accent, var(--red)) 8%, transparent);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 8%, transparent);
 }
 .sort-dropdown-item.ai-sort-option .auto-sort-icon {
-  color: var(--accent, var(--red));
+  color: var(--red);
   display: inline-flex;
   align-items: center;
 }
@@ -1323,7 +1273,7 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
   transform: translateX(-4px);
 }
 .sort-dropdown-item.ai-sort-option:hover {
-  background: color-mix(in srgb, var(--accent, var(--red)) 15%, transparent) !important;
+  background: color-mix(in srgb, var(--red) 15%, transparent) !important;
 }
 .sort-dropdown-sep {
   border-top: 1px solid var(--border);
@@ -1509,9 +1459,9 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
 
 /* Quick run button */
 .cookbook-run-btn {
-  background: var(--accent, var(--red)) !important;
+  background: var(--red) !important;
   color: var(--panel) !important;
-  border-color: var(--accent, var(--red)) !important;
+  border-color: var(--red) !important;
   font-weight: 600;
 }
 .cookbook-run-btn:hover {
@@ -1596,7 +1546,7 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
   transition: opacity 0.12s, color 0.12s;
 }
 .cookbook-srv-default:hover { opacity: 0.8; }
-.cookbook-srv-default.active { opacity: 1; color: var(--accent, var(--red)); }
+.cookbook-srv-default.active { opacity: 1; color: var(--red); }
 .cookbook-srv-default-label { font-size: 10px; font-weight: 600; letter-spacing: 0.02em; }
 .cookbook-srv-default-icon {
   display: inline-flex;
@@ -1628,15 +1578,15 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
   transition: opacity 0.12s, color 0.12s;
 }
 .cookbook-modeldir-dl:hover { opacity: 0.8; }
-.cookbook-modeldir-dl.active { opacity: 1; color: var(--accent, var(--red)); }
+.cookbook-modeldir-dl.active { opacity: 1; color: var(--red); }
 /* The tag currently flagged as the download target — clearly highlighted so
    it's obvious where downloads land. */
 .cookbook-modeldir-target {
   opacity: 1;
-  color: var(--accent, var(--red));
+  color: var(--red);
   font-weight: 600;
-  background: color-mix(in srgb, var(--accent, var(--red)) 16%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent, var(--red)) 60%, transparent);
+  background: color-mix(in srgb, var(--red) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--red) 60%, transparent);
 }
 .cookbook-modeldir-rm {
   cursor: pointer;
@@ -1665,25 +1615,7 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
   padding: 0 9px;
   transition: border-color 0.12s, background 0.12s;
 }
-.cookbook-modeldir-add:hover { border-color: var(--accent, var(--red)); background: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent); }
-
-/* Cookbook serve optimizations */
-.hwfit-serve-opts {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 4px 0;
-}
-.hwfit-apply-opts {
-  font-size: 11px !important;
-  min-width: auto !important;
-  white-space: nowrap;
-}
-.hwfit-opts-desc {
-  font-size: 9px;
-  opacity: 0.4;
-  font-style: italic;
-}
+.cookbook-modeldir-add:hover { border-color: var(--red); background: color-mix(in srgb, var(--red) 10%, transparent); }
 
 /* Library modal tabs */
 .lib-tabs,
@@ -1709,8 +1641,8 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
 .admin-tab:hover { color: var(--fg); }
 .lib-tab.active,
 .admin-tab.active {
-  color: var(--accent, var(--red));
-  border-bottom-color: var(--accent, var(--red));
+  color: var(--red);
+  border-bottom-color: var(--red);
 }
 
 /* Cookbook tab count badge */
@@ -1722,8 +1654,8 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
   height: 16px;
   padding: 0 4px;
   border-radius: 8px;
-  background: color-mix(in srgb, var(--accent, var(--red)) 20%, transparent);
-  color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--red) 20%, transparent);
+  color: var(--red);
   font-size: 9px;
   font-weight: 700;
   margin-left: 4px;
@@ -1770,28 +1702,6 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
   opacity: 0.6;
   cursor: progress;
 }
-.report-spinner {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.88em;
-  color: var(--fg);
-  opacity: 0.7;
-}
-.report-spinner-text {
-  font-weight: 500;
-}
-.report-spinner-dots::after {
-  content: '';
-  animation: report-dots 1.4s steps(4, end) infinite;
-}
-@keyframes report-dots {
-  0%   { content: ''; }
-  25%  { content: '.'; }
-  50%  { content: '..'; }
-  75%  { content: '...'; }
-  100% { content: ''; }
-}
 
 /* ── Continue research hint ────────────────────────── */
 .continue-research-wrap {
@@ -1830,12 +1740,12 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
    nodes that pop in as they're captured. Pulses indicate activity. */
 .research-synapse {
   margin: 6px 0 4px;
-  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 24%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--red) 24%, var(--border));
   border-radius: 7px;
   background:
     linear-gradient(color-mix(in srgb, var(--fg) 3%, transparent) 1px, transparent 1px),
     linear-gradient(90deg, color-mix(in srgb, var(--fg) 3%, transparent) 1px, transparent 1px),
-    radial-gradient(ellipse at 50% 48%, color-mix(in srgb, var(--accent, var(--red)) 13%, transparent) 0%, transparent 62%),
+    radial-gradient(ellipse at 50% 48%, color-mix(in srgb, var(--red) 13%, transparent) 0%, transparent 62%),
     color-mix(in srgb, var(--panel) 68%, var(--bg));
   background-size: 18px 18px, 18px 18px, auto, auto;
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg) 5%, transparent);
@@ -1866,45 +1776,23 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
   margin: 0;
   overflow: hidden;
   pointer-events: none;
-  color: color-mix(in srgb, var(--accent, var(--red)) 76%, var(--fg));
+  color: color-mix(in srgb, var(--red) 76%, var(--fg));
   font: 600 10px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace;
   white-space: pre;
   text-align: center;
   opacity: 1;
-  text-shadow: 0 0 7px color-mix(in srgb, var(--accent, var(--red)) 55%, transparent);
+  text-shadow: 0 0 7px color-mix(in srgb, var(--red) 55%, transparent);
   mix-blend-mode: screen;
 }
 .research-synapse-compact .rs-meta { padding: 5px 8px 6px; font-size: 10px; }
 .research-synapse-compact .rs-label-sub { font-size: 8px; }
-.research-synapse .rs-stage-head {
-  position: absolute;
-  z-index: 2;
-  top: 7px;
-  left: 9px;
-  right: 9px;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--fg-dim, var(--fg));
-  font: 600 8px/1 ui-monospace, "JetBrains Mono", monospace;
-  text-transform: uppercase;
-  pointer-events: none;
-}
-.research-synapse .rs-live-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--accent, var(--red));
-  box-shadow: 0 0 6px color-mix(in srgb, var(--accent, var(--red)) 75%, transparent);
-  animation: rs-live 1.8s ease-in-out infinite;
-}
 .research-synapse .rs-phase-chip {
   margin-left: auto;
   padding: 3px 5px;
-  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 25%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--red) 25%, var(--border));
   border-radius: 3px;
-  background: color-mix(in srgb, var(--accent, var(--red)) 8%, var(--bg));
-  color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--red) 8%, var(--bg));
+  color: var(--red);
 }
 .research-synapse svg {
   display: block;
@@ -1912,14 +1800,14 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
   height: 100%;
 }
 .research-synapse .rs-edge {
-  stroke: color-mix(in srgb, var(--accent, var(--red)) 32%, var(--border));
+  stroke: color-mix(in srgb, var(--red) 32%, var(--border));
   stroke-width: 1.35;
   fill: none;
   opacity: 0.72;
 }
 .research-synapse .rs-node {
   fill: var(--bg);
-  stroke: var(--accent, var(--red));
+  stroke: var(--red);
   stroke-width: 1.5;
   transition: all 0.3s ease;
   transform-box: fill-box;
@@ -1936,7 +1824,7 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
   animation: rs-pop 0.6s ease-out;
 }
 .research-synapse .rs-pulse {
-  fill: var(--accent, var(--red));
+  fill: var(--red);
   opacity: 0;
   animation: rs-pulse 2.6s ease-out infinite;
   transform-box: fill-box;
@@ -1968,7 +1856,7 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
 }
 .research-synapse .rs-meta .rs-status {
   display: none;
-  color: var(--accent, var(--red));
+  color: var(--red);
   font-weight: 600;
   min-width: 0;
   overflow: hidden;

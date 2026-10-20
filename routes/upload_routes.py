@@ -1,4 +1,3 @@
-# routes/upload_routes.py
 import os
 import time
 import json
@@ -318,7 +317,7 @@ def setup_upload_routes(upload_handler):
             db.close()
     
     @router.post("")
-    async def api_upload(
+    def api_upload(
         request: Request,
         files: List[UploadFile] = File(...),
         session_id: Optional[str] = Form(None),
@@ -352,12 +351,8 @@ def setup_upload_routes(upload_handler):
         client_ip = request.client.host if request.client else "unknown"
         out = []
 
-        # Limit concurrent uploads per IP. Count genuine recent upload events —
-        # NOT the number of files in this batch. The previous check summed over
-        # `files`, so a single multi-file request counted itself as N concurrent
-        # uploads and tripped the limit (issue #1346: "attach more than one file
-        # → the model doesn't even see them"). save_upload still enforces the
-        # per-minute sliding-window rate limit per file.
+        # Count recent upload events, not files in this batch, so one multi-file
+        # request does not trip the limit; save_upload rate-limits per file.
         recent_uploads = count_recent_uploads(
             upload_handler.upload_rate_log.get(client_ip, []), time.time()
         )
@@ -436,7 +431,7 @@ def setup_upload_routes(upload_handler):
             raise HTTPException(500, "Failed to get upload statistics")
 
     @router.get("/{file_id}")
-    async def download_file(request: Request, file_id: str, thumb: int = 0):
+    def download_file(request: Request, file_id: str, thumb: int = 0):
         """Serve an uploaded file by its ID. `?thumb=1` returns a small cached
         JPEG thumbnail for images (used by chat attachment previews) so the
         client isn't downloading the full-resolution photo just to show it tiny."""
@@ -527,7 +522,7 @@ def setup_upload_routes(upload_handler):
             db.close()
 
     @router.get("/{file_id}/vision")
-    async def get_vision_text(request: Request, file_id: str, force: int = 0):
+    def get_vision_text(request: Request, file_id: str, force: int = 0):
         """Return the vision-model OCR/description for an uploaded image.
         Cached under UPLOAD_DIR/.vision/{file_id}.txt — first call computes,
         subsequent loads are instant. Pass force=1 to recompute."""

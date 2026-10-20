@@ -6,15 +6,13 @@ import uiModule from './ui.js?v=20260916largetoolscroll1';
 import settingsModule from './settings.js?v=20260912writingstyle3';
 import { sortModelObjects } from './modelSort.js';
 import spinnerModule from './spinner.js';
+import { loadFavorites, toggleFavorite } from './model/favorites.js';
 
 const API_BASE = window.location.origin;
 
-// ── Recent + Favorites persistence ──
-// Recent is auto-tracked (last 5 picks, most-recent-first) and lives in its
-// own key. Favorites is the SAME key the sidebar Models section uses, so a
-// favorite toggled here shows up there and vice-versa.
+// Recent is auto-tracked (last 5 picks, most-recent-first). Favorites are
+// shared with the sidebar Models section through models.js.
 const RECENT_KEY = 'odysseus-model-recent';
-const FAVORITES_KEY = 'odysseus-model-favorites';
 const RECENT_MAX = 5;
 // Catalogs at or below this size are small enough that hiding everything
 // behind search would be a regression — keep listing them in browse mode.
@@ -36,28 +34,13 @@ function _pushRecent(mid) {
   next.unshift(mid);
   _saveList(RECENT_KEY, next.slice(0, RECENT_MAX));
 }
-function _loadFavorites() { return _loadList(FAVORITES_KEY); }
-function _toggleFavorite(mid) {
-  const favs = _loadFavorites();
-  const i = favs.indexOf(mid);
-  if (i >= 0) favs.splice(i, 1);
-  else favs.push(mid);
-  _saveList(FAVORITES_KEY, favs);
-  // Keep the sidebar Models section (same key) in sync if it's mounted.
-  try {
-    if (window.modelsModule && typeof window.modelsModule.refreshModels === 'function') {
-      window.modelsModule.refreshModels();
-    }
-  } catch { /* sidebar not present */ }
-  return i < 0; // true when now favorited
-}
 
 function _pickerModelKey(m) {
   if (!m) return '';
   return `${m.endpointId || m.url || m.epName || 'model'}::${m.mid || ''}`;
 }
 
-// ── Shared keyboard nav for model pickers ──
+// Shared keyboard nav for model pickers
 function _handlePickerKeydown(e, listEl, itemSelector, closeFn) {
   if (e.key === 'Escape') { closeFn(); return; }
   if (e.key === 'Enter') {
@@ -133,14 +116,14 @@ async function _ensureDefaultPendingChat() {
   const seq = ++_defaultPendingSeq;
   try {
     let dc = null;
-    try {
-      dc = window.__odysseusDefaultChat || null;
-    } catch (_) {}
+    dc = window.__odysseusDefaultChat || null;
     if (!dc || !dc.endpoint_url || !dc.model) {
       try {
         const res = await fetch(`${API_BASE}/api/default-chat`, { credentials: 'same-origin' });
         if (res.ok) dc = await res.json();
-      } catch (_) {}
+      } catch (e) {
+        console.warn('Failed to load default chat:', e);
+      }
     }
     if (dc && dc.endpoint_url && dc.model) {
       if (seq !== _defaultPendingSeq) return;
@@ -369,7 +352,7 @@ function _initModelPickerDropdown() {
     return seq === _pickerLoadSeq;
   }
 
-  // ── Provider display names and grouping ──
+  // Provider display names and grouping
   const _PROVIDER_NAMES = {
     '01-ai': 'Yi', 'abacusai': 'Abacus AI', 'adept': 'Adept',
     'ai21': 'AI21 Labs', 'ai21labs': 'AI21 Labs', 'aion-labs': 'Aion Labs',
@@ -464,7 +447,7 @@ function _initModelPickerDropdown() {
       if (!byId.has(m.mid)) byId.set(m.mid, m);
     });
 
-    const favs = _loadFavorites();
+    const favs = loadFavorites();
 
     function _addSection(label) {
       const el = document.createElement('div');
@@ -498,7 +481,7 @@ function _initModelPickerDropdown() {
       nameSpan.className = 'mp-model-name';
       nameSpan.textContent = m.display;
       // Long model names are clipped with ellipsis — expose the full name on
-      // hover so the suffix/variant tag is still discoverable (#1982).
+      // hover so the suffix/variant tag is still discoverable.
       nameSpan.title = m.display;
       row.appendChild(nameSpan);
       // Offline state is already conveyed by the row's reduced opacity —
@@ -527,7 +510,8 @@ function _initModelPickerDropdown() {
       _setFavState(favs.includes(m.mid));
       favDot.addEventListener('click', (e) => {
         e.stopPropagation();
-        const nowFav = _toggleFavorite(m.mid);
+        const nowFav = toggleFavorite(m.mid);
+        window.modelsModule?.refreshModels?.();
         _setFavState(nowFav);
         favDot.classList.remove('pulse');
         void favDot.offsetWidth;
@@ -597,7 +581,7 @@ function _initModelPickerDropdown() {
       }
     }
 
-    // ── Search mode: grouped, filtered results across the whole catalog ──
+    // Search mode: grouped, filtered results across the whole catalog
     if (q) {
       const matches = all.filter(m => {
         const groupKey = _providerGroupKey(m);
@@ -623,7 +607,7 @@ function _initModelPickerDropdown() {
       return;
     }
 
-    // ── Browse mode: Favorites (manual) + Recent (auto), with dedupe. ──
+    // Browse mode: Favorites (manual) + Recent (auto), with dedupe
     const shown = new Set();
     const favModels = favs.map(id => byKey.get(id) || byId.get(id)).filter(Boolean);
     if (favModels.length) {
@@ -675,7 +659,7 @@ async function _pick(m) {
     } catch (_) {}
     let switchDone = null;
     const switchPromise = new Promise(resolve => { switchDone = resolve; });
-    try { window.__odysseusModelSwitchPromise = switchPromise; } catch (_) {}
+    window.__odysseusModelSwitchPromise = switchPromise;
     const finishSwitch = () => {
       try {
         if (switchDone) switchDone();
@@ -993,7 +977,7 @@ export function updateModelPicker() {
   _updateReasoningEffortUI(modelId, s, latestPending, selectedEndpoint);
 }
 
-// ── Reasoning effort control for models supporting reasoning levels ──
+// Reasoning effort control for models supporting reasoning levels
 let _reasoningEffortBound = false;
 let _pendingReasoningEffort = null;
 
@@ -1009,7 +993,7 @@ export function getSelectedReasoningEffort() {
   }
   return null;
 }
-try { window.__odysseusGetReasoningEffort = getSelectedReasoningEffort; } catch (_) {}
+window.__odysseusGetReasoningEffort = getSelectedReasoningEffort;
 
 function _initReasoningEffort() {
   if (_reasoningEffortBound) return;
@@ -1086,14 +1070,12 @@ async function _updateReasoningEffortUI(modelId, s, latestPending, selectedEndpo
       } else {
         activeLevel = 'default';
         s.thinking_mode = 'off';
-        try {
-          fetch(`${API_BASE}/api/session/${encodeURIComponent(s.id)}/generation-settings`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
-            body: JSON.stringify({ thinking_mode: 'off', reasoning_effort: null }),
-          }).catch(() => {});
-        } catch (_) {}
+        fetch(`${API_BASE}/api/session/${encodeURIComponent(s.id)}/generation-settings`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ thinking_mode: 'off', reasoning_effort: null }),
+        }).catch(e => console.warn('Failed to reset generation settings:', e));
       }
     }
   } else if (_pendingReasoningEffort) {

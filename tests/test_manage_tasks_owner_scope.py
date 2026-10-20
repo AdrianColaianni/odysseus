@@ -282,13 +282,13 @@ async def test_one_off_edit_pause_resume_keeps_exact_schedule():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('value', [None, '', 'bad-date', '2000-01-01T00:00:00Z'])
-async def test_invalid_one_off_date_never_creates_an_inert_active_task(value):
-    out = await do_manage_tasks(json.dumps({
-        'action': 'create', 'name': 'invalid dated fixture', 'prompt': 'synthetic',
-        'schedule': 'once', 'scheduled_date': value,
-    }), owner='alice')
-    assert out['exit_code'] == 1
+async def test_invalid_one_off_date_never_creates_an_inert_active_task():
+    for value in (None, 'bad-date', '2000-01-01T00:00:00Z'):
+        out = await do_manage_tasks(json.dumps({
+            'action': 'create', 'name': 'invalid dated fixture', 'prompt': 'synthetic',
+            'schedule': 'once', 'scheduled_date': value,
+        }), owner='alice')
+        assert out['exit_code'] == 1, value
     with _TS() as db:
         assert db.query(ScheduledTask).filter(ScheduledTask.name == 'invalid dated fixture').count() == 0
 

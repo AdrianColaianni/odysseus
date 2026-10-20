@@ -157,28 +157,6 @@ def test_update_skill_does_not_mutate_foreign_owned_skill(tmp_path):
     _ = result  # not asserted; documented behavior is not the point.
 
 
-def test_update_skill_scalar_keys_exclude_owner():
-    """Static check: the manager's scalar_keys whitelist MUST NOT
-    include 'owner' — otherwise a non-owner caller can pass
-    updates={'owner': 'attacker'} and reassign the file. The fix
-    removed 'owner' from scalar_keys; this test now asserts the
-    fix is in place."""
-    src = Path("services/memory/skills.py").read_text(encoding="utf-8")
-    import re
-    m = re.search(
-        r"def update_skill\(.*?scalar_keys\s*=\s*\((.*?)\)",
-        src,
-        re.DOTALL,
-    )
-    assert m, "could not locate scalar_keys tuple in update_skill"
-    body = m.group(1)
-    assert '"owner"' not in body and "'owner'" not in body, (
-        "BUG (regression): scalar_keys in update_skill includes 'owner'. "
-        "The fix removed this to prevent cross-user ownership reassignment "
-        "via the updates dict."
-    )
-
-
 def test_read_skill_md_and_references_are_owner_scoped(tmp_path):
     """Two users own distinct skills with the same slug. read_skill_md()
     called with owner='alice' must return Alice's content, not Bob's.

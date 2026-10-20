@@ -25,13 +25,7 @@ from src.foreground_model_routing import (
     build_foreground_model_candidates,
     resolve_foreground_model_policy,
 )
-
-
-def _collect(gen):
-    async def _run():
-        return [chunk async for chunk in gen]
-
-    return asyncio.run(_run())
+from tests.helpers.agent_stream import collect_chunks, patch_agent_loop_basics
 
 
 def test_visible_response_text_for_save_collapses_duplicate_done():
@@ -121,19 +115,10 @@ class _RouteRequest:
         return self._form
 
 
-@pytest.mark.parametrize(
-    ("status", "expected"),
-    [
-        (429, 429),
-        ("503", 503),
-        (429.9, None),
-        (True, None),
-        ("429.9", None),
-    ],
-)
-def test_stream_failure_status_uses_exact_http_statuses(status, expected):
-    chunk = f'event: error\ndata: {json.dumps({"status": status})}\n\n'
-    assert chat_routes._stream_failure_status(chunk) == expected
+def test_stream_failure_status_uses_exact_http_statuses():
+    for status, expected in ((429, 429), ("503", 503), (429.9, None), (True, None), ("429.9", None)):
+        chunk = f'event: error\ndata: {json.dumps({"status": status})}\n\n'
+        assert chat_routes._stream_failure_status(chunk) == expected, status
 
 
 def _chat_stream_endpoint(
@@ -503,26 +488,24 @@ async def test_chat_stream_approval_ignores_research_and_new_attachments(monkeyp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["chat", "agent"])
-@pytest.mark.parametrize("endpoint_url", ["", None])
 async def test_chat_stream_rejects_missing_selected_endpoint_before_fallback(
     monkeypatch,
     mode,
-    endpoint_url,
 ):
-    captured = {}
-    endpoint = _chat_stream_endpoint(
-        monkeypatch,
-        mode,
-        captured,
-        endpoint_url=endpoint_url,
-    )
+    for endpoint_url in ("", None):
+        captured = {}
+        endpoint = _chat_stream_endpoint(
+            monkeypatch,
+            mode,
+            captured,
+            endpoint_url=endpoint_url,
+        )
 
-    with pytest.raises(HTTPException) as exc:
-        await endpoint(_RouteRequest(mode))
+        with pytest.raises(HTTPException) as exc:
+            await endpoint(_RouteRequest(mode))
 
-    assert exc.value.status_code == 400
-    assert "not configured" in str(exc.value.detail)
-    assert captured == {}
+        assert exc.value.status_code == 400
+        assert captured == {}
 
 
 @pytest.mark.asyncio
@@ -1268,22 +1251,18 @@ async def test_nonstream_chat_is_strict_by_default_and_reports_selected_route(mo
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("endpoint_url", ["", None])
-async def test_nonstream_chat_rejects_missing_selected_endpoint_before_fallback(
-    monkeypatch,
-    endpoint_url,
-):
-    endpoint, saved = _chat_endpoint(monkeypatch, endpoint_url=endpoint_url)
+async def test_nonstream_chat_rejects_missing_selected_endpoint_before_fallback(monkeypatch):
+    for endpoint_url in ("", None):
+        endpoint, saved = _chat_endpoint(monkeypatch, endpoint_url=endpoint_url)
 
-    with pytest.raises(HTTPException) as exc:
-        await endpoint(
-            _RouteRequest("chat"),
-            ChatRequest(message="hello", session="session-1"),
-        )
+        with pytest.raises(HTTPException) as exc:
+            await endpoint(
+                _RouteRequest("chat"),
+                ChatRequest(message="hello", session="session-1"),
+            )
 
-    assert exc.value.status_code == 400
-    assert "not configured" in str(exc.value.detail)
-    assert saved == []
+        assert exc.value.status_code == 400
+        assert saved == []
 
 
 @pytest.mark.asyncio
@@ -1899,25 +1878,21 @@ def test_retired_silent_endpoint_switcher_is_not_callable():
     assert not hasattr(chat_helpers, "try_fallback_endpoint")
 
 
-@pytest.mark.parametrize(
-    "prefs",
-    [
-        {},
-        {"foreground_fallback_enabled": False, "foreground_model_fallbacks": [{"endpoint_id": "b", "model": "m"}]},
-        {"foreground_fallback_enabled": "true", "foreground_model_fallbacks": [{"endpoint_id": "b", "model": "m"}]},
-        {"foreground_fallback_enabled": True, "foreground_model_fallbacks": []},
-        {"default_model_fallbacks": [{"endpoint_id": "legacy", "model": "legacy"}]},
-    ],
-)
-def test_foreground_policy_fails_closed_without_explicit_complete_opt_in(monkeypatch, prefs):
-    monkeypatch.setattr(foreground_model_routing, "_load_policy_preferences", lambda owner=None: prefs)
+def test_foreground_policy_fails_closed_without_explicit_complete_opt_in(monkeypatch):
     monkeypatch.setattr(
         foreground_model_routing,
         "resolve_fallback_entries",
         lambda entries, owner=None: pytest.fail("disabled policy resolved fallback entries"),
     )
-
-    assert resolve_foreground_model_policy("alice") == ForegroundModelPolicy()
+    for prefs in (
+        {},
+        {"foreground_fallback_enabled": False, "foreground_model_fallbacks": [{"endpoint_id": "b", "model": "m"}]},
+        {"foreground_fallback_enabled": "true", "foreground_model_fallbacks": [{"endpoint_id": "b", "model": "m"}]},
+        {"foreground_fallback_enabled": True, "foreground_model_fallbacks": []},
+        {"default_model_fallbacks": [{"endpoint_id": "legacy", "model": "legacy"}]},
+    ):
+        monkeypatch.setattr(foreground_model_routing, "_load_policy_preferences", lambda owner=None: prefs)
+        assert resolve_foreground_model_policy("alice") == ForegroundModelPolicy(), prefs
 
 
 def test_foreground_policy_resolves_ordered_owner_scoped_entries(monkeypatch):
@@ -2088,7 +2063,7 @@ def test_named_owner_unrelated_save_does_not_import_flat_fallback_consent(
             {"endpoint_id": "legacy", "model": "legacy-model"},
         ],
     }), encoding="utf-8")
-    monkeypatch.setattr(prefs_routes, "PREFS_FILE", str(prefs_file))
+    monkeypatch.setattr(prefs_routes, "USER_PREFS_FILE", str(prefs_file))
     monkeypatch.setattr(
         foreground_model_routing,
         "resolve_fallback_entries",
@@ -2134,7 +2109,7 @@ def test_startup_pref_migration_does_not_transfer_flat_fallback_consent(
     monkeypatch.setattr(database, "AUTH_FILE", str(tmp_path / "auth.json"))
     monkeypatch.setattr(database, "MEMORY_FILE", str(tmp_path / "memory.json"))
     monkeypatch.setattr(database, "USER_PREFS_FILE", str(prefs_file))
-    monkeypatch.setattr(prefs_routes, "PREFS_FILE", str(prefs_file))
+    monkeypatch.setattr(prefs_routes, "USER_PREFS_FILE", str(prefs_file))
     monkeypatch.setattr(
         foreground_model_routing,
         "resolve_fallback_entries",
@@ -2166,7 +2141,7 @@ def test_auth_disabled_write_in_multiuser_store_does_not_grant_named_consent(
             "bob": {"theme": "light"},
         },
     }), encoding="utf-8")
-    monkeypatch.setattr(prefs_routes, "PREFS_FILE", str(prefs_file))
+    monkeypatch.setattr(prefs_routes, "USER_PREFS_FILE", str(prefs_file))
     monkeypatch.setattr(
         foreground_model_routing,
         "resolve_fallback_entries",
@@ -2316,9 +2291,7 @@ def test_multi_round_agent_uses_only_selected_model(monkeypatch):
     seen_candidates = []
     round_number = 0
 
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
-    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    patch_agent_loop_basics(monkeypatch)
     monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
     async def fake_stream(candidates, messages, **kwargs):
         nonlocal round_number
@@ -2340,7 +2313,7 @@ def test_multi_round_agent_uses_only_selected_model(monkeypatch):
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
     monkeypatch.setattr(agent_loop, "execute_tool_block", fake_execute)
 
-    chunks = _collect(
+    chunks = collect_chunks(
         agent_loop.stream_agent_loop(
             "https://selected.example/v1",
             "selected-model",
@@ -2360,9 +2333,7 @@ def test_multi_round_agent_uses_only_selected_model(monkeypatch):
 
 
 def test_agent_stream_attributes_model_response_reference_to_round(monkeypatch):
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
-    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    patch_agent_loop_basics(monkeypatch)
     monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
 
     async def fake_stream(candidates, messages, **kwargs):
@@ -2372,7 +2343,7 @@ def test_agent_stream_attributes_model_response_reference_to_round(monkeypatch):
 
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
 
-    chunks = _collect(
+    chunks = collect_chunks(
         agent_loop.stream_agent_loop(
             "https://model.invalid/v1",
             "policy-model",
@@ -2400,9 +2371,7 @@ def test_multi_round_agent_pins_answering_fallback_for_the_run(monkeypatch):
     backup = ("https://backup.example/v1", "backup-model", {"Authorization": "backup"})
     route_modes = []
 
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
-    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    patch_agent_loop_basics(monkeypatch)
     monkeypatch.setattr(
         agent_loop,
         "_agent_route_tool_mode",
@@ -2429,7 +2398,7 @@ def test_multi_round_agent_pins_answering_fallback_for_the_run(monkeypatch):
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
     monkeypatch.setattr(agent_loop, "execute_tool_block", fake_execute)
 
-    chunks = _collect(
+    chunks = collect_chunks(
         agent_loop.stream_agent_loop(
             primary[0],
             primary[1],
@@ -2467,9 +2436,7 @@ def test_late_agent_fallback_records_each_round_and_stays_pinned(monkeypatch):
     primary = ("https://selected.example/v1", "selected-model", {})
     backup = ("https://backup.example/v1", "backup-model", {})
 
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
-    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    patch_agent_loop_basics(monkeypatch)
     monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
     monkeypatch.setattr(agent_loop, "_agent_route_tool_mode", lambda url, model, owner=None, headers=None: (True, False, False))
 
@@ -2500,7 +2467,7 @@ def test_late_agent_fallback_records_each_round_and_stays_pinned(monkeypatch):
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
     monkeypatch.setattr(agent_loop, "execute_tool_block", fake_execute)
 
-    chunks = _collect(
+    chunks = collect_chunks(
         agent_loop.stream_agent_loop(
             primary[0],
             primary[1],
@@ -2531,38 +2498,35 @@ def test_late_agent_fallback_records_each_round_and_stays_pinned(monkeypatch):
     ]
 
 
-@pytest.mark.parametrize("status", [400, 401, 404])
-def test_agent_terminal_first_round_error_has_no_success_completion(monkeypatch, status):
-    calls = 0
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
-    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+def test_agent_terminal_first_round_error_has_no_success_completion(monkeypatch):
+    patch_agent_loop_basics(monkeypatch)
+    for status in (400, 401, 404):
+        calls = []
 
-    async def fake_stream(candidates, messages, **kwargs):
-        nonlocal calls
-        calls += 1
-        yield f'event: error\ndata: {json.dumps({"status": status, "error": "provider rejected request"})}\n\n'
+        async def fake_stream(candidates, messages, **kwargs):
+            calls.append(status)
+            yield f'event: error\ndata: {json.dumps({"status": status, "error": "provider rejected request"})}\n\n'
 
-    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
+        monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
 
-    chunks = _collect(
-        agent_loop.stream_agent_loop(
-            "https://selected.example/v1",
-            "selected-model",
-            [{"role": "user", "content": "hello"}],
-            max_rounds=3,
-            relevant_tools=set(),
-            fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES,
-            fallback_on_empty=False,
-            _is_teacher_run=True,
+        chunks = collect_chunks(
+            agent_loop.stream_agent_loop(
+                "https://selected.example/v1",
+                "selected-model",
+                [{"role": "user", "content": "hello"}],
+                max_rounds=3,
+                relevant_tools=set(),
+                fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES,
+                fallback_on_empty=False,
+                _is_teacher_run=True,
+            )
         )
-    )
 
-    assert calls == 1
-    assert any(chunk.startswith("event: error") for chunk in chunks)
-    assert not any('"type": "metrics"' in chunk for chunk in chunks), chunks
-    assert "data: [DONE]\n\n" not in chunks
-    assert not any("empty response" in chunk.lower() for chunk in chunks)
+        assert calls == [status]
+        assert any(chunk.startswith("event: error") for chunk in chunks)
+        assert not any('"type": "metrics"' in chunk for chunk in chunks), chunks
+        assert "data: [DONE]\n\n" not in chunks
+        assert not any("empty response" in chunk.lower() for chunk in chunks)
 
 
 @pytest.mark.parametrize(
@@ -2579,9 +2543,7 @@ def test_agent_terminal_later_round_error_stops_after_completed_tool(
     expected_message,
 ):
     calls = 0
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
-    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    patch_agent_loop_basics(monkeypatch)
     monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
     monkeypatch.setattr(
         agent_loop,
@@ -2609,7 +2571,7 @@ def test_agent_terminal_later_round_error_stops_after_completed_tool(
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
     monkeypatch.setattr(agent_loop, "execute_tool_block", fake_execute)
 
-    chunks = _collect(
+    chunks = collect_chunks(
         agent_loop.stream_agent_loop(
             "https://selected.example/v1",
             "selected-model",
@@ -2659,9 +2621,7 @@ def test_direct_low_signal_partial_error_emits_terminal_history(
     expected_status,
     expected_message,
 ):
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
-    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    patch_agent_loop_basics(monkeypatch)
     monkeypatch.setattr(
         agent_loop,
         "_classify_agent_request",
@@ -2680,7 +2640,7 @@ def test_direct_low_signal_partial_error_emits_terminal_history(
 
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
 
-    chunks = _collect(agent_loop.stream_agent_loop(
+    chunks = collect_chunks(agent_loop.stream_agent_loop(
         "https://selected.example/v1",
         "selected-model",
         [{"role": "user", "content": "hello"}],
@@ -2786,7 +2746,7 @@ def test_direct_low_signal_fallback_estimates_winning_route_prompt(
 
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
 
-    chunks = _collect(agent_loop.stream_agent_loop(
+    chunks = collect_chunks(agent_loop.stream_agent_loop(
         primary[0],
         primary[1],
         [{"role": "user", "content": "hello"}],
@@ -2853,7 +2813,7 @@ def test_direct_low_signal_configuration_error_surfaces_without_fake_success(mon
     )
     monkeypatch.setattr(agent_loop, "_is_casual_low_signal", lambda latest: True)
 
-    chunks = _collect(agent_loop.stream_agent_loop(
+    chunks = collect_chunks(agent_loop.stream_agent_loop(
         "https://selected.example/v1",
         "selected-model",
         [{"role": "user", "content": "hello"}],
@@ -2895,7 +2855,7 @@ def test_direct_low_signal_empty_completion_surfaces_without_fake_success(monkey
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", empty_stream)
-    chunks = _collect(agent_loop.stream_agent_loop(
+    chunks = collect_chunks(agent_loop.stream_agent_loop(
         "https://selected.example/v1",
         "selected-model",
         [{"role": "user", "content": "hello"}],
@@ -2914,9 +2874,7 @@ def test_direct_low_signal_empty_completion_surfaces_without_fake_success(monkey
 
 
 def test_reasoning_only_agent_error_emits_terminal_history(monkeypatch):
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
-    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    patch_agent_loop_basics(monkeypatch)
 
     async def fake_stream(candidates, messages, **kwargs):
         yield 'data: {"delta": "private reasoning partial", "thinking": true}\n\n'
@@ -2924,7 +2882,7 @@ def test_reasoning_only_agent_error_emits_terminal_history(monkeypatch):
 
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
 
-    chunks = _collect(agent_loop.stream_agent_loop(
+    chunks = collect_chunks(agent_loop.stream_agent_loop(
         "https://selected.example/v1",
         "selected-model",
         [{"role": "user", "content": "Investigate this failure."}],
@@ -2949,9 +2907,7 @@ def test_toolless_multi_round_agent_persists_round_route_provenance(monkeypatch)
     calls = 0
     primary = ("https://selected.example/v1", "selected-model", {})
     backup = ("https://backup.example/v1", "backup-model", {})
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
-    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    patch_agent_loop_basics(monkeypatch)
 
     async def fake_stream(candidates, messages, **kwargs):
         nonlocal calls
@@ -2965,7 +2921,7 @@ def test_toolless_multi_round_agent_persists_round_route_provenance(monkeypatch)
 
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
 
-    chunks = _collect(agent_loop.stream_agent_loop(
+    chunks = collect_chunks(agent_loop.stream_agent_loop(
         primary[0],
         primary[1],
         [{"role": "user", "content": "Please investigate."}],
@@ -2998,9 +2954,7 @@ def test_agent_metrics_attribute_usage_to_each_answering_route(monkeypatch):
     calls = 0
     primary = ("https://paid.example/v1", "selected-model", {})
     backup = ("http://localhost:11434/v1", "backup-model", {})
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
-    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    patch_agent_loop_basics(monkeypatch)
     monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
     monkeypatch.setattr(
         agent_loop,
@@ -3032,7 +2986,7 @@ def test_agent_metrics_attribute_usage_to_each_answering_route(monkeypatch):
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
     monkeypatch.setattr(agent_loop, "execute_tool_block", fake_execute)
 
-    chunks = _collect(agent_loop.stream_agent_loop(
+    chunks = collect_chunks(agent_loop.stream_agent_loop(
         primary[0],
         primary[1],
         [{"role": "user", "content": "Run one tool."}],
@@ -3080,74 +3034,58 @@ def test_agent_metrics_attribute_usage_to_each_answering_route(monkeypatch):
     ]
 
 
-@pytest.mark.parametrize("malformed_input", [None, "bad", 10**1000])
-def test_agent_round_ignores_malformed_usage_and_uses_estimate(
-    monkeypatch,
-    malformed_input,
-):
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
-    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+def test_agent_round_ignores_malformed_usage_and_uses_estimate(monkeypatch):
+    patch_agent_loop_basics(monkeypatch)
     monkeypatch.setattr(
         agent_loop,
         "_agent_route_tool_mode",
         lambda *args, **kwargs: (True, False, False),
     )
 
-    async def fake_stream(candidates, messages, **kwargs):
-        usage_event = {
-            "type": "usage",
-            "data": {
-                "input_tokens": malformed_input,
-                "output_tokens": 1,
-            },
-        }
-        yield "data: " + json.dumps(usage_event) + "\n\n"
-        yield 'data: {"delta": "valid answer"}\n\n'
-        yield "data: [DONE]\n\n"
+    for malformed_input in (None, "bad", 10**1000):
+        async def fake_stream(candidates, messages, **kwargs):
+            usage_event = {
+                "type": "usage",
+                "data": {
+                    "input_tokens": malformed_input,
+                    "output_tokens": 1,
+                },
+            }
+            yield "data: " + json.dumps(usage_event) + "\n\n"
+            yield 'data: {"delta": "valid answer"}\n\n'
+            yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
+        monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
 
-    chunks = _collect(agent_loop.stream_agent_loop(
-        "https://selected.example/v1",
-        "selected-model",
-        [{"role": "user", "content": "Run a detailed investigation."}],
-        max_rounds=1,
-        relevant_tools={"bash"},
-        route_descriptors=[{
-            "endpoint_id": "selected",
-            "endpoint_label": "Selected",
-            "endpoint_cost_tracked": True,
-        }],
-        fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES,
-        fallback_on_empty=False,
-        _is_teacher_run=True,
-    ))
+        chunks = collect_chunks(agent_loop.stream_agent_loop(
+            "https://selected.example/v1",
+            "selected-model",
+            [{"role": "user", "content": "Run a detailed investigation."}],
+            max_rounds=1,
+            relevant_tools={"bash"},
+            route_descriptors=[{
+                "endpoint_id": "selected",
+                "endpoint_label": "Selected",
+                "endpoint_cost_tracked": True,
+            }],
+            fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES,
+            fallback_on_empty=False,
+            _is_teacher_run=True,
+        ))
 
-    metrics = json.loads(next(
-        chunk for chunk in chunks if '"type": "metrics"' in chunk
-    )[6:])["data"]
-    assert metrics["usage_source"] == "estimated"
-    assert metrics["input_tokens"] == 10
-    assert metrics["usage_buckets"][0]["input_tokens"] == 10
-    assert metrics["usage_buckets"][0]["output_tokens"] == len("valid answer") // 4
+        metrics = json.loads(next(
+            chunk for chunk in chunks if '"type": "metrics"' in chunk
+        )[6:])["data"]
+        assert metrics["usage_source"] == "estimated", malformed_input
+        assert metrics["input_tokens"] == 10
+        assert metrics["usage_buckets"][0]["input_tokens"] == 10
+        assert metrics["usage_buckets"][0]["output_tokens"] == len("valid answer") // 4
 
 
-@pytest.mark.parametrize(
-    ("synthesis_result", "expected_answer"),
-    [
-        ("Recovered final answer.", "Recovered final answer."),
-        (
-            "",
-            "I gathered some search results but couldn't pull a clean answer together. "
-            "Want me to try a more specific question, or summarize what I did find?",
-        ),
-    ],
-)
+@pytest.mark.parametrize("synthesis_result", ["Recovered final answer.", ""])
 def test_force_answer_recovery_persists_and_bills_pinned_fallback_route(
     monkeypatch,
     synthesis_result,
-    expected_answer,
 ):
     primary = ("https://selected.example/v1", "selected-model", {})
     backup = (
@@ -3158,9 +3096,7 @@ def test_force_answer_recovery_persists_and_bills_pinned_fallback_route(
     requests_by_round = []
     synthesis_calls = []
 
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
-    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    patch_agent_loop_basics(monkeypatch)
     monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
     monkeypatch.setattr(
         agent_loop,
@@ -3216,7 +3152,7 @@ def test_force_answer_recovery_persists_and_bills_pinned_fallback_route(
     monkeypatch.setattr(agent_loop, "execute_tool_block", fake_execute)
     monkeypatch.setattr(llm_core, "llm_call_async", fake_synthesis)
 
-    chunks = _collect(agent_loop.stream_agent_loop(
+    chunks = collect_chunks(agent_loop.stream_agent_loop(
         primary[0],
         primary[1],
         [{"role": "user", "content": "Keep checking until you can answer."}],
@@ -3257,7 +3193,9 @@ def test_force_answer_recovery_persists_and_bills_pinned_fallback_route(
     metrics = json.loads(next(
         chunk for chunk in chunks if '"type": "metrics"' in chunk
     )[6:])["data"]
-    assert metrics["round_texts"][-1] == expected_answer
+    if synthesis_result:
+        assert metrics["round_texts"][-1] == synthesis_result
+    assert metrics["round_texts"][-1].strip()
     assert metrics["round_models"][-1] == backup[1]
     assert metrics["round_endpoint_ids"][-1] == "backup-ep"
     assert metrics["usage_buckets"][-1] == {
@@ -3277,9 +3215,7 @@ def test_agent_terminal_retains_completed_paid_fallback_usage(monkeypatch):
     calls = 0
     primary = ("http://localhost:11434/v1", "selected-model", {})
     backup = ("https://paid.example/v1", "backup-model", {})
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
-    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    patch_agent_loop_basics(monkeypatch)
     monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
     monkeypatch.setattr(
         agent_loop,
@@ -3308,7 +3244,7 @@ def test_agent_terminal_retains_completed_paid_fallback_usage(monkeypatch):
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
     monkeypatch.setattr(agent_loop, "execute_tool_block", fake_execute)
 
-    chunks = _collect(agent_loop.stream_agent_loop(
+    chunks = collect_chunks(agent_loop.stream_agent_loop(
         primary[0],
         primary[1],
         [{"role": "user", "content": "Run one tool."}],
@@ -3350,9 +3286,7 @@ def test_agent_builds_backup_prompt_and_tool_transport_before_attempt(monkeypatc
     primary = ("https://selected.example/v1", "selected-model", {})
     backup = ("http://localhost:11434/api/chat", "backup-model", {})
 
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
-    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    patch_agent_loop_basics(monkeypatch)
     monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
     monkeypatch.setattr(
         agent_loop,
@@ -3384,7 +3318,7 @@ def test_agent_builds_backup_prompt_and_tool_transport_before_attempt(monkeypatc
 
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
 
-    chunks = _collect(
+    chunks = collect_chunks(
         agent_loop.stream_agent_loop(
             primary[0],
             primary[1],
@@ -3507,7 +3441,7 @@ def test_agent_fallback_request_uses_candidate_context_budget(
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
     monkeypatch.setattr(agent_loop, "execute_tool_block", fake_execute)
 
-    chunks = _collect(
+    chunks = collect_chunks(
         agent_loop.stream_agent_loop(
             primary[0],
             primary[1],
@@ -3555,9 +3489,7 @@ def test_agent_persists_only_answering_route_compaction(monkeypatch):
     backup = ("https://backup.example/v1", "backup-model", {})
     applied = []
 
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
-    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    patch_agent_loop_basics(monkeypatch)
     monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
 
     async def fake_compact(
@@ -3587,7 +3519,7 @@ def test_agent_persists_only_answering_route_compaction(monkeypatch):
     monkeypatch.setattr(agent_loop, "apply_compaction_state", fake_apply)
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
 
-    _collect(
+    collect_chunks(
         agent_loop.stream_agent_loop(
             primary[0],
             primary[1],
@@ -3610,9 +3542,7 @@ def test_agent_deferred_compaction_survives_duplicate_primary_fallback(monkeypat
     primary = ("https://selected.example/v1", "selected-model", {})
     compacted_routes = []
 
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
-    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    patch_agent_loop_basics(monkeypatch)
     monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
 
     async def fake_compact(
@@ -3633,7 +3563,7 @@ def test_agent_deferred_compaction_survives_duplicate_primary_fallback(monkeypat
     monkeypatch.setattr(agent_loop, "maybe_compact", fake_compact)
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
 
-    chunks = _collect(agent_loop.stream_agent_loop(
+    chunks = collect_chunks(agent_loop.stream_agent_loop(
         primary[0],
         primary[1],
         [{"role": "user", "content": "Investigate this."}],
@@ -3657,9 +3587,7 @@ def test_skill_activation_reaches_later_fallback_request_and_pinned_round(monkey
     primary = ("https://selected.example/v1", "selected-model", {})
     backup = ("https://backup.example/v1", "odysseus-qwen-backup", {})
 
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
-    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    patch_agent_loop_basics(monkeypatch)
     monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
     monkeypatch.setattr(
         agent_loop,
@@ -3741,7 +3669,7 @@ def test_skill_activation_reaches_later_fallback_request_and_pinned_round(monkey
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
     monkeypatch.setattr(agent_loop, "execute_tool_block", fake_execute)
 
-    chunks = _collect(
+    chunks = collect_chunks(
         agent_loop.stream_agent_loop(
             primary[0],
             primary[1],

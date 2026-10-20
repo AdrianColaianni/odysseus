@@ -1,21 +1,5 @@
-/* 13-image-editor - part of the former static/style.css.
- *
- * The stylesheet is split by area, but the split is mechanical: rules were
- * moved verbatim and NOT regrouped. The numeric prefix is the load order, and
- * that order is what preserves the cascade. A rule sits in the file its
- * original position fell into, so an area's rules are not all in its file and
- * a file is not only that area's rules.
- *
- * Do not reorder the <link> tags in static/index.html, and do not move a rule
- * between files: with 1,151 redeclarations and 1,886 !important in this
- * cascade, either can change which declaration wins.
- *
- * static/index.html and the PRECACHE list in static/sw.js must agree on this
- * order. tests/test_static_stylesheet_manifest.py and
- * tests/test_css_computed_style_snapshot.py fail if that drifts.
- */
 .ge-draft-status[data-state="pending"],
-.ge-draft-status[data-state="saving"] { color: color-mix(in srgb, var(--accent, var(--red)) 75%, var(--fg)); }
+.ge-draft-status[data-state="saving"] { color: color-mix(in srgb, var(--red) 75%, var(--fg)); }
 .ge-draft-status[data-state="saved"] { color: color-mix(in srgb, var(--color-success, #4ade80) 78%, var(--fg)); }
 .ge-draft-status[data-state="error"] { color: var(--color-error, #ef4444); }
 /* "ALPHA" badge — flags the editor as in-development. */
@@ -28,9 +12,9 @@
   padding: 3px 6px;
   margin-right: 4px;
   border-radius: 4px;
-  color: var(--accent, var(--red));
-  background: color-mix(in srgb, var(--accent, var(--red)) 16%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 40%, transparent);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 40%, transparent);
   text-transform: uppercase;
   user-select: none;
   cursor: default;
@@ -62,13 +46,13 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: var(--accent, var(--red));
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 50%, var(--border));
-  background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 50%, var(--border));
+  background: color-mix(in srgb, var(--red) 12%, transparent);
 }
 .ge-topbar-fill:hover {
-  background: color-mix(in srgb, var(--accent, var(--red)) 22%, transparent);
-  border-color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--red) 22%, transparent);
+  border-color: var(--red);
 }
 /* Mask-color swatch in the topbar — small label + circular swatch so
    the user can pick a contrasting overlay colour from anywhere. */
@@ -207,9 +191,8 @@
   transition: background 0.15s, opacity 0.15s;
 }
 .ge-tool-btn { position: relative; }
-/* Hover background is now a pseudo so we can shift it 2 px left
-   independently from the button's own bounds (which contain the icon
-   and label at their already-shifted positions). */
+/* Hover background is a pseudo so it can shift 2px left independently
+   of the button's own bounds. */
 .ge-tool-btn:hover { opacity: 0.85; }
 .ge-tool-btn.active {
   opacity: 1;
@@ -365,7 +348,7 @@
   transform: translateX(-50%);
   padding: 7px;
   box-sizing: border-box;
-  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 42%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--red) 42%, var(--border));
   border-radius: 8px;
   background: color-mix(in srgb, var(--panel, var(--bg)) 94%, transparent);
   box-shadow: 0 8px 22px color-mix(in srgb, #000 26%, transparent);
@@ -382,7 +365,7 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--accent, var(--red));
+  color: var(--red);
   font: inherit;
   font-size: 11px;
   font-weight: 600;
@@ -419,7 +402,7 @@
   min-width: 102px;
   padding: 2px 9px;
   opacity: 0.32;
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 18%, var(--border));
+  border-color: color-mix(in srgb, var(--red) 18%, var(--border));
   box-shadow: 0 3px 10px color-mix(in srgb, #000 16%, transparent);
 }
 .ge-canvas-area:hover .ge-ai-command-collapsed,
@@ -427,7 +410,7 @@
 .ge-ai-command-collapsed:focus-within {
   bottom: 10px;
   opacity: 0.94;
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 42%, var(--border));
+  border-color: color-mix(in srgb, var(--red) 42%, var(--border));
   box-shadow: 0 8px 22px color-mix(in srgb, #000 24%, transparent);
 }
 .ge-ai-command-form {
@@ -450,7 +433,7 @@
 }
 .ge-ai-command-input:focus {
   outline: none;
-  border-color: var(--accent, var(--red));
+  border-color: var(--red);
 }
 .ge-ai-command-clear {
   position: relative;
@@ -535,7 +518,7 @@
   max-height: 236px;
   overflow: auto;
   padding: 5px;
-  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 34%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--red) 34%, var(--border));
   border-radius: 8px;
   background: color-mix(in srgb, var(--panel, var(--bg)) 97%, #000 3%);
   box-shadow: 0 10px 28px color-mix(in srgb, #000 28%, transparent);
@@ -558,12 +541,12 @@
 }
 .ge-ai-command-suggestion:hover,
 .ge-ai-command-suggestion.active {
-  background: color-mix(in srgb, var(--accent, var(--red)) 16%, transparent);
+  background: color-mix(in srgb, var(--red) 16%, transparent);
 }
 .ge-ai-command-suggestion-kind {
   min-width: 0;
   overflow: hidden;
-  color: var(--accent, var(--red));
+  color: var(--red);
   font-size: 8px;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -592,7 +575,7 @@
   color: var(--fg-muted);
 }
 .ge-ai-command-status[data-kind="running"] {
-  color: var(--accent, var(--red));
+  color: var(--red);
 }
 .ge-ai-command-status[data-kind="done"] {
   color: var(--green, #4caf50);
@@ -986,7 +969,7 @@
   gap: 4px;
   padding: 0 0 8px;
   background: color-mix(in srgb, var(--panel) 98%, var(--bg));
-  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 42%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--red) 42%, var(--border));
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
   backdrop-filter: blur(6px);
@@ -1112,12 +1095,12 @@
 .ge-transform-spin button:first-child { border-radius: 3px 3px 0 0; border-bottom: 0; }
 .ge-transform-spin button:last-child  { border-radius: 0 0 3px 3px; }
 .ge-transform-spin button:hover {
-  background: color-mix(in srgb, var(--accent, var(--red)) 25%, transparent);
+  background: color-mix(in srgb, var(--red) 25%, transparent);
   color: var(--fg);
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 55%, var(--border));
+  border-color: color-mix(in srgb, var(--red) 55%, var(--border));
 }
 .ge-transform-spin button:active {
-  background: color-mix(in srgb, var(--accent, var(--red)) 55%, transparent);
+  background: color-mix(in srgb, var(--red) 55%, transparent);
 }
 /* Position the ° suffix to the LEFT of the spinner so they don't
    overlap. The rotation input's larger padding leaves room. */
@@ -1153,8 +1136,8 @@
 .ge-transform-aspect-btn:hover { opacity: 1; }
 .ge-transform-aspect-btn.active {
   opacity: 1;
-  color: var(--accent, var(--red));
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 50%, var(--border));
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 50%, var(--border));
 }
 /* Quick-action cluster (flip H, flip V, rotate 90°) — sits between the
    rotation input and the Apply button. Each button matches the input
@@ -1188,11 +1171,11 @@
 .ge-transform-quick-btn:hover {
   opacity: 1;
   color: var(--fg);
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 55%, var(--border));
-  background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);
+  border-color: color-mix(in srgb, var(--red) 55%, var(--border));
+  background: color-mix(in srgb, var(--red) 12%, transparent);
 }
 .ge-transform-quick-btn:active {
-  background: color-mix(in srgb, var(--accent, var(--red)) 25%, transparent);
+  background: color-mix(in srgb, var(--red) 25%, transparent);
 }
 .ge-transform-popup-hint {
   font-size: 10px;
@@ -1210,7 +1193,7 @@
   cursor: pointer;
 }
 .ge-transform-preserve-field input {
-  accent-color: var(--accent, var(--red));
+  accent-color: var(--red);
   margin: 0;
 }
 
@@ -1356,9 +1339,7 @@
      stays visible when the slider expands left over the label. */
   position: relative;
 }
-/* Inline value chip next to the label text. (Previously absolutely-
-   positioned over the slider track to ride the expand animation, which
-   caused overlap now that the dynamic-slider behavior is off for these.) */
+/* Inline value chip next to the label text. */
 .ge-eraser-row label > span[id$="-label"] {
   margin-left: 4px;
   padding: 0 4px;
@@ -1463,7 +1444,6 @@
   width: 100%;
   text-align: left;
   padding: 5px 8px;
-  font-size: 11px;
   gap: 8px;
   font: inherit;
   font-size: 11px;
@@ -1503,19 +1483,7 @@
    ? span so the chip hugs the title with no extra gap. */
 .ge-section-title-with-help .ge-section-help { margin-left: 0; }
 .ge-section-help {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--fg) 12%, transparent);
-  color: var(--fg-muted);
-  font-size: 9px;
-  font-weight: 700;
-  cursor: help;
   user-select: none;
-  transition: background 0.12s, color 0.12s;
 }
 .ge-section-help:hover,
 .ge-section-help:focus-visible {
@@ -1715,7 +1683,7 @@
 .ge-layer-fx-btn:hover { opacity: 0.9; }
 .ge-layer-fx-btn.active {
   opacity: 1;
-  color: var(--accent, var(--red));
+  color: var(--red);
 }
 /* Add-mask button on each layer row. Subtle by default; lights up red
    when a lasso/wand selection is live so the user instantly sees that
@@ -1726,8 +1694,8 @@
 .ge-layer-mask-btn:hover { opacity: 0.9; }
 .ge-layer-mask-btn.from-selection {
   opacity: 1;
-  color: var(--accent, var(--red));
-  background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 14%, transparent);
 }
 
 /* Shared frosted-glass style for FX menu + adjustment popups. */
@@ -1804,7 +1772,7 @@
   width: 16px;
   display: inline-flex;
   justify-content: center;
-  color: var(--accent, var(--red));
+  color: var(--red);
   font-size: 13px;
 }
 .ge-add-layer-divider { height: 1px; margin: 4px 5px; background: color-mix(in srgb, var(--fg) 10%, transparent); }
@@ -1840,7 +1808,6 @@
   font-size: 16px; line-height: 1; cursor: pointer; padding: 0 4px;
   flex-shrink: 0;
 }
-.ge-history-close:hover { color: var(--fg); }
 /* Mobile-only: shift head icons/buttons up and enlarge the minimise
    glyph so it reads as a window-minimise affordance, not a centered
    minus. Desktop keeps the original tight head styling. */
@@ -1923,7 +1890,7 @@
 }
 .ge-adj-sub-icon {
   display: inline-flex; align-items: center;
-  color: var(--accent, var(--red));
+  color: var(--red);
   flex-shrink: 0;
 }
 .ge-adj-sub-icon svg { width: 11px; height: 11px; }
@@ -1964,8 +1931,8 @@
   color: var(--fg); font-size: 11px;
 }
 .ge-history-row:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); }
-.ge-history-row.current { background: color-mix(in srgb, var(--accent, var(--red)) 18%, transparent); }
-.ge-history-row.current .ge-history-row-dot { background: var(--accent, var(--red)); }
+.ge-history-row.current { background: color-mix(in srgb, var(--red) 18%, transparent); }
+.ge-history-row.current .ge-history-row-dot { background: var(--red); }
 .ge-history-row.future { opacity: 0.45; }
 .ge-history-row-dot {
   width: 6px; height: 6px; border-radius: 50%;
@@ -2021,9 +1988,9 @@
 .ge-canvas-loading-spinner {
   width: 32px; height: 32px;
   border: 3px solid color-mix(in srgb, var(--fg) 25%, transparent);
-  border-top-color: var(--accent, var(--red));
+  border-top-color: var(--red);
   border-radius: 50%;
-  animation: ge-canvas-spin 0.8s linear infinite;
+  animation: spin 0.8s linear infinite;
 }
 .ge-canvas-loading-msg { font-size: 12px; opacity: 0.85; }
 
@@ -2033,8 +2000,8 @@
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  background: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 30%, transparent);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
   border-radius: 6px;
   margin: 4px 0 8px;
   font-size: 11px;
@@ -2053,15 +2020,15 @@
 /* Brief highlight on a Cookbook deps row arrived-at via deep-link. */
 .cookbook-pkg-flash { animation: cookbook-pkg-flash 1.4s ease-out; }
 @keyframes cookbook-pkg-flash {
-  0%   { background: color-mix(in srgb, var(--accent, var(--red)) 30%, transparent); }
+  0%   { background: color-mix(in srgb, var(--red) 30%, transparent); }
   100% { background: transparent; }
 }
 
 /* Flash highlight when an anchor-link ([Name](#task-/#skill-/#research-))
    opens a panel and focuses a specific item. */
 @keyframes anchor-item-flash {
-  0%   { background: color-mix(in srgb, var(--accent, var(--red)) 28%, transparent); }
-  60%  { background: color-mix(in srgb, var(--accent, var(--red)) 18%, transparent); }
+  0%   { background: color-mix(in srgb, var(--red) 28%, transparent); }
+  60%  { background: color-mix(in srgb, var(--red) 18%, transparent); }
   100% { background: transparent; }
 }
 .task-card-flash,
@@ -2073,7 +2040,7 @@
 
 .memory-item-focus {
   animation: anchor-item-flash 2.2s ease-out;
-  outline: 1px solid color-mix(in srgb, var(--accent, var(--red)) 45%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--red) 45%, transparent);
   outline-offset: 2px;
   border-radius: 6px;
 }
@@ -2128,8 +2095,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
-  border: 3px dashed color-mix(in srgb, var(--accent, var(--red)) 80%, transparent);
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+  border: 3px dashed color-mix(in srgb, var(--red) 80%, transparent);
   border-radius: 8px;
 }
 .ge-drop-overlay-msg {
@@ -2180,7 +2147,7 @@
   color: var(--fg);
   font: inherit;
 }
-.ge-adj-preset-select:focus { outline: none; border-color: var(--accent, var(--red)); }
+.ge-adj-preset-select:focus { outline: none; border-color: var(--red); }
 .ge-adj-popup { box-sizing: border-box; overflow: hidden; }
 .ge-adj-foot {
   display: flex; gap: 6px; justify-content: flex-end;
@@ -2189,9 +2156,9 @@
 }
 .ge-adj-foot-spacer { flex: 1 1 auto; }
 .ge-adj-compare-btn.is-active {
-  color: var(--accent, var(--red));
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 65%, transparent);
-  background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 65%, transparent);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
 }
 .ge-adj-channel-field {
   display: grid;
@@ -2262,7 +2229,7 @@
 }
 .ge-curves-canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
 .ge-adj-help { margin: 7px 0 0; font-size: 9px; line-height: 1.35; opacity: .5; }
-.ge-adjustment-layer-item .ge-layer-adjustment-marker { color: var(--accent, var(--red)); }
+.ge-adjustment-layer-item .ge-layer-adjustment-marker { color: var(--red); }
 .ge-adjustment-layer-item .ge-layer-adjustment-marker svg { width: 12px; height: 12px; }
 /* Mobile-only: oversize the foot Cancel/Apply buttons to match the
    Transform popup. Desktop keeps the original ge-btn-sm sizing. */
@@ -2345,10 +2312,8 @@
 .ge-adj-row input[type="range"]:active::-moz-range-thumb {
   width: 18px; height: 18px;
 }
-/* Value chip — fixed-width column, text aligned LEFT so the chip's
-   left edge always sits immediately after the slider regardless of
-   value length. Without a fixed width Hue's "180 °" made its slider
-   shorter than Saturation's "100" since slider was flex-1. */
+/* Value chip: fixed-width column, text aligned left, so every slider
+   keeps the same flex-1 width whatever the value length. */
 .ge-adj-value {
   flex: 0 0 34px;
   margin-left: 0;
@@ -2423,7 +2388,7 @@
 .ge-adj-hist-handle:hover { border-bottom-color: var(--fg); }
 .ge-adj-hist-handle.hist-h-black { border-bottom-color: #111; }
 .ge-adj-hist-handle.hist-h-white { border-bottom-color: #fff; }
-.ge-adj-hist-handle.hist-h-gamma { border-bottom-color: var(--accent, var(--red)); }
+.ge-adj-hist-handle.hist-h-gamma { border-bottom-color: var(--red); }
 /* Per-slider revert button. */
 .ge-adj-revert {
   background: none; border: none;
@@ -2439,7 +2404,7 @@
 .ge-adj-sub-item {
   padding-left: 18px;
   opacity: 0.85;
-  border-left: 2px solid color-mix(in srgb, var(--accent, var(--red)) 35%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--red) 35%, transparent);
   margin-left: 6px;
   font-size: 10.5px;
 }
@@ -2503,9 +2468,9 @@
 }
 .ge-btn:hover { background: color-mix(in srgb, var(--fg) 10%, var(--bg)); }
 .ge-btn.active {
-  background: color-mix(in srgb, var(--accent, var(--red)) 16%, var(--bg));
-  border-color: var(--accent, var(--red));
-  color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--red) 16%, var(--bg));
+  border-color: var(--red);
+  color: var(--red);
 }
 .ge-btn-sm { padding: 3px 6px; font-size: 10px; }
 /* Busy state on AI tool buttons — whirlpool + verb text side by side. */
@@ -2541,9 +2506,9 @@
 .ge-inpaint-mode-btn:hover { opacity: 0.85; }
 .ge-inpaint-mode-btn.active {
   opacity: 1;
-  background: color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
-  border-color: var(--accent, var(--red));
-  color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+  border-color: var(--red);
+  color: var(--red);
   font-weight: 600;
 }
 /* Wand New / + Add / − Subtract segmented toggle. */
@@ -2557,9 +2522,9 @@
 .ge-wand-mode-btn:hover { opacity: 0.85; }
 .ge-wand-mode-btn.active {
   opacity: 1;
-  background: color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
-  border-color: var(--accent, var(--red));
-  color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+  border-color: var(--red);
+  color: var(--red);
   font-weight: 600;
 }
 .ge-wand-live-btn {
@@ -2577,9 +2542,9 @@
 .ge-wand-live-btn:hover { opacity: 0.85; }
 .ge-wand-live-btn.active {
   opacity: 1;
-  background: color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
-  border-color: var(--accent, var(--red));
-  color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+  border-color: var(--red);
+  color: var(--red);
   font-weight: 600;
 }
 /* Top-bar buttons (undo/redo, zoom +/-, Fit, 1:1, Resize, Edge, Import,
@@ -2650,7 +2615,6 @@
   align-items: center;
   justify-content: center;
   opacity: 0.7;
-  /* Glyph nudged 1 px right (was 2 px left). */
   position: relative;
   left: -1px;
 }
@@ -2695,7 +2659,7 @@
   gap: 5px;
   padding: 3px 10px;
   border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--accent, var(--red)) 8%, var(--bg-secondary));
+  background: color-mix(in srgb, var(--red) 8%, var(--bg-secondary));
   color: var(--fg);
   font-size: 10px;
 }
@@ -3563,7 +3527,7 @@ button .spinner-whirlpool {
 }
 .ge-layer-item:focus-visible,
 .ge-layer-group-row:focus-visible {
-  outline: 1px solid var(--accent, var(--red));
+  outline: 1px solid var(--red);
   outline-offset: -1px;
 }
 @media (min-width: 701px) {
@@ -3619,9 +3583,9 @@ button .spinner-whirlpool {
 /* Row-hover tint removed — kept the layer row's background stable so
    it doesn't shift visually as the user reaches for the opacity slider. */
 .ge-layer-item.active {
-  background: color-mix(in srgb, var(--accent, var(--red)) 52%, var(--bg-secondary, var(--bg)));
-  border-left-color: var(--accent, var(--red));
-  box-shadow: inset 3px 0 0 var(--accent, var(--red)), inset 0 0 0 1px color-mix(in srgb, var(--accent, var(--red)) 80%, transparent);
+  background: color-mix(in srgb, var(--red) 52%, var(--bg-secondary, var(--bg)));
+  border-left-color: var(--red);
+  box-shadow: inset 3px 0 0 var(--red), inset 0 0 0 1px color-mix(in srgb, var(--red) 80%, transparent);
 }
 .ge-layer-item.active > .ge-layer-name,
 .ge-layer-group-row.active > .ge-layer-group-name { font-weight: 700; }
@@ -3634,8 +3598,8 @@ button .spinner-whirlpool {
   border-left-color: color-mix(in srgb, var(--fg) 30%, transparent);
 }
 .ge-layer-item.selected:not(.active):not(.active-parent) {
-  background: color-mix(in srgb, var(--accent, var(--red)) 22%, var(--bg));
-  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent, var(--red)) 55%, transparent);
+  background: color-mix(in srgb, var(--red) 22%, var(--bg));
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--red) 55%, transparent);
 }
 .ge-layer-group-row {
   min-height: 36px;
@@ -3689,7 +3653,7 @@ button .spinner-whirlpool {
 .ge-layer-group-drag { touch-action: none; }
 .ge-layer-group-row.group-dragging {
   opacity: 0.62;
-  outline: 1px solid color-mix(in srgb, var(--accent, var(--red)) 65%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--red) 65%, transparent);
 }
 .ge-group-drop-line {
   position: absolute;
@@ -3698,12 +3662,12 @@ button .spinner-whirlpool {
   right: 6px;
   height: 2px;
   pointer-events: none;
-  background: var(--accent, var(--red));
+  background: var(--red);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--bg) 65%, transparent);
 }
 .ge-layer-group-row.active {
-  background: color-mix(in srgb, var(--accent, var(--red)) 38%, var(--bg-secondary));
-  box-shadow: inset 2px 0 0 var(--accent, var(--red)), inset 0 0 0 1px color-mix(in srgb, var(--accent, var(--red)) 50%, transparent);
+  background: color-mix(in srgb, var(--red) 38%, var(--bg-secondary));
+  box-shadow: inset 2px 0 0 var(--red), inset 0 0 0 1px color-mix(in srgb, var(--red) 50%, transparent);
 }
 .ge-layer-group-toggle {
   width: 18px;
@@ -3752,7 +3716,7 @@ button .spinner-whirlpool {
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
-  color: var(--accent, var(--red));
+  color: var(--red);
   opacity: 0.82;
 }
 .ge-layer-name-input {
@@ -3849,8 +3813,8 @@ button .spinner-whirlpool {
   flex-shrink: 0;
 }
 .ge-layer-controls .ge-mask-inspect-btn.active {
-  color: var(--accent, var(--red));
-  background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 14%, transparent);
 }
 .ge-mask-properties {
   position: relative;
@@ -3860,7 +3824,7 @@ button .spinner-whirlpool {
 .ge-mask-properties[open] > summary {
   opacity: 0.8;
 }
-.ge-mask-properties[open] > summary { color: var(--accent, var(--red)); opacity: 0.95; }
+.ge-mask-properties[open] > summary { color: var(--red); opacity: 0.95; }
 .ge-mask-properties-panel {
   position: fixed;
   box-sizing: border-box;
@@ -3892,14 +3856,14 @@ button .spinner-whirlpool {
 .ge-mask-apply-btn {
   width: 100%;
   min-height: 26px;
-  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 55%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--red) 55%, var(--border));
   border-radius: 4px;
-  background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
   color: var(--fg);
   cursor: pointer;
   font-size: 10px;
 }
-.ge-mask-apply-btn:hover { background: color-mix(in srgb, var(--accent, var(--red)) 22%, transparent); }
+.ge-mask-apply-btn:hover { background: color-mix(in srgb, var(--red) 22%, transparent); }
 .ge-layer-tools {
   display: flex;
   align-items: center;
@@ -3998,7 +3962,7 @@ button .spinner-whirlpool {
   transition: opacity 0.1s;
 }
 .ge-layer-btn:hover { opacity: 0.8; }
-.ge-layer-btn.active { color: var(--accent, var(--red)); opacity: 0.95; }
+.ge-layer-btn.active { color: var(--red); opacity: 0.95; }
 .ge-layer-btn:disabled { cursor: default; opacity: 0.16; }
 .ge-layer-style-btn { font-style: italic; font-weight: 700; font-size: 13px; }
 .ge-layer-style-menu {
@@ -4064,7 +4028,7 @@ button .spinner-whirlpool {
   justify-content: center;
   border: 1px solid color-mix(in srgb, var(--fg) 28%, transparent);
   border-radius: 3px;
-  color: var(--accent, var(--red));
+  color: var(--red);
   font-size: 11px;
   line-height: 1;
 }
@@ -4282,8 +4246,8 @@ button .spinner-whirlpool {
     scrollbar-width: none;
   }
   .ge-toolbar::-webkit-scrollbar { display: none; }
-  /* Section labels in the toolbar were vertical breaks — turn them
-     into thin vertical dividers when the column flows horizontally. */
+  /* Section labels become thin vertical dividers when the column flows
+     horizontally. */
   .ge-tool-sep {
     border-top: none;
     border-left: 1px solid var(--border);
@@ -4582,7 +4546,6 @@ button .spinner-whirlpool {
     top: -1px;
   }
   .ge-transform-spin {
-    display: inline-flex !important;
     flex-direction: row !important;
     /* Use grid-order to swap positions of [−][+]: the − should sit
        BEFORE the input, the + AFTER it. Achieve this by absolute
@@ -4613,10 +4576,9 @@ button .spinner-whirlpool {
   .ge-transform-spin button[data-spin="up"] {
     order: 3;
   }
-  /* The buttons themselves — chunky, square, identical in size. Reset
-     the base `:first-child` rule (which strips the bottom border for
-     the old stacked layout) so both buttons render with the same
-     visual box in the new row layout. */
+  /* Chunky, square, identical buttons. Reset the base `:first-child`
+     rule (it strips the bottom border for the stacked layout) so both
+     render the same box in the row layout. */
   .ge-transform-spin button {
     box-sizing: border-box !important;
     width: 36px !important;
@@ -4684,10 +4646,8 @@ button .spinner-whirlpool {
     width: 22px !important;
     height: 22px !important;
   }
-  /* Slider value bubble on mobile — bigger text/padding for
-     readability. Position is JS-driven via `position: fixed` from the
-     base rule, so don't override top/bottom here — `bottom: 100%`
-     with fixed positioning was pushing the bubble off-screen. */
+  /* Slider value bubble on mobile: bigger text and padding. JS positions
+     it via `position: fixed` from the base rule, so leave top/bottom alone. */
   .ge-slider-bubble {
     font-size: 14px !important;
     padding: 5px 10px !important;

@@ -1,4 +1,5 @@
 /** Shared sampled renderer for brush, eraser, clone, masks, and retouch tools. */
+import { makeCanvas } from './placed-layer.js';
 import { state } from './state.js';
 import { createBrushSampler, pressureValue } from './brush-engine.js';
 import { isLayerTransparencyLocked } from './layer-groups.js';
@@ -102,9 +103,7 @@ export function createStrokePipeline({ activeLayer, getActiveMaskLayer, composit
     const sx = state.cloneSourceX - (state.cloneSourceOffsetX || 0) + (sample.x - state.cloneStrokeStartX);
     const sy = state.cloneSourceY - (state.cloneSourceOffsetY || 0) + (sample.y - state.cloneStrokeStartY);
     const size = Math.max(2, Math.ceil(radius * 2));
-    const stamp = document.createElement('canvas');
-    stamp.width = size;
-    stamp.height = size;
+    const stamp = makeCanvas(size, size);
     const stampCtx = stamp.getContext('2d');
     stampCtx.drawImage(state.cloneSourceSnapshot, sx - radius, sy - radius, size, size, 0, 0, size, size);
     stampCtx.globalCompositeOperation = 'destination-in';
@@ -182,9 +181,7 @@ export function createStrokePipeline({ activeLayer, getActiveMaskLayer, composit
       );
       return;
     }
-    const stamp = document.createElement('canvas');
-    stamp.width = size;
-    stamp.height = size;
+    const stamp = makeCanvas(size, size);
     const stampCtx = stamp.getContext('2d');
     stampCtx.drawImage(smudgeBuffer, 0, 0);
     stampCtx.globalCompositeOperation = 'destination-in';

@@ -43,7 +43,7 @@ export function createLayout({ isOpen = () => true } = {}) {
     const isGrid = pane?.classList.contains('notes-view-grid');
     const isMobileGrid = isGrid && window.matchMedia('(max-width: 768px)').matches;
     // Tear down any prior observer (defensive : _renderNotes wipes body.innerHTML).
-    if (_masonryObserver) { try { _masonryObserver.disconnect(); } catch {} _masonryObserver = null; }
+    if (_masonryObserver) { _masonryObserver.disconnect(); _masonryObserver = null; }
     // A save that resolves after close re-renders the leaving pane; don't
     // re-create the observer that panel teardown already disposed.
     if (!isOpen()) return;

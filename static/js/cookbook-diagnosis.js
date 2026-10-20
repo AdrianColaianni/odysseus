@@ -1,8 +1,3 @@
-// ============================================
-// COOKBOOK DIAGNOSIS SUB-MODULE
-// Error pattern matching and diagnosis UI
-// ============================================
-
 import {
   _envState,
   _loadTasks,
@@ -13,6 +8,8 @@ import {
   _setPanelField,
   _setPanelCheckbox,
   _copyText,
+  fetchWithTimeout,
+  esc,
   _persistEnvState,
   _tmuxCmd,
   _serveAutoRetry,
@@ -23,27 +20,6 @@ import {
   // browser loads it once. See cookbook-hwfit.js.
 } from './cookbook.js';
 import uiModule from './ui.js?v=20260916largetoolscroll1';
-
-// Tiny HTML-escape — keeps the file standalone instead of leaning on a
-// shared helper that may not be exported from this module's import surface.
-function _diagEsc(s) {
-  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-
-function _diagFetchWithTimeout(input, init = {}, timeoutMs = 75000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const parentSignal = init.signal;
-  const abortFromParent = () => controller.abort();
-  if (parentSignal) {
-    if (parentSignal.aborted) controller.abort();
-    else parentSignal.addEventListener('abort', abortFromParent, { once: true });
-  }
-  return fetch(input, { ...init, signal: controller.signal }).finally(() => {
-    clearTimeout(timer);
-    parentSignal?.removeEventListener('abort', abortFromParent);
-  });
-}
 
 // Pick an icon for a diagnosis-action button based on the label. The icon
 // renders on the LEFT of the button text. Keeps the strokes consistent
@@ -77,8 +53,6 @@ function _diagFixIcon(label) {
   return _svg('<path d="M9 21h6"/><path d="M12 17v4"/><path d="M12 3a6 6 0 0 0-4 10.5c1 1 1.5 2 1.5 3.5h5c0-1.5.5-2.5 1.5-3.5A6 6 0 0 0 12 3Z"/>');
 }
 import spinnerModule from './spinner.js';
-
-// ── Error diagnosis ──
 
 // Re-exported so callers (Launch-tab pre-flight) can deep-link into the
 // Dependencies tab + auto-expand a specific backend's recipe panel and
@@ -971,10 +945,6 @@ export function _showDiagnosis(panel, diagnosis, sourceText) {
   copyBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
     const bundle = _diagnosisCopyBundle(task, diagnosis, sourceText, suggestionText);
-    // Use the shared helper which falls back to execCommand('copy') on
-    // non-HTTPS origins (Tailscale IPs, LAN IPs, etc.) — navigator.clipboard
-    // is silently a no-op on those, which is why the button appeared dead
-    // for users on http://100.113.161.2:7011 over Tailscale/mobile.
     const ok = await _copyText(bundle);
     if (ok) {
       copyBtn.classList.add('copied');
@@ -1037,7 +1007,7 @@ export function _showDiagnosis(panel, diagnosis, sourceText) {
       const btn = document.createElement('button');
       btn.className = 'cookbook-btn cookbook-diag-btn';
       btn.type = 'button';
-      btn.innerHTML = _diagFixIcon(fix.label) + '<span class="cookbook-diag-btn-label">' + _diagEsc(fix.label) + '</span>';
+      btn.innerHTML = _diagFixIcon(fix.label) + '<span class="cookbook-diag-btn-label">' + esc(fix.label) + '</span>';
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         runFix(fix, btn);
@@ -1054,8 +1024,6 @@ export function _clearDiagnosis(panel) {
   if (diag) { diag.innerHTML = ''; diag.classList.add('hidden'); }
 }
 
-// ── Quick command ──
-
 export async function _runQuickCmd(panel, cmd) {
   const task = _taskForDiagnosisPanel(panel);
   let fullCmd = cmd;
@@ -1071,24 +1039,24 @@ export async function _runQuickCmd(panel, cmd) {
   }
 
   try {
-    const res = await _diagFetchWithTimeout('/api/shell/exec', {
+    const res = await fetchWithTimeout('/api/shell/exec', {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command: fullCmd, timeout: 60 }),
-    });
+    }, 75000);
     const data = await res.json().catch(() => ({}));
     const out = [data.stdout, data.stderr].filter(Boolean).join('\n').trim();
     const ok = res.ok && Number(data.exit_code ?? 1) === 0;
     if (diag) {
       diag.innerHTML = ''
         + `<div class="cookbook-diag-message">${ok ? 'Command completed.' : 'Command failed.'}</div>`
-        + `<div class="cookbook-diag-suggestion" style="opacity:0.75;margin-top:1px;">Exit code: ${_diagEsc(data.exit_code ?? 'unknown')}</div>`
-        + (out ? `<pre class="cookbook-diag-output" style="margin:6px 0 0;white-space:pre-wrap;max-height:180px;overflow:auto;font-size:10px;line-height:1.35;">${_diagEsc(out)}</pre>` : '');
+        + `<div class="cookbook-diag-suggestion" style="opacity:0.75;margin-top:1px;">Exit code: ${esc(String(data.exit_code ?? 'unknown'))}</div>`
+        + (out ? `<pre class="cookbook-diag-output" style="margin:6px 0 0;white-space:pre-wrap;max-height:180px;overflow:auto;font-size:10px;line-height:1.35;">${esc(out)}</pre>` : '');
     }
   } catch (e) {
     if (diag) {
-      diag.innerHTML = `<div class="cookbook-diag-message">Command error.</div><div class="cookbook-diag-suggestion">${_diagEsc(e.message)}</div>`;
+      diag.innerHTML = `<div class="cookbook-diag-message">Command error.</div><div class="cookbook-diag-suggestion">${esc(e.message)}</div>`;
     }
   }
 }

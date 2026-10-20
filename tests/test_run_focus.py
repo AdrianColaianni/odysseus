@@ -266,17 +266,17 @@ def test_run_last_failed_only():
     ]]
 
 
-@pytest.mark.parametrize("value", ["cookbook", "sub_cookbook"])
-def test_run_accepts_both_sub_area_forms(value):
-    executor = _FakeExecutor()
-    run(["--sub-area", value], executor=executor)
-    assert executor.calls == [[
-        sys.executable,
-        "-m",
-        "pytest",
-        "-m",
-        "sub_cookbook",
-    ]]
+def test_run_accepts_both_sub_area_forms():
+    for value in ["cookbook", "sub_cookbook"]:
+        executor = _FakeExecutor()
+        run(["--sub-area", value], executor=executor)
+        assert executor.calls == [[
+            sys.executable,
+            "-m",
+            "pytest",
+            "-m",
+            "sub_cookbook",
+        ]]
 
 
 def test_run_keeps_embedding_memory_selector_specific():
@@ -371,25 +371,25 @@ def test_durations_zero_is_allowed_means_show_all():
     ]]
 
 
-@pytest.mark.parametrize("flag,value", [("--durations", "-1"), ("--durations-min", "-0.5")])
-def test_negative_duration_values_are_rejected(flag, value):
-    executor = _FakeExecutor()
-    with pytest.raises(SystemExit) as excinfo:
-        run(["--fast", flag, value], executor=executor)
-    assert excinfo.value.code == 2
-    assert executor.calls == []
+def test_negative_duration_values_are_rejected():
+    for flag, value in [("--durations", "-1"), ("--durations-min", "-0.5")]:
+        executor = _FakeExecutor()
+        with pytest.raises(SystemExit) as excinfo:
+            run(["--fast", flag, value], executor=executor)
+        assert excinfo.value.code == 2
+        assert executor.calls == []
 
 
-@pytest.mark.parametrize("argv", [
-    ["--fast", "--durations-min", "0.05"],
-    ["--area", "services", "--durations-min", "0.05"],
-])
-def test_durations_min_without_durations_is_rejected(argv):
-    executor = _FakeExecutor()
-    with pytest.raises(SystemExit) as excinfo:
-        run(argv, executor=executor)
-    assert excinfo.value.code == 2
-    assert executor.calls == []
+def test_durations_min_without_durations_is_rejected():
+    for argv in [
+        ["--fast", "--durations-min", "0.05"],
+        ["--area", "services", "--durations-min", "0.05"],
+    ]:
+        executor = _FakeExecutor()
+        with pytest.raises(SystemExit) as excinfo:
+            run(argv, executor=executor)
+        assert excinfo.value.code == 2
+        assert executor.calls == []
 
 
 def test_durations_min_with_durations_is_allowed():

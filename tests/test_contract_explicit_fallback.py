@@ -3,8 +3,6 @@ import ast
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 from src.agent_loop import ToolBlock, _has_accepted_contract_tool_call
 
 
@@ -35,31 +33,31 @@ def run_fallback(blocks, contract):
     return state, native, converted
 
 
-@pytest.mark.parametrize("tool,args", [
-    ("web_search", '{"query":"IANA example domains","count":1}'),
-    ("web_fetch", '{"url":"https://www.iana.org/help/example-domains"}'),
-    ("web_search", "IANA example domains"),
-])
-def test_in_scope_call_keeps_arguments_identity_and_native_ids(tool, args):
-    blocks = [ToolBlock(tool, args)]
+def test_in_scope_call_keeps_arguments_identity_and_native_ids():
     contract = SimpleNamespace(permits=lambda name: name in {"web_search", "web_fetch"})
-    state, native, converted = run_fallback(blocks, contract)
-    assert state["tool_blocks"] is blocks
-    assert state["tool_blocks"][0].content == args
-    assert state["native_tool_calls"] is native
-    assert state["converted_calls"] is converted
-    assert state["native_tool_calls"][0]["id"] == "call_search_1"
-    assert state["used_native"] is True
-    assert state["full_response"] == "model preamble"
+    for tool, args in (
+        ("web_search", '{"query":"IANA example domains","count":1}'),
+        ("web_fetch", '{"url":"https://www.iana.org/help/example-domains"}'),
+        ("web_search", "IANA example domains"),
+    ):
+        blocks = [ToolBlock(tool, args)]
+        state, native, converted = run_fallback(blocks, contract)
+        assert state["tool_blocks"] is blocks
+        assert state["tool_blocks"][0].content == args
+        assert state["native_tool_calls"] is native
+        assert state["converted_calls"] is converted
+        assert state["native_tool_calls"][0]["id"] == "call_search_1"
+        assert state["used_native"] is True
+        assert state["full_response"] == "model preamble"
 
 
-@pytest.mark.parametrize("blocks", [[], [ToolBlock("manage_notes", '{"action":"list"}')]])
-def test_fallback_remains_when_no_accepted_contract_call(blocks):
+def test_fallback_remains_when_no_accepted_contract_call():
     contract = SimpleNamespace(permits=lambda name: name == "web_search")
-    state, _, _ = run_fallback(blocks, contract)
-    assert state["tool_blocks"][0].content == state["_qwen_explicit_args"]
-    assert state["native_tool_calls"] == []
-    assert state["used_native"] is False
+    for blocks in ([], [ToolBlock("manage_notes", '{"action":"list"}')]):
+        state, _, _ = run_fallback(blocks, contract)
+        assert state["tool_blocks"][0].content == state["_qwen_explicit_args"]
+        assert state["native_tool_calls"] == []
+        assert state["used_native"] is False
 
 
 def test_standalone_behavior_is_unchanged():

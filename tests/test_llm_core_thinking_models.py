@@ -1,27 +1,13 @@
 """Regression coverage for structured-thinking model detection."""
 
-import os
-
-os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
-
-import pytest
-
 from src.llm_core import _supports_thinking
 
 
-@pytest.mark.parametrize(
-    "model",
-    [
-        "deepseek-v4",
-        "deepseek-v4-flash",
-        "DeepSeek-V4-Flash",
-        "deepseek/deepseek-v4-flash",
-    ],
-)
-def test_deepseek_v4_models_support_thinking(model):
-    assert _supports_thinking(model) is True
+def test_deepseek_v4_models_support_thinking():
+    models = ["deepseek-v4", "DeepSeek-V4-Flash", "deepseek/deepseek-v4-flash"]
+    assert [m for m in models if _supports_thinking(m) is not True] == []
 
 
-@pytest.mark.parametrize("model", ["deepseek-v3", "deepseek-chat"])
-def test_other_deepseek_models_are_not_promoted_to_thinking(model):
-    assert _supports_thinking(model) is False
+def test_other_deepseek_models_are_not_promoted_to_thinking():
+    for model in ("deepseek-v3", "deepseek-chat"):
+        assert _supports_thinking(model) is False

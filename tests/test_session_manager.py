@@ -4,9 +4,6 @@ These tests prove the chat context drifting bug (#135) exists and verify fixes.
 Uses mocked DB to test in-memory session management logic in isolation.
 """
 
-import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 from unittest.mock import MagicMock, patch

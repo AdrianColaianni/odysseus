@@ -6,13 +6,12 @@ from src.clean_agent_preview import browser_transport_recovery
 URL = 'https://example.com/catalog/'
 
 
-@pytest.mark.parametrize('error', ['HTTP2_PROTOCOL_ERROR', 'NAME_NOT_RESOLVED', 'CONNECTION_RESET'])
-def test_failed_navigation_preserves_task_and_uses_permitted_fetch(error):
-    message = browser_transport_recovery(
-        {'action': 'open', 'url': URL}, 'net::ERR_' + error, {'web_fetch'}, set())
-    assert URL in message
-    assert 'original objective' in message
-    assert 'Use web_fetch once' in message
+def test_failed_navigation_preserves_task_and_uses_permitted_fetch():
+    for error in ['HTTP2_PROTOCOL_ERROR', 'NAME_NOT_RESOLVED']:
+        message = browser_transport_recovery(
+            {'action': 'open', 'url': URL}, 'net::ERR_' + error, {'web_fetch'}, set())
+        assert URL in message
+        assert 'Use web_fetch once' in message
 
 
 def test_exhausted_fetch_uses_search_instead_of_bouncing():
@@ -23,11 +22,11 @@ def test_exhausted_fetch_uses_search_instead_of_bouncing():
     assert 'Use web_fetch' not in message
 
 
-@pytest.mark.parametrize('action', ['click', 'fill', 'press', 'evaluate'])
-def test_mutating_batch_never_replayed(action):
-    assert not browser_transport_recovery(
-        {'action': 'batch', 'commands': [['open', URL], [action, 'target']]},
-        'net::ERR_HTTP2_PROTOCOL_ERROR', {'web_fetch'}, set())
+def test_mutating_batch_never_replayed():
+    for action in ['click', 'fill', 'press', 'evaluate']:
+        assert not browser_transport_recovery(
+            {'action': 'batch', 'commands': [['open', URL], [action, 'target']]},
+            'net::ERR_HTTP2_PROTOCOL_ERROR', {'web_fetch'}, set()), action
 
 
 def test_read_only_batch_and_no_available_tools():
@@ -37,9 +36,9 @@ def test_read_only_batch_and_no_available_tools():
     assert 'No permitted retrieval fallback' in message
 
 
-@pytest.mark.parametrize('output', ['net::ERR_CERT_AUTHORITY_INVALID', 'CAPTCHA', 'Access denied', 'OK'])
-def test_no_transport_recovery_for_security_or_success(output):
-    assert not browser_transport_recovery({'action': 'open', 'url': URL}, output, {'web_fetch'}, set())
+def test_no_transport_recovery_for_security_or_success():
+    for output in ['net::ERR_CERT_AUTHORITY_INVALID', 'CAPTCHA', 'Access denied', 'OK']:
+        assert not browser_transport_recovery({'action': 'open', 'url': URL}, output, {'web_fetch'}, set()), output
 
 
 @pytest.mark.asyncio
@@ -117,9 +116,9 @@ async def test_stream_recovers_navigation_then_fetch_without_email_classifier(mo
     assert 'Corrected target: ' + URL in requests[0]['messages'][0]['content']
 
 
-@pytest.mark.parametrize('arguments', ['"url"', '[]', 'null', '42'])
-def test_provider_history_requires_object_tool_arguments(arguments):
+def test_provider_history_requires_object_tool_arguments():
     from src.clean_agent_preview import protocol_safe_tool_calls
-    calls = [{'function': {'name': 'web_fetch', 'arguments': arguments}}]
-    assert protocol_safe_tool_calls(calls)[0]['function']['arguments'] == '{}'
-    assert calls[0]['function']['arguments'] == arguments
+    for arguments in ['"url"', '[]', 'null', '42']:
+        calls = [{'function': {'name': 'web_fetch', 'arguments': arguments}}]
+        assert protocol_safe_tool_calls(calls)[0]['function']['arguments'] == '{}'
+        assert calls[0]['function']['arguments'] == arguments

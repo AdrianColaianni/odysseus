@@ -101,5 +101,5 @@ export function createSettingsShell(options = {}) {
     hideSettingsModal(modalEl);
   }
 
-  return { open, close, onPanelActivated, openAdminTab, syncAdminVisibility };
+  return { open, close, onPanelActivated, openAdminTab };
 }

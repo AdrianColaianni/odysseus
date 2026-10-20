@@ -6,33 +6,33 @@ import pytest
 from src.task_endpoint import _same_endpoint_base, resolve_task_candidates
 
 
-@pytest.mark.parametrize("url", [
-    "https://untrusted.test/https://api.example.test/v1/chat/completions",
-    "https://api.example.test.evil.test/v1",
-    "http://api.example.test/v1",
-    "https://api.example.test:444/v1",
-    "https://api.example.test/v10",
-    "https://api.example.test/v1?redirect=elsewhere",
-    "https://user@api.example.test/v1",
-])
-def test_unrelated_override_receives_no_saved_credentials(monkeypatch, url):
+def test_unrelated_override_receives_no_saved_credentials(monkeypatch):
     import src.database as database
     import src.endpoint_resolver as resolver
     import src.task_endpoint as tasks
 
-    db = MagicMock()
-    db.query.return_value.filter.return_value.all.return_value = [
-        SimpleNamespace(base_url="https://api.example.test/v1")
-    ]
-    monkeypatch.setattr(database, "SessionLocal", lambda: db)
-    runtime = MagicMock(return_value=("https://api.example.test/v1", "dummy-secret"))
-    monkeypatch.setattr(resolver, "resolve_endpoint_runtime", runtime)
-    monkeypatch.setattr(tasks, "resolve_task_endpoint", lambda *a, **k: (None, None, {}))
-    monkeypatch.setattr(tasks, "resolve_endpoint", lambda *a, **k: (None, None, {}))
-    monkeypatch.setattr(tasks, "resolve_utility_fallback_candidates", lambda **k: [])
-    candidates = resolve_task_candidates(override_url=url, override_model="test")
-    assert candidates == [(url, "test", {})]
-    runtime.assert_not_called()
+    for url in [
+        "https://untrusted.test/https://api.example.test/v1/chat/completions",
+        "https://api.example.test.evil.test/v1",
+        "http://api.example.test/v1",
+        "https://api.example.test:444/v1",
+        "https://api.example.test/v10",
+        "https://api.example.test/v1?redirect=elsewhere",
+        "https://user@api.example.test/v1",
+    ]:
+        db = MagicMock()
+        db.query.return_value.filter.return_value.all.return_value = [
+            SimpleNamespace(base_url="https://api.example.test/v1")
+        ]
+        monkeypatch.setattr(database, "SessionLocal", lambda: db)
+        runtime = MagicMock(return_value=("https://api.example.test/v1", "dummy-secret"))
+        monkeypatch.setattr(resolver, "resolve_endpoint_runtime", runtime)
+        monkeypatch.setattr(tasks, "resolve_task_endpoint", lambda *a, **k: (None, None, {}))
+        monkeypatch.setattr(tasks, "resolve_endpoint", lambda *a, **k: (None, None, {}))
+        monkeypatch.setattr(tasks, "resolve_utility_fallback_candidates", lambda **k: [])
+        candidates = resolve_task_candidates(override_url=url, override_model="test")
+        assert candidates == [(url, "test", {})]
+        runtime.assert_not_called()
 
 
 def test_exact_api_base_allows_normalized_chat_path():
@@ -75,8 +75,8 @@ def test_credential_resolution_is_exact_and_owner_scoped(monkeypatch, tmp_path, 
         if resolver_kind == "task":
             headers = tasks.resolve_task_candidates(override_url=url, override_model="test", owner=owner)[0][2]
         else:
-            from routes.skills_routes import _resolve_audit_models
-            headers = _resolve_audit_models(owner=owner, endpoint_url=url, model_spec="test")[2]
+            from services.skills.model_selection import resolve_audit_models
+            headers = resolve_audit_models(owner=owner, endpoint_url=url, model_spec="test")[2]
         assert headers.get("Authorization") == expected
     finally:
         engine.dispose()

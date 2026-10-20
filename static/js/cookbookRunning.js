@@ -1,10 +1,5 @@
-// ============================================
-// COOKBOOK RUNNING SUB-MODULE
-// Running tasks tab: task cards, status monitoring,
-// stop/restart, diagnosis, auto-fix, background monitor
-// ============================================
-
 import uiModule from './ui.js?v=20260916largetoolscroll1';
+import { fetchWithTimeout, SERVE_STATE_KEY, _venvRootFromPath, _foregroundChatBusy } from './cookbook.js';
 import { _diagnose, _showDiagnosis, _clearDiagnosis } from './cookbook-diagnosis.js';
 import { registerMenuDismiss } from './escMenuStack.js';
 import { computeProgressSignal } from './cookbookProgressSignal.js';
@@ -144,13 +139,6 @@ function _canClearTask(task) {
 function _clearPillLabel(task) {
   if (_downloadOutputLooksActive(task)) return 'reconnect';
   return 'clear';
-}
-
-function _venvRootFromPath(path) {
-  let p = (path || '').toString().trim().replace(/\/+$/, '');
-  if (!p) return '';
-  p = p.replace(/\/bin\/(?:activate|python(?:3(?:\.\d+)?)?|vllm|pip(?:3)?)$/i, '');
-  return p;
 }
 
 // A pip dependency/driver install (payload._dep) reports success with the
@@ -428,7 +416,6 @@ let _soloExpandTaskId = null;
 // Storage keys
 const TASKS_KEY = 'cookbook-tasks';
 const STORAGE_KEY = 'cookbook-presets';
-const SERVE_STATE_KEY = 'cookbook-serve-state';
 const SERVE_FAVORITES_KEY = 'cookbook-serve-favorite-models';
 
 // Polling / timeout intervals
@@ -437,7 +424,7 @@ const BG_MONITOR_INTERVAL_MS = 10000;     // background task status poll
 const STALE_PROGRESS_MS = 5 * 60 * 1000;  // download with no progress this long = stale
 const STARTUP_STALE_PROGRESS_MS = 45 * 1000; // 0%-forever startup stall: retry much sooner
 
-// ── Phase detection (mirrors Python _parse_serve_phase in cookbook_routes.py) ──
+// Mirrors _parse_serve_phase in routes/cookbook_routes.py.
 // Single source of truth for serve task status. KEEP IN SYNC with the Python version.
 export function _parseServePhase(snapshot) {
   if (!snapshot) return {};
@@ -511,8 +498,6 @@ export function _parseServePhase(snapshot) {
   return {};
 }
 
-// ── Port auto-increment ──
-
 function _nextAvailablePort() {
   const tasks = _loadTasks();
   const presets = _loadPresets();
@@ -529,8 +514,6 @@ function _nextAvailablePort() {
   return nextFreePort(usedPorts);
 }
 
-// ── Endpoint cleanup ──
-
 async function _removeEndpointByUrl(baseUrl) {
   try {
     const res = await _fetchWithTimeout('/api/model-endpoints', { credentials: 'same-origin' });
@@ -543,7 +526,7 @@ async function _removeEndpointByUrl(baseUrl) {
       await _fetchWithTimeout(`/api/model-endpoints/${ep.id}`, { method: 'DELETE', credentials: 'same-origin' });
       _refreshModelsAfterEndpointChange();
     }
-  } catch {}
+  } catch (e) { console.warn('[cookbook] endpoint cleanup failed', e); }
 }
 
 function _refreshModelsAfterEndpointChange() {
@@ -661,7 +644,7 @@ function _isImageServeTask(task) {
   return cmd.includes('diffusion_server') || cmd.includes('mlx_image_server');
 }
 
-// ── Download queue — runs one at a time per server ──
+// Download queue: one download at a time per server.
 
 function _processQueue() {
   const tasks = _loadPrunedTasks();
@@ -744,8 +727,6 @@ async function _startQueuedDownload(task) {
     _renderRunningTab();
   }
 }
-
-// ── Task CRUD ──
 
 function _serveOutputLooksReady(task) {
   const out = String(task?.output || '');
@@ -1001,8 +982,6 @@ function _animateOutThenRemove(el, sessionId) {
   setTimeout(() => _removeTask(sessionId), 360);
 }
 
-// ── tmux / Windows session commands ──
-
 function _taskRemoteHost(task) {
   return task?.remoteHost || task?.payload?.remote_host || '';
 }
@@ -1173,8 +1152,6 @@ function _endpointUrlForTask(task, outputText = '') {
   return `http://${host}:${port}/v1`;
 }
 
-// ── Wave animation ──
-
 const _waveFrames = ['▁▂▃', '▂▃▄', '▃▄▅', '▄▅▆', '▅▆▅', '▆▅▄', '▅▄▃', '▄▃▂', '▃▂▁'];
 let _waveIdx = 0;
 let _waveTimer = null;
@@ -1220,8 +1197,6 @@ function _disposeTaskCard(el) {
   }
 }
 
-// ── Notifications ──
-
 function _showCookbookNotif(isError = false) {
   const dot = document.getElementById('cookbook-notif-dot');
   if (dot) {
@@ -1249,8 +1224,6 @@ export function _clearCookbookNotif() {
   }
   if (window._syncRailDynamic) window._syncRailDynamic();
 }
-
-// ── Presets helper (for save-from-task) ──
 
 // A preset must carry the venv + activated GPUs, not just the command — without
 // them a relaunch has no environment activated and no GPU pinning, so a config
@@ -1350,8 +1323,6 @@ function _autoSaveWorkingConfig(task) {
   uiModule.showToast('Saved working config');
 }
 
-// ── Cross-device sync ──
-
 let _syncTimer = null;
 function _syncToServer() {
   // Debounce to coalesce bursts of writes, but keep latency low so the server
@@ -1383,7 +1354,7 @@ function _syncToServer() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(_stripStateSecrets(state)),
       }, 15000);
-    } catch {}
+    } catch (e) { console.warn('[cookbook] state sync failed', e); }
   }, 400);
 }
 
@@ -1496,8 +1467,6 @@ export function _syncFromServer() {
   return pending;
 }
 
-// ── Retry download ──
-
 // Bounded auto-retry counter for downloads, keyed by model — network blips on
 // big multi-file downloads are common and HF resumes from the .incomplete parts.
 const _dlRetryCount = new Map();
@@ -1515,7 +1484,7 @@ async function _retryTask(el, task) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command: _tmuxGracefulKill(task) }),
     });
-  } catch {}
+  } catch (e) { console.warn('[cookbook] tmux kill failed', e); }
   if (task.payload) {
     if (task.type === 'serve' && task.payload._cmd) {
       _removeTask(task.sessionId);
@@ -1583,12 +1552,8 @@ async function _retryDownload(name, payload, replaceSessionId = '') {
   }
 }
 
-// ── Serve auto-fix (kill + relaunch with env var) ──
-
 // Block stacked retries: once any "Retry with X" is clicked for a task, ignore
-// every further retry click for it. Each retry fires its own _launchServeTask,
-// so clicking several options — or one repeatedly during the fade-out / while a
-// relaunch was loading — used to stack up multiple servers (e.g. 6 launches).
+// every further retry click for it, since each retry launches its own server.
 // The flag rides on the card element (removed right after), so it can't re-arm.
 function _guardServeRetry(panel, taskEl) {
   if (!taskEl || taskEl.dataset.retrying) return false;
@@ -1617,7 +1582,7 @@ export async function _serveAutoFix(panel, envVar) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command: killCmd }),
     });
-  } catch {}
+  } catch (e) { console.warn('[cookbook] tmux kill failed', e); }
 
   _animateOutThenRemove(taskEl, taskId);
 
@@ -1680,7 +1645,7 @@ export async function _serveAutoRetryReplace(panel, flag, value) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${taskId}`) }),
     });
-  } catch {}
+  } catch (e) { console.warn('[cookbook] tmux kill failed', e); }
 
   _animateOutThenRemove(taskEl, taskId);
 
@@ -1722,7 +1687,7 @@ export async function _serveAutoRetryRemove(panel, flag) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${taskId}`) }),
     });
-  } catch {}
+  } catch (e) { console.warn('[cookbook] tmux kill failed', e); }
 
   _animateOutThenRemove(taskEl, taskId);
 
@@ -1755,7 +1720,7 @@ export async function _serveAutoRetry(panel, flag) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${taskId}`) }),
     });
-  } catch {}
+  } catch (e) { console.warn('[cookbook] tmux kill failed', e); }
 
   _animateOutThenRemove(taskEl, taskId);
 
@@ -1774,7 +1739,6 @@ export async function _serveAutoRetry(panel, flag) {
   }
 }
 
-// ── Edit-command prompt ──
 // Shows a small modal with a textarea pre-filled with the current serve cmd.
 // Resolves to the edited string on Save, or null on Cancel.
 function _promptEditServeCmd(currentCmd) {
@@ -1810,8 +1774,6 @@ function _promptEditServeCmd(currentCmd) {
     document.addEventListener('keydown', onKey);
   });
 }
-
-// ── Launch serve task ──
 
 // Best-effort reconstruction of serve-form field values from a raw launch
 // command. Fallback for tasks created before _fields capture existed.
@@ -1980,7 +1942,7 @@ export async function _launchServeTask(shortName, repo, cmd, fields, hostOverrid
         });
         _removeTask(_old.sessionId);
       }
-    } catch {}
+    } catch (e) { console.warn('[cookbook] port-collision stop failed', e); }
   }
   // Replace any serve already targeting this same host:port — you can't run two
   // servers on one port, so re-serving (or retrying) should stop & remove the
@@ -2000,12 +1962,12 @@ export async function _launchServeTask(shortName, repo, cmd, fields, hostOverrid
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ command: _tmuxGracefulKill(_t) }),
             });
-          } catch {}
+          } catch (e) { console.warn('[cookbook] tmux kill failed', e); }
           _removeTask(_t.sessionId);
         }
       }
     }
-  } catch {}
+  } catch (e) { console.warn('[cookbook] port-collision stop failed', e); }
   // Capture the env + GPU pin used for THIS launch BEFORE building the request.
   // The serve panel sets _envState.env/envPath/gpus, calls us, then restores them
   // synchronously — and our payload is built after an `await`, so reading
@@ -2079,8 +2041,6 @@ export async function _launchServeTask(shortName, repo, cmd, fields, hostOverrid
     uiModule.showToast('Failed: ' + e.message);
   }
 }
-
-// ── Render Running tab ──
 
 export function _renderRunningTab() {
   // Auto-clear the sidebar notif (the bright-icon highlight) when no tasks
@@ -2246,7 +2206,6 @@ export function _renderRunningTab() {
   }
 
 
-  // ── Server-grouped sections ──
   group.querySelectorAll('.cookbook-serve-section, .cookbook-dl-section').forEach(el => el.remove());
 
   const serverKeys = Object.keys(serverGroups).sort((a, b) => {
@@ -2575,13 +2534,11 @@ export function _renderRunningTab() {
         }
         // Otherwise: real clear. Kill the tmux session as belt-and-suspenders,
         // then animate out + remove the row.
-        try {
-          _fetchWithTimeout('/api/shell/exec', {
-            method: 'POST', credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${task.sessionId}`) }),
-          }).catch(() => {});
-        } catch {}
+        _fetchWithTimeout('/api/shell/exec', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${task.sessionId}`) }),
+        }).catch(e => console.warn('[cookbook] tmux kill failed', e));
         _animateOutThenRemove(el, task.sessionId);
       });
     }
@@ -2946,7 +2903,7 @@ export function _renderRunningTab() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ command: ollamaUnload }),
           });
-        } catch {}
+        } catch (e) { console.warn('[cookbook] ollama unload failed', e); }
       }
       // Gracefully stop (C-c, then kill the session) so it's fully down...
       try {
@@ -2955,17 +2912,14 @@ export function _renderRunningTab() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ command: _tmuxGracefulKill(task) }),
         });
-      } catch {}
+      } catch (e) { console.warn('[cookbook] tmux kill failed', e); }
       // ...then smoothly fade/slide the card out and auto-remove it — no manual
       // ⋮ → Remove needed.
       _animateOutThenRemove(el, task.sessionId);
     });
 
-    // Wire kill — awaits the SSH/tmux kill and verifies the session is
-    // actually gone before removing the row. Previously fire-and-forget,
-    // which meant a failed kill (wrong remoteHost, SSH error, tmux server
-    // already exited) silently left the live serve running while the
-    // row disappeared from the UI.
+    // Verify the session is gone before removing the row, so a failed kill
+    // never hides a live serve.
     el.querySelector('.cookbook-task-action-kill').addEventListener('click', async () => {
       const outputText = el.querySelector('.cookbook-output-pre')?.textContent || task.output || '';
       const isLive = task.type === 'serve' && ['running', 'ready', 'loading', 'warming', 'starting'].includes(task.status || '');
@@ -3090,8 +3044,6 @@ export function _renderRunningTab() {
     if (chevron) { chevron.style.transform = 'rotate(-90deg)'; chevron.style.opacity = ''; }
   });
 }
-
-// ── Reconnect task (polling loop) ──
 
 async function _reconnectTask(el, task) {
   if (!el || !task) return;
@@ -3408,10 +3360,6 @@ async function _reconnectTask(el, task) {
             // back to %/aggregate only when no byte counter is present.
             const _byteMatches = [...snapshot.matchAll(/([\d.]+\s?[KMGT])B?\s*\/\s*[\d.]+\s?[KMGT]B?/gi)];
             const _bytes = _byteMatches.length ? _byteMatches[_byteMatches.length - 1][1].replace(/\s/g, '') : null;
-            // When there's no byte counter (pip resolve / native build phase of a
-            // dependency install), key off the output tail so new build lines count
-            // as progress — otherwise a long quiet build is falsely declared stale
-            // and restarted mid-build, looping forever (#1568).
             const curProgress = computeProgressSignal(_bytes, _dlAgg, lastPct, snapshot);
             const _fetchPctMatches = [...snapshot.matchAll(/Fetching\s+\d+\s+files:\s*(\d+)%/g)];
             const _fetchPct = _fetchPctMatches.length ? parseInt(_fetchPctMatches[_fetchPctMatches.length - 1][1]) : null;
@@ -3447,7 +3395,7 @@ async function _reconnectTask(el, task) {
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${task.sessionId}`) }),
                 });
-              } catch {}
+              } catch (e) { console.warn('[cookbook] tmux kill failed', e); }
               try {
                 // Reuse original payload so the full repo_id (e.g. "Qwen/Qwen3.5-...")
                 // is preserved — rebuilding from task.repo/task.name drops the org prefix.
@@ -3562,7 +3510,7 @@ async function _reconnectTask(el, task) {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ command: _tmuxCmd(task, `kill-session -t ${task.sessionId}`) }),
                   });
-                } catch {}
+                } catch (e) { console.warn('[cookbook] tmux kill failed', e); }
                 _removeTask(task.sessionId);
                 setTimeout(() => { _retryDownload(_nm, _p); }, 8000);
                 break;
@@ -3795,8 +3743,6 @@ async function _reconnectTask(el, task) {
   }
 }
 
-// ── Background monitor ──
-
 let _bgMonitorInterval = null;
 let _bgPollInFlight = false;
 const BG_LEADER_KEY = 'odysseus-cookbook-bg-leader';
@@ -3830,14 +3776,6 @@ function _isCookbookVisible() {
   return !!modal && !modal.classList.contains('hidden');
 }
 
-function _foregroundChatBusy() {
-  try {
-    return !!window.__odysseusChatBusy || Date.now() < (window.__odysseusChatBusyUntil || 0);
-  } catch {
-    return false;
-  }
-}
-
 function _claimBackgroundLeader() {
   if (document.visibilityState !== 'visible') return false;
   const now = Date.now();
@@ -3868,11 +3806,8 @@ function _canBackgroundPoll() {
 // Remote status and endpoint probes can hang while a host is waking up or
 // unreachable. Bound each background request so one socket cannot hold the
 // monitor's in-flight lock forever.
-function _fetchWithTimeout(input, init = {}, timeoutMs = 15000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  return fetch(input, { ...init, signal: controller.signal })
-    .finally(() => clearTimeout(timer));
+function _fetchWithTimeout(input, init, timeoutMs = 15000) {
+  return fetchWithTimeout(input, init, timeoutMs);
 }
 
 // Reachability check for running serve tasks. The tmux pane can stay alive
@@ -3993,12 +3928,12 @@ function _syncSettingsServerDots(byKey) {
     if (failed) {
       msg.textContent = 'Server not responding';
       msg.title = 'Server not responding - running serve may have crashed';
-      msg.style.color = 'var(--red,#e06c75)';
+      msg.style.color = 'var(--red)';
       msg.style.opacity = '0.75';
     } else if (/failed|crashed|not responding|unreachable/i.test(msg.textContent || '')) {
       msg.textContent = 'Reachable';
       msg.title = 'Reachable';
-      msg.style.color = 'var(--green,#50fa7b)';
+      msg.style.color = 'var(--green)';
       msg.style.opacity = '0.75';
     }
   });
@@ -4059,9 +3994,8 @@ async function _selfHealStaleTasksImpl(opts = {}) {
     // reports the session as up). This was the main source of finished↔
     // downloading oscillation on a flaky connection.
     if (t.status === 'done' && /DOWNLOAD_OK|\/snapshots\//.test(t.output || '')) return false;
-    // Cooldown: never flip the same task more than once every 45s. A flapping
-    // SSH connection used to drive the badge back-and-forth on every probe
-    // cycle; this enforces a stable view between flaps.
+    // Cooldown: never flip the same task more than once every 45s, so a
+    // flapping SSH connection cannot toggle the badge every probe cycle.
     if (t._lastStatusFlipAt && (Date.now() - t._lastStatusFlipAt < 45000)) return false;
     return true;
   });
@@ -4099,10 +4033,7 @@ async function _selfHealStaleTasksImpl(opts = {}) {
       }
     } catch { /* network blip — skip this one */ }
   }
-  if (flipped) {
-    console.log(`[cookbook] auto-reconnect: revived ${flipped} task(s) whose tmux session was still alive`);
-    _renderRunningTab();
-  }
+  if (flipped) _renderRunningTab();
 }
 
 export function _selfHealStaleTasks(opts = {}) {
@@ -4446,11 +4377,11 @@ async function _pollBackgroundStatus() {
       } else if (errorTasks.length > 0) {
         statusEl.textContent = 'error';
         statusEl.style.display = '';
-        statusEl.style.color = 'var(--color-error, #f44)';
+        statusEl.style.color = 'var(--color-error)';
       } else if (completedTasks.length > 0) {
         statusEl.textContent = 'done';
         statusEl.style.display = '';
-        statusEl.style.color = 'var(--color-success, #4caf50)';
+        statusEl.style.color = 'var(--color-success)';
       } else {
         statusEl.style.display = 'none';
         statusEl.style.color = '';
@@ -4469,8 +4400,6 @@ async function _pollBackgroundStatus() {
     _bgPollInFlight = false;
   }
 }
-
-// ── Init: receive shared state/functions ──
 
 export function initRunning(shared) {
   _envState = shared._envState;

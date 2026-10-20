@@ -1,11 +1,7 @@
-"""Always-on monitor that auto-continues the agent when a background job
-(see src/bg_jobs.py) finishes.
+"""Re-invokes the agent when a background job (src/bg_jobs.py) finishes.
 
-Reliability is the whole point: completion → agent re-invocation must never
-silently no-op. The monitor drains `bg_jobs.pending_followups()` every tick and
-only calls `mark_followed_up()` AFTER the agent run succeeds — so a transient
-failure is simply retried on the next tick. A timed-out/dead job still produces
-a follow-up ("the job failed/timed out"), so the user always hears back.
+`mark_followed_up()` runs only after the agent run succeeds, so a failed
+follow-up is retried on the next tick.
 """
 
 from __future__ import annotations

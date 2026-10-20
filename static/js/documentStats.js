@@ -1,41 +1,20 @@
 // Unicode-aware text statistics shared by source and rich-text documents.
 
-let _wordSegmenter;
-let _graphemeSegmenter;
-
-function _segmenter(granularity) {
-  if (typeof Intl === 'undefined' || typeof Intl.Segmenter !== 'function') return null;
-  try {
-    if (granularity === 'word') {
-      _wordSegmenter ||= new Intl.Segmenter(undefined, { granularity: 'word' });
-      return _wordSegmenter;
-    }
-    _graphemeSegmenter ||= new Intl.Segmenter(undefined, { granularity: 'grapheme' });
-    return _graphemeSegmenter;
-  } catch (_) {
-    return null;
-  }
-}
+const WORD_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'word' });
+const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 export function countDocumentWords(value) {
   const text = String(value ?? '');
   if (!text.trim()) return 0;
-  const segmenter = _segmenter('word');
-  if (segmenter) {
-    let count = 0;
-    for (const segment of segmenter.segment(text)) {
-      if (segment.isWordLike) count += 1;
-    }
-    return count;
+  let count = 0;
+  for (const segment of WORD_SEGMENTER.segment(text)) {
+    if (segment.isWordLike) count += 1;
   }
-  return (text.match(/[\p{L}\p{N}\p{M}]+(?:['’][\p{L}\p{N}\p{M}]+)*/gu) || []).length;
+  return count;
 }
 
 export function countDocumentCharacters(value) {
-  const text = String(value ?? '');
-  const segmenter = _segmenter('grapheme');
-  if (segmenter) return Array.from(segmenter.segment(text)).length;
-  return Array.from(text).length;
+  return Array.from(GRAPHEME_SEGMENTER.segment(String(value ?? ''))).length;
 }
 
 export function getDocumentStats(value) {

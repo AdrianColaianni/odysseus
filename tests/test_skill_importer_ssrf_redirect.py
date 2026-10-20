@@ -79,33 +79,31 @@ def _install_fake_client(monkeypatch, *, redirect_from, redirect_to):
 
 # --- Guard unit: block_private=True refuses internal, allows public ----------
 
-@pytest.mark.parametrize("url", [LOOPBACK, METADATA, "http://10.0.0.5/", "http://[::1]/"])
-def test_check_fetch_url_blocks_internal(url):
-    with pytest.raises(SkillImportError):
+def test_check_fetch_url_blocks_internal():
+    for url in (LOOPBACK, METADATA, "http://10.0.0.5/", "http://[::1]/"):
+        with pytest.raises(SkillImportError):
+            _check_fetch_url(url)
+
+
+def test_check_fetch_url_allows_public():
+    for url in (PUBLIC_A, PUBLIC_B):
         _check_fetch_url(url)
-
-
-@pytest.mark.parametrize("url", [PUBLIC_A, PUBLIC_B])
-def test_check_fetch_url_allows_public(url):
-    # Should not raise for a public IP literal.
-    _check_fetch_url(url)
 
 
 # --- Redirect revalidation: the core regression ------------------------------
 
-@pytest.mark.parametrize("internal", [LOOPBACK, METADATA])
-def test_get_checked_blocks_redirect_to_internal(monkeypatch, internal):
-    _install_fake_client(monkeypatch, redirect_from=PUBLIC_A, redirect_to=internal)
-    with pytest.raises(SkillImportError, match="blocked"):
-        _get_checked(PUBLIC_A)
+def test_get_checked_blocks_redirect_to_internal(monkeypatch):
+    for internal in (LOOPBACK, METADATA):
+        _install_fake_client(monkeypatch, redirect_from=PUBLIC_A, redirect_to=internal)
+        with pytest.raises(SkillImportError, match="blocked"):
+            _get_checked(PUBLIC_A)
 
 
-@pytest.mark.parametrize("internal", [LOOPBACK, METADATA])
-def test_fetch_bytes_blocks_redirect_to_internal(monkeypatch, internal):
-    # Higher-level: the public fetch helpers inherit the per-hop guard.
-    _install_fake_client(monkeypatch, redirect_from=PUBLIC_A, redirect_to=internal)
-    with pytest.raises(SkillImportError, match="blocked"):
-        _fetch_bytes(PUBLIC_A)
+def test_fetch_bytes_blocks_redirect_to_internal(monkeypatch):
+    for internal in (LOOPBACK, METADATA):
+        _install_fake_client(monkeypatch, redirect_from=PUBLIC_A, redirect_to=internal)
+        with pytest.raises(SkillImportError, match="blocked"):
+            _fetch_bytes(PUBLIC_A)
 
 
 def test_skills_sh_entry_blocks_redirect_to_metadata(monkeypatch):

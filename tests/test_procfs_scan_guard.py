@@ -170,7 +170,7 @@ def test_the_guard_detector_still_sees_the_known_scans():
     guarded, unguarded = _collect_sites()
     found = set(guarded) | set(unguarded)
     files = {label.rsplit(":", 1)[0] for label in found}
-    known = {"src/agent_tools/web_tools.py", "src/tools/cookbook.py"}
+    known = {"src/tools/cookbook.py"}
     assert known <= files, (
         "the detector no longer sees a known procfs scan — check whether the "
         f"root was renamed. Found: {sorted(found)}"

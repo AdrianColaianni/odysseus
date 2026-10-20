@@ -23,9 +23,8 @@ Reads are found three ways, because one pattern is not enough:
 2. Calls to env-reader helpers - any function that passes one of its own
    parameters to an environment read. This is detected, not hardcoded, so a new
    helper is picked up without editing this script. It is what finds the
-   read_byte_limit_env family in src/upload_limits.py and the media-ingress
-   overrides in src/media_ingress.py, both of which a grep for `os.environ.get(`
-   misses entirely.
+   read_byte_limit_env family in src/upload_limits.py, which a grep for
+   `os.environ.get(` misses entirely.
 3. A regex sweep of the raw file text, to catch reads that the AST cannot see -
    notably a read inside a Python snippet that is itself a string literal
    (routes/cookbook_helpers.py builds an Ollama probe script that way).
@@ -231,8 +230,7 @@ def find_env_reader_helpers(tree: ast.Module) -> dict[str, int]:
     """Functions in this module that read `os.environ` from a parameter.
 
     Returns helper name -> index of the parameter holding the variable name.
-    Nested functions count: src/media_ingress.py defines its reader inside
-    limits_from_env().
+    Nested functions count.
     """
     helpers: dict[str, int] = {}
     for func in ast.walk(tree):
@@ -548,7 +546,7 @@ VARIABLE_NOTES: dict[str, tuple[str, str, str]] = {
     ),
     "ODYSSEUS_TOOL_CONTRACT_ROOT": (
         "Agent loop and tool execution", INTERNAL,
-        "Directory holding the tool-contract scripts the clean-agent preview loads. "
+        "Directory holding the tool-contract script the clean tool-loop diagnostic loads. "
         "The default resolves to the bundled scripts directory relative to the installed/source tree.",
     ),
 
@@ -582,16 +580,6 @@ VARIABLE_NOTES: dict[str, tuple[str, str, str]] = {
         "Browser automation", USER,
         "Truthy refuses to start the browser MCP server unless its npm package is "
         "already in the npx cache, instead of installing it at startup.",
-    ),
-    "ODYSSEUS_BROWSER_NAMESPACE": (
-        "Browser automation", USER,
-        "Namespace for the detached agent-browser daemon's pid files, so two "
-        "runtimes on one machine do not terminate each other's browsers.",
-    ),
-    "ODYSSEUS_BROWSER_SCREENSHOT_DIR": (
-        "Browser automation", USER,
-        "Where private-browser screenshots are written. Falls back to the container "
-        "path, then the system temp directory.",
     ),
 
     # -- Container and workspace mounts ------------------------------------
@@ -634,11 +622,6 @@ VARIABLE_NOTES: dict[str, tuple[str, str, str]] = {
     ),
 
     # -- Calendar, notes and single-user mode -------------------------------
-    "ODYSSEUS_SINGLE_USER": (
-        "Calendar, notes and single-user mode", USER,
-        "Security-relevant. On by default. Set to 0 on a real multi-user install so "
-        "unauthenticated calendar writes are rejected rather than absorbed.",
-    ),
     "ODYSSEUS_FALLBACK_OWNER": (
         "Calendar, notes and single-user mode", USER,
         "Owner address that single-user mode attributes an unauthenticated request "
@@ -681,50 +664,6 @@ VARIABLE_NOTES: dict[str, tuple[str, str, str]] = {
     ),
     "ODYSSEUS_ICS_MAX_BYTES": (
         "Upload and media limits", USER, "Maximum bytes accepted for an imported ICS file.",
-    ),
-    "ODYSSEUS_MEDIA_MAX_FILES": (
-        "Upload and media limits", USER,
-        "How many local media files one agent turn may ingest.",
-    ),
-    "ODYSSEUS_MEDIA_MAX_IMAGE_BYTES": (
-        "Upload and media limits", USER, "Largest source image the media pipeline will read.",
-    ),
-    "ODYSSEUS_MEDIA_MAX_VIDEO_BYTES": (
-        "Upload and media limits", USER, "Largest source video the media pipeline will read.",
-    ),
-    "ODYSSEUS_MEDIA_MAX_DOCUMENT_BYTES": (
-        "Upload and media limits", USER, "Largest source document the media pipeline will read.",
-    ),
-    "ODYSSEUS_MEDIA_MAX_AUDIO_BYTES": (
-        "Upload and media limits", USER, "Largest source audio file the media pipeline will read.",
-    ),
-    "ODYSSEUS_MEDIA_MAX_ENCODED_BYTES": (
-        "Upload and media limits", USER,
-        "Budget for the encoded payload handed to the model, counted cumulatively "
-        "across one turn's attachments rather than per file.",
-    ),
-    "ODYSSEUS_MEDIA_MAX_DOCUMENT_CHARS": (
-        "Upload and media limits", USER,
-        "How many characters of an ingested document are inlined into the turn.",
-    ),
-    "ODYSSEUS_MEDIA_MAX_DIMENSION": (
-        "Upload and media limits", USER,
-        "Longest edge in pixels an image is resized down to before encoding.",
-    ),
-    "ODYSSEUS_MEDIA_MAX_PIXELS": (
-        "Upload and media limits", USER,
-        "Total pixel budget for a source image, as a decompression-bomb guard.",
-    ),
-    "ODYSSEUS_MEDIA_MAX_VIDEO_FRAMES": (
-        "Upload and media limits", USER, "How many frames are sampled from a video.",
-    ),
-    "ODYSSEUS_MEDIA_PROBE_TIMEOUT": (
-        "Upload and media limits", USER,
-        "Seconds allowed for probing a video's metadata before giving up.",
-    ),
-    "ODYSSEUS_MEDIA_FRAME_TIMEOUT": (
-        "Upload and media limits", USER,
-        "Seconds allowed for extracting frames from a video before giving up.",
     ),
 
     # -- Search -------------------------------------------------------------
@@ -951,8 +890,7 @@ reads three ways, because no single pattern covers the codebase:
 - Calls to env-reader helpers - any function that forwards one of its own
   parameters to an environment read. This is detected rather than hardcoded, so a
   new helper needs no change here. It is what finds the upload caps in
-  `src/upload_limits.py` and the media-ingress overrides in
-  `src/media_ingress.py`.
+  `src/upload_limits.py`.
 - A regex sweep of the raw file text, for reads the AST cannot see.
   `routes/cookbook_helpers.py` builds an Ollama probe script as a list of source
   lines, so one read lives inside a string literal.

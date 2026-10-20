@@ -3,8 +3,6 @@
 import json
 from types import SimpleNamespace
 
-import pytest
-
 import src.endpoint_resolver as endpoint_resolver
 from src.endpoint_resolver import (
     endpoint_cost_tracked,
@@ -331,12 +329,9 @@ def test_endpoint_cost_tracking_is_non_secret_route_classification():
     assert endpoint_cost_tracked("https://api.example.com/v1", "local") is False
 
 
-@pytest.mark.parametrize(
-    ("url", "expected"),
-    [
+def test_endpoint_cost_tracking_classifies_public_ipv6_and_link_local_ipv4():
+    for url, expected in [
         ("https://[2606:4700:4700::1111]/v1", True),
         ("http://169.254.10.20:8000/v1", False),
-    ],
-)
-def test_endpoint_cost_tracking_classifies_public_ipv6_and_link_local_ipv4(url, expected):
-    assert endpoint_cost_tracked(url) is expected
+    ]:
+        assert endpoint_cost_tracked(url) is expected

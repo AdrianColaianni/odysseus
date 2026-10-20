@@ -8,6 +8,7 @@ import { chromium } from 'playwright';
 const renderer = await readFile(new URL('../static/js/chatRenderer.js', import.meta.url), 'utf8');
 const chat = await readFile(new URL('../static/js/chat.js', import.meta.url), 'utf8');
 const addMessage = renderer.slice(renderer.indexOf('export function addMessage('), renderer.indexOf('\nconst chatRenderer =')).replace('export ', '');
+const toolNodes = renderer.slice(renderer.indexOf('function _toolDiffHtml('), renderer.indexOf('\nfunction _makeActionBtn(')).replaceAll('export ', '');
 const resume = chat.slice(chat.indexOf('export async function resumeStream('), chat.indexOf('\n  /**\n   * Check for background streams')).replace('export ', '');
 let browser;
 before(async () => { browser = await chromium.launch({ headless: true }); });
@@ -24,7 +25,7 @@ async function setup() {
     return route.fulfill({ contentType: 'text/javascript', body: source });
   });
   await page.goto('http://render.test/');
-  await page.evaluate(async ({ addMessage, resume }) => {
+  await page.evaluate(async ({ addMessage, resume, toolNodes }) => {
     const noop = () => {};
     const esc = value => { const node = document.createElement('div'); node.textContent = String(value ?? ''); return node.innerHTML; };
     Object.assign(window, {
@@ -58,6 +59,7 @@ async function setup() {
     window.applyModelRouteEventState = (await import('/static/js/chatModelProvenance.js')).applyModelRouteEventState;
     window.createTerminalStreamError = (await import('/static/js/chatStreamErrors.js')).createTerminalStreamError;
     window.generatedImageResult = (await import('/static/js/generatedImageResult.js')).generatedImageResult;
+    (0, eval)(toolNodes);
     window.addMessage = (0, eval)('(' + addMessage + ')');
     window.resumeStream = (0, eval)('(' + resume + ')');
     window.chatRenderer = { addMessage: window.addMessage, recordSessionMetricsCost: noop, buildSourcesBox, buildFindingsBox, buildRagSourcesBox };
@@ -68,7 +70,7 @@ async function setup() {
     window.fetch = async url => String(url).includes('/api/chat/resume/')
       ? new Response(stream, { headers: { 'X-Odysseus-Run-Id': 'run-1' } })
       : new Response(JSON.stringify({ history: window.savedHistory }));
-  }, { addMessage, resume });
+  }, { addMessage, resume, toolNodes });
   return page;
 }
 

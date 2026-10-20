@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createNotesPersistence } from '../frontend/src/features/notes/infrastructure/storage.js';
-import { createNotesState } from '../frontend/src/features/notes/application/state.js';
-import { createNotesDrafts } from '../frontend/src/features/notes/application/drafts.js';
-import { createDraftEditor } from '../frontend/src/features/notes/ui/draftEditor.js';
+import { createNotesPersistence } from '../static/js/features/notes/infrastructure/storage.js';
+import { createNotesState } from '../static/js/features/notes/application/state.js';
+import { createNotesDrafts } from '../static/js/features/notes/application/drafts.js';
+import { createDraftEditor } from '../static/js/features/notes/ui/draftEditor.js';
 
 function harness(patch = async () => ({})) {
   const data = new Map(), timers = new Map(), errors = [];

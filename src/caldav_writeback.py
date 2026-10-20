@@ -1,19 +1,8 @@
-"""CalDAV write-back: push local create/update/delete out to the remote (#800).
+"""CalDAV write-back: push local create/update/delete to the remote calendar.
 
-``src/caldav_sync.py`` is a one-way pull (remote → local). So events created,
-edited, or deleted in Odysseus on a CalDAV-backed calendar only changed the local
-SQLite copy and never reached the server (iCloud/Nextcloud/Radicale/Fastmail) —
-they'd silently disappear on the next pull and never show on the user's phone.
-
-This adds the missing write half. The remote calendar URL isn't stored locally
-(the local calendar id is a one-way hash of it), so we re-discover the remote
-calendar by matching that same hash, then PUT/DELETE the VEVENT by its UID via
-the `caldav` lib. Writes are best-effort: the local DB stays the source of truth,
-and a remote failure is reported, never fatal to the local operation.
-
-The pure pieces (``build_event_ical``, ``find_remote_calendar``, ``push_event``)
-take their inputs by argument so they unit-test against a fake client with no
-network.
+The remote URL is not stored, so the calendar is found again by matching the
+local id hash from caldav_sync._stable_cal_id. Best-effort: a remote failure
+never fails the local write.
 """
 
 import asyncio

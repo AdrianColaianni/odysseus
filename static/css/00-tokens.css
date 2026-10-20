@@ -1,23 +1,5 @@
-/* 00-tokens - part of the former static/style.css.
- *
- * The stylesheet is split by area, but the split is mechanical: rules were
- * moved verbatim and NOT regrouped. The numeric prefix is the load order, and
- * that order is what preserves the cascade. A rule sits in the file its
- * original position fell into, so an area's rules are not all in its file and
- * a file is not only that area's rules.
- *
- * Do not reorder the <link> tags in static/index.html, and do not move a rule
- * between files: with 1,151 redeclarations and 1,886 !important in this
- * cascade, either can change which declaration wins.
- *
- * static/index.html and the PRECACHE list in static/sw.js must agree on this
- * order. tests/test_static_stylesheet_manifest.py and
- * tests/test_css_computed_style_snapshot.py fail if that drifts.
- */
-/* ============================================ */
-/* Odysseus UI — Consolidated Stylesheet        */
-/* ============================================ */
-
+/* The app cascade is these files in the <link> order of static/index.html;
+ * moving a rule between files can change which declaration wins. */
 
 /* ── Variables ──
  *
@@ -26,7 +8,7 @@
  *   Syntax:   --hl-keyword, --hl-string, --hl-comment, --hl-function,
  *             --hl-number, --hl-builtin, --hl-variable, --hl-params,
  *             --hl-bg, --hl-fg
- *   Accents:  --accent-primary, --accent-error (set by theme.js)
+ *   Accents:  --accent-primary, --accent-error (set only from a legacy saved theme, static/index.html)
  *   Semantic: --color-error, --color-success, --color-warning, --color-danger,
  *             --color-accent, --color-muted, --color-muted-alt
  */
@@ -78,7 +60,7 @@
   --select-fg: var(--fg);
   --select-option-bg: color-mix(in srgb, var(--panel) 74%, var(--bg));
   --select-option-fg: var(--fg);
-  --select-option-active-bg: color-mix(in srgb, var(--accent, var(--red)) 24%, var(--panel));
+  --select-option-active-bg: color-mix(in srgb, var(--red) 24%, var(--panel));
   /* Warm accent — used by the Goals/Today UI in Notes. Lives as a token so
      themes can override without touching the goal CSS. */
   --accent-warm: #d19a66;
@@ -142,7 +124,6 @@ body {
               padding-right 160ms cubic-bezier(0.22, 0.61, 0.36, 1);
   font-family: var(--font-family, 'Fira Code', monospace);
   display: flex;
-  height: 100%;
   height: var(--app-height);
   padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
   overflow: hidden;
@@ -159,12 +140,6 @@ body {
 /* Self-hosted OpenDyslexic — dyslexia-friendly accessibility font option (SIL OFL 1.1) */
 @font-face { font-family: 'OpenDyslexic'; font-weight: 400; font-style: normal; font-display: swap; src: url('/static/fonts/OpenDyslexic-Regular.woff2') format('woff2'); }
 @font-face { font-family: 'OpenDyslexic'; font-weight: 700; font-style: normal; font-display: swap; src: url('/static/fonts/OpenDyslexic-Bold.woff2') format('woff2'); }
-
-/* Code block baseline */
-pre, code, .hljs {
-  font-size: 11px;
-  line-height: 1.5;
-}
 
 /* Scrollbar styling */
 @supports selector(::-webkit-scrollbar) {
@@ -189,9 +164,6 @@ html {
   scrollbar-color: var(--red) var(--panel);
   scrollbar-width: thin;
 }
-
-/* Utility */
-.red-text { color: var(--red); }
 
 /* ── Density Overrides ── */
 

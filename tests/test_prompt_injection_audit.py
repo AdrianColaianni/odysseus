@@ -16,7 +16,6 @@ import sys
 import types
 from unittest.mock import MagicMock
 
-import pytest
 
 # ── stub heavy imports before loading agent_loop ────────────────────────────
 for _mod in [

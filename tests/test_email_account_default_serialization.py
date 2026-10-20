@@ -20,6 +20,7 @@ from sqlalchemy import create_engine, create_mock_engine, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
+from tests.helpers.routes import route_endpoint
 
 
 @pytest.fixture
@@ -43,14 +44,11 @@ def account_db(tmp_path, monkeypatch):
 
 
 def _endpoint(method, path):
-    from routes import email_routes
+    from routes.email import email_routes
 
     with mock.patch.object(email_routes, "_start_poller"):
         router = email_routes.setup_email_routes()
-    for route in router.routes:
-        if route.path == path and method in getattr(route, "methods", set()):
-            return route.endpoint
-    raise AssertionError(f"email route not found: {method} {path}")
+    return route_endpoint(router, path, method)
 
 
 def _named_endpoint(router, name):
@@ -94,7 +92,7 @@ def _rows(factory):
 
 def _install_lock_pause(monkeypatch, paused_thread_name):
     """Pause one worker after acquisition and observe another waiting."""
-    from routes import email_routes
+    from routes.email import email_routes
 
     real_lock = email_routes._lock_email_account_owner_mutation
     first_acquired = threading.Event()
@@ -448,9 +446,7 @@ def test_rename_serializes_old_and_new_owner_and_stale_set_default_fails_closed(
     results = {}
 
     def rename_owner():
-        results["rename"] = asyncio.run(
-            rename_user("alice", SimpleNamespace(username="bob"), request)
-        )
+        results["rename"] = rename_user("alice", SimpleNamespace(username="bob"), request)
 
     def select_stale_default():
         try:

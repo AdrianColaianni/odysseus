@@ -82,9 +82,7 @@ export function init(apiBase) {
   initEnabledToggle();
   initNameDropdown();
   initResetButton();
-  initSaveAsTemplate();
   initExpandButton();
-  initPersistentChat();
   loadUserTemplates();
 }
 
@@ -401,120 +399,6 @@ async function loadUserTemplates() {
 
 
 /**
- * Init "Save as Character" button
- */
-/**
- * "Create Persistent Chat" button — creates a favorited session for the current character
- */
-function initPersistentChat() {
-  const btn = document.getElementById('create-persistent-chat-btn');
-  if (!btn) return;
-
-  btn.addEventListener('click', async () => {
-    const nameInput = document.getElementById('custom-character-name');
-    const charName = nameInput ? nameInput.value.trim() : '';
-    if (!charName) return;
-
-    try {
-      // Get current model info from session module
-      const sessionModule = (await import('./sessions.js'));
-      const sessions = sessionModule.getSessions();
-      const current = sessions.find(s => s.id === sessionModule.getCurrentSessionId());
-
-      // Create new session
-      const fd = new FormData();
-      fd.append('name', charName);
-      if (current) {
-        fd.append('endpoint_url', current.endpoint_url || '');
-        fd.append('model', current.model || '');
-        fd.append('skip_validation', 'true');
-      }
-      const res = await fetch(`${API_BASE}/api/session`, { method: 'POST', body: fd });
-      if (!res.ok) throw new Error('Failed to create session');
-      const data = await res.json();
-      const sessionId = data.session_id || data.id;
-
-      // Favorite it
-      const favFd = new FormData();
-      favFd.append('important', true);
-      await fetch(`${API_BASE}/api/session/${sessionId}/important`, { method: 'POST', body: favFd });
-
-      // Save session → character mapping so it restores on switch
-      const charSessions = loadStoredObject('odysseus-char-sessions');
-      charSessions[sessionId] = charName;
-      localStorage.setItem('odysseus-char-sessions', JSON.stringify(charSessions));
-
-      // Close modal, reload sessions, switch to the new chat
-      const modal = document.getElementById('custom-preset-modal');
-      if (modal) modal.classList.add('hidden');
-      await sessionModule.loadSessions();
-      await sessionModule.selectSession(sessionId);
-
-      btn.textContent = 'Created!';
-      setTimeout(() => { btn.textContent = 'Create Persistent Chat'; }, 1500);
-    } catch (e) {
-      console.error('Failed to create persistent chat:', e);
-      btn.textContent = 'Error';
-      setTimeout(() => { btn.textContent = 'Create Persistent Chat'; }, 2000);
-    }
-  });
-}
-
-function initSaveAsTemplate() {
-  const btn = document.getElementById('save-as-template-btn');
-  if (!btn) return;
-
-  btn.addEventListener('click', async () => {
-    const nameInput = document.getElementById('custom-character-name');
-    const promptInput = document.getElementById('custom-system-prompt');
-    const tempInput = document.getElementById('custom-temperature');
-    const tokensInput = document.getElementById('custom-max-tokens');
-
-    let name = nameInput ? nameInput.value.trim() : '';
-    if (!name) {
-      name = prompt('Enter a name for this persona:');
-      if (!name || !name.trim()) return;
-      name = name.trim();
-      if (nameInput) nameInput.value = name;
-    }
-
-    const _rawTk = tokensInput ? parseInt(tokensInput.value) : 0;
-    const template = {
-      id: '',
-      name: name,
-      system_prompt: promptInput ? promptInput.value : '',
-      temperature: tempInput ? parseFloat(tempInput.value) : 1.0,
-      max_tokens: _rawTk > 8192 ? 0 : _rawTk,
-      persona_memory: presets.custom?.persona_memory || '',
-      persona_memory_schema: presets.custom?.persona_memory_schema || 'general',
-    };
-
-    try {
-      const res = await fetch(`${API_BASE}/api/presets/templates`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(template),
-      });
-      if (!res.ok) throw new Error(`Server returned ${res.status}`);
-      const data = await res.json();
-      if (data.success) {
-        await loadUserTemplates();
-        btn.textContent = 'Saved!';
-        setTimeout(() => { btn.textContent = 'Save as Template'; }, 1500);
-      } else {
-        btn.textContent = 'Error';
-        setTimeout(() => { btn.textContent = 'Save as Template'; }, 2000);
-      }
-    } catch (e) {
-      console.error('Failed to save template:', e);
-      btn.textContent = 'Restart server';
-      btn.style.color = 'var(--color-error)';
-      setTimeout(() => { btn.textContent = 'Save as Template'; btn.style.color = ''; }, 3000);
-    }
-  });
-}
-
-/**
  * Load presets from server
  */
 export async function loadPresets(showError) {
@@ -706,12 +590,10 @@ export function openCustomPresetModal(openTab = '') {
         if (window._syncGroupIndicator) window._syncGroupIndicator(false);
       } else {
         deactivateCharacter();
-        try {
-          fetch(`${API_BASE}/api/presets/custom`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ...(presets.custom || {}), name: (presets.custom && presets.custom.character_name) || '', enabled: false }),
-          }).catch(() => {});
-        } catch {}
+        fetch(`${API_BASE}/api/presets/custom`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...(presets.custom || {}), name: (presets.custom && presets.custom.character_name) || '', enabled: false }),
+        }).catch(e => console.warn('Failed to save disabled preset:', e));
       }
       const m = document.getElementById('custom-preset-modal');
       if (m) m.classList.add('hidden');
@@ -730,11 +612,8 @@ export function openCustomPresetModal(openTab = '') {
   _updateStartBtn();
 
   function _syncCharRows() {
-    const hasName = nameInput && nameInput.value.trim();
     const delBtn = document.getElementById('char-delete-template-btn');
     if (delBtn) delBtn.style.display = userTemplates.find(t => t.name === (nameInput ? nameInput.value.trim() : '')) ? '' : 'none';
-    const persistBtn = document.getElementById('create-persistent-chat-btn');
-    if (persistBtn) persistBtn.style.display = hasName ? '' : 'none';
   }
 
   _syncCharRows();
@@ -748,7 +627,6 @@ export function openCustomPresetModal(openTab = '') {
   const lockNotice = document.getElementById('char-lock-notice');
   const resetBtn = document.getElementById('reset-character-btn');
   const newBtn = document.getElementById('char-new-btn');
-  const persistBtn = document.getElementById('create-persistent-chat-btn');
   const delBtn2 = document.getElementById('char-delete-template-btn');
 
   if (isPersistent) {
@@ -756,7 +634,6 @@ export function openCustomPresetModal(openTab = '') {
     if (nameInput) nameInput.readOnly = true;
     if (resetBtn) resetBtn.style.display = 'none';
     if (newBtn) newBtn.style.display = 'none';
-    if (persistBtn) persistBtn.style.display = 'none';
     if (delBtn2) delBtn2.style.display = 'none';
     if (!lockNotice) {
       const notice = document.createElement('div');
@@ -1117,7 +994,7 @@ function _syncCharIndicator() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ ...presets.custom, name: presets.custom.character_name || '', enabled: false }),
-          }).catch(() => {});
+          }).catch(e => console.warn('Failed to save disabled preset:', e));
           return;
         }
         if (typeof openCustomPresetModal === 'function') openCustomPresetModal(hasChar ? 'character' : 'inject');

@@ -7,13 +7,14 @@ import uuid
 from datetime import datetime, date, timedelta, timezone
 from typing import Optional, List
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile, File
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Depends
+from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from sqlalchemy import or_, and_
 from sqlalchemy.exc import IntegrityError
 from dateutil.rrule import rrulestr
 
-from core.database import SessionLocal, CalendarCal, CalendarDeletedEvent, CalendarEvent, Note
+from core.database import SessionLocal, CalendarCal, CalendarDeletedEvent, CalendarEvent, Note, get_db
 from src.auth_helpers import effective_user, require_user
 from src.upload_limits import read_upload_limited, ICS_MAX_BYTES
 from src.upload_handler import reserve_upload_references
@@ -55,15 +56,9 @@ def _ensure_positive_duration(start_dt, end_dt, all_day):
     return end_dt
 
 
-# Single-user fallback identity. Used only when:
-#   1. The app is configured for single-user (no auth middleware), AND
-#   2. The request didn't resolve to an authenticated user.
-# Override at deploy time via `ODYSSEUS_FALLBACK_OWNER` env var. In a real
-# multi-user install set `ODYSSEUS_SINGLE_USER=0` so unauthenticated requests
-# are rejected instead of silently writing to this address.
+# Owner for calendar rows when auth is off, so rows still filter by owner.
 import os as _os
 FALLBACK_OWNER = _os.environ.get("ODYSSEUS_FALLBACK_OWNER", "owner@localhost")
-_SINGLE_USER_MODE = _os.environ.get("ODYSSEUS_SINGLE_USER", "1") != "0"
 
 
 def _require_user(request: Request) -> str:
@@ -84,11 +79,7 @@ def _get_or_404_calendar(db, cal_id: str, owner: str) -> CalendarCal:
     cal = db.query(CalendarCal).filter(CalendarCal.id == cal_id).first()
     if not cal:
         raise HTTPException(404, "Calendar not found")
-    # Tighten the legacy null-owner gate (v2 review HIGH-12): if the
-    # caller is authenticated AND the calendar's owner is null OR
-    # belongs to a different user, treat it as not-found. The previous
-    # rule (`if cal.owner and cal.owner != owner`) silently allowed any
-    # authenticated user to read/edit any calendar with owner=None.
+    # An authenticated caller never sees null-owner calendars.
     if owner and (cal.owner is None or cal.owner != owner):
         raise HTTPException(404, "Calendar not found")
     return cal
@@ -195,7 +186,6 @@ def _record_caldav_delete_tombstone(db, ev: CalendarEvent, owner: str) -> None:
     tombstone.summary = ev.summary or ""
     tombstone.last_error = None
 
-# ── Pydantic models ──
 
 class EventCreate(BaseModel):
     summary: str
@@ -221,8 +211,6 @@ class EventUpdate(BaseModel):
     color: Optional[str] = None
     reminder_minutes: Optional[int] = None
 
-
-# ── Helpers ──
 
 _DEFAULT_CALENDAR_NAMESPACE = uuid.UUID("4840613a-9847-4a3b-bd75-19e6bc5fc3ce")
 
@@ -359,6 +347,71 @@ from src.user_time import (
 )
 
 
+def _parse_time(t: str):
+    """Return (hour, minute) from '1pm', '1:30 PM', '13:00', etc., or None."""
+    t = re.sub(r'\b([ap])(?:\s*\.)?\s*m\.?\b', r'\1m', t.strip(), flags=re.IGNORECASE)
+    m = re.match(r'^\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*$', t, re.IGNORECASE)
+    if not m:
+        return None
+    h = int(m.group(1))
+    mn = int(m.group(2) or 0)
+    ampm = (m.group(3) or "").lower()
+    if ampm == "pm" and h < 12:
+        h += 12
+    elif ampm == "am" and h == 12:
+        h = 0
+    if not (0 <= h < 24 and 0 <= mn < 60):
+        return None
+    return h, mn
+
+
+_DAY_WORD_OFFSETS = {"today": 0, "tonight": 0, "tomorrow": 1, "tmrw": 1, "yesterday": -1}
+_WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+
+def _parse_natural(s: str, now: datetime):
+    """Resolve the phrasings LLMs emit ("tomorrow 2pm", "next friday", "in 2 hours",
+    a bare "13:00") against `now`, keeping its tzinfo. None when nothing matches."""
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    lower = s.lower().strip()
+
+    def _at(base, rest):
+        if not rest:
+            return base
+        t = _parse_time(rest)
+        return base.replace(hour=t[0], minute=t[1]) if t is not None else None
+
+    m = re.match(r'^(today|tonight|tomorrow|tmrw|yesterday)(?:\s+at)?\s*(.*)$', lower)
+    if m:
+        hit = _at(today + timedelta(days=_DAY_WORD_OFFSETS[m.group(1)]), m.group(2).strip())
+        if hit is not None:
+            return hit
+
+    m = re.match(r'^(.*\S)\s+(today|tonight|tomorrow|tmrw|yesterday)$', lower)
+    if m:
+        hit = _at(today + timedelta(days=_DAY_WORD_OFFSETS[m.group(2)]), m.group(1).strip())
+        if hit is not None:
+            return hit
+
+    m = re.match(r'^next\s+(\w+)(?:\s+at)?\s*(.*)$', lower)
+    if m and m.group(1) in _WEEKDAYS:
+        days = (_WEEKDAYS.index(m.group(1)) - today.weekday()) % 7 or 7
+        hit = _at(today + timedelta(days=days), m.group(2).strip())
+        if hit is not None:
+            return hit
+
+    m = re.match(r'^in\s+(\d+)\s*(hour|hr|minute|min|day)s?\s*$', lower)
+    if m:
+        n = int(m.group(1))
+        unit = {"hour": "hours", "hr": "hours", "minute": "minutes", "min": "minutes", "day": "days"}[m.group(2)]
+        return now + timedelta(**{unit: n})
+
+    t = _parse_time(lower)
+    if t is not None:
+        return today.replace(hour=t[0], minute=t[1])
+    return None
+
+
 def parse_due_for_user(s: str) -> str:
     """Parse a due-date string emitted by the LLM / agent in the USER's tz.
 
@@ -373,7 +426,7 @@ def parse_due_for_user(s: str) -> str:
         evaluated against the user's local "now" instead of the server's,
         then ISO-with-offset.
     """
-    from datetime import timezone as _tz, timedelta as _td
+    from datetime import timezone as _tz
     offset = get_user_tz_offset()
     tz_name = get_user_tz_name()
     s = (s or "").strip()
@@ -399,60 +452,9 @@ def parse_due_for_user(s: str) -> str:
     if parsed is not None and parsed.tzinfo is None:
         return parsed.replace(tzinfo=user_tz).isoformat()
 
-    # Natural language — evaluate against user's "now".
-    server_now_utc = datetime.now(_tz.utc)
-    user_now = now_user_local(server_now_utc)
-    # Patch datetime.now() inside _parse_dt by leveraging the user's clock:
-    # we re-implement the small natural-language phrases here against user_now
-    # so the result is naturally in the user's tz.
-    import re as _re
-    lower = s.lower().strip()
-
-    def _parse_time(t):
-        t = _re.sub(r'\b([ap])(?:\s*\.)?\s*m\.?\b', r'\1m', t.strip(), flags=_re.IGNORECASE)
-        m = _re.match(r'^\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*$', t, _re.IGNORECASE)
-        if not m: return None
-        h = int(m.group(1)); mn = int(m.group(2) or 0); ampm = (m.group(3) or "").lower()
-        if ampm == "pm" and h < 12: h += 12
-        elif ampm == "am" and h == 12: h = 0
-        if not (0 <= h < 24 and 0 <= mn < 60): return None
-        return h, mn
-
-    today = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
-
-    m = _re.match(r'^(today|tonight|tomorrow|tmrw|yesterday)(?:\s+at)?\s*(.*)$', lower)
-    if m:
-        word, rest = m.group(1), m.group(2).strip()
-        base = today
-        if word in ("tomorrow", "tmrw"): base = today + _td(days=1)
-        elif word == "yesterday":         base = today - _td(days=1)
-        if not rest:
-            return base.isoformat()
-        t = _parse_time(rest)
-        if t is not None:
-            return base.replace(hour=t[0], minute=t[1]).isoformat()
-
-    # Time-first: "3pm today", "11pm today", "9am tomorrow"
-    m = _re.match(r'^(.*\S)\s+(today|tonight|tomorrow|tmrw|yesterday)$', lower)
-    if m:
-        time_part, word = m.group(1).strip(), m.group(2)
-        base = today
-        if word in ("tomorrow", "tmrw"): base = today + _td(days=1)
-        elif word == "yesterday":        base = today - _td(days=1)
-        t = _parse_time(time_part)
-        if t is not None:
-            return base.replace(hour=t[0], minute=t[1]).isoformat()
-
-    m = _re.match(r'^in\s+(\d+)\s*(hour|hr|minute|min|day)s?\s*$', lower)
-    if m:
-        n = int(m.group(1)); unit = m.group(2)
-        if unit in ("hour", "hr"):  return (user_now + _td(hours=n)).isoformat()
-        if unit in ("minute", "min"): return (user_now + _td(minutes=n)).isoformat()
-        if unit == "day":             return (user_now + _td(days=n)).isoformat()
-
-    t = _parse_time(lower)
-    if t is not None:
-        return today.replace(hour=t[0], minute=t[1]).isoformat()
+    natural = _parse_natural(s, now_user_local(datetime.now(_tz.utc)))
+    if natural is not None:
+        return natural.isoformat()
 
     # Last resort: dateutil. Trust it but apply user tz if it returned naive.
     try:
@@ -505,7 +507,6 @@ def _parse_dt(s: str) -> datetime:
     other absolute formats. Local-naive datetimes returned to match the
     DB schema (CalendarEvent.dtstart is naive).
     """
-    import re as _re
     s = (s or "").strip()
     if not s:
         raise ValueError("empty datetime string")
@@ -524,97 +525,15 @@ def _parse_dt(s: str) -> datetime:
     except ValueError:
         pass
 
-    now = datetime.now()
-    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    lower = s.lower().strip()
-
-    def _parse_time(t: str):
-        """Return (hour, minute) from '1pm', '1:30 PM', '13:00', etc., or None."""
-        t = _re.sub(r'\b([ap])(?:\s*\.)?\s*m\.?\b', r'\1m', t.strip(), flags=_re.IGNORECASE)
-        m = _re.match(r'^\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*$', t, _re.IGNORECASE)
-        if not m:
-            return None
-        h = int(m.group(1))
-        mn = int(m.group(2) or 0)
-        ampm = (m.group(3) or "").lower()
-        if ampm == "pm" and h < 12:
-            h += 12
-        elif ampm == "am" and h == 12:
-            h = 0
-        if not (0 <= h < 24 and 0 <= mn < 60):
-            return None
-        return h, mn
-
-    # today/tonight/tomorrow/yesterday [at] TIME
-    m = _re.match(r'^(today|tonight|tomorrow|tmrw|yesterday)(?:\s+at)?\s*(.*)$', lower)
-    if m:
-        word, rest = m.group(1), m.group(2).strip()
-        base = today
-        if word in ("tomorrow", "tmrw"):
-            base = today + timedelta(days=1)
-        elif word == "yesterday":
-            base = today - timedelta(days=1)
-        if not rest:
-            return base
-        t = _parse_time(rest)
-        if t is not None:
-            return base.replace(hour=t[0], minute=t[1])
-
-    # time-first: "3pm today", "9am tomorrow", "11pm tonight"
-    # (parity with parse_due_for_user, which handles these via the same form)
-    m = _re.match(r'^(.*\S)\s+(today|tonight|tomorrow|tmrw|yesterday)$', lower)
-    if m:
-        time_part, word = m.group(1).strip(), m.group(2)
-        base = today
-        if word in ("tomorrow", "tmrw"):
-            base = today + timedelta(days=1)
-        elif word == "yesterday":
-            base = today - timedelta(days=1)
-        t = _parse_time(time_part)
-        if t is not None:
-            return base.replace(hour=t[0], minute=t[1])
-
-    # next <weekday> [at] TIME
-    weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-    m = _re.match(r'^next\s+(\w+)(?:\s+at)?\s*(.*)$', lower)
-    if m and m.group(1) in weekdays:
-        target_dow = weekdays.index(m.group(1))
-        days = (target_dow - today.weekday()) % 7 or 7
-        base = today + timedelta(days=days)
-        rest = m.group(2).strip()
-        if not rest:
-            return base
-        t = _parse_time(rest)
-        if t is not None:
-            return base.replace(hour=t[0], minute=t[1])
-
-    # in N hours/minutes/days
-    m = _re.match(r'^in\s+(\d+)\s*(hour|hr|minute|min|day)s?\s*$', lower)
-    if m:
-        n = int(m.group(1))
-        unit = m.group(2)
-        if unit in ("hour", "hr"):
-            return now + timedelta(hours=n)
-        if unit in ("minute", "min"):
-            return now + timedelta(minutes=n)
-        if unit == "day":
-            return now + timedelta(days=n)
-
-    # Bare time → today at that time
-    t = _parse_time(lower)
-    if t is not None:
-        return today.replace(hour=t[0], minute=t[1])
+    natural = _parse_natural(s, datetime.now())
+    if natural is not None:
+        return natural
 
     # Last resort: dateutil's fuzzy parser
     try:
         from dateutil import parser as _du
         parsed = _du.parse(s)
-        # Strip tz like every other return path above — this function's
-        # contract is naive datetimes (CalendarEvent.dtstart is naive). An
-        # offset-bearing non-ISO input (e.g. RFC-2822 "Mon, 05 Jan 2026
-        # 14:00:00 +0900") otherwise leaked tz-aware into the naive column and
-        # crashed read-back comparisons in _expand_rrule with "can't compare
-        # offset-naive and offset-aware datetimes".
+        # Naive like every other return path: CalendarEvent.dtstart is naive.
         if parsed.tzinfo is not None:
             from datetime import timezone as _tz
             return parsed.astimezone(_tz.utc).replace(tzinfo=None)
@@ -793,8 +712,6 @@ def _event_to_dict(ev: CalendarEvent, db=None, owner: str | None = None) -> dict
     }
 
 
-# ── Recurrence expansion ──
-
 _RRULE_EXPANSION_LIMIT = 1000
 
 
@@ -937,8 +854,6 @@ def _expand_rrule(
     return results
 
 
-# ── Routes ──
-
 def setup_calendar_routes(upload_handler=None) -> APIRouter:
     router = APIRouter(prefix="/api/calendar", tags=["calendar"])
 
@@ -951,7 +866,6 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         if missing_id:
             raise HTTPException(409, f"Referenced upload is no longer available: {missing_id}")
 
-    # ── CalDAV multi-account helpers ─────────────────────────────────────────
 
     def _get_caldav_accounts(owner: str) -> list:
         from src.caldav_sync import _load_caldav_accounts
@@ -964,7 +878,6 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         prefs.pop("caldav", None)
         _save_for_user(owner, prefs)
 
-    # ── CalDAV config routes (backward-compat single-account API) ────────────
 
     @router.get("/config")
     async def get_config(request: Request):
@@ -1021,7 +934,6 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         _save_caldav_accounts(owner, new_accounts)
         return {"ok": True}
 
-    # ── CalDAV multi-account CRUD ─────────────────────────────────────────────
 
     @router.get("/config/accounts")
     async def list_caldav_accounts(request: Request):
@@ -1231,9 +1143,8 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
 
 
     @router.delete("/calendars/{cal_id}")
-    async def delete_calendar(request: Request, cal_id: str):
+    def delete_calendar(request: Request, cal_id: str, db: Session = Depends(get_db)):
         owner = _require_user(request)
-        db = SessionLocal()
         try:
             cal = _get_or_404_calendar(db, cal_id, owner)
             db.query(CalendarEvent).filter(CalendarEvent.calendar_id == cal_id).delete()
@@ -1246,14 +1157,11 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             db.rollback()
             logger.error("Failed to delete calendar %s: %s", cal_id, e)
             raise HTTPException(500, "Failed to delete calendar")
-        finally:
-            db.close()
 
 
     @router.get("/calendars")
-    async def list_calendars(request: Request):
+    def list_calendars(request: Request, db: Session = Depends(get_db)):
         owner = _require_user(request)
-        db = SessionLocal()
         try:
             _ensure_default_calendar(db, owner)
             # Listing calendars intentionally lazily creates a durable default.
@@ -1270,11 +1178,9 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             db.rollback()
             logger.error("Failed to list calendars: %s", e)
             raise HTTPException(500, "Failed to list calendars")
-        finally:
-            db.close()
 
     @router.get("/events")
-    async def list_events(request: Request, start: str, end: str, calendar: str = ""):
+    def list_events(request: Request, start: str, end: str, calendar: str = "", db: Session = Depends(get_db)):
         owner = _require_user(request)
         try:
             start_dt = _parse_dt(start)
@@ -1285,7 +1191,6 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             # just log it and return no events for this window.
             logger.warning("list_events: unparseable range start=%r end=%r", start, end)
             return {"events": []}
-        db = SessionLocal()
         try:
             # Scope events to calendars owned by the caller.
             # Non-recurring events must overlap the query window; recurring
@@ -1336,14 +1241,11 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         except Exception as e:
             logger.error("Failed to list events: %s", e)
             raise HTTPException(500, "Failed to list events")
-        finally:
-            db.close()
 
     @router.post("/events")
-    async def create_event(request: Request, data: EventCreate):
+    async def create_event(request: Request, data: EventCreate, db: Session = Depends(get_db)):
         owner = _require_user(request)
         _reserve_calendar_uploads(request, data.color, data.description, data.location)
-        db = SessionLocal()
         try:
             cal = None
             if data.calendar_href:
@@ -1407,29 +1309,22 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             db.rollback()
             logger.error("Failed to create event: %s", e)
             raise HTTPException(500, "Failed to create event")
-        finally:
-            db.close()
 
     @router.get("/events/{uid}")
-    async def get_event(request: Request, uid: str):
+    def get_event(request: Request, uid: str, db: Session = Depends(get_db)):
         owner = _require_user(request)
-        db = SessionLocal()
-        try:
-            base_uid = _resolve_base_uid(uid)
-            ev = _get_or_404_event(db, base_uid, owner)
-            return {"event": _event_to_dict(ev, db=db, owner=owner)}
-        finally:
-            db.close()
+        base_uid = _resolve_base_uid(uid)
+        ev = _get_or_404_event(db, base_uid, owner)
+        return {"event": _event_to_dict(ev, db=db, owner=owner)}
 
     @router.put("/events/{uid}")
-    async def update_event(request: Request, uid: str, data: EventUpdate):
+    async def update_event(request: Request, uid: str, data: EventUpdate, db: Session = Depends(get_db)):
         owner = _require_user(request)
         _reserve_calendar_uploads(request, data.color, data.description, data.location)
         try:
             base_uid = _resolve_base_uid(uid)
         except ValueError as e:
             raise HTTPException(400, str(e))
-        db = SessionLocal()
         try:
             ev = _get_or_404_event(db, base_uid, owner)
             if data.summary is not None:
@@ -1481,17 +1376,14 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             db.rollback()
             logger.error("Failed to update event: %s", e)
             raise HTTPException(500, "Failed to update event")
-        finally:
-            db.close()
 
     @router.delete("/events/{uid}")
-    async def delete_event(request: Request, uid: str, scope: str = "series"):
+    async def delete_event(request: Request, uid: str, scope: str = "series", db: Session = Depends(get_db)):
         owner = _require_user(request)
         try:
             base_uid = _resolve_base_uid(uid)
         except ValueError as e:
             raise HTTPException(400, str(e))
-        db = SessionLocal()
         try:
             ev = _get_or_404_event(db, base_uid, owner)
             is_occurrence_delete = scope in {"occurrence", "instance"} and "::" in uid and bool(ev.rrule)
@@ -1526,14 +1418,11 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             db.rollback()
             logger.error("Failed to delete event: %s", e)
             raise HTTPException(500, "Failed to delete event")
-        finally:
-            db.close()
 
     @router.post("/calendars")
-    async def create_calendar(request: Request, name: str = "Imported", color: str = "#5b8abf"):
+    def create_calendar(request: Request, name: str = "Imported", color: str = "#5b8abf", db: Session = Depends(get_db)):
         owner = _require_user(request)
         _reserve_calendar_uploads(request, color)
-        db = SessionLocal()
         try:
             cal = CalendarCal(
                 id=str(uuid.uuid4()),
@@ -1549,14 +1438,11 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             db.rollback()
             logger.error("Failed to create calendar: %s", e)
             raise HTTPException(500, "Failed to create calendar")
-        finally:
-            db.close()
 
     @router.put("/calendars/{cal_id}")
-    async def update_calendar(request: Request, cal_id: str, name: str = None, color: str = None):
+    def update_calendar(request: Request, cal_id: str, name: str = None, color: str = None, db: Session = Depends(get_db)):
         owner = _require_user(request)
         _reserve_calendar_uploads(request, color)
-        db = SessionLocal()
         try:
             cal = _get_or_404_calendar(db, cal_id, owner)
             if name is not None:
@@ -1571,8 +1457,6 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             db.rollback()
             logger.error("Failed to update calendar: %s", e)
             raise HTTPException(500, "Failed to update calendar")
-        finally:
-            db.close()
 
 
     # Hard cap on ICS upload (ICS_MAX_BYTES, default 10 MB). Loading the whole
@@ -1580,12 +1464,11 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
     # upload would OOM.
 
     @router.post("/import")
-    async def import_ics(request: Request, file: UploadFile = File(...), calendar_name: str = ""):
+    async def import_ics(request: Request, file: UploadFile = File(...), calendar_name: str = "", db: Session = Depends(get_db)):
         """Import events from an .ics file (scoped to caller's account)."""
         from icalendar import Calendar as iCal
 
         owner = _require_user(request)
-        db = SessionLocal()
         try:
             content = await read_upload_limited(file, ICS_MAX_BYTES, "ICS file")
             try:
@@ -1615,14 +1498,14 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
 
             imported = skipped = repaired = 0
             event_uids = []
+            existing_by_key = {}
+            for row in db.query(CalendarEvent).filter(CalendarEvent.calendar_id == target_cal.id).all():
+                existing_by_key.setdefault((row.dtstart, row.summary), row)
             for comp in cal_data.walk():
                 if comp.name != "VEVENT":
                     continue
-                # Generate a fresh uid for each import. The old code reused
-                # the VEVENT uid from the file, which leaked across users:
-                # a uid present on ANY user's calendar caused this user's
-                # row to be silently skipped (and enabled enumeration).
-                # Using a fresh uuid scopes uniqueness per-row.
+                # A fresh uid per row: reusing the file's uid would collide
+                # with other users' rows that share it.
                 uid_val = str(uuid.uuid4())
                 dtstart = comp.get("dtstart")
                 if not dtstart:
@@ -1633,29 +1516,13 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
                 # source-uid + same dtstart in the same target = duplicate.
                 source_uid = str(comp.get("uid", "")) or None
                 if source_uid:
-                    src_dtstart = dtstart.dt
-                    # Normalize to the SAME naive form import_ics stores, so a
-                    # re-import of a tz-aware event matches the existing row.
-                    # The old code stripped tzinfo WITHOUT converting to UTC
-                    # (wall clock), while storage converts to UTC first, so
-                    # every re-import of a TZID event created a duplicate.
-                    naive_src = _ics_naive_dtstart(src_dtstart)
-                    existing = (
-                        db.query(CalendarEvent)
-                        .filter(
-                            CalendarEvent.calendar_id == target_cal.id,
-                            CalendarEvent.dtstart == naive_src,
-                            CalendarEvent.summary == str(comp.get("summary", "")),
-                        )
-                        .first()
-                    )
+                    # Same naive UTC form the row below is stored in, so a
+                    # re-import of a TZID event matches.
+                    naive_src = _ics_naive_dtstart(dtstart.dt)
+                    existing = existing_by_key.get((naive_src, str(comp.get("summary", ""))))
                     if existing:
-                        # An import predating the clamp below may have stored
-                        # this same event with a non-positive duration, which
-                        # the list_events overlap filter hides. Re-importing
-                        # lands here and would skip without touching that row,
-                        # so the event would stay invisible. Backfill the clamp
-                        # onto the stored row before skipping it.
+                        # Rows stored before the duration clamp are hidden by
+                        # list_events; backfill the clamp before skipping.
                         fixed_end = _ensure_positive_duration(
                             existing.dtstart, existing.dtend, bool(existing.all_day)
                         )
@@ -1668,12 +1535,8 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
 
                 dt_val = dtstart.dt
                 all_day = isinstance(dt_val, date) and not isinstance(dt_val, datetime)
-                # For timed events, preserve the source timezone by converting
-                # to UTC before stripping tzinfo (DB stores naive). We mark
-                # the row with is_utc=True so the serializer adds the Z
-                # suffix on output — without this, the frontend would parse
-                # the naive ISO as the user's CURRENT local, which is exactly
-                # the bug where imported events fire reminders at wrong times.
+                # Timed events convert to naive UTC and set is_utc so the
+                # serializer adds the Z suffix the frontend needs.
                 from datetime import timezone as _tz
                 row_is_utc = False
                 if all_day:
@@ -1730,16 +1593,13 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             db.rollback()
             logger.error("Failed to import ICS: %s", e)
             raise HTTPException(500, "Failed to import ICS")
-        finally:
-            db.close()
 
     @router.get("/export/{cal_id}")
-    async def export_ics(request: Request, cal_id: str):
+    def export_ics(request: Request, cal_id: str, db: Session = Depends(get_db)):
         """Export a calendar as .ics file."""
         from fastapi.responses import Response
 
         owner = _require_user(request)
-        db = SessionLocal()
         try:
             cal = _get_or_404_calendar(db, cal_id, owner)
             events = db.query(CalendarEvent).filter(
@@ -1788,8 +1648,6 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         except Exception as e:
             logger.error("Failed to export ICS: %s", e)
             raise HTTPException(500, "Failed to export ICS")
-        finally:
-            db.close()
 
     @router.post("/quick-parse")
     async def quick_parse(request: Request):
@@ -1806,8 +1664,7 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         owner = _require_user(request)
         from src.endpoint_resolver import resolve_endpoint
         from src.llm_core import llm_call_async
-        from src.text_helpers import strip_think
-        import json as _json
+        from src.text_helpers import extract_llm_json, strip_think
         import re as _re
 
         body = await request.json()
@@ -1877,22 +1734,13 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             return {"ok": False, "error": f"LLM call failed: {e}"}
 
         cleaned = strip_think(raw or "", prose=False, prompt_echo=True)
-        cleaned = _re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=_re.MULTILINE).strip()
-        m = _re.search(r"\{[\s\S]*\}", cleaned)
-        if not m:
+        parsed = extract_llm_json(cleaned)
+        if not isinstance(parsed, dict):
             return {"ok": False, "error": "Could not extract JSON", "raw": cleaned[:400]}
-        try:
-            parsed = _json.loads(m.group())
-        except Exception as e:
-            return {"ok": False, "error": f"Invalid JSON: {e}", "raw": cleaned[:400]}
 
         # Light validation / defaults so the frontend can trust the shape.
         summary = (parsed.get("summary") or text)[:200]
-        # Strip stale relative/absolute time tokens that the LLM (or the
-        # user's raw input) sometimes leaks into the summary — these
-        # would otherwise be displayed verbatim in reminder notifications
-        # that fire much later, when "in 29 min" is no longer true. The
-        # actual timing lives in dtstart/dtend.
+        # Time tokens in the title go stale in reminders; dtstart/dtend hold the time.
         summary = _re.sub(r'\bin\s+\d+\s*(min|minute|hour|hr|day)s?\b', '', summary, flags=_re.IGNORECASE)
         summary = _re.sub(r'\(\s*\d{1,2}:\d{2}\s*\)', '', summary)
         summary = _re.sub(r'\b\d{1,2}(:\d{2})?\s*(am|pm)\b', '', summary, flags=_re.IGNORECASE)
@@ -1901,24 +1749,15 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         all_day = bool(parsed.get("all_day"))
         dtstart = (parsed.get("dtstart") or "").strip()
         dtend   = (parsed.get("dtend") or "").strip()
-        # Force naive-local on LLM output. The model is anchored on the
-        # user's local "now" via the system prompt, so its emitted
-        # datetime is already meant to be the user's wall-clock time.
-        # Some models append `Z` or a tz offset anyway, which would
-        # make `_parse_dt_pair` flag the row as UTC and shift the
-        # displayed time forward by the user's tz offset. Strip any
-        # trailing tz marker so the time is stored exactly as the LLM
-        # wrote it.
+        # The prompt anchors the model on user-local time, so a trailing Z or
+        # offset it adds anyway is wrong; drop it before _parse_dt_pair sees it.
         def _strip_tz(s):
             if not s:
                 return s
             s = s.strip()
-            # Strip "Z"
             if s.endswith('Z') or s.endswith('z'):
                 s = s[:-1]
-            # Strip "+HH:MM" / "-HH:MM" if it followed a T-time
-            s = _re.sub(r'[+-]\d{2}:?\d{2}$', '', s)
-            return s
+            return _re.sub(r'[+-]\d{2}:?\d{2}$', '', s)
         dtstart = _strip_tz(dtstart)
         dtend   = _strip_tz(dtend)
         if not dtstart:

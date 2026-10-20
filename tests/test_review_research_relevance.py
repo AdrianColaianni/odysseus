@@ -6,14 +6,14 @@ from src.deep_research import DeepResearcher
 from src.research_navigator import ResearchPage
 
 
-@pytest.mark.parametrize("question,text", [
-    ("日本の人工知能", "日本の人工知能の研究について"),
-    ("日本の人工知能", "Artificial intelligence research in Japan"),
-    ("artificial intelligence", "人工知能の研究について"),
-    ("???", "A source that the model can assess"),
-])
-def test_lexical_filter_defers_when_it_cannot_assess_language(question, text):
-    assert DeepResearcher._topic_relevant(question, text)
+def test_lexical_filter_defers_when_it_cannot_assess_language():
+    for question, text in [
+        ("日本の人工知能", "日本の人工知能の研究について"),
+        ("日本の人工知能", "Artificial intelligence research in Japan"),
+        ("artificial intelligence", "人工知能の研究について"),
+        ("???", "A source that the model can assess"),
+    ]:
+        assert DeepResearcher._topic_relevant(question, text)
 
 
 def test_small_model_filter_still_rejects_unrelated_english():

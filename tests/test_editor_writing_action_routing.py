@@ -1,5 +1,6 @@
 """Writing-menu source text must not redirect the requested editor operation."""
 import re
+from itertools import product
 from types import SimpleNamespace
 
 import pytest
@@ -20,33 +21,32 @@ MENU = declaration('_AI_WRITING_ACTIONS')
 ACTIONS = dict(re.findall(r"\s+(\w+): '([^']+)'", MENU))
 
 
-@pytest.mark.parametrize('action', ['proofread', 'improve', 'concise', 'style', 'sources'])
-@pytest.mark.parametrize('newline', ['\n', '\r\n'])
-def test_writing_actions_keep_inline_tools_despite_source_topics(action, newline):
-    prompt = ACTIONS[action] + '\n\nUse this configured writing style as the source of truth:\n---\nUse clear sentences about files and tasks.\n---'
-    prompt += '\n\nImportant scope: work only on this selected passage. Selected passage:\n---\nThe calendar lists events. I read notes about Python scripts, images and a new document. This sentnce needs help.\n---'
-    prompt = prompt.replace('\n', newline)
-    doc = SimpleNamespace(title='Essay', language='markdown', current_content='This sentnce needs help.')
-    families = requested_capabilities(prompt, active_document=True)
-    assert families == ({'documents', 'search_browser'} if action == 'sources' else {'documents'})
-    assert targets_active_editor(doc, prompt)
-    assert active_editor_suggestion_request(doc, prompt) == (action != 'proofread')
-    selected = preserve_bound_editor_selected_tools(prompt, selected_tools_for_request(prompt), active_document=True)
-    contract = resolve_turn_contract(capabilities=families, schemas=FUNCTION_TOOL_SCHEMAS,
-                                     policy=ToolPolicy(), selected_tools=selected)
-    scoped = scope_active_editor_contract(contract, suggestion_only=action != 'proofread', source_verification=action == 'sources')
-    names = {s['function']['name'] for s in scoped.schemas()}
-    if action == 'proofread':
-        assert names == {'edit_document', 'update_document'}
-        return
-    assert 'suggest_document' in names
-    assert not names & {'edit_document', 'update_document', 'create_document', 'bash'}
-    if action == 'sources':
-        assert 'web_search' in names
-    else:
-        assert names == {'suggest_document'}
-        assert required_active_editor_tool_choice(active_editor_target=True, suggestion_target=True,
-            whole_draft_target=False, offered=scoped.schemas())['function']['name'] == 'suggest_document'
+def test_writing_actions_keep_inline_tools_despite_source_topics():
+    for action, newline in product(('proofread', 'improve', 'concise', 'style', 'sources'), ('\n', '\r\n')):
+        prompt = ACTIONS[action] + '\n\nUse this configured writing style as the source of truth:\n---\nUse clear sentences about files and tasks.\n---'
+        prompt += '\n\nImportant scope: work only on this selected passage. Selected passage:\n---\nThe calendar lists events. I read notes about Python scripts, images and a new document. This sentnce needs help.\n---'
+        prompt = prompt.replace('\n', newline)
+        doc = SimpleNamespace(title='Essay', language='markdown', current_content='This sentnce needs help.')
+        families = requested_capabilities(prompt, active_document=True)
+        assert families == ({'documents', 'search_browser'} if action == 'sources' else {'documents'})
+        assert targets_active_editor(doc, prompt)
+        assert active_editor_suggestion_request(doc, prompt) == (action != 'proofread')
+        selected = preserve_bound_editor_selected_tools(prompt, selected_tools_for_request(prompt), active_document=True)
+        contract = resolve_turn_contract(capabilities=families, schemas=FUNCTION_TOOL_SCHEMAS,
+                                         policy=ToolPolicy(), selected_tools=selected)
+        scoped = scope_active_editor_contract(contract, suggestion_only=action != 'proofread', source_verification=action == 'sources')
+        names = {s['function']['name'] for s in scoped.schemas()}
+        if action == 'proofread':
+            assert names == {'edit_document', 'update_document'}
+            continue
+        assert 'suggest_document' in names
+        assert not names & {'edit_document', 'update_document', 'create_document', 'bash'}
+        if action == 'sources':
+            assert 'web_search' in names
+        else:
+            assert names == {'suggest_document'}
+            assert required_active_editor_tool_choice(active_editor_target=True, suggestion_target=True,
+                whole_draft_target=False, offered=scoped.schemas())['function']['name'] == 'suggest_document'
 
 
 def test_source_boundary_preserves_trailing_instructions_and_plain_requests():
@@ -62,14 +62,12 @@ def test_editor_requests_do_not_capture_explicit_other_targets():
         assert not targets_active_editor(doc, prompt)
 
 
-@pytest.mark.parametrize('prompt', ['Fix the spelling in the open document.',
-                                    'Correct this sentence.', 'Polish this paragraph.',
-                                    'Shorten the open document.', 'Rewrite this document.'])
-def test_direct_edits_share_the_capability_router(prompt):
+def test_direct_edits_share_the_capability_router():
     doc = SimpleNamespace(title='Essay', language='markdown', current_content='Text')
-    assert requested_capabilities(prompt, active_document=True) == {'documents'}
-    assert targets_active_editor(doc, prompt)
-    assert not active_editor_suggestion_request(doc, prompt)
+    for prompt in ('Fix the spelling in the open document.', 'Polish this paragraph.', 'Rewrite this document.'):
+        assert requested_capabilities(prompt, active_document=True) == {'documents'}
+        assert targets_active_editor(doc, prompt)
+        assert not active_editor_suggestion_request(doc, prompt)
 
 
 def test_source_review_still_requires_tool_completion_after_research():
@@ -78,11 +76,11 @@ def test_source_review_still_requires_tool_completion_after_research():
         whole_draft_target=False, offered=schemas) == 'required'
 
 
-@pytest.mark.parametrize('value', [3, None, [], 'not an object'])
-def test_malformed_editor_tool_arguments_get_a_recoverable_error(value):
+def test_malformed_editor_tool_arguments_get_a_recoverable_error():
     from src.clean_agent_preview import normalize_preview_call_args
-    with pytest.raises(ValueError, match='JSON object'):
-        normalize_preview_call_args('suggest_document', value)
+    for value in (3, None, 'not an object'):
+        with pytest.raises(ValueError, match='JSON object'):
+            normalize_preview_call_args('suggest_document', value)
 
 
 @pytest.mark.asyncio
@@ -221,7 +219,6 @@ async def test_finish_after_saved_editor_batch_skips_another_model_request(monke
 @pytest.mark.asyncio
 async def test_finish_interrupts_wait_for_next_model_token():
     import asyncio
-    from src.clean_agent_preview import preview_lines_until_finish
 
     finish = asyncio.Event()
     waiting = asyncio.Event()

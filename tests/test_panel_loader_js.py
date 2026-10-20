@@ -12,30 +12,15 @@ no real panel module graph. The production `loadPanel` is the same function
 applied to the real registry, checked here only for its registered names.
 """
 
-import json
 import os
 import re
-import shutil
-import subprocess
 import textwrap
 from pathlib import Path
 
-import pytest
+from tests.helpers.node import run_node_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _PANELS = (_REPO / "static" / "js" / "panels.js").as_posix()
-_HAS_NODE = shutil.which("node") is not None
-
-pytestmark = pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
-
-
-def _run(js: str) -> str:
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, cwd=str(_REPO), timeout=30,
-    )
-    assert proc.returncode == 0, proc.stderr
-    return proc.stdout.strip()
 
 
 def test_repeated_loads_import_once_and_share_one_promise():
@@ -61,7 +46,7 @@ def test_repeated_loads_import_once_and_share_one_promise():
         }}));
         """
     )
-    out = json.loads(_run(js))
+    out = run_node_module(js)
     assert out["calls"] == 1
     assert out["sameWhilePending"] is True
     assert out["sameAfterResolve"] is True
@@ -79,7 +64,7 @@ def test_unknown_panel_throws_instead_of_returning_undefined():
         console.log(JSON.stringify({{ message, returned: String(returned) }}));
         """
     )
-    out = json.loads(_run(js))
+    out = run_node_module(js)
     assert out["message"] is not None
     assert 'nope' in out["message"]
     assert out["returned"] == "not-reached"
@@ -106,7 +91,7 @@ def test_a_failed_load_is_not_memoised_so_a_retry_can_succeed():
         console.log(JSON.stringify({{ calls, firstError, opened: second.open() }}));
         """
     )
-    out = json.loads(_run(js))
+    out = run_node_module(js)
     assert out["firstError"] == "offline"
     assert out["calls"] == 2
     assert out["opened"] == "opened"
@@ -124,7 +109,7 @@ def test_a_thunk_that_throws_synchronously_rejects_rather_than_escaping():
         console.log(JSON.stringify({{ sync, rejected }}));
         """
     )
-    out = json.loads(_run(js))
+    out = run_node_module(js)
     assert out["sync"] is None, "a broken thunk must not throw at call time"
     assert out["rejected"] == "boom"
 
@@ -136,7 +121,7 @@ def test_the_image_editor_is_registered():
         console.log(JSON.stringify(panelNames()));
         """
     )
-    assert "editor" in json.loads(_run(js))
+    assert "editor" in run_node_module(js)
 
 
 # ── Offline coverage ──────────────────────────────────────────────────────

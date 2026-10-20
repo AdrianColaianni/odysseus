@@ -1,6 +1,5 @@
 // compare/probe.js — model probe/check system
 import state from './state.js';
-import { WAVE_FRAMES } from './icons.js?v=20260908compareprompts1';
 import uiModule from '../ui.js?v=20260916largetoolscroll1';
 import spinnerModule from '../spinner.js';
 
@@ -43,7 +42,7 @@ async function _checkUnprobed() {
         continue;
       }
       const res = await fetch(`${state.API_BASE}/api/probe-selected`, {
-        method: 'POST', credentials: 'same-origin',
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ models: [{ endpoint_id: m.endpointId || '', model: m.model, endpoint: m.endpoint || '' }] }),
       });

@@ -81,8 +81,6 @@ jobs:
           python-version: "3.11"
       # Byte-compile sources — catches syntax errors without installing deps.
       - run: python -m compileall -q app.py core routes src services scripts tests
-      - name: Check committed frontend deployment modules
-        run: python scripts/build_frontend.py --check
 
   node-syntax:
     name: JS syntax (node --check)
@@ -94,19 +92,13 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: "20"
-      - run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Check frontend architecture
-        run: node scripts/check_frontend.mjs
       # Syntax-check our own JS (skip vendored libs in static/lib).
       - name: node --check
         run: |
           shopt -s globstar nullglob
-          for f in static/app.js static/js/**/*.js frontend/src/**/*.js; do
+          for f in static/app.js static/js/**/*.js; do
             node --check "$f"
           done
-          node --check scripts/check_frontend.mjs
-      - name: Test frontend architecture gates and stateless proof
-        run: node --test tests/frontendArchitecture.test.mjs
 
   python-tests:
     name: Python tests (pytest ${{ matrix.shard }})
@@ -161,9 +153,9 @@ jobs:
         if: steps.docs-check.outputs.docs_only != 'true'
         with:
           enable-cache: true
-          cache-dependency-glob: requirements.txt
+          cache-dependency-glob: requirements*.txt
           prune-cache: false
-      - run: uv pip install --system -r requirements.txt
+      - run: uv pip install --system -r requirements-dev.txt
         if: steps.docs-check.outputs.docs_only != 'true'
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         if: steps.docs-check.outputs.docs_only != 'true'

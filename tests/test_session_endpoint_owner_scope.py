@@ -75,22 +75,16 @@ def test_chat_scoped_bearer_can_still_choose_an_owner_registered_endpoint():
     )
 
 
-@pytest.mark.parametrize(
-    ("skip_validation", "api_key"),
-    [(True, ""), (False, "caller-secret")],
-)
-def test_bearer_token_cannot_use_interactive_session_options(
-    skip_validation,
-    api_key,
-):
-    with pytest.raises(HTTPException) as exc:
-        _reject_delegated_session_options(
-            _request("admin", admin=True, api_token=True, scopes=["chat"]),
-            skip_validation=skip_validation,
-            api_key=api_key,
-        )
+def test_bearer_token_cannot_use_interactive_session_options():
+    for skip_validation, api_key in ((True, ""), (False, "caller-secret")):
+        with pytest.raises(HTTPException) as exc:
+            _reject_delegated_session_options(
+                _request("admin", admin=True, api_token=True, scopes=["chat"]),
+                skip_validation=skip_validation,
+                api_key=api_key,
+            )
 
-    assert exc.value.status_code == 403
+        assert exc.value.status_code == 403
 
 
 def test_chat_endpoint_recovery_paths_are_owner_scoped():
@@ -101,6 +95,6 @@ def test_chat_endpoint_recovery_paths_are_owner_scoped():
     assert "def _clear_orphaned_session_endpoint(sess, owner:" in chat_routes
     assert "def _recover_empty_session_model(sess, session_id: str, owner:" in chat_routes
     assert "q = owner_filter(q, ModelEndpoint, owner)" in chat_routes
-    assert "resolve_session_auth(sess, session, owner=effective_user(request))" in chat_routes
+    assert "resolve_session_auth(sess, session_id, owner=owner)" in chat_routes
     assert "def resolve_session_auth(sess, session_id: str, owner:" in chat_helpers
     assert "update_q = update_q.filter(DBSession.owner == owner)" in chat_helpers

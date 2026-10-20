@@ -53,25 +53,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # binary without paying `npx` startup/install overhead on each tool call.
 RUN npm install -g agent-browser@0.35.0 --omit=dev --loglevel=error
 
-# libgl1/libglib2.0-0t64/libxcb1 are runtime shared libs (libGL.so.1,
-# libglib-2.0/libgthread, libxcb.so.1) that opencv-python (cv2) loads. The
-# slim base omits them, so the Cookbook "install realesrgan" path imports cv2
-# and dies with `libxcb.so.1: cannot open shared object file` despite a clean
-# pip install. Using full opencv-python (not -headless) because basicsr/gfpgan/
-# facexlib/realesrgan all depend on the `opencv-python` distribution by name.
-#
-# libmagic1 is the shared lib (libmagic.so.1) that python-magic dlopens for
-# content-based MIME sniffing in src/upload_handler.py. We install both here
-# (libmagic1 + the python-magic wrapper, below) rather than in requirements.txt
-# because python-magic resolves libmagic at import time: where the lib is
-# absent the import can block or raise, so keeping it image-only avoids
-# regressing pip/venv installs on hosts without libmagic. Debian always has the
-# lib here, so the import is instant and detection actually works.
+# libgl1/libglib2.0-0t64/libxcb1 are the shared libs opencv-python (cv2) loads
+# for the Cookbook realesrgan install; the slim base omits them.
+# libmagic1 backs python-magic, installed below rather than in requirements.txt
+# because its import blocks or raises on hosts without libmagic.
 
-# Docker CLI (client only — daemon stays on the host via the
-# /var/run/docker.sock mount). The Debian `docker.io` package ships
-# dockerd but not the client binary on slim, so grab the static client
-# tarball from download.docker.com instead.
+# Docker CLI client only; the daemon stays on the host via the socket mount.
+# Debian's docker.io ships no client binary on slim.
 ARG DOCKER_CLI_VERSION=29.6.2
 RUN ARCH="$(dpkg --print-architecture)" \
     && case "$ARCH" in \
@@ -94,21 +82,15 @@ COPY requirements.txt requirements-optional.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
     && if [ "$INSTALL_OPTIONAL" = "true" ]; then pip install --no-cache-dir -r requirements-optional.txt; fi
 
-# python-magic powers content-based MIME sniffing in src/upload_handler.py.
-# Image-only (not in requirements.txt) because it needs the libmagic1 system
-# lib installed above; see the apt note near the top of this stage.
+# Content-based MIME sniffing in src/upload_handler.py; see the libmagic1 note above.
 RUN pip install --no-cache-dir python-magic==0.4.27
 
-# Pre-install the patched basicsr/gfpgan/facexlib wheels built in the
-# realesrgan-wheels stage (--no-deps keeps the image lean — torch & friends are
-# pulled only when realesrgan is actually installed). With these dists already
-# satisfied, the Cookbook's plain `pip install realesrgan` resolves them from
-# wheels instead of rebuilding the sdists that fail on Python 3.14.
+# Patched basicsr/gfpgan/facexlib wheels, so the Cookbook's `pip install
+# realesrgan` skips the sdists that fail on Python 3.14. --no-deps keeps torch out.
 COPY --from=realesrgan-wheels /wheels/ /tmp/odysseus-wheels/
 RUN pip install --no-cache-dir --no-deps /tmp/odysseus-wheels/*.whl \
     && rm -rf /tmp/odysseus-wheels
 
-# Copy app code
 COPY . .
 # Require the redistribution notices in the image build context.
 COPY licenses/ ./licenses/
@@ -117,15 +99,13 @@ COPY THIRD_PARTY_PROVENANCE.json ACKNOWLEDGMENTS.md ./
 # Create data directory (mount a volume here for persistence)
 RUN mkdir -p data logs services/cache/search
 
-# Entrypoint that drops to PUID/PGID (default 1000:1000) and repairs
-# ownership on the bind-mounted /app/data and /app/logs. Without this,
-# the container runs as root and writes root-owned files into host
-# bind mounts — any later non-root run (or a host user trying to
-# update them) silently fails on EPERM, breaking skill extraction,
-# prefs persistence, mail attachments, etc.
+# Drops to PUID/PGID (default 1000:1000) and repairs ownership of the
+# bind-mounted /app/data and /app/logs so host users can write them.
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
+# Keep APP_PORT equal to the CMD's --port: loopback calls and OAuth callbacks read it.
+ENV APP_PORT=7000
 EXPOSE 7000
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

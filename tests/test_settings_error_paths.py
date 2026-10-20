@@ -6,19 +6,7 @@ that was previously uncaught and would crash the app.
 """
 
 import json
-import os
-import sys
-import tempfile
-from pathlib import Path
 from unittest.mock import patch
-
-_TMP = Path(tempfile.mkdtemp(prefix="odysseus-settings-test-"))
-os.environ.setdefault("DATA_DIR", str(_TMP))
-os.environ.setdefault("DATABASE_URL", f"sqlite:///{_TMP / 'app.db'}")
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def _fresh_load(settings_path, content=None):

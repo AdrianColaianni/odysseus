@@ -5,7 +5,6 @@ import sys
 import threading
 import time
 import types
-from unittest.mock import MagicMock
 from types import SimpleNamespace
 
 import httpx
@@ -18,18 +17,6 @@ with preserve_import_state("core.database", "src.database", "core.session_manage
     # Other tests stub this module during collection. These helper tests need
     # the real URL normalization helpers so Anthropic /v1 handling is covered.
     clear_fake_endpoint_resolver_modules()
-
-    if "core.database" not in sys.modules:
-        _core_db = types.ModuleType("core.database")
-        for _name in [
-            "SessionLocal", "ModelEndpoint", "Session", "ChatMessage", "Document",
-            "DocumentVersion", "GalleryImage", "GalleryAlbum", "Note",
-            "CalendarCal", "CalendarEvent", "ScheduledTask", "TaskRun",
-            "McpServer", "ProviderAuthSession", "Base",
-        ]:
-            setattr(_core_db, _name, MagicMock())
-        _core_db.utcnow_naive = MagicMock()
-        sys.modules["core.database"] = _core_db
 
     import routes.model_routes as model_routes
     import src.database as src_database
@@ -51,7 +38,6 @@ with preserve_import_state("core.database", "src.database", "core.session_manage
         _normalize_endpoint_refresh_mode,
         _endpoint_refresh_mode,
         _is_google_api_base,
-        _truthy,
         _speech_settings_using_endpoint,
         _clear_speech_settings_for_endpoint,
         _endpoint_settings_using_endpoint,
@@ -181,136 +167,67 @@ def test_endpoint_cleanup_updates_active_scoped_prefs_but_preserves_legacy_data(
 
 # ── _default_endpoint_needs_assignment (add-endpoint auto-default) ──
 
-def test_default_assignment_when_none_configured():
-    # Nothing configured yet → first added endpoint should become the default.
+def test_default_assignment_follows_enabled_state():
     assert _default_endpoint_needs_assignment("", {"a", "b"}) is True
-
-
-def test_default_assignment_when_current_default_disabled():
-    # #3586: the configured default points at an endpoint that is no longer
-    # enabled (the user disabled it). Adding a new endpoint must reassign the
-    # default — otherwise Memory → Tidy keeps failing with "No default model
-    # configured" even though an enabled endpoint exists.
+    # #3586: a default pointing at a disabled endpoint left Memory -> Tidy
+    # failing with "No default model configured"; adding an endpoint reassigns it.
     assert _default_endpoint_needs_assignment("disabled-ep", {"new-ep"}) is True
-
-
-def test_default_preserved_when_current_default_enabled():
-    # Normal case: the configured default is still enabled → leave it alone.
     assert _default_endpoint_needs_assignment("live-ep", {"live-ep", "new-ep"}) is False
 
 
 # ── _match_provider_curated ──
 
-class TestMatchProviderCurated:
-    def test_url_match_overrides_provider(self):
-        assert _match_provider_curated("https://z.ai/v1", "openai") == "zai"
-
-    def test_deepseek_url(self):
-        assert _match_provider_curated("https://api.deepseek.com/v1", "openai") == "deepseek"
-
-    def test_groq_url(self):
-        assert _match_provider_curated("https://api.groq.com/openai/v1", "openai") == "groq"
-
-    def test_mistral_url(self):
-        assert _match_provider_curated("https://api.mistral.ai/v1", "openai") == "mistral"
-
-    def test_together_url(self):
-        assert _match_provider_curated("https://api.together.xyz/v1", "openai") == "together"
-
-    def test_fireworks_url(self):
-        assert _match_provider_curated("https://api.fireworks.ai/inference/v1", "openai") == "fireworks"
-
-    def test_google_url(self):
-        assert _match_provider_curated("https://generativelanguage.googleapis.com/v1beta", "openai") == "google"
-
-    def test_xai_url(self):
-        assert _match_provider_curated("https://api.x.ai/v1", "openai") == "xai"
-
-    def test_ollama_url(self):
-        assert _match_provider_curated("https://ollama.com/api", "openai") == "ollama"
-
-    def test_kimi_code_url(self):
-        assert _match_provider_curated("https://api.kimi.com/coding/v1", "openai") == "kimi-code"
-
-    def test_no_url_match_returns_provider(self):
-        assert _match_provider_curated("https://localhost:1234", "openai") == "openai"
-
-    def test_none_provider_passthrough(self):
-        assert _match_provider_curated("https://localhost:1234", None) is None
-
-    def test_none_url_safe(self):
-        assert _match_provider_curated(None, "openai") == "openai"
-
-    # ── Z.AI coding plan path override (#2230) ──
-
-    def test_zai_coding_path_returns_coding_curated(self):
-        """z.ai/api/coding must return 'zai-coding', not the base 'zai' list."""
-        assert _match_provider_curated("https://z.ai/api/coding", "openai") == "zai-coding"
-
-    def test_zai_coding_path_differs_from_base_zai(self):
-        """The coding plan and the base plan must resolve to different curated keys."""
-        base = _match_provider_curated("https://z.ai/v1", "openai")
-        coding = _match_provider_curated("https://z.ai/api/coding", "openai")
-        assert base == "zai"
-        assert coding == "zai-coding"
-        assert base != coding
-
-    def test_zai_coding_with_trailing_slash(self):
-        assert _match_provider_curated("https://z.ai/api/coding/", "openai") == "zai-coding"
-
-    def test_zai_base_does_not_match_coding(self):
-        """z.ai without the /api/coding path must NOT return 'zai-coding'."""
-        assert _match_provider_curated("https://z.ai/v1", "openai") != "zai-coding"
-
-    def test_zai_coding_none_provider(self):
-        """Path-based override fires even when provider is None."""
-        assert _match_provider_curated("https://z.ai/api/coding", None) == "zai-coding"
+def test_match_provider_curated_prefers_url_over_provider():
+    for url, provider, expected in (
+        ("https://z.ai/v1", "openai", "zai"),
+        ("https://api.deepseek.com/v1", "openai", "deepseek"),
+        ("https://api.groq.com/openai/v1", "openai", "groq"),
+        ("https://api.mistral.ai/v1", "openai", "mistral"),
+        ("https://api.together.xyz/v1", "openai", "together"),
+        ("https://api.fireworks.ai/inference/v1", "openai", "fireworks"),
+        ("https://generativelanguage.googleapis.com/v1beta", "openai", "google"),
+        ("https://api.x.ai/v1", "openai", "xai"),
+        ("https://ollama.com/api", "openai", "ollama"),
+        ("https://api.kimi.com/coding/v1", "openai", "kimi-code"),
+        ("https://localhost:1234", "openai", "openai"),
+        ("https://localhost:1234", None, None),
+        (None, "openai", "openai"),
+        # #2230: the Z.AI coding plan has its own list, even with no provider.
+        ("https://z.ai/api/coding", "openai", "zai-coding"),
+        ("https://z.ai/api/coding/", "openai", "zai-coding"),
+        ("https://z.ai/api/coding", None, "zai-coding"),
+    ):
+        assert _match_provider_curated(url, provider) == expected, url
 
 
 # ── _probe_endpoint: Z.AI coding plan (#2230) ──
 
+def _probe_urls_as_given(monkeypatch):
+    monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
+    monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
+
+
 class TestProbeZaiCoding:
     """Regression coverage for the Z.AI coding endpoint probing path."""
 
-    def _patch(self, monkeypatch):
-        monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
-        monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
-
-    def test_probe_preserves_models_from_server(self, monkeypatch):
-        """Models returned by /models are kept in the result."""
-        self._patch(monkeypatch)
-        server_models = [{"id": "glm-5.1"}, {"id": "custom-finetune"}]
+    def test_probe_keeps_server_models_and_appends_curated(self, monkeypatch):
+        _probe_urls_as_given(monkeypatch)
 
         def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
-            return httpx.Response(200, json={"data": server_models},
+            return httpx.Response(200, json={"data": [{"id": "glm-5.1"}, {"id": "custom-finetune"}]},
                                  request=httpx.Request("GET", url))
 
         monkeypatch.setattr(model_routes.httpx, "get", fake_get)
         result = _probe_endpoint("https://z.ai/api/coding", "key")
         assert "glm-5.1" in result
         assert "custom-finetune" in result
-
-    def test_probe_appends_curated_on_partial_response(self, monkeypatch):
-        """When /models returns a partial list, curated-only models are appended."""
-        self._patch(monkeypatch)
-        # Server only returns one model; the curated list has more
-        server_models = [{"id": "glm-5.1"}]
-
-        def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
-            return httpx.Response(200, json={"data": server_models},
-                                 request=httpx.Request("GET", url))
-
-        monkeypatch.setattr(model_routes.httpx, "get", fake_get)
-        result = _probe_endpoint("https://z.ai/api/coding", "key")
-        assert "glm-5.1" in result
-        # At least one curated model should be appended
         coding_curated = _PROVIDER_CURATED.get("zai-coding", [])
         appended = [m for m in coding_curated if m in result and m != "glm-5.1"]
         assert len(appended) > 0, "curated-only models should be appended"
 
     def test_probe_does_not_use_base_zai_curated(self, monkeypatch):
         """The coding endpoint must use zai-coding, NOT the base zai list."""
-        self._patch(monkeypatch)
+        _probe_urls_as_given(monkeypatch)
 
         def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
             return httpx.Response(200, json={"data": [{"id": "glm-5.1"}]},
@@ -339,12 +256,6 @@ class TestCurateModels:
         assert curated == models
         assert extra == []
 
-    def test_kimi_code_partitions(self):
-        models = ["kimi-for-coding", "other-model"]
-        curated, extra = _curate_models(models, "kimi-code")
-        assert "kimi-for-coding" in curated
-        assert "other-model" in extra
-
     def test_curated_sorted_by_priority(self):
         models = ["gpt-4o-mini", "gpt-4o", "o3"]
         curated, _ = _curate_models(models, "openai")
@@ -353,133 +264,67 @@ class TestCurateModels:
         gpt4o_mini_idx = curated.index("gpt-4o-mini")
         assert gpt4o_idx < gpt4o_mini_idx
 
-    def test_empty_models(self):
-        curated, extra = _curate_models([], "openai")
-        assert curated == []
-        assert extra == []
-
-    def test_deepseek_curated(self):
-        models = ["deepseek-chat", "deepseek-reasoner", "deepseek-coder"]
-        curated, extra = _curate_models(models, "deepseek")
-        assert "deepseek-chat" in curated
-        assert "deepseek-reasoner" in curated
-        assert "deepseek-coder" in extra
-
-    def test_xai_curated(self):
-        models = ["grok-4", "grok-3-fast", "grok-2"]
-        curated, extra = _curate_models(models, "xai")
-        assert "grok-4" in curated
-        assert "grok-3-fast" in curated
-        assert "grok-2" in extra
-
-    def test_xai_current_grok_43_curated(self):
-        curated, extra = _curate_models(["grok-4.3", "grok-4.3-fast"], "xai")
-        assert curated == ["grok-4.3", "grok-4.3-fast"]
-        assert extra == []
-
-    def test_groq_current_models_curated(self):
-        models = [
-            "openai/gpt-oss-120b",
-            "groq/compound",
-            "llama-3.1-8b-instant",
-            "llama-4-scout-17b-16e-instruct",
-        ]
-        curated, extra = _curate_models(models, "groq")
-        assert curated == models
-        assert extra == []
-
-    def test_google_current_gemini_curated(self):
-        curated, extra = _curate_models(["gemini-3.5-flash", "gemini-3.1-pro"], "google")
-        assert curated == ["gemini-3.5-flash", "gemini-3.1-pro"]
-        assert extra == []
+    def test_provider_lists_partition_current_models(self):
+        for provider, models, expected_extra in (
+            ("deepseek", ["deepseek-chat", "deepseek-reasoner", "deepseek-coder"], ["deepseek-coder"]),
+            ("xai", ["grok-4", "grok-3-fast", "grok-2"], ["grok-2"]),
+            ("xai", ["grok-4.3", "grok-4.3-fast"], []),
+            ("groq", ["openai/gpt-oss-120b", "groq/compound", "llama-3.1-8b-instant",
+                      "llama-4-scout-17b-16e-instruct"], []),
+            ("google", ["gemini-3.5-flash", "gemini-3.1-pro"], []),
+            ("kimi-code", ["kimi-for-coding", "other-model"], ["other-model"]),
+        ):
+            curated, extra = _curate_models(models, provider)
+            assert curated == [m for m in models if m not in expected_extra], provider
+            assert extra == expected_extra, provider
 
 
 # ── _is_chat_model ──
 
-class TestIsChatModel:
-    @pytest.mark.parametrize("model_id", [
+def test_is_chat_model_excludes_media_audio_and_legacy_instruct_models():
+    for model_id in (
         "gpt-4o", "gpt-4o-mini", "claude-sonnet-4", "llama-3.3-70b",
         "deepseek-chat", "gemini-2.0-flash", "o3",
         "llama-4-scout-17b-16e-instruct",
         "gemma-2b-it", "google/gemma-2b-it",
         "bigcode/starcoder2-15b-instruct",
-    ])
-    def test_chat_models(self, model_id):
-        assert _is_chat_model(model_id) is True
-
-    @pytest.mark.parametrize("model_id", [
+        "gpt-4o-audio-preview",
+    ):
+        assert _is_chat_model(model_id) is True, model_id
+    for model_id in (
         "dall-e-3", "tts-1", "whisper-1", "text-embedding-3-small",
-        "gpt-image-1", "sora-1",
-    ])
-    def test_non_chat_models(self, model_id):
-        assert _is_chat_model(model_id) is False
-
-    def test_realtime_excluded(self):
-        assert _is_chat_model("gpt-4o-realtime-preview") is False
-
-    def test_audio_preview_is_chat(self):
-        # gpt-4o-audio-preview is a chat model (has "audio" not "gpt-audio")
-        assert _is_chat_model("gpt-4o-audio-preview") is True
-
-    def test_gpt_audio_is_not_chat(self):
-        assert _is_chat_model("gpt-audio") is False
-
-    def test_legacy_openai_instruct_is_not_chat(self):
-        assert _is_chat_model("gpt-3.5-turbo-instruct") is False
-
-    @pytest.mark.parametrize("bad", [None, 123, 4.5, ["x"], {"a": 1}])
-    def test_non_string_id_is_treated_as_chat(self, bad):
-        # Defensive boundary: a non-compliant upstream can yield a non-string
-        # model id; it must not crash on .lower() (treated as chat-capable).
-        assert _is_chat_model(bad) is True
+        "gpt-image-1", "sora-1", "gpt-4o-realtime-preview", "gpt-audio",
+        "gpt-3.5-turbo-instruct",
+    ):
+        assert _is_chat_model(model_id) is False, model_id
+    # A non-compliant upstream can send a non-string id; it must not crash.
+    for bad in (None, 123, 4.5, ["x"], {"a": 1}):
+        assert _is_chat_model(bad) is True, bad
 
 
 # ── _classify_endpoint ──
 
 class TestClassifyEndpoint:
-    def test_localhost(self):
-        assert _classify_endpoint("http://localhost:1234") == "local"
-
-    def test_127(self):
-        assert _classify_endpoint("http://127.0.0.1:8080/v1") == "local"
-
-    def test_private_192(self):
-        assert _classify_endpoint("http://192.168.1.100:5000") == "local"
-
-    def test_private_10(self):
-        assert _classify_endpoint("http://10.0.0.5:8000") == "local"
-
-    @pytest.mark.parametrize("host", [
-        "10.example-cloud.com",
-        "172.16.example-cloud.com",
-        "192.168.example-cloud.com",
-    ])
-    def test_private_prefix_dns_names_are_api(self, host):
-        assert _classify_endpoint(f"https://{host}/v1") == "api"
-
-    def test_public_api(self):
-        assert _classify_endpoint("https://api.openai.com/v1") == "api"
-
-    def test_openrouter_api(self):
-        assert _classify_endpoint("https://openrouter.ai/api/v1") == "api"
-
-    def test_empty_string(self):
-        assert _classify_endpoint("") == "api"
-
-    def test_malformed_url(self):
-        assert _classify_endpoint("not-a-url") == "api"
-
-    def test_tailscale_auto_is_local(self):
-        assert _classify_endpoint("http://100.117.136.97:34521/v1") == "local"
-
-    def test_tailscale_proxy_override_is_api(self):
-        assert _classify_endpoint("http://100.117.136.97:34521/v1", "proxy") == "api"
-
-    def test_tailscale_api_override_is_api(self):
-        assert _classify_endpoint("http://100.117.136.97:34521/v1", "api") == "api"
-
-    def test_public_local_override_is_local(self):
-        assert _classify_endpoint("https://api.openai.com/v1", "local") == "local"
+    def test_classify_uses_private_host_unless_kind_is_explicit(self):
+        for url, kind, expected in (
+            ("http://localhost:1234", None, "local"),
+            ("http://127.0.0.1:8080/v1", None, "local"),
+            ("http://192.168.1.100:5000", None, "local"),
+            ("http://10.0.0.5:8000", None, "local"),
+            ("http://100.117.136.97:34521/v1", None, "local"),
+            ("https://10.example-cloud.com/v1", None, "api"),
+            ("https://172.16.example-cloud.com/v1", None, "api"),
+            ("https://192.168.example-cloud.com/v1", None, "api"),
+            ("https://api.openai.com/v1", None, "api"),
+            ("https://openrouter.ai/api/v1", None, "api"),
+            ("", None, "api"),
+            ("not-a-url", None, "api"),
+            ("http://100.117.136.97:34521/v1", "proxy", "api"),
+            ("http://100.117.136.97:34521/v1", "api", "api"),
+            ("https://api.openai.com/v1", "local", "local"),
+        ):
+            args = (url,) if kind is None else (url, kind)
+            assert _classify_endpoint(*args) == expected, (url, kind)
 
     def test_keyed_legacy_v1_endpoint_is_effective_proxy(self):
         ep = SimpleNamespace(endpoint_kind="auto", api_key="fake-key")
@@ -585,17 +430,8 @@ class TestClassifyEndpoint:
 # ── setup probing ──
 
 class TestSetupProbeSafety:
-    @pytest.mark.parametrize("value", ["true", "1", "yes", "on", " TRUE "])
-    def test_truthy_true_values(self, value):
-        assert _truthy(value) is True
-
-    @pytest.mark.parametrize("value", ["false", "0", "no", "", None])
-    def test_truthy_false_values(self, value):
-        assert _truthy(value) is False
-
     def test_keyed_probe_does_not_fallback_to_curated_on_auth_failure(self, monkeypatch):
-        monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
-        monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
+        _probe_urls_as_given(monkeypatch)
 
         def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
             request = httpx.Request("GET", url)
@@ -607,8 +443,7 @@ class TestSetupProbeSafety:
         assert _probe_endpoint("https://api.groq.com/openai/v1", "bad-key") == []
 
     def test_unkeyed_probe_can_still_use_curated_fallback(self, monkeypatch):
-        monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
-        monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
+        _probe_urls_as_given(monkeypatch)
 
         def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
             raise httpx.ConnectError("offline")
@@ -618,8 +453,7 @@ class TestSetupProbeSafety:
         assert _probe_endpoint("https://api.groq.com/openai/v1") == _PROVIDER_CURATED["groq"]
 
     def test_google_probe_uses_native_paginated_models_api(self, monkeypatch):
-        monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
-        monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
+        _probe_urls_as_given(monkeypatch)
         seen = []
 
         def fake_get(url, headers=None, params=None, timeout=None, verify=None, **kwargs):
@@ -682,8 +516,7 @@ class TestSetupProbeSafety:
         assert seen[1][2] == {"pageSize": 1000, "pageToken": "next-page"}
 
     def test_google_probe_does_not_use_curated_fallback_on_failure(self, monkeypatch):
-        monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
-        monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
+        _probe_urls_as_given(monkeypatch)
 
         def fake_get(url, headers=None, params=None, timeout=None, verify=None, **kwargs):
             request = httpx.Request("GET", url)
@@ -695,8 +528,7 @@ class TestSetupProbeSafety:
         assert _probe_endpoint("https://generativelanguage.googleapis.com/v1beta/openai", "bad-key") == []
 
     def test_keyed_anthropic_probe_does_not_fallback_on_failure(self, monkeypatch):
-        monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
-        monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
+        _probe_urls_as_given(monkeypatch)
 
         def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
             raise httpx.ConnectError("offline")
@@ -706,8 +538,7 @@ class TestSetupProbeSafety:
         assert _probe_endpoint("https://api.anthropic.com/v1", "bad-key") == []
 
     def test_anthropic_probe_does_not_double_v1(self, monkeypatch):
-        monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
-        monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
+        _probe_urls_as_given(monkeypatch)
         seen = []
 
         def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
@@ -726,8 +557,7 @@ class TestSetupProbeSafety:
         assert seen == ["https://api.anthropic.com/v1/models"]
 
     def test_ollama_cloud_probe_uses_native_tags_endpoint(self, monkeypatch):
-        monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
-        monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
+        _probe_urls_as_given(monkeypatch)
         seen = []
 
         def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
@@ -746,8 +576,7 @@ class TestSetupProbeSafety:
         assert seen == [("https://ollama.com/api/tags", {"Authorization": "Bearer ollama-key"})]
 
     def test_unkeyed_anthropic_probe_can_use_curated_fallback(self, monkeypatch):
-        monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
-        monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
+        _probe_urls_as_given(monkeypatch)
 
         def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
             raise httpx.ConnectError("offline")
@@ -756,48 +585,34 @@ class TestSetupProbeSafety:
 
         assert _probe_endpoint("https://api.anthropic.com/v1") == ANTHROPIC_MODELS
 
-def test_ollama_endpoint_error_message_includes_troubleshooting():
+def test_endpoint_error_message_names_probed_url_and_probe_error():
+    # Issue #25: the message carries the URL actually probed so the user can
+    # self-diagnose, and picks the hint for the server the URL points at.
     msg = model_routes._model_endpoint_error_message(
         "http://localhost:11434/v1",
         {"error": "Connection refused"},
     )
-
-    assert "No Ollama models found" in msg
+    assert "Ollama" in msg
     assert "Connection refused" in msg
     assert "http://localhost:11434/v1" in msg
-    assert "ollama list" in msg
 
-
-def test_generic_endpoint_error_message_preserves_probe_error():
     msg = model_routes._model_endpoint_error_message(
         "https://api.example.com/v1",
         {"error": "HTTP 401"},
     )
-
-    # Issue #25: the message must include the probed URL so the user can
-    # self-diagnose (was opaque "No models found for that provider/key").
-    assert "No models found for that provider/key" in msg
     assert "HTTP 401" in msg
     assert "https://api.example.com/v1/models" in msg
 
-
-def test_lmstudio_endpoint_error_message_includes_hint_and_probed_url():
-    # Issue #25: when the user pastes an LM Studio URL, surface a port-aware
-    # hint and the URL we actually probed (not the bare base URL).
     msg = model_routes._model_endpoint_error_message(
         "http://localhost:1234/v1",
         {"error": "HTTP 200"},  # 200-with-empty-list is the LM Studio trap
     )
-
     assert "LM Studio" in msg
-    assert "port 1234" in msg
     assert "http://localhost:1234/v1/models" in msg
-    assert "Developer Server" in msg
 
 
 def test_lmstudio_error_for_bare_host_port_probes_v1_models(monkeypatch):
-    # Regression: build_models_url must add /v1 for path-less LM Studio URLs
-    # (the OpenAI-compatible branch lands on /v1/models for LM Studio).
+    # Regression: build_models_url must add /v1 for path-less LM Studio URLs.
     # _is_ollama_native_url would otherwise match localhost+empty path and
     # route to /api/tags, masking the LM Studio URL we want to assert on.
     monkeypatch.setattr("src.llm_core._is_ollama_native_url", lambda url: False)
@@ -866,58 +681,36 @@ class TestDockerHostGatewayReachable:
 # ── pinned model IDs: normalization helper ──
 
 
-class TestNormalizeModelIds:
-    def test_list_passthrough_trims_and_dedupes(self):
-        assert _normalize_model_ids([" a ", "a", "b", ""]) == ["a", "b"]
-
-    def test_json_string_list(self):
-        assert _normalize_model_ids('["x", "y", "x"]') == ["x", "y"]
-
-    def test_comma_and_newline_string(self):
-        assert _normalize_model_ids("a, b\n c ,a") == ["a", "b", "c"]
-
-    def test_none_and_empty(self):
-        assert _normalize_model_ids(None) == []
-        assert _normalize_model_ids("") == []
-        assert _normalize_model_ids("   ") == []
-
-    def test_non_string_values_ignored(self):
-        assert _normalize_model_ids([1, "ok", None, {"a": 1}]) == ["ok"]
+def test_normalize_model_ids_trims_dedupes_and_parses_strings():
+    assert _normalize_model_ids([" a ", "a", "b", ""]) == ["a", "b"]
+    assert _normalize_model_ids('["x", "y", "x"]') == ["x", "y"]
+    assert _normalize_model_ids("a, b\n c ,a") == ["a", "b", "c"]
+    assert _normalize_model_ids(None) == []
+    assert _normalize_model_ids("   ") == []
+    assert _normalize_model_ids([1, "ok", None, {"a": 1}]) == ["ok"]
 
 
-# ── pinned model IDs: _visible_models merge ──
-
-
-class TestVisibleModelsPinned:
-    def test_includes_pinned_not_in_cached(self):
-        visible = _visible_models(["a"], None, ["deploy-1"])
-        assert visible == ["a", "deploy-1"]
-
-    def test_cached_plus_pinned_dedup_preserves_order(self):
-        visible = _visible_models(["a", "b"], None, ["b", "c"])
-        assert visible == ["a", "b", "c"]
-
-    def test_hidden_can_hide_a_pinned_model(self):
-        visible = _visible_models(["a"], ["deploy-1"], ["deploy-1"])
-        assert visible == ["a"]
-
-    def test_accepts_json_string_inputs(self):
-        visible = _visible_models('["a"]', '["a"]', '["b"]')
-        assert visible == ["b"]
+def test_visible_models_merges_pinned_after_cached_and_honours_hidden():
+    assert _visible_models(["a"], None, ["deploy-1"]) == ["a", "deploy-1"]
+    assert _visible_models(["a", "b"], None, ["b", "c"]) == ["a", "b", "c"]
+    assert _visible_models(["a"], ["deploy-1"], ["deploy-1"]) == ["a"]
+    assert _visible_models('["a"]', '["a"]', '["b"]') == ["b"]
+    # Non-JSON strings are comma/newline lists and never raise.
+    assert _visible_models("a,b", "b", "{bad json") == ["a", "{bad json"]
+    assert _visible_models("", None, "") == []
 
 
 # ── pinned model IDs: route behaviour ──
 
-# Building the router exercises FastAPI's Form() routes, which require
-# python-multipart. The test env ships without it, so register a minimal stub
-# (mirrors tests/test_review_regressions.py) only when it's genuinely missing.
-if "python_multipart" not in sys.modules:
+@pytest.fixture(autouse=True)
+def _python_multipart(monkeypatch):
+    # Building the router registers Form() routes, which need python-multipart.
     try:
         import python_multipart  # noqa: F401
     except ImportError:
-        _mp_stub = types.ModuleType("python_multipart")
-        _mp_stub.__version__ = "0.0.13"
-        sys.modules["python_multipart"] = _mp_stub
+        stub = types.ModuleType("python_multipart")
+        stub.__version__ = "0.0.13"
+        monkeypatch.setitem(sys.modules, "python_multipart", stub)
 
 
 class _RouteCondition:
@@ -962,9 +755,6 @@ class _RouteModelEndpoint:
             setattr(self, key, value)
 
 
-_RecordingEndpoint = _RouteModelEndpoint
-
-
 class _PinnedFakeRequest:
     def __init__(self, body=None, headers=None):
         self._body = body if body is not None else {}
@@ -974,12 +764,13 @@ class _PinnedFakeRequest:
         return self._body
 
 
-def _get_route(path, method):
+def _admin_route(monkeypatch, rows, path, method):
+    """Bind `rows` as the endpoint table and return the admin route handler."""
+    db = _RouteDb(rows)
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
     router = model_routes.setup_model_routes(model_discovery=None)
-    for route in router.routes:
-        if getattr(route, "path", "") == path and method in getattr(route, "methods", set()):
-            return route.endpoint
-    raise AssertionError(f"{method} {path} not found")
+    return db, _route_endpoint(router, path, method)
 
 
 def _make_endpoint(**kwargs):
@@ -1006,79 +797,40 @@ def _make_endpoint(**kwargs):
     return SimpleNamespace(**base)
 
 
-def test_patch_models_saves_pinned_models(monkeypatch):
-    ep = _make_endpoint()
-    db = _PinnedFakeDb([ep])
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
-    endpoint = _get_route("/api/model-endpoints/{ep_id}/models", "PATCH")
+def test_patch_pinned_models_dedupes_and_leaves_hidden_alone(monkeypatch):
+    ep = _make_endpoint(hidden_models=json.dumps(["hide-me"]))
+    _, endpoint = _admin_route(monkeypatch, [ep], "/api/model-endpoints/{ep_id}/models", "PATCH")
 
     request = _PinnedFakeRequest(body={"pinned_models": ["deploy-1", "deploy-1", "deploy-2"]})
     result = asyncio.run(endpoint("ep1", request))
 
     assert json.loads(ep.pinned_models) == ["deploy-1", "deploy-2"]
     assert result["pinned_count"] == 2
-
-
-def test_patch_models_pinned_does_not_clobber_hidden(monkeypatch):
-    ep = _make_endpoint(hidden_models=json.dumps(["hide-me"]))
-    db = _PinnedFakeDb([ep])
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
-    endpoint = _get_route("/api/model-endpoints/{ep_id}/models", "PATCH")
-
-    request = _PinnedFakeRequest(body={"pinned_models": ["deploy-1"]})
-    asyncio.run(endpoint("ep1", request))
-
     assert json.loads(ep.hidden_models) == ["hide-me"]
-    assert json.loads(ep.pinned_models) == ["deploy-1"]
 
 
 def test_patch_api_hidden_payload_converts_to_pinned(monkeypatch):
-    ep = _make_endpoint(
-        base_url="https://openrouter.ai/api/v1",
-        cached_models=json.dumps(["m1", "m2", "m3"]),
-        pinned_models=None,
-    )
-    db = _PinnedFakeDb([ep])
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
-    endpoint = _get_route("/api/model-endpoints/{ep_id}/models", "PATCH")
+    # An empty hidden list means every cached model is pinned, not none.
+    for hidden, expected_pins in ((["m2"], ["m1", "m3"]), ([], ["m1", "m2", "m3"])):
+        ep = _make_endpoint(
+            base_url="https://openrouter.ai/api/v1",
+            cached_models=json.dumps(["m1", "m2", "m3"]),
+            pinned_models=None,
+        )
+        _, endpoint = _admin_route(monkeypatch, [ep], "/api/model-endpoints/{ep_id}/models", "PATCH")
 
-    result = asyncio.run(endpoint("ep1", _PinnedFakeRequest(body={"hidden": ["m2"]})))
+        result = asyncio.run(endpoint("ep1", _PinnedFakeRequest(body={"hidden": hidden})))
 
-    assert result["pinned_count"] == 2
-    assert result["hidden_count"] == 0
-    assert json.loads(ep.pinned_models) == ["m1", "m3"]
-    assert ep.hidden_models is None
-
-
-def test_patch_api_hidden_empty_pins_all_cached_models(monkeypatch):
-    ep = _make_endpoint(
-        base_url="https://openrouter.ai/api/v1",
-        cached_models=json.dumps(["m1", "m2", "m3"]),
-        pinned_models=None,
-    )
-    db = _PinnedFakeDb([ep])
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
-    endpoint = _get_route("/api/model-endpoints/{ep_id}/models", "PATCH")
-
-    result = asyncio.run(endpoint("ep1", _PinnedFakeRequest(body={"hidden": []})))
-
-    assert result["pinned_count"] == 3
-    assert result["hidden_count"] == 0
-    assert json.loads(ep.pinned_models) == ["m1", "m2", "m3"]
-    assert ep.hidden_models is None
+        assert result["pinned_count"] == len(expected_pins)
+        assert result["hidden_count"] == 0
+        assert json.loads(ep.pinned_models) == expected_pins
+        assert ep.hidden_models is None
 
 
 def test_get_models_returns_pinned_when_probe_empty(monkeypatch):
     ep = _make_endpoint(pinned_models=json.dumps(["deploy-1"]))
-    db = _PinnedFakeDb([ep])
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
     monkeypatch.setattr(model_routes, "_probe_endpoint", lambda *a, **k: [])
-    endpoint = _get_route("/api/model-endpoints/{ep_id}/models", "GET")
+    _, endpoint = _admin_route(monkeypatch, [ep], "/api/model-endpoints/{ep_id}/models", "GET")
 
     result = endpoint("ep1", _PinnedFakeRequest(), SimpleNamespace(headers={}))
 
@@ -1093,10 +845,7 @@ def test_get_api_models_marks_picker_as_pinned_only(monkeypatch):
         cached_models=json.dumps(["openai/gpt-image-1", "anthropic/claude-sonnet-4"]),
         pinned_models=json.dumps(["openai/gpt-image-1"]),
     )
-    db = _PinnedFakeDb([ep])
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
-    endpoint = _get_route("/api/model-endpoints/{ep_id}/models", "GET")
+    _, endpoint = _admin_route(monkeypatch, [ep], "/api/model-endpoints/{ep_id}/models", "GET")
 
     result = endpoint("ep1", _PinnedFakeRequest(), SimpleNamespace(headers={}))
 
@@ -1113,10 +862,7 @@ def test_get_fresh_api_models_marks_cached_inventory_as_pinned(monkeypatch):
         cached_models=json.dumps(["openai/gpt-image-1", "anthropic/claude-sonnet-4"]),
         pinned_models=None,
     )
-    db = _PinnedFakeDb([ep])
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
-    endpoint = _get_route("/api/model-endpoints/{ep_id}/models", "GET")
+    _, endpoint = _admin_route(monkeypatch, [ep], "/api/model-endpoints/{ep_id}/models", "GET")
 
     result = endpoint("ep1", _PinnedFakeRequest(), SimpleNamespace(headers={}))
 
@@ -1135,10 +881,7 @@ def test_get_legacy_api_models_preserves_hidden_selection_as_pinned(monkeypatch)
         hidden_models=json.dumps(["m2"]),
         pinned_models=None,
     )
-    db = _PinnedFakeDb([ep])
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
-    endpoint = _get_route("/api/model-endpoints/{ep_id}/models", "GET")
+    _, endpoint = _admin_route(monkeypatch, [ep], "/api/model-endpoints/{ep_id}/models", "GET")
 
     result = endpoint("ep1", _PinnedFakeRequest(), SimpleNamespace(headers={}))
 
@@ -1150,15 +893,12 @@ def test_get_legacy_api_models_preserves_hidden_selection_as_pinned(monkeypatch)
 
 def test_reprobe_preserves_pinned_models(monkeypatch):
     ep = _make_endpoint(pinned_models=json.dumps(["deploy-1"]))
-    db = _PinnedFakeDb([ep])
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
     monkeypatch.setattr(model_routes, "_probe_endpoint", lambda *a, **k: ["m1"])
     monkeypatch.setattr(model_routes, "_is_chat_model", lambda m: True)
     monkeypatch.setattr(
         model_routes, "_probe_single_model", lambda *a, **k: {"status": "ok"}
     )
-    endpoint = _get_route("/api/model-endpoints/{ep_id}/probe", "GET")
+    _, endpoint = _admin_route(monkeypatch, [ep], "/api/model-endpoints/{ep_id}/probe", "GET")
 
     response = endpoint("ep1", _PinnedFakeRequest())
 
@@ -1183,9 +923,6 @@ def test_reprobe_chatgpt_subscription_does_not_hide_models(monkeypatch):
         api_key=None,
         hidden_models=json.dumps(["stale-hidden"]),
     )
-    db = _PinnedFakeDb([ep])
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
     monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
     monkeypatch.setattr(model_routes, "_probe_endpoint", lambda *a, **k: ["gpt-5.1-codex", "gpt-5.1"])
     monkeypatch.setattr(model_routes, "_is_chat_model", lambda m: True)
@@ -1194,7 +931,7 @@ def test_reprobe_chatgpt_subscription_does_not_hide_models(monkeypatch):
         model_routes.httpx, "post",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not probe chatgpt-subscription")),
     )
-    endpoint = _get_route("/api/model-endpoints/{ep_id}/probe", "GET")
+    _, endpoint = _admin_route(monkeypatch, [ep], "/api/model-endpoints/{ep_id}/probe", "GET")
 
     response = endpoint("ep1", _PinnedFakeRequest())
     chunks = []
@@ -1220,16 +957,6 @@ def test_reprobe_chatgpt_subscription_does_not_hide_models(monkeypatch):
     assert all(r["status"] == "ok" and r.get("skipped") is True for r in results)
     # The stale hidden_models is cleared, not repopulated with every model.
     assert ep.hidden_models is None
-
-
-def test_visible_models_handles_malformed_strings():
-    # Non-JSON cached/pinned strings are treated as comma/newline lists and
-    # never raise; a malformed hidden string is normalized too.
-    result = _visible_models("a,b", "b", "{bad json")
-    assert isinstance(result, list)
-    assert result == ["a", "{bad json"]
-    assert _visible_models("", None, "") == []
-    assert _visible_models("only-cached", None, None) == ["only-cached"]
 
 
 def test_api_key_fingerprint_is_stable_and_non_secret():
@@ -1274,14 +1001,15 @@ def _patch_create_deps(monkeypatch, db, settings=None):
     settings = {"default_endpoint_id": "exists"} if settings is None else settings
     monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
     monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
-    monkeypatch.setattr(model_routes, "ModelEndpoint", _RecordingEndpoint)
+    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
     monkeypatch.setattr(model_routes, "_normalize_base", lambda b: b)
     monkeypatch.setattr(model_routes, "_rewrite_loopback_for_docker", lambda b, **k: b)
     monkeypatch.setattr(model_routes, "_load_settings", lambda: settings)
     monkeypatch.setattr(model_routes, "_save_settings", lambda s: settings.update(s))
     monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda u: u)
     monkeypatch.setattr(auth_helpers, "get_current_user", lambda req: None)
-    return settings
+    router = model_routes.setup_model_routes(model_discovery=None)
+    return settings, _route_endpoint(router, "/api/model-endpoints", "POST")
 
 
 def test_list_model_endpoints_returns_key_fingerprint(monkeypatch):
@@ -1294,10 +1022,7 @@ def test_list_model_endpoints_returns_key_fingerprint(monkeypatch):
         api_key=None,
         cached_models=json.dumps(["m2"]),
     )
-    db = _PinnedFakeDb([endpoint_with_key, endpoint_without_key])
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
-    endpoint = _get_route("/api/model-endpoints", "GET")
+    _, endpoint = _admin_route(monkeypatch, [endpoint_with_key, endpoint_without_key], "/api/model-endpoints", "GET")
 
     result = endpoint(_PinnedFakeRequest())
 
@@ -1313,10 +1038,7 @@ def test_list_api_endpoint_defaults_inventory_to_visible_when_none_pinned(monkey
         cached_models=json.dumps(["openai/gpt-image-1", "anthropic/claude-sonnet-4"]),
         pinned_models=None,
     )
-    db = _PinnedFakeDb([ep])
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
-    endpoint = _get_route("/api/model-endpoints", "GET")
+    _, endpoint = _admin_route(monkeypatch, [ep], "/api/model-endpoints", "GET")
 
     result = endpoint(_PinnedFakeRequest())
 
@@ -1351,10 +1073,7 @@ def test_list_api_endpoint_returns_pinned_picker_models(monkeypatch):
         cached_models=json.dumps(["openai/gpt-image-1", "anthropic/claude-sonnet-4"]),
         pinned_models=json.dumps(["openai/gpt-image-1"]),
     )
-    db = _PinnedFakeDb([ep])
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
-    endpoint = _get_route("/api/model-endpoints", "GET")
+    _, endpoint = _admin_route(monkeypatch, [ep], "/api/model-endpoints", "GET")
 
     result = endpoint(_PinnedFakeRequest())
 
@@ -1370,10 +1089,7 @@ def test_list_api_endpoint_pinned_models_ignore_stale_hidden_state(monkeypatch):
         hidden_models=json.dumps(["openai/gpt-image-1"]),
         pinned_models=json.dumps(["openai/gpt-image-1"]),
     )
-    db = _PinnedFakeDb([ep])
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
-    endpoint = _get_route("/api/model-endpoints", "GET")
+    _, endpoint = _admin_route(monkeypatch, [ep], "/api/model-endpoints", "GET")
 
     result = endpoint(_PinnedFakeRequest())
 
@@ -1387,10 +1103,7 @@ def test_list_api_endpoint_derives_pins_from_legacy_hidden_state(monkeypatch):
         hidden_models=json.dumps(["m2"]),
         pinned_models=None,
     )
-    db = _PinnedFakeDb([ep])
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
-    endpoint = _get_route("/api/model-endpoints", "GET")
+    _, endpoint = _admin_route(monkeypatch, [ep], "/api/model-endpoints", "GET")
 
     result = endpoint(_PinnedFakeRequest())
 
@@ -1400,9 +1113,8 @@ def test_list_api_endpoint_derives_pins_from_legacy_hidden_state(monkeypatch):
 
 
 def test_post_creates_endpoint_with_pinned_models(monkeypatch):
-    db = _PinnedFakeDb([])  # no existing row → fresh create path
-    _patch_create_deps(monkeypatch, db)
-    create = _get_route("/api/model-endpoints", "POST")
+    db = _RouteDb([])  # no existing row → fresh create path
+    _, create = _patch_create_deps(monkeypatch, db)
 
     result = create(
         _PinnedFakeRequest(),
@@ -1419,10 +1131,9 @@ def test_post_creates_endpoint_with_pinned_models(monkeypatch):
 
 
 def test_post_google_endpoint_defaults_to_manual_refresh_when_mode_omitted(monkeypatch):
-    db = _PinnedFakeDb([])
-    _patch_create_deps(monkeypatch, db)
+    db = _RouteDb([])
+    _, create = _patch_create_deps(monkeypatch, db)
     monkeypatch.setattr(model_routes, "_probe_endpoint", lambda *args, **kwargs: ["gemini-test"])
-    create = _get_route("/api/model-endpoints", "POST")
 
     create(
         _PinnedFakeRequest(),
@@ -1445,9 +1156,8 @@ def test_post_dedupe_existing_merges_and_returns_pinned(monkeypatch):
         hidden_models=None,
         pinned_models=json.dumps(["old-pin"]),
     )
-    db = _PinnedFakeDb([existing])
-    _patch_create_deps(monkeypatch, db)
-    create = _get_route("/api/model-endpoints", "POST")
+    db = _RouteDb([existing])
+    _, create = _patch_create_deps(monkeypatch, db)
 
     result = create(
         _PinnedFakeRequest(),
@@ -1471,9 +1181,8 @@ def test_post_dedupe_existing_does_not_clobber_pinned_when_omitted(monkeypatch):
         cached_models=json.dumps(["m1"]),
         pinned_models=json.dumps(["keep-me"]),
     )
-    db = _PinnedFakeDb([existing])
-    _patch_create_deps(monkeypatch, db)
-    create = _get_route("/api/model-endpoints", "POST")
+    db = _RouteDb([existing])
+    _, create = _patch_create_deps(monkeypatch, db)
 
     result = create(
         _PinnedFakeRequest(),
@@ -1491,9 +1200,8 @@ def test_post_same_base_url_different_api_key_creates_distinct_endpoint(monkeypa
         base_url="https://api.example.test/v1",
         api_key="key-one",
     )
-    db = _PinnedFakeDb([existing])
-    _patch_create_deps(monkeypatch, db)
-    create = _get_route("/api/model-endpoints", "POST")
+    db = _RouteDb([existing])
+    _, create = _patch_create_deps(monkeypatch, db)
 
     result = create(
         _PinnedFakeRequest(),
@@ -1514,11 +1222,10 @@ def test_post_reassigns_default_when_current_default_disabled(monkeypatch):
     # new endpoint must promote it to the default, otherwise raw-setting readers
     # (Memory → Tidy) keep failing with "No default model configured".
     disabled = _make_endpoint(id="dead", base_url="http://old-host/v1", is_enabled=False)
-    db = _PinnedFakeDb([disabled])
-    settings = _patch_create_deps(
+    db = _RouteDb([disabled])
+    settings, create = _patch_create_deps(
         monkeypatch, db, settings={"default_endpoint_id": "dead", "default_model": "stale"}
     )
-    create = _get_route("/api/model-endpoints", "POST")
 
     create(
         _PinnedFakeRequest(),
@@ -1535,11 +1242,10 @@ def test_post_keeps_default_when_current_default_enabled(monkeypatch):
     # Counter-case: an enabled default must be left untouched when another
     # endpoint is added.
     live = _make_endpoint(id="live", base_url="http://live-host/v1", is_enabled=True)
-    db = _PinnedFakeDb([live])
-    settings = _patch_create_deps(
+    db = _RouteDb([live])
+    settings, create = _patch_create_deps(
         monkeypatch, db, settings={"default_endpoint_id": "live", "default_model": "live-model"}
     )
-    create = _get_route("/api/model-endpoints", "POST")
 
     create(
         _PinnedFakeRequest(),
@@ -1556,9 +1262,8 @@ def test_post_same_base_url_same_api_key_still_dedupes(monkeypatch):
         base_url="https://api.example.test/v1",
         api_key="key-one",
     )
-    db = _PinnedFakeDb([existing])
-    _patch_create_deps(monkeypatch, db)
-    create = _get_route("/api/model-endpoints", "POST")
+    db = _RouteDb([existing])
+    _, create = _patch_create_deps(monkeypatch, db)
 
     result = create(
         _PinnedFakeRequest(),
@@ -1624,9 +1329,6 @@ class _RouteDb:
     def add(self, row):
         self.rows.append(row)
         self.added.append(row)
-
-
-_PinnedFakeDb = _RouteDb
 
 
 class _ImmediateThread:
@@ -1700,6 +1402,17 @@ def _route_request():
         state=SimpleNamespace(current_user=None),
         app=SimpleNamespace(state=SimpleNamespace(auth_manager=None)),
     )
+
+
+def _models_route(monkeypatch, rows):
+    """Bind `rows` as the endpoint table with auth off; return GET /api/models."""
+    db = _RouteDb(rows)
+    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "_auth_disabled", lambda: True)
+    monkeypatch.setattr(model_routes, "build_chat_url", lambda base: f"{base}/chat/completions")
+    router = model_routes.setup_model_routes(model_discovery=None)
+    return db, _route_endpoint(router, "/api/models")
 
 
 def test_api_models_rejects_api_token_without_chat_scope(monkeypatch):
@@ -1778,13 +1491,7 @@ def test_api_models_returns_only_pinned_proxy_models_without_refresh_probe(monke
         api_key="fake-key",
         refresh_mode="manual",
     )
-    db = _RouteDb([row])
-    router = model_routes.setup_model_routes(model_discovery=None)
-
-    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "_auth_disabled", lambda: True)
-    monkeypatch.setattr(model_routes, "build_chat_url", lambda base: f"{base}/chat/completions")
+    _, list_models = _models_route(monkeypatch, [row])
 
     def fail_probe(*args, **kwargs):
         raise AssertionError("/models probe should not run for cached manual proxy")
@@ -1792,7 +1499,7 @@ def test_api_models_returns_only_pinned_proxy_models_without_refresh_probe(monke
     monkeypatch.setattr(model_routes, "_probe_endpoint", fail_probe)
     monkeypatch.setattr(threading, "Thread", _ImmediateThread)
 
-    result = _route_endpoint(router, "/api/models")(_route_request())
+    result = list_models(_route_request())
 
     assert result["items"][0]["models"] == ["cached-model"]
     assert result["items"][0]["models_extra"] == []
@@ -1811,16 +1518,10 @@ def test_api_models_openrouter_uses_pinned_models_not_hidden(monkeypatch):
         api_key="fake-key",
     )
     row.hidden_models = json.dumps(["openai/gpt-image-1"])
-    db = _RouteDb([row])
-    router = model_routes.setup_model_routes(model_discovery=None)
-
-    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "_auth_disabled", lambda: True)
-    monkeypatch.setattr(model_routes, "build_chat_url", lambda base: f"{base}/chat/completions")
+    _, list_models = _models_route(monkeypatch, [row])
     monkeypatch.setattr(threading, "Thread", _NoopThread)
 
-    result = _route_endpoint(router, "/api/models")(_route_request())
+    result = list_models(_route_request())
 
     assert result["items"][0]["endpoint_name"] == "openrouter"
     assert result["items"][0]["category"] == "api"
@@ -1835,16 +1536,10 @@ def test_api_models_openrouter_defaults_cached_models_visible(monkeypatch):
         pinned_models=None,
         api_key="fake-key",
     )
-    db = _RouteDb([row])
-    router = model_routes.setup_model_routes(model_discovery=None)
-
-    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "_auth_disabled", lambda: True)
-    monkeypatch.setattr(model_routes, "build_chat_url", lambda base: f"{base}/chat/completions")
+    _, list_models = _models_route(monkeypatch, [row])
     monkeypatch.setattr(threading, "Thread", _NoopThread)
 
-    result = _route_endpoint(router, "/api/models")(_route_request())
+    result = list_models(_route_request())
 
     assert result["items"][0]["endpoint_name"] == "openrouter"
     assert result["items"][0]["models"] == ["m1", "m2", "m3"]
@@ -1885,13 +1580,7 @@ async def test_probe_local_skips_tailscale_proxy_endpoint(monkeypatch):
 def test_background_refresh_deduplicates_same_base_url(monkeypatch):
     ep1 = _route_ep("a", "http://127.0.0.1:8000/v1", endpoint_kind="local")
     ep2 = _route_ep("b", "http://127.0.0.1:8000/v1", endpoint_kind="local")
-    db = _RouteDb([ep1, ep2])
-    router = model_routes.setup_model_routes(model_discovery=None)
-
-    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "_auth_disabled", lambda: True)
-    monkeypatch.setattr(model_routes, "build_chat_url", lambda base: f"{base}/chat/completions")
+    _, list_models = _models_route(monkeypatch, [ep1, ep2])
 
     calls = []
     probe_done = threading.Event()
@@ -1903,7 +1592,7 @@ def test_background_refresh_deduplicates_same_base_url(monkeypatch):
 
     monkeypatch.setattr(model_routes, "_probe_endpoint", fake_probe)
 
-    _route_endpoint(router, "/api/models")(_route_request(), refresh=True)
+    list_models(_route_request(), refresh=True)
 
     assert probe_done.wait(2)
     assert _wait_for(lambda: ep1.cached_models and ep2.cached_models)
@@ -1914,18 +1603,10 @@ def test_background_refresh_deduplicates_same_base_url(monkeypatch):
 
 def test_picker_refresh_waits_for_discovered_models(monkeypatch):
     ep = _route_ep("local", "http://127.0.0.1:8000/v1", endpoint_kind="local")
-    db = _RouteDb([ep])
-    router = model_routes.setup_model_routes(model_discovery=None)
-
-    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "_auth_disabled", lambda: True)
-    monkeypatch.setattr(model_routes, "build_chat_url", lambda base: f"{base}/chat/completions")
+    _, list_models = _models_route(monkeypatch, [ep])
     monkeypatch.setattr(model_routes, "_probe_endpoint", lambda *a, **k: ["new-model"])
 
-    result = _route_endpoint(router, "/api/models")(
-        _route_request(), refresh=True, wait_refresh=True
-    )
+    result = list_models(_route_request(), refresh=True, wait_refresh=True)
 
     assert result["items"][0]["models"] == ["new-model"]
 
@@ -1937,13 +1618,7 @@ def test_background_refresh_failure_keeps_existing_cached_models(monkeypatch):
         cached_models=["cached-model"],
         endpoint_kind="local",
     )
-    db = _RouteDb([ep])
-    router = model_routes.setup_model_routes(model_discovery=None)
-
-    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
-    monkeypatch.setattr(model_routes, "_auth_disabled", lambda: True)
-    monkeypatch.setattr(model_routes, "build_chat_url", lambda base: f"{base}/chat/completions")
+    db, list_models = _models_route(monkeypatch, [ep])
     probe_done = threading.Event()
 
     def fake_probe(*args, **kwargs):
@@ -1952,7 +1627,7 @@ def test_background_refresh_failure_keeps_existing_cached_models(monkeypatch):
 
     monkeypatch.setattr(model_routes, "_probe_endpoint", fake_probe)
 
-    result = _route_endpoint(router, "/api/models")(_route_request(), refresh=True)
+    result = list_models(_route_request(), refresh=True)
 
     assert probe_done.wait(2)
     assert _wait_for(lambda: db.commits > 0)

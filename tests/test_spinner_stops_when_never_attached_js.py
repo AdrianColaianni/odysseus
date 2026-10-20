@@ -21,17 +21,11 @@ no imports of its own, so inlining is exact. A fake clock and a manual frame
 pump replace performance.now()/requestAnimationFrame, so nothing here depends on
 wall-clock time or real frame timing.
 """
-import json
-import shutil
-import subprocess
 from pathlib import Path
 
-import pytest
+from tests.helpers.node import run_node_module
 
-_REPO = Path(__file__).resolve().parent.parent
-_MODULE = _REPO / "static" / "js" / "spinner.js"
-_HAS_NODE = shutil.which("node") is not None
-_SRC = _MODULE.read_text(encoding="utf-8") if _MODULE.exists() else ""
+_SRC = (Path(__file__).resolve().parent.parent / "static" / "js" / "spinner.js").read_text(encoding="utf-8")
 
 # Browser stand-ins, installed before the module body runs. `clock` is advanced
 # only by pump(), so every timing decision in the module is deterministic.
@@ -130,17 +124,9 @@ function startedWhirlpool() {
 
 def _run(body: str) -> dict:
     """Run `body` with the real spinner module and the browser stubs in scope."""
-    js = _STUBS + "\n" + _SRC + "\n" + body
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, encoding="utf-8",
-        cwd=str(_REPO), timeout=30,
-    )
-    assert proc.returncode == 0, proc.stderr
-    return json.loads(proc.stdout.strip())
+    return run_node_module(_STUBS + "\n" + _SRC + "\n" + body)
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_never_attached_whirlpool_stops_itself():
     # The leak: element created, spinner started, element never inserted. Past
     # the grace window it must give up rather than re-arm forever.
@@ -167,7 +153,6 @@ def test_never_attached_whirlpool_stops_itself():
     assert out["framesAfterStop"] == 0, "loop kept drawing after it gave up"
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_attached_whirlpool_keeps_running_past_the_grace_window():
     # The converse guard: the fix must not kill spinners that are on screen.
     body = """
@@ -190,7 +175,6 @@ def test_attached_whirlpool_keeps_running_past_the_grace_window():
     assert out["framesDrawn"] == 10, "a visible spinner stopped animating"
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_attached_then_removed_whirlpool_stops():
     # The pre-existing exit - a loading row replaced by results - still works.
     body = """
@@ -218,7 +202,6 @@ def test_attached_then_removed_whirlpool_stops():
     assert out["framesAfterRemoval"] == 0
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_loading_row_helper_stops_when_the_row_is_never_inserted():
     # createLoadingRow() starts the spinner for the caller and hands back a
     # detached row, so a caller that early-returns is the real leak shape.
@@ -239,7 +222,6 @@ def test_loading_row_helper_stops_when_the_row_is_never_inserted():
     assert out["framesAfterStop"] == 0
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_stop_cancels_the_pending_frame_and_releases_the_listener():
     # stop() must be authoritative: no queued frame survives it, and it leaves
     # no visibilitychange listener behind on a dead spinner.
@@ -269,7 +251,6 @@ def test_stop_cancels_the_pending_frame_and_releases_the_listener():
     assert out["framesAfterStop"] == 0
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_hidden_tab_pauses_frames_and_showing_resumes_them():
     body = """
     const sp = new Spinner('', 'clean', 'whirlpool');
@@ -296,7 +277,6 @@ def test_hidden_tab_pauses_frames_and_showing_resumes_them():
     assert out["drawnAfterShow"] == 10, "did not resume when the tab came back"
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_restarted_spinner_gets_a_fresh_grace_window():
     # The grace deadline is per-run. A spinner reused after stop() must not
     # inherit the previous run's timestamp and die on its first frame.

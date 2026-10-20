@@ -1,31 +1,11 @@
 """Parser and browser coverage for document heading navigation."""
 
-import json
-import subprocess
-from pathlib import Path
-from tests.helpers.stylesheets import app_css
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-STYLE = app_css()
-
-
-def _run_node(script: str):
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout)
+from tests.helpers.node import run_node_module
 
 
 def test_markdown_outline_parses_structure_and_ignores_fenced_code():
-    data = _run_node(
+    data = run_node_module(
         r"""
         import { parseMarkdownOutline } from './static/js/documentOutline.js';
         const source = [
@@ -56,18 +36,8 @@ def test_markdown_outline_parses_structure_and_ignores_fenced_code():
     assert data[2]["line"] == 8
 
 
-def test_outline_control_is_mode_aware_live_and_accessible():
-    assert 'id="doc-outline-toolbar-btn"' in DOC_JS
-    assert 'aria-haspopup="true"' in DOC_JS
-    assert "language === 'markdown' || _isRichTextLang(language)" in DOC_JS
-    assert "_refreshDocumentOutline();" in DOC_JS
-    assert "bindMenuDismiss(menu" in DOC_JS
-    assert ".doc-outline-menu" in STYLE
-    assert "@media (max-width: 768px)" in STYLE
-
-
 def test_outline_jumps_in_markdown_and_rich_text_and_fits_mobile():
-    data = _run_node(
+    data = run_node_module(
         r"""
         import { chromium } from 'playwright';
         const browser = await chromium.launch({ headless: true });
@@ -89,6 +59,8 @@ def test_outline_jumps_in_markdown_and_rich_text_and_fits_mobile():
 
         await page.locator('#doc-outline-toolbar-btn').click();
         const markdownLabels = await page.locator('.doc-outline-label').allTextContents();
+        // The menu focuses its first item on the next animation frame.
+        await page.waitForFunction(() => document.activeElement?.classList.contains('doc-outline-item'));
         await page.keyboard.press('ArrowDown');
         await page.keyboard.press('Enter');
         const selected = await page.locator('#doc-editor-textarea').evaluate(el =>

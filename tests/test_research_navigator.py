@@ -30,15 +30,15 @@ def test_parse_research_actions_accepts_strict_actions_array():
 
 
 def test_research_navigator_search_records_provider(monkeypatch):
-    providers_mod = types.ModuleType("src.search.providers")
+    providers_mod = types.ModuleType("services.search.providers")
     providers_mod._get_search_settings = lambda: {"search_provider": "searxng"}
-    core_mod = types.ModuleType("src.search.core")
+    core_mod = types.ModuleType("services.search.core")
     core_mod._build_provider_chain = lambda provider: ["searxng", "duckduckgo"]
     core_mod._call_provider = lambda provider, query, count: (
         [{"url": "https://example.com", "title": "Example"}] if provider == "duckduckgo" else []
     )
-    monkeypatch.setitem(sys.modules, "src.search.providers", providers_mod)
-    monkeypatch.setitem(sys.modules, "src.search.core", core_mod)
+    monkeypatch.setitem(sys.modules, "services.search.providers", providers_mod)
+    monkeypatch.setitem(sys.modules, "services.search.core", core_mod)
 
     nav = ResearchNavigator()
     results = asyncio.run(nav.search("example", count=5))
@@ -49,7 +49,7 @@ def test_research_navigator_search_records_provider(monkeypatch):
 
 def test_research_navigator_fetch_normalizes_content(monkeypatch):
     monkeypatch.setattr(
-        "src.search.content.fetch_webpage_content",
+        "services.search.content.fetch_webpage_content",
         lambda url, **kwargs: {
             "success": True,
             "title": "Example Domain",

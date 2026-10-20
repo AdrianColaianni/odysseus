@@ -1,13 +1,7 @@
-"""Cookbook serve lifecycle: kills scheduler-owned serves whose end-of-
-window has passed.
+"""Stops scheduler-launched cookbook serves once their window ends.
 
-Pairs with action_cookbook_serve in builtin_actions.py — that action
-stamps the task it launches with `_scheduledStopAtMs`, this loop ticks
-every 60s and kills any serve whose stamp is in the past.
-
-Single small module. Delete this file + the registration line in app.py
-and the feature stops doing anything; scheduler-launched serves just
-stay up until the user kills them manually.
+action_cookbook_serve in builtin_actions.py stamps the task with
+`_scheduledStopAtMs`; this loop reads that stamp.
 """
 
 from __future__ import annotations

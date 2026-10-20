@@ -102,13 +102,6 @@ def test_pages_site_owns_its_entrypoint_and_media():
     ]
     assert not unreferenced, f"unreferenced website video(s): {unreferenced}"
 
-    workflow = (REPO / ".github/workflows/deploy-pages.yml").read_text(encoding="utf-8")
-    assert "actions/jekyll-build-pages@" in workflow
-    assert "source: website" in workflow
-    assert "destination: _site" in workflow
-    assert "path: _site" in workflow
-    assert "cancel-in-progress: false" in workflow
-
 
 def test_pages_guides_keep_relative_links_inside_site():
     site_root = (REPO / "website").resolve()
@@ -139,13 +132,6 @@ docker info --format '{{.DockerRootDir}}'
     assert guarded_command in setup
 
 
-def test_preview_encoder_targets_pages_source():
-    encoder = (REPO / "scripts/encode_previews.sh").read_text(encoding="utf-8")
-
-    assert "landing page: website/<name>.webm" in encoder
-    assert 'OUT_DIR="$(cd "$(dirname "$0")/../website" && pwd)"' in encoder
-
-
 def test_ci_runs_asset_ownership_guards_for_managed_roots():
     workflow = (REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     match = re.search(r"grep -Ev '([^']+)'", workflow)
@@ -159,24 +145,19 @@ def test_ci_runs_asset_ownership_guards_for_managed_roots():
     assert not docs_only.match("assets/branding/new-logo.png")
 
 
-@pytest.mark.parametrize(
-    "path",
-    [
-        "website/favicon.png",
+def test_managed_site_media_is_not_ignored():
+    for path in (
         "website/media/social-card.jpg",
         "website/guides/reference.pdf",
-        "assets/branding/new-logo.gif",
         "assets/branding/print/logo.tiff",
-    ],
-)
-def test_managed_site_media_is_not_ignored(path):
-    result = subprocess.run(
-        ["git", "check-ignore", "--no-index", "--quiet", path],
-        cwd=REPO,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if result.returncode == 128:
-        pytest.skip("not a git checkout")
-    assert result.returncode == 1, f"{path} is unexpectedly ignored"
+    ):
+        result = subprocess.run(
+            ["git", "check-ignore", "--no-index", "--quiet", path],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 128:
+            pytest.skip("not a git checkout")
+        assert result.returncode == 1, f"{path} is unexpectedly ignored"

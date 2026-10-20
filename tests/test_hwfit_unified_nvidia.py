@@ -10,20 +10,13 @@ as a unified-memory CUDA GPU backed by system RAM, while discrete GPUs are
 unchanged.
 """
 
-import pytest
-
 from services.hwfit import hardware
-
-
-@pytest.fixture(autouse=True)
-def _local(monkeypatch):
-    monkeypatch.setattr(hardware, "_remote_host", None)
 
 
 def test_gb10_unified_memory_detected_not_dropped(monkeypatch):
     # Real GB10 nvidia-smi --query-gpu=memory.total,name output: memory is N/A.
-    monkeypatch.setattr(hardware, "_run", lambda cmd: "[N/A], NVIDIA GB10")
-    monkeypatch.setattr(hardware, "_get_ram_gb", lambda: 128.0)
+    monkeypatch.setattr(hardware, "_run", lambda cmd, remote=None: "[N/A], NVIDIA GB10")
+    monkeypatch.setattr(hardware, "_get_ram_gb", lambda remote=None: 128.0)
     info = hardware._detect_nvidia()
     assert info is not None, "GB10 was dropped as 'No GPU'"
     assert info["gpu_name"] == "NVIDIA GB10"
@@ -36,12 +29,12 @@ def test_gb10_unified_memory_detected_not_dropped(monkeypatch):
 
 def test_detect_system_reports_gb10_as_gpu(monkeypatch):
     """End-to-end through detect_system: has_gpu True + unified_memory propagated."""
-    monkeypatch.setattr(hardware, "_run", lambda cmd: "[N/A], NVIDIA GB10")
-    monkeypatch.setattr(hardware, "_get_ram_gb", lambda: 128.0)
-    monkeypatch.setattr(hardware, "_get_available_ram_gb", lambda: 120.0)
-    monkeypatch.setattr(hardware, "_get_cpu_count", lambda: 20)
-    monkeypatch.setattr(hardware, "_get_cpu_name", lambda: "NVIDIA Grace")
-    monkeypatch.setattr(hardware, "_detect_apple_silicon", lambda: None)
+    monkeypatch.setattr(hardware, "_run", lambda cmd, remote=None: "[N/A], NVIDIA GB10")
+    monkeypatch.setattr(hardware, "_get_ram_gb", lambda remote=None: 128.0)
+    monkeypatch.setattr(hardware, "_get_available_ram_gb", lambda remote=None: 120.0)
+    monkeypatch.setattr(hardware, "_get_cpu_count", lambda remote=None: 20)
+    monkeypatch.setattr(hardware, "_get_cpu_name", lambda remote=None: "NVIDIA Grace")
+    monkeypatch.setattr(hardware, "_detect_apple_silicon", lambda remote=None: None)
     s = hardware.detect_system(fresh=True)
     assert s["has_gpu"] is True
     assert s["gpu_name"] == "NVIDIA GB10"
@@ -50,7 +43,7 @@ def test_detect_system_reports_gb10_as_gpu(monkeypatch):
 
 
 def test_discrete_gpu_unchanged_and_not_unified(monkeypatch):
-    monkeypatch.setattr(hardware, "_run", lambda cmd: "24576, NVIDIA GeForce RTX 4090")
+    monkeypatch.setattr(hardware, "_run", lambda cmd, remote=None: "24576, NVIDIA GeForce RTX 4090")
     info = hardware._detect_nvidia()
     assert info["gpu_vram_gb"] == 24.0
     assert info["gpu_count"] == 1
@@ -60,7 +53,7 @@ def test_discrete_gpu_unchanged_and_not_unified(monkeypatch):
 def test_discrete_takes_precedence_over_unified_row(monkeypatch):
     """A box with a real discrete-VRAM GPU keeps the discrete path; the
     N/A-memory row is not conflated into a unified pool."""
-    monkeypatch.setattr(hardware, "_run", lambda cmd: "24576, NVIDIA RTX 4090\n[N/A], NVIDIA GB10")
+    monkeypatch.setattr(hardware, "_run", lambda cmd, remote=None: "24576, NVIDIA RTX 4090\n[N/A], NVIDIA GB10")
     info = hardware._detect_nvidia()
     assert info["gpu_name"] == "NVIDIA RTX 4090"
     assert info["gpu_count"] == 1
@@ -69,7 +62,7 @@ def test_discrete_takes_precedence_over_unified_row(monkeypatch):
 
 def test_no_gpu_still_none(monkeypatch):
     """No nvidia-smi output → still None, no spurious unified GPU."""
-    monkeypatch.setattr(hardware, "_run", lambda cmd: None)
+    monkeypatch.setattr(hardware, "_run", lambda cmd, remote=None: None)
     assert hardware._detect_nvidia() is None
 
 
@@ -77,21 +70,21 @@ def test_detect_system_cache_separates_same_host_different_ports(monkeypatch):
     """Keep cache separate by host+port+platform, don't use cached data"""
     ram_gb = 0
 
-    def _ram():
+    def _ram(remote=None):
         nonlocal ram_gb
         ram_gb += 1
         return ram_gb * 64.0
 
     monkeypatch.setattr(hardware, "_get_ram_gb", _ram)
-    monkeypatch.setattr(hardware, "_get_available_ram_gb", lambda: 40.0)
-    monkeypatch.setattr(hardware, "_get_cpu_count", lambda: 16)
-    monkeypatch.setattr(hardware, "_get_cpu_name", lambda: "AMD Ryzen")
-    monkeypatch.setattr(hardware, "_detect_apple_silicon", lambda: None)
-    monkeypatch.setattr(hardware, "_detect_nvidia", lambda: None)
-    monkeypatch.setattr(hardware, "_detect_amd", lambda: None)
-    monkeypatch.setattr(hardware, "_run", lambda _cmd: "x86_64")
+    monkeypatch.setattr(hardware, "_get_available_ram_gb", lambda remote=None: 40.0)
+    monkeypatch.setattr(hardware, "_get_cpu_count", lambda remote=None: 16)
+    monkeypatch.setattr(hardware, "_get_cpu_name", lambda remote=None: "AMD Ryzen")
+    monkeypatch.setattr(hardware, "_detect_apple_silicon", lambda remote=None: None)
+    monkeypatch.setattr(hardware, "_detect_nvidia", lambda remote=None: None)
+    monkeypatch.setattr(hardware, "_detect_amd", lambda remote=None: None)
+    monkeypatch.setattr(hardware, "_run", lambda _cmd, remote=None: "x86_64")
 
-    def _windows_probe():
+    def _windows_probe(remote=None):
         nonlocal ram_gb
         ram_gb += 1
         return {
@@ -126,19 +119,19 @@ def test_detect_system_cache_hits_when_remote_context_matches(monkeypatch):
     """Cache hits when host+port+platform match"""
     ram_gb = 0
 
-    def _ram():
+    def _ram(remote=None):
         nonlocal ram_gb
         ram_gb += 1
         return ram_gb * 64.0
 
     monkeypatch.setattr(hardware, "_get_ram_gb", _ram)
-    monkeypatch.setattr(hardware, "_get_available_ram_gb", lambda: 40.0)
-    monkeypatch.setattr(hardware, "_get_cpu_count", lambda: 16)
-    monkeypatch.setattr(hardware, "_get_cpu_name", lambda: "AMD Ryzen")
-    monkeypatch.setattr(hardware, "_detect_apple_silicon", lambda: None)
-    monkeypatch.setattr(hardware, "_detect_nvidia", lambda: None)
-    monkeypatch.setattr(hardware, "_detect_amd", lambda: None)
-    monkeypatch.setattr(hardware, "_run", lambda _cmd: "x86_64")
+    monkeypatch.setattr(hardware, "_get_available_ram_gb", lambda remote=None: 40.0)
+    monkeypatch.setattr(hardware, "_get_cpu_count", lambda remote=None: 16)
+    monkeypatch.setattr(hardware, "_get_cpu_name", lambda remote=None: "AMD Ryzen")
+    monkeypatch.setattr(hardware, "_detect_apple_silicon", lambda remote=None: None)
+    monkeypatch.setattr(hardware, "_detect_nvidia", lambda remote=None: None)
+    monkeypatch.setattr(hardware, "_detect_amd", lambda remote=None: None)
+    monkeypatch.setattr(hardware, "_run", lambda _cmd, remote=None: "x86_64")
     hardware._cache_by_host.clear()
 
     hardware.detect_system(host="user@wsl-host", ssh_port="22", platform="linux", fresh=False)

@@ -424,7 +424,7 @@ class ToolApprovalStore:
                     # Launch scopes exist only for granted bash/python, but the
                     # approval exists to admit an ungranted one. Seal its launch
                     # boundary now, in the request's workspace, the same way an
-                    # ungranted filesystem action gets its root below (#6635).
+                    # ungranted filesystem action gets its root below.
                     roots = request_authority.resource_roots
                     if not roots and workspace:
                         roots = (FilesystemRoot.seal(workspace, owner=_normalized_owner(owner)),)

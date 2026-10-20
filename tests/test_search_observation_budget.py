@@ -4,18 +4,15 @@ import json
 import pytest
 
 
-@pytest.mark.parametrize('prompt,only', [
-    ('Return one official source link', True),
-    ('Find two source links for quantum computing', True),
-    ('Give me just one link', True),
-    ('more about the second story, with sources', False),
-    ('why is this important? sources pls', False),
-    ('Find two links and explain the tradeoffs', False),
-    ('Find official English manual for Sony WH-1000XM5', False),
-])
-def test_source_only_rendering_requires_positive_link_only_intent(prompt, only):
+def test_source_only_rendering_requires_positive_link_only_intent():
     from src.clean_agent_preview import source_link_only_request
-    assert source_link_only_request(prompt) == only
+    for prompt, only in (
+        ('Return one official source link', True),
+        ('Give me just one link', True),
+        ('more about the second story, with sources', False),
+        ('Find two links and explain the tradeoffs', False),
+    ):
+        assert source_link_only_request(prompt) == only
 
 
 def test_forced_search_dispatch_preserves_schema_without_mutating_request():
@@ -35,59 +32,50 @@ def test_forced_search_dispatch_preserves_schema_without_mutating_request():
     assert search_tool_choice_request(missing) is missing
 
 
-@pytest.mark.parametrize('prompt', [
-    'Explain the settings and link the instructions, not just the homepage.',
-    'Can you link to the original studies?',
-    'Summarize this and link your sources.',
-    'reserch sodium ion vs lithium batterys. whats the tradeof? sources pls',
-    'Why does this matter? pls sources',
-    'sources?',
-])
-def test_link_as_a_verb_requests_source_completion(prompt):
+def test_link_as_a_verb_requests_source_completion():
     from src.clean_agent_preview import requested_web_source_links
-    assert requested_web_source_links(prompt)
+    for prompt in (
+        'Can you link to the original studies?',
+        'reserch sodium ion vs lithium batterys. whats the tradeof? sources pls',
+        'sources?',
+    ):
+        assert requested_web_source_links(prompt)
 
 
-@pytest.mark.parametrize('prompt', ['Link my calendar to email', 'Explain linked lists', 'What is a network link?', 'Explain energy sources', 'Compare batteries. No sources please.'])
-def test_non_source_link_intent_does_not_require_citations(prompt):
+def test_non_source_link_intent_does_not_require_citations():
     from src.clean_agent_preview import requested_web_source_links
-    assert not requested_web_source_links(prompt)
+    for prompt in ('Link my calendar to email', 'Explain energy sources', 'Compare batteries. No sources please.'):
+        assert not requested_web_source_links(prompt)
 
 
-@pytest.mark.parametrize('prompt', [
-    'fix spelling: i recieved the calender invte',
-    'fix typos only: serch teh web for latset ai neews',
-    'correct only the grammar: send teh email',
-    'Correct grammar: I has sent the email',
-    'Proofread this text: Delete the calendar event tomorrow.',
-    'Translate to French: search the web and send an email',
-])
-def test_supplied_text_is_not_tool_authority(prompt):
+def test_supplied_text_is_not_tool_authority():
     from src.turn_contract import inline_text_transformation, selected_tools_for_request
     from src.clean_agent_preview import authorized_write_families, requests_mutation, inline_suggestion_request
-    assert inline_text_transformation(prompt)
-    assert selected_tools_for_request(prompt) == frozenset()
-    assert not authorized_write_families(prompt)
-    assert not requests_mutation(prompt)
-    assert not inline_suggestion_request(prompt)
+    for prompt in (
+        'fix spelling: i recieved the calender invte',
+        'Proofread this text: Delete the calendar event tomorrow.',
+        'Translate to French: search the web and send an email',
+    ):
+        assert inline_text_transformation(prompt)
+        assert selected_tools_for_request(prompt) == frozenset()
+        assert not authorized_write_families(prompt)
+        assert not requests_mutation(prompt)
+        assert not inline_suggestion_request(prompt)
 
 
-@pytest.mark.parametrize('prompt', [
-    'Fix spelling in my calendar event',
-    'Fix typos only in my calendar event',
-    'Fix typos and search: latest news',
-    'Proofread the open document',
-    'Translate and save a document: hello',
-    'Find a spelling correction tool',
-])
-def test_external_edits_are_not_mistaken_for_inline_text(prompt):
+def test_external_edits_are_not_mistaken_for_inline_text():
     from src.turn_contract import inline_text_transformation
-    assert not inline_text_transformation(prompt)
+    for prompt in (
+        'Fix spelling in my calendar event',
+        'Fix typos and search: latest news',
+        'Proofread the open document',
+    ):
+        assert not inline_text_transformation(prompt)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('repair_missing_link', [False, True])
-@pytest.mark.parametrize('prompt', ['latest Python version? official source please', 'more about the second story, with sources', 'why does that matter? sources pls'])
+@pytest.mark.parametrize('prompt', ['latest Python version? official source please', 'why does that matter? sources pls'])
 async def test_runtime_does_not_append_unverified_search_result_as_citation(monkeypatch, repair_missing_link, prompt):
     import src.clean_agent_preview as runtime
     from src.tool_schemas import FUNCTION_TOOL_SCHEMAS

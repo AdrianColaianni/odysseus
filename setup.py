@@ -16,7 +16,7 @@ sys.path.insert(0, BASE_DIR)
 from src.constants import (
     DATA_DIR, AUTH_FILE, UPLOAD_DIR, PERSONAL_DIR, PERSONAL_UPLOADS_DIR,
     TTS_CACHE_DIR, GENERATED_IMAGES_DIR, DEEP_RESEARCH_DIR, CHROMA_DIR,
-    RAG_DIR, MEMORY_VECTORS_DIR, AGENT_WORKSPACE_DIR, PASSWORD_MIN_LENGTH,
+    RAG_DIR, MEMORY_VECTORS_DIR, AGENT_WORKSPACE_DIR, PASSWORD_MIN_LENGTH, APP_PORT,
 )
 from core.auth import RESERVED_USERNAMES
 
@@ -43,12 +43,8 @@ def create_dirs():
 
 
 def init_database():
-    """Create all SQLAlchemy tables."""
-    sys.path.insert(0, BASE_DIR)
-    os.environ.setdefault("DATABASE_URL", f"sqlite:///{os.path.join(DATA_DIR, 'app.db')}")
-
-    from core.database import Base, engine
-    Base.metadata.create_all(bind=engine)
+    from core.database import init_db
+    init_db()
     print("  [ok] Database initialized")
 
 
@@ -284,8 +280,8 @@ def main():
     # this, so suppress the manual hint there to avoid a contradictory URL.
     if not os.getenv("ODYSSEUS_SKIP_RUN_HINT"):
         print(f"\nStart the server with:")
-        print(f"  python -m uvicorn app:app --host 127.0.0.1 --port 7000")
-        print(f"\nThen open http://localhost:7000")
+        print(f"  python -m uvicorn app:app --host 127.0.0.1 --port {APP_PORT}")
+        print(f"\nThen open http://localhost:{APP_PORT}")
 
     # Cleaned, action-focused final instruction strings
     if admin_status == "created":

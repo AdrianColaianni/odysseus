@@ -9,6 +9,7 @@ import { sortModelIds } from '../modelSort.js';
 import { searchProviderLogo } from '../searchProviderIcons.js';
 import { orderActionMenuItems, actionMenuRank, SELECT_MENU_ICON } from '../actionMenuOrder.js';
 import { bindMenuDismiss } from '../escMenuStack.js';
+import uiModule, { esc } from '../ui.js?v=20260916largetoolscroll1';
 
 // jobId -> { synapse, status } — survives across _renderJobs() rebuilds so
 // the SVG keeps its accumulated nodes/edges between progress events.
@@ -178,7 +179,7 @@ async function _updateResearchCount() {
   const el = document.getElementById('research-stats');
   if (!el) return;
   try {
-    const res = await fetch('/api/research/library?limit=1', { credentials: 'same-origin' });
+    const res = await fetch('/api/research/library?limit=1');
     if (!res.ok) return;
     const data = await res.json();
     const n = data.total || 0;
@@ -487,15 +488,13 @@ function _animateOutThenRemove(el, removeFn) {
 /** Dismiss the mobile keyboard by stealing focus into a throwaway readonly
  *  input (blur() alone is often ignored on Firefox mobile). */
 function _dismissKeyboard(input) {
-  try {
-    if (input) input.blur();
-    const tmp = document.createElement('input');
-    tmp.setAttribute('readonly', 'readonly');
-    tmp.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;border:0;padding:0;';
-    document.body.appendChild(tmp);
-    tmp.focus();
-    setTimeout(() => { try { tmp.blur(); tmp.remove(); } catch {} }, 60);
-  } catch {}
+  if (input) input.blur();
+  const tmp = document.createElement('input');
+  tmp.setAttribute('readonly', 'readonly');
+  tmp.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;border:0;padding:0;';
+  document.body.appendChild(tmp);
+  tmp.focus();
+  setTimeout(() => { tmp.blur(); tmp.remove(); }, 60);
 }
 
 /** Reset the category selector back to "Auto" (called after each start). */
@@ -749,23 +748,18 @@ async function _handleStart() {
   if (_mobile) _dismissKeyboard(queryEl); else queryEl.focus();
   _resetCategoryToAuto();
   startPromise.then((job) => {
-    // A rejected launch used to be rendered as a finished history item before
-    // the user could read why it failed. Keep immediate request failures in
-    // the compose view and preserve the query for a corrected retry.
+    // Keep an immediate launch failure in the compose view with the query
+    // preserved for a corrected retry.
     if (job?.status !== 'error') return;
     const detail = job.errorMsg || 'Unable to start research.';
     jobs.removeJob(job.id);
     queryEl.value = query;
     _setResearchTab('research');
-    if (typeof uiModule !== 'undefined' && uiModule?.showError) {
-      uiModule.showError(`Research did not start: ${detail}`);
-    }
+    uiModule.showError(`Research did not start: ${detail}`);
   }).catch((e) => {
     queryEl.value = query;
     _setResearchTab('research');
-    if (typeof uiModule !== 'undefined' && uiModule?.showError) {
-      uiModule.showError(`Research did not start: ${e?.message || 'Unable to start research.'}`);
-    }
+    uiModule.showError(`Research did not start: ${e?.message || 'Unable to start research.'}`);
   });
 }
 
@@ -780,13 +774,11 @@ async function _restoreSavedSettings() {
   const search = document.getElementById('research-search-provider');
   if (search && saved.search_provider !== undefined) search.value = saved.search_provider;
 
-  // The compose panel must start from the Deep Research default configured in
-  // Settings. Previously it only restored an old local panel selection, so a
-  // fresh panel stayed at "Default" and its model picker had no models.
+  // With no saved panel selection, start from the Deep Research default in Settings.
   let configured = {};
   if (!saved.endpoint_id) {
     try {
-      const response = await fetch(`${_apiBase}/api/auth/settings`, { credentials: 'same-origin' });
+      const response = await fetch(`${_apiBase}/api/auth/settings`);
       if (response.ok) configured = await response.json() || {};
     } catch (_) { /* The endpoint list remains usable without this preference. */ }
   }
@@ -806,7 +798,7 @@ async function _restoreSavedSettings() {
 
 async function _loadEndpoints() {
   try {
-    const res = await fetch(`${_apiBase}/api/model-endpoints`, { credentials: 'same-origin' });
+    const res = await fetch(`${_apiBase}/api/model-endpoints`);
     if (!res.ok) return;
     _endpoints = await res.json();
     const sel = document.getElementById('research-endpoint');
@@ -884,7 +876,7 @@ function _renderHistoryFilters(items) {
     .map(([value, label]) => {
       const active = _historyFilter === value ? ' active' : '';
       const count = value === 'all' ? items.length : (counts.get(value) || 0);
-      return `<button type="button" class="skills-summary-chip${active}" data-research-filter="${_esc(value)}" title="Show ${_esc(label.toLowerCase())} research"><span>${_esc(label)}</span><strong>${count}</strong></button>`;
+      return `<button type="button" class="skills-summary-chip${active}" data-research-filter="${esc(value)}" title="Show ${esc(label.toLowerCase())} research"><span>${esc(label)}</span><strong>${count}</strong></button>`;
     }).join('');
   el.querySelectorAll('[data-research-filter]').forEach(button => {
     button.addEventListener('click', () => {
@@ -945,7 +937,7 @@ async function _deleteHistoryJobs(ids) {
   const selected = new Set(ids);
   const selectedJobs = jobs.getJobs().filter(job => selected.has(job.id));
   await Promise.all(selectedJobs.filter(job => job.status === 'done').map(async job => {
-    try { await fetch(`${_apiBase}/api/research/${job.id}`, { method: 'DELETE', credentials: 'same-origin' }); } catch {}
+    try { await fetch(`${_apiBase}/api/research/${job.id}`, { method: 'DELETE' }); } catch (e) { console.warn('Research delete failed:', e); }
   }));
   selectedJobs.forEach(job => jobs.removeJob(job.id));
 }
@@ -1115,7 +1107,7 @@ function _buildJobCard(job) {
 
   const elapsed = jobs.formatElapsed(job.elapsed || 0);
   const modelTag = (job.modelName || job.settings?._modelName)
-    ? `<span class="research-job-model">${_esc(job.modelName || job.settings._modelName)}</span>` : '';
+    ? `<span class="research-job-model">${esc(job.modelName || job.settings._modelName)}</span>` : '';
 
   if (job.status === 'queued') {
     const rounds = job.settings?.max_rounds;
@@ -1125,9 +1117,9 @@ function _buildJobCard(job) {
     const meta = [mName, epName, roundsLabel].filter(Boolean).join(' -- ');
     card.innerHTML = `
       <div class="research-job-header">
-        <span class="research-job-query">${_esc(job.query)}</span>
+        <span class="research-job-query">${esc(job.query)}</span>
       </div>
-      <div class="research-job-queued-meta">${_esc(meta)}</div>
+      <div class="research-job-queued-meta">${esc(meta)}</div>
       <div class="research-job-actions">
         <button class="research-job-action" data-action="start" title="Start">${_playIcon} Start</button>
         <button class="research-job-action" data-action="edit" title="Edit query">${_editIcon} Edit</button>
@@ -1164,7 +1156,7 @@ function _buildJobCard(job) {
     card.classList.toggle('research-active-expanded', expanded);
     card.innerHTML = `
       <div class="research-job-header research-active-card-header" role="button" tabindex="0" aria-expanded="${expanded}" title="${expanded ? 'Hide live research' : 'Show live research'}">
-        <span class="research-job-query">${_esc(job.query)}</span>
+        <span class="research-job-query">${esc(job.query)}</span>
         ${modelTag}
         <span class="research-job-time">${elapsed}</span>
         <span class="research-active-card-chevron" aria-hidden="true">${expanded ? _vizCollapseIcon : _vizExpandIcon}</span>
@@ -1244,11 +1236,11 @@ function _buildJobCard(job) {
     const thumbSource = (job.sources || []).find(s => s && (s.image || s.og_image));
     const thumbUrl = job.thumbnail || thumbSource?.image || thumbSource?.og_image || '';
     const thumbnail = thumbUrl
-      ? `<span class="research-job-thumb-frame"><img class="research-job-thumb" src="${_esc(thumbUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer"></span>`
+      ? `<span class="research-job-thumb-frame"><img class="research-job-thumb" src="${esc(thumbUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer"></span>`
       : '<span class="research-job-thumb-frame research-job-thumb-empty" aria-hidden="true"></span>';
     card.innerHTML = `
       <div class="research-job-header">
-        <span class="research-job-query">${_esc(job.query)}</span>${doneBadge}
+        <span class="research-job-query">${esc(job.query)}</span>${doneBadge}
         <button type="button" class="task-status-badge task-state-badge research-job-report-badge" data-action="report" title="Open visual report">${_externalIcon}<span class="task-state-label">Visual</span></button>
         <button type="button" class="task-status-badge task-state-badge research-job-discuss-badge" data-action="chat" title="Open follow-up chat with this research as context">${_chatIcon}<span class="task-state-label">Chat</span></button>
         ${_jobOverflowHTML([
@@ -1296,7 +1288,7 @@ function _buildJobCard(job) {
         const ok = await window.styledConfirm('Delete this research? This permanently removes it from disk.', { confirmText: 'Delete', danger: true });
         if (!ok) return;
       }
-      try { await fetch(`${_apiBase}/api/research/${job.id}`, { method: 'DELETE', credentials: 'same-origin' }); } catch {}
+      try { await fetch(`${_apiBase}/api/research/${job.id}`, { method: 'DELETE' }); } catch (e) { console.warn('Research delete failed:', e); }
       overflow.close();
       _animateOutThenRemove(card, () => jobs.removeJob(job.id));
     });
@@ -1307,10 +1299,10 @@ function _buildJobCard(job) {
     });
 
   } else {
-    const errMsg = job.errorMsg ? `<span class="research-job-error research-job-title-error" title="${_esc(job.errorMsg)}">${_esc(job.errorMsg)}</span>` : '';
+    const errMsg = job.errorMsg ? `<span class="research-job-error research-job-title-error" title="${esc(job.errorMsg)}">${esc(job.errorMsg)}</span>` : '';
     card.innerHTML = `
       <div class="research-job-header">
-        <span class="research-job-query">${_esc(job.query)}</span>
+        <span class="research-job-query">${esc(job.query)}</span>
         ${errMsg}
         <button type="button" class="task-status-badge task-state-badge research-job-retry-badge" data-action="retry" title="Retry">${_retryIcon}<span class="task-state-label">Retry</span></button>
         <button type="button" class="task-status-badge task-state-badge research-job-edit-badge" data-action="edit" title="Edit and retry">${_editIcon}<span class="task-state-label">Edit</span></button>
@@ -1509,12 +1501,12 @@ function _setupResearchPickers(pane) {
       const selected = select.options[select.selectedIndex] || select.options[0];
       if (!selected) return;
       const icon = _researchPickerIcon(id, selected.value);
-      current.innerHTML = `${icon ? `<span class="research-picker-icon">${icon}</span>` : ''}<span class="research-picker-label">${_esc(selected.textContent)}</span>`;
+      current.innerHTML = `${icon ? `<span class="research-picker-icon">${icon}</span>` : ''}<span class="research-picker-label">${esc(selected.textContent)}</span>`;
       menu.innerHTML = Array.from(select.options).map(option => {
         const optionIcon = _researchPickerIcon(id, option.value);
         const active = option.value === select.value ? ' active' : '';
-        const safeValue = _esc(option.value).replace(/"/g, '&quot;');
-        return `<button type="button" class="research-picker-option${active}" role="option" aria-selected="${option.value === select.value}" data-value="${safeValue}">${optionIcon ? `<span class="research-picker-icon">${optionIcon}</span>` : ''}<span>${_esc(option.textContent)}</span><span class="research-picker-check">&#10003;</span></button>`;
+        const safeValue = esc(option.value).replace(/"/g, '&quot;');
+        return `<button type="button" class="research-picker-option${active}" role="option" aria-selected="${option.value === select.value}" data-value="${safeValue}">${optionIcon ? `<span class="research-picker-icon">${optionIcon}</span>` : ''}<span>${esc(option.textContent)}</span><span class="research-picker-check">&#10003;</span></button>`;
       }).join('');
       menu.querySelectorAll('.research-picker-option').forEach(optionButton => {
         optionButton.addEventListener('click', e => {
@@ -1576,7 +1568,7 @@ function _renderResult(job) {
         <span class="research-hero-icon">${catIcon}</span>
         <div class="research-hero-text">
           <div class="research-hero-label">${catLabel}</div>
-          <div class="research-hero-query">${_esc(job.query)}</div>
+          <div class="research-hero-query">${esc(job.query)}</div>
         </div>
       </div>
     `;
@@ -1586,7 +1578,7 @@ function _renderResult(job) {
         <span class="research-hero-icon">${catIcon}</span>
         <div class="research-hero-text">
           <div class="research-hero-label">${catLabel}</div>
-          <div class="research-hero-query">${_esc(job.query)}</div>
+          <div class="research-hero-query">${esc(job.query)}</div>
         </div>
       </div>
     `;
@@ -1595,7 +1587,7 @@ function _renderResult(job) {
   if (job.sources?.length) {
     html += '<div class="research-job-sources">';
     for (const s of job.sources.slice(0, 10)) {
-      const title = _esc(s.title || s.url || '');
+      const title = esc(s.title || s.url || '');
       const url = _safeSourceHref(s.url);
       const badges = _researchSourceBadges(s);
       html += url
@@ -1606,7 +1598,7 @@ function _renderResult(job) {
     html += '</div>';
   }
   if (job.source_state) {
-    html += `<div class="research-source-state">${_esc(job.source_state)}</div>`;
+    html += `<div class="research-source-state">${esc(job.source_state)}</div>`;
   }
   if (Array.isArray(job.navigation_trace) && job.navigation_trace.length) {
     html += `<div class="research-navigation-trace">${_renderNavigationTrace(job.navigation_trace, job.action_trace)}</div>`;
@@ -1618,7 +1610,7 @@ function _renderResult(job) {
   if (_markdownModule) {
     html += `<div class="${bodyCls}">${_markdownModule.renderContent(job.result)}</div>`;
   } else {
-    html += `<div class="${bodyCls}"><pre>${_esc(job.result)}</pre></div>`;
+    html += `<div class="${bodyCls}"><pre>${esc(job.result)}</pre></div>`;
   }
   return html;
 }
@@ -1627,7 +1619,7 @@ async function _ensureResult(job) {
   if (job.result) return;
   try {
     const res = await fetch(`${_apiBase}/api/research/result-peek/${job.id}`, {
-      method: 'POST', credentials: 'same-origin',
+      method: 'POST',
     });
     if (!res.ok) return;
     const d = await res.json();
@@ -1645,16 +1637,16 @@ async function _ensureResult(job) {
 function _renderActionTrace(trace) {
   const rows = (Array.isArray(trace) ? trace : []).slice(-8).map((item) => {
     const round = Number.isFinite(Number(item.round)) ? `Round ${Number(item.round)}` : 'Plan';
-    const tool = _esc(item.tool || 'tool');
-    const target = _esc(item.query || item.url || '');
+    const tool = esc(item.tool || 'tool');
+    const target = esc(item.query || item.url || '');
     const skipped = item.status === 'skipped';
     const label = skipped ? `${tool}: ${target}` : `${tool}: ${target}`;
     const requestedMeta = item.requested_by && item.requested_by !== item.tool
-      ? `via ${_esc(item.requested_by)}`
+      ? `via ${esc(item.requested_by)}`
       : '';
     const meta = skipped
-      ? `<span class="research-nav-meta">skipped${item.reason ? ` · ${_esc(item.reason)}` : ''}</span>`
-      : (item.source ? `<span class="research-nav-meta">${_esc(item.source)}${requestedMeta ? ` · ${requestedMeta}` : ''}</span>` : (requestedMeta ? `<span class="research-nav-meta">${requestedMeta}</span>` : ''));
+      ? `<span class="research-nav-meta">skipped${item.reason ? ` · ${esc(item.reason)}` : ''}</span>`
+      : (item.source ? `<span class="research-nav-meta">${esc(item.source)}${requestedMeta ? ` · ${requestedMeta}` : ''}</span>` : (requestedMeta ? `<span class="research-nav-meta">${requestedMeta}</span>` : ''));
     return `<div class="research-nav-row research-action-row${skipped ? ' research-action-skipped' : ''}"><span class="research-nav-tool">${round}</span><span class="research-nav-target">${label}</span>${meta}</div>`;
   }).join('');
   return rows;
@@ -1664,14 +1656,14 @@ function _renderNavigationTrace(trace, actionTrace = []) {
   const plan = _renderActionTrace(actionTrace);
   const navigation = Array.isArray(trace) ? trace : [];
   const rows = navigation.slice(-8).map((item) => {
-    const tool = _esc(item.tool || 'tool');
-    const status = _esc(item.status || 'unknown');
-    const target = _esc(item.query || item.title || item.url || '');
+    const tool = esc(item.tool || 'tool');
+    const status = esc(item.status || 'unknown');
+    const target = esc(item.query || item.title || item.url || '');
     const meta = [];
     if (Number.isFinite(Number(item.results))) meta.push(`${Number(item.results)} results`);
-    if (item.source_kind) meta.push(_esc(item.source_kind));
+    if (item.source_kind) meta.push(esc(item.source_kind));
     if (Number.isFinite(Number(item.source_score))) meta.push(`${Number(item.source_score)}/100`);
-    if (item.retrieval && item.retrieval !== 'fetch') meta.push(_esc(item.retrieval));
+    if (item.retrieval && item.retrieval !== 'fetch') meta.push(esc(item.retrieval));
     const metaHtml = meta.length ? `<span class="research-nav-meta">${meta.join(' · ')}</span>` : '';
     return `<div class="research-nav-row"><span class="research-nav-tool">${tool}</span><span class="research-nav-target">${target}</span><span class="research-nav-status">${status}</span>${metaHtml}</div>`;
   }).join('');
@@ -1713,7 +1705,7 @@ async function _copyResult(job, btn) {
     document.body.appendChild(ta);
     ta.focus();
     ta.select();
-    try { ta.setSelectionRange(0, text.length); } catch {}
+    ta.setSelectionRange(0, text.length);
     try {
       const sel = window.getSelection();
       if (sel && (!sel.rangeCount || sel.isCollapsed)) {
@@ -1760,7 +1752,7 @@ async function _chatAboutResearch(researchId, btn) {
   }
   try {
     const res = await fetch(`${_apiBase}/api/research/spinoff/${researchId}`, {
-      method: 'POST', credentials: 'same-origin',
+      method: 'POST',
     });
     if (!res.ok) {
       let detail = '';
@@ -1787,16 +1779,10 @@ async function _chatAboutResearch(researchId, btn) {
   }
 }
 
-function _esc(s) {
-  const d = document.createElement('div');
-  d.textContent = s || '';
-  return d.innerHTML;
-}
-
 function _safeSourceHref(raw) {
   try {
     const parsed = new URL(String(raw || '').trim(), window.location.origin);
-    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return _esc(parsed.href);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return esc(parsed.href);
   } catch {}
   return '';
 }
@@ -1806,8 +1792,8 @@ function _researchSourceBadges(source) {
   const kind = String(source?.source_kind || '').trim();
   const retrieval = String(source?.retrieval || '').trim();
   const score = Number(source?.source_score);
-  if (kind) badges.push(`<span class="research-source-badge">${_esc(kind)}</span>`);
-  if (retrieval && retrieval !== 'fetch') badges.push(`<span class="research-source-badge">${_esc(retrieval)}</span>`);
+  if (kind) badges.push(`<span class="research-source-badge">${esc(kind)}</span>`);
+  if (retrieval && retrieval !== 'fetch') badges.push(`<span class="research-source-badge">${esc(retrieval)}</span>`);
   if (Number.isFinite(score)) badges.push(`<span class="research-source-badge">${Math.max(0, Math.min(100, Math.round(score)))}</span>`);
   return badges.length ? `<span class="research-source-badges">${badges.join('')}</span>` : '';
 }

@@ -1,21 +1,9 @@
 /**
- * Editor state store — a single mutable object that the gallery editor
- * and its tool modules read and write directly.
- *
- * Migration: galleryEditor.js used to own ~110 module-scope `let`
- * declarations and capture them via closure. Tool modules can't import
- * a `let` binding's mutations across module boundaries, so we move the
- * state into a single exported OBJECT whose properties are freely
- * mutated by anyone holding a reference. Read/write `state.transformW`
- * exactly the way the old code wrote `_transformW`.
- *
- * Slices land here one tool at a time; this file grows as more state
- * migrates out of galleryEditor.js. Defaults match the legacy
- * module-scope initializers verbatim — every `state.foo = …` reset
- * site in galleryEditor.js still works unchanged.
+ * Editor state store: one mutable object that the gallery editor and its
+ * tool modules read and write directly, since a module cannot export a
+ * `let` binding's later mutations.
  */
 export const state = {
-  // ── Transform tool ──
   // Drag-resize / rotate session state. While `transformActive` is
   // false every field below should be considered stale.
   transformActive: false,
@@ -70,7 +58,6 @@ export const state = {
   transformOverlay: null,
   transformOverlayCtx: null,
 
-  // ── Magic Wand tool ──
   // Binary selection mask + the layer it was sampled from. `wandMask`
   // is a canvas the size of `wandLayer`'s pixels, white where selected,
   // transparent elsewhere. `wandLastSeed` remembers the last click so
@@ -88,7 +75,6 @@ export const state = {
   // 4K layers; invalidated when the active layer changes).
   wandSrcCache: null,
 
-  // ── Brush / Eraser / Clone tools ──
   // Shared paint color (brush picks up the swatch; eraser and clone
   // ignore color but reuse the same picker control).
   color: '#e06c75',
@@ -153,7 +139,6 @@ export const state = {
   cloneLastTapX: 0,
   cloneLastTapY: 0,
 
-  // ── Inpaint + mask ──
   // Active mask canvas + its 2D context. Re-pointed to the active
   // mask sub-layer whenever the user picks a different mask in the
   // layer panel.
@@ -189,7 +174,6 @@ export const state = {
   // Memoised "is rembg installed on the server?" probe.
   rembgInstalledCache: null,
 
-  // ── Stroke drag state ──
   // Generic in-progress-stroke flags shared by brush/eraser/clone/
   // inpaint. `lastX/Y` are the last mouse position used to interpolate
   // a continuous line through fast-moving cursor samples.
@@ -197,7 +181,6 @@ export const state = {
   lastX: 0,
   lastY: 0,
 
-  // ── Move tool ──
   moving: false,
   moveStartX: 0,
   moveStartY: 0,
@@ -218,7 +201,6 @@ export const state = {
   // is a vertical / horizontal line in canvas space.
   activeSnapGuides: null,
 
-  // ── Crop tool ──
   cropping: false,
   cropStart: null,
   cropEnd: null,
@@ -229,13 +211,11 @@ export const state = {
   cropMoving: false,
   cropMoveStart: null,
 
-  // ── Lasso tool ──
   // Freehand selection polygon in canvas pixels. Empty when no lasso
   // is in progress or staged.
   lassoPoints: [],
   lassoActive: false,
 
-  // ── Marquee selection ──
   marqueeShape: 'rectangle',
   marqueeConstraint: 'free',
   marqueeRatioWidth: 1,
@@ -259,7 +239,6 @@ export const state = {
   // round-trip layer alpha and metadata losslessly.
   internalClipboard: null,
 
-  // ── Editor DOM refs ──
   // Root container that openEditor mounts into.
   container: null,
   // Main image canvas + its 2D context. Re-created on every openEditor
@@ -277,7 +256,6 @@ export const state = {
   groupCompositeCanvases: new Map(),
   clippingCompositeCanvas: null,
 
-  // ── Document + layers ──
   layers: [],
   activeLayerId: null,
   selectedLayerIds: [],
@@ -321,17 +299,14 @@ export const state = {
   // Mutated in place (push / length = 0); the reference never changes.
   editorDocClickHandlers: [],
 
-  // ── Undo / redo ──
   undoStack: [],
   redoStack: [],
 
-  // ── Layer offsets + id allocation ──
   // Map<layerId, {x, y}> — kept in a Map so we can serialise it
   // separately from the layer's own canvas. Mutated in place.
   layerOffsets: new Map(),
   nextLayerId: 1,
 
-  // ── Popup / panel handles ──
   fxPopupEl: null,
   fxPopupLayerId: null,
   fxMenuEl: null,
@@ -349,7 +324,6 @@ export const state = {
   // Loading-overlay element (whirlpool + label).
   editorLoadingEl: null,
 
-  // ── Draft persistence ──
   draftId: null,
   draftName: '',
   persistTimer: null,

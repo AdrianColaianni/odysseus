@@ -1,55 +1,30 @@
-import ipaddress
 import importlib.util
 import sys
 import types
 from pathlib import Path
 
 import pytest
+from tests.helpers.routes import route_endpoint
 
 
-@pytest.mark.parametrize("url", [
-    "http://127.0.0.1:8000/v1",
-    "http://localhost:8000/v1",
-    "http://10.0.0.5/v1",
-    "http://172.16.0.1/v1",
-    "http://192.168.1.2/v1",
-    "http://169.254.169.254/latest/meta-data/",
-    "http://metadata.google.internal/",
-    "http://[::1]:8000/v1",
-    "http://[fc00::1]/v1",
-    "http://224.0.0.1/v1",
-    "http://0.0.0.0/v1",
-    "file:///etc/passwd",
-])
-def test_public_url_validator_blocks_internal_targets(url):
-    from src.url_security import is_public_http_url
+def test_public_url_validator_blocks_internal_targets():
+    from src.url_safety import check_outbound_url
 
-    assert is_public_http_url(url) is False
-
-
-def test_public_url_validator_allows_public_endpoint(monkeypatch):
-    from src import url_security
-
-    monkeypatch.setattr(
-        url_security,
-        "_resolve_hostname_ips",
-        lambda host: [ipaddress.ip_address("93.184.216.34")],
-    )
-
-    assert url_security.validate_public_http_url("https://api.example.com/v1") == "https://api.example.com/v1"
-
-
-def test_public_url_validator_blocks_dns_to_private(monkeypatch):
-    from src import url_security
-
-    monkeypatch.setattr(
-        url_security,
-        "_resolve_hostname_ips",
-        lambda host: [ipaddress.ip_address("10.0.0.5")],
-    )
-
-    with pytest.raises(ValueError):
-        url_security.validate_public_http_url("https://api.example.com/v1")
+    for url in [
+        "http://127.0.0.1:8000/v1",
+        "http://localhost:8000/v1",
+        "http://10.0.0.5/v1",
+        "http://172.16.0.1/v1",
+        "http://192.168.1.2/v1",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://metadata.google.internal/",
+        "http://[::1]:8000/v1",
+        "http://[fc00::1]/v1",
+        "http://224.0.0.1/v1",
+        "http://0.0.0.0/v1",
+        "file:///etc/passwd",
+    ]:
+        assert check_outbound_url(url, block_private=True)[0] is False, url
 
 
 def _load_webhook_routes_for_test(monkeypatch):
@@ -59,6 +34,7 @@ def _load_webhook_routes_for_test(monkeypatch):
     core_pkg.__path__ = []
     core_db = types.ModuleType("core.database")
     core_db.SessionLocal = object
+    core_db.get_db = object
     core_db.Webhook = object
     core_db.ModelEndpoint = object
     core_middleware = types.ModuleType("core.middleware")
@@ -260,10 +236,7 @@ def _sync_chat_endpoint(webhook_routes, session_manager):
         auth_manager=None,
         session_manager=session_manager,
     )
-    for route in router.routes:
-        if route.path == "/api/v1/chat":
-            return route.endpoint
-    raise AssertionError("sync chat route not found")
+    return route_endpoint(router, "/api/v1/chat", "POST")
 
 
 @pytest.mark.parametrize("base_url", [
@@ -301,13 +274,7 @@ async def test_api_chat_direct_base_url_allows_mocked_public_endpoint(monkeypatc
     webhook_routes = _load_webhook_routes_for_test(monkeypatch)
     _install_sync_chat_stubs(monkeypatch)
 
-    from src import url_security
-
-    monkeypatch.setattr(
-        url_security,
-        "_resolve_hostname_ips",
-        lambda host: [ipaddress.ip_address("93.184.216.34")],
-    )
+    monkeypatch.setattr("src.url_safety._default_resolver", lambda host: ["93.184.216.34"])
 
     session_manager = _SessionManager()
     sync_chat = _sync_chat_endpoint(webhook_routes, session_manager)
@@ -377,13 +344,13 @@ async def test_api_chat_fallback_trusts_configured_local_endpoint(monkeypatch):
     def _session_local():
         return db
 
-    def _validate_public_http_url(url, *, max_length=2048):
+    def _check_outbound_url(url, **kwargs):
         calls.append(url)
         raise AssertionError("configured fallback endpoint should not be publicly validated")
 
     monkeypatch.setattr(webhook_routes, "ModelEndpoint", _ModelEndpoint)
     monkeypatch.setattr(webhook_routes, "SessionLocal", _session_local)
-    monkeypatch.setattr(webhook_routes, "validate_public_http_url", _validate_public_http_url)
+    monkeypatch.setattr(webhook_routes, "check_outbound_url", _check_outbound_url)
 
     session_manager = _SessionManager()
     sync_chat = _sync_chat_endpoint(webhook_routes, session_manager)

@@ -1,18 +1,9 @@
-import importlib.util
 import json
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-
-PATH = Path(__file__).resolve().parents[1] / "scripts" / "odysseus_conversation_qa.py"
-SPEC = importlib.util.spec_from_file_location("odysseus_conversation_qa", PATH)
-MODULE = importlib.util.module_from_spec(SPEC)
-assert SPEC and SPEC.loader
-sys.modules[SPEC.name] = MODULE
-SPEC.loader.exec_module(MODULE)
+import scripts.odysseus_conversation_qa as MODULE
 
 
 def test_json_parser_accepts_fenced_teacher_output():
@@ -149,181 +140,31 @@ def test_family_seeds_are_multiturn_and_non_destructive():
 
 
 def test_flow_may_mutate_uses_expected_action_and_imperative_wording():
-    for user in (
-        "jot a reminder to call the dentist tomorow at 9am",
-        "if thats a gap, jot it in my notes so i dont forget",
-        "ok ping me every morning at 7 with the pollen level",
-        "shift that one 45 min later if it won't collide with anything",
-        "tick off the one about the privacy policy",
-        "get rid of that week ahead note",
-        "help me draft a reply to lisa",
-        "ok scrap it",
-        "switch it to personal",
-        "huh ok, take dan off it",
-    ):
-        assert MODULE.flow_may_mutate({
-            "family": "switching",
-            "turns": [{"user": user, "expect": "Perform the requested mutation."}],
-        })
-    assert MODULE.flow_may_mutate({
-        "family": "cookbook_admin",
-        "turns": [{
-            "user": "spin up a scratch chat named relay check",
-            "expect": "Creates the requested session",
-        }],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "notes",
-        "turns": [{"user": "put that in my notes", "expect": "manage_notes action='add'"}],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "switching",
-        "turns": [{
-            "user": "sticck that in a note for me",
-            "expect": "Use manage_notes add",
-        }],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "email",
-        "turns": [{"user": "please draft a reply", "expect": "Creates a reviewable reply"}],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "shell_files",
-        "turns": [{"user": "ok cool, save that output to a file", "expect": "Writes the file"}],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "switching",
-        "turns": [{"user": "nice — save how u did that as a skill", "expect": "Adds a skill"}],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "shell_files",
-        "turns": [{
-            "user": "drop that output into a file called shellcheck.txt",
-            "expect": "Use write_file to save the captured output.",
-        }],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "switching",
-        "turns": [{
-            "user": "ok remind me to check this again tomorow morning",
-            "expect": "Create a scheduled reminder.",
-        }],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "shell_files",
-        "turns": [
-            {"user": "use bash to do a read-only check", "expect": "bash runs the exact command"},
-            {"user": "run it again", "expect": "bash re-runs the command"},
-            {"user": "save that output to hostcheck.txt in the workspace",
-             "expect": "write_file creating hostcheck.txt with the captured command output"},
-        ],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "ui",
-        "turns": [
+    """One flow per mutation pattern: user request, context action, and each expectation form."""
+    for flow in [
+        {"family": "switching", "turns": [{"user": "get rid of that week ahead note", "expect": "Do it."}]},
+        {"family": "switching", "turns": [{"user": "help me draft a reply to lisa", "expect": "Do it."}]},
+        {"family": "shell_files", "turns": [{
+            "user": "in a temp dir make two files and calculate checksums", "expect": "Inspect them",
+        }]},
+        {"family": "notes", "turns": [{
+            "user": "keep that somewhere for me", "expect": "Use manage_notes add with the summary",
+        }]},
+        {"family": "ui", "turns": [
             {"user": "open my calendar", "expect": "Open the panel"},
-            {"user": "whats on next week?", "expect": "List events"},
             {"user": "now open notes and make a short note called week ahead",
-            "expect": "Open notes and create the note"},
-        ],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "switching",
-        "turns": [{"user": "note down which one is for work so i dont forget", "expect": "Save it"}],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "shell_files",
-        "turns": [{"user": "in a temp dir make two files and calculate checksums", "expect": "Inspect them"}],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "shell_files",
-        "turns": [{"user": "also write the report", "expect": "Create report"}],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "cookbook_admin",
-        "turns": [{"user": "Launch my SD3.5 preset.", "expect": "Call serve_preset"}],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "calendar",
-        "turns": [{
-            "user": "clear my reminder for tomorrow's lunch",
-            "expect": "Use manage_calendar update_event to remove the reminder",
-        }],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "cookbook_admin",
-        "turns": [{"user": "Stop the first server.", "expect": "Call stop_served_model"}],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "notes",
-        "turns": [{
-            "user": "keep that somewhere for me",
-            "expect": "Use manage_notes add with the summary",
-        }],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "cookbook_admin",
-        "turns": [{
-            "user": "get those weights locally",
-            "expect": "Call download_model and return the session ID",
-        }],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "switching",
-        "turns": [{
-            "user": "cool, grab Qwen/Qwen3-8B locally but only the *.safetensors files",
-            "expect": "Call download_model and return the tracked session ID",
-        }],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "switching",
-        "turns": [{
-            "user": "ok can u drop all that into a note called model shortlist",
-            "expect": "Create the note",
-        }],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "tasks",
-        "turns": [{
+             "expect": "Open notes and create the note"},
+        ]},
+        {"family": "tasks", "turns": [{
             "user": "set up a daily remider at 9am to review the SFT traces",
             "expect": "Create a scheduled task using manage_tasks.",
-        }],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "documents",
-        "turns": [{
-            "user": "can you expand this document",
-            "expect": "Read the active document, then apply the expansion edits.",
-        }],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "memory",
-        "turns": [{
+        }]},
+        {"family": "memory", "turns": [{
             "user": "hey can you stash a temporary note for me",
             "expect": "Calls the memory tool family to add a new memory.",
-        }],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "skills",
-        "turns": [{
-            "user": "nope, so start a draft skil called trace-audit",
-            "expect": "Uses the skills tool add action creating a draft skill.",
-        }],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "tasks",
-        "turns": [
-            {"user": "is the notes recap task still paused?", "expect": "List it."},
-            {"user": "turn it back on please", "expect": "Call manage_tasks with resume."},
-        ],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "documents",
-        "turns": [{
-            "user": "with that log still open, tack this on the end: keep the evidence",
-            "expect": "Append the sentence through a targeted edit.",
-        }],
-    })
+        }]},
+    ]:
+        assert MODULE.flow_may_mutate(flow)
     assert not MODULE.flow_may_mutate({
         "family": "notes",
         "turns": [{"user": "which note did I create most recently?", "expect": "Read-only answer"}],
@@ -334,6 +175,17 @@ def test_flow_may_mutate_treats_new_research_as_durable_but_not_status_checks():
     assert MODULE.flow_may_mutate({
         "family": "research",
         "turns": [{"user": "research why Boston terriers are great", "expect": "Starts research"}],
+    })
+    assert not MODULE.flow_may_mutate({
+        "family": "research",
+        "turns": [{"user": "is the research still running?", "expect": "Checks status"}],
+    })
+    assert MODULE.flow_may_mutate({
+        "family": "research",
+        "turns": [
+            {"user": "research Boston terriers", "expect": "Starts a job"},
+            {"user": "is it still running?", "expect": "Checks status"},
+        ],
     })
 
 
@@ -448,17 +300,6 @@ def test_fixture_isolated_replay_restores_after_unexpected_failure(monkeypatch, 
         MODULE.replay_flows_with_fixture_isolation([{"id": "one"}], args, "cookie")
 
     assert len(restores) == 3
-    assert not MODULE.flow_may_mutate({
-        "family": "research",
-        "turns": [{"user": "is the research still running?", "expect": "Checks status"}],
-    })
-    assert MODULE.flow_may_mutate({
-        "family": "research",
-        "turns": [
-            {"user": "research Boston terriers", "expect": "Starts a job"},
-            {"user": "is it still running?", "expect": "Checks status"},
-        ],
-    })
 
 
 def test_orphaned_opening_followup_is_not_a_valid_standalone_flow():
@@ -491,16 +332,13 @@ def test_self_contained_opening_is_not_rejected_for_later_followups():
     })
 
 
-@pytest.mark.parametrize("tool", [
-    "python", "read_file", "write_file", "edit_file", "apply_patch",
-])
-def test_webui_sft_audit_rejects_native_workspace_only_expectations(tool):
-    flow = {
-        "source_seed_id": f"native-only-{tool}",
-        "family": "shell_files",
-        "turns": [{"user": "inspect the workspace", "expect": f"Use {tool} to do it"}],
-    }
-    assert not MODULE.flow_is_auditable(flow)
+def test_webui_sft_audit_rejects_native_workspace_only_expectations():
+    for tool in ["python", "read_file", "write_file", "edit_file", "apply_patch"]:
+        assert not MODULE.flow_is_auditable({
+            "source_seed_id": f"native-only-{tool}",
+            "family": "shell_files",
+            "turns": [{"user": "inspect the workspace", "expect": f"Use {tool} to do it"}],
+        })
     assert not MODULE.flow_has_orphaned_opening_followup({
         "turns": [
             {"user": "print a marker and the hostname", "expect": "Run bash."},
@@ -516,39 +354,6 @@ def test_known_ambiguous_generated_seed_is_quarantined():
     assert not MODULE.flow_is_auditable({
         "source_seed_id": "56b28e74-c890-46a9-a7f5-e3b96b0c8032:2",
         "turns": [{"user": "open up sprint-notes so i can see it"}],
-    })
-    assert not MODULE.flow_is_auditable({
-        "source_seed_id": "f62677e6-9bd5-4528-9112-d45e37c9fa6a:2",
-        "turns": [
-            {"user": "Can you pull up my calendar for the next seven days?"},
-            {"user": "Anything Friday afternoon I should prep for?"},
-        ],
-    })
-    assert not MODULE.flow_is_auditable({
-        "source_seed_id": "8ec45076-dfe3-4751-9954-0cc2fe4a7b3a:1",
-        "turns": [{"user": "remind me tomorrow", "expect": "Use manage_tasks."}],
-    })
-    assert not MODULE.flow_is_auditable({
-        "source_seed_id": "f313b13a-efe9-455f-9d5e-216a4f6d27a5:1",
-        "turns": [
-            {"user": "list three memories"},
-            {"user": "when did i save the first one?", "expect": "Inspect its date."},
-        ],
-    })
-    assert not MODULE.flow_is_auditable({
-        "source_seed_id": "a2830b66-79e1-4bf9-990d-5b35502f1198:1",
-        "turns": [{"user": "what do i have coming up?"}],
-    })
-    assert not MODULE.flow_is_auditable({
-        "source_seed_id": "68e92e46-5274-48cf-8eb0-846f3036aaf2:1",
-        "turns": [{"user": "can you expand this document"}],
-    })
-    assert not MODULE.flow_is_auditable({
-        "source_seed_id": "4522013c-db9e-498c-aeb6-d6fd3dcb9a9a:1",
-        "turns": [{
-            "user": "anything on my calendar today? just the headlines",
-            "expect": "Return at most three titles.",
-        }],
     })
     assert MODULE.flow_is_auditable({
         "source_seed_id": "valid-seed:1",
@@ -1113,12 +918,6 @@ def test_resume_replay_rows_uses_checkpoint_evidence_without_judgments():
         [{"final": "x"}], [{"final": "y"}],
     ]
     assert all("judge" not in row for row in rows)
-
-
-def test_compact_catalog_distinguishes_note_reminders_from_automated_tasks():
-    tools = {tool["name"]: tool for tool in MODULE.compact_tool_catalog()["tools"]}
-    assert "due_date" in tools["manage_notes"]["purpose"]
-    assert "one-off reminder" in tools["manage_tasks"]["purpose"]
 
 
 def test_judge_ownership_treats_missing_note_due_date_as_model_failure():

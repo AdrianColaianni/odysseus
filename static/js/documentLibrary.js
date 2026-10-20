@@ -1,8 +1,5 @@
 // static/js/documentLibrary.js
-/**
- * Document Library — modal with Chats / Documents / Research / Archive tabs.
- * Extracted from document.js to reduce file size.
- */
+// Document Library: modal with Chats / Documents / Research / Archive tabs.
 
 import { topPortalZ } from './toolWindowZOrder.js';
 import uiModule from './ui.js?v=20260916largetoolscroll1';
@@ -21,7 +18,6 @@ import { orderActionMenuItems, actionMenuRank, SELECT_MENU_ICON } from './action
 
 // ── Injected references from documentModule ──
 let API_BASE = '';
-let _esc;          // HTML-escape function
 let _getDocs;      // () => Map of open docs
 let _isOpenFn;     // () => boolean — is doc panel open
 let _createDocument;
@@ -126,7 +122,6 @@ function _enhanceLibrarySortSelect(select) {
 
 export function initLibrary(config) {
   API_BASE        = config.apiBase;
-  _esc            = config.esc;
   _getDocs        = config.getDocs;
   _isOpenFn       = config.isOpen;
   _createDocument = config.createDocument;
@@ -166,7 +161,7 @@ let _librarySearchDebounce = null;
 // then wraps each whitespace-separated term in <mark>. Multi-term, matching
 // the backend's per-term search, so every word that matched is marked.
 function _hlSearch(text) {
-  const esc = _esc(text || '');
+  const esc = uiModule.esc(text || '');
   const q = (_librarySearch || '').trim();
   if (!q) return esc;
   const toks = [...new Set(q.split(/\s+/).filter(Boolean))]
@@ -182,7 +177,7 @@ function _hlSearch(text) {
 function _safeResearchHref(raw) {
   try {
     const parsed = new URL(String(raw || '').trim(), window.location.origin);
-    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return _esc(parsed.href);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return uiModule.esc(parsed.href);
   } catch {}
   return '';
 }
@@ -700,15 +695,14 @@ function _setLibraryCountChipContent(chip, label, count) {
     const meta = document.createElement('div');
     meta.className = 'memory-item-meta';
     meta.style.cssText = 'font-size:10px;opacity:0.55;margin-top:2px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;';
-    const _esc = (s) => uiModule.esc(String(s || ''));
     const pieces = [];
-    if (doc.session_name) pieces.push(`<span>${_esc(doc.session_name)}</span>`);
+    if (doc.session_name) pieces.push(`<span>${uiModule.esc(doc.session_name)}</span>`);
     if (doc.language && doc.language !== 'text') {
       // Per-language icon lives in the title row above; just the language
       // name here keeps the meta line scannable without duplicating the icon.
-      pieces.push(`<span>${_esc(doc.language)}</span>`);
+      pieces.push(`<span>${uiModule.esc(doc.language)}</span>`);
     }
-    pieces.push(`<span>${_esc(libraryRelativeTime(doc.updated_at))}</span>`);
+    pieces.push(`<span>${uiModule.esc(libraryRelativeTime(doc.updated_at))}</span>`);
     meta.innerHTML = pieces.join('<span style="opacity:0.5;">\u00b7</span>');
     content.appendChild(meta);
     // Action buttons — "..." menu
@@ -1392,19 +1386,8 @@ function _setLibraryCountChipContent(chip, label, count) {
     const actionsBtn = document.getElementById('doclib-bulk-actions');
     if (countEl) countEl.textContent = `${_librarySelectedIds.size} Selected`;
     if (actionsBtn) actionsBtn.style.color = _librarySelectedIds.size > 0 ? 'var(--fg)' : '';
-    // Legacy per-action buttons no longer rendered — guard so the rest of the
-    // function (if anything still references them) doesn't crash.
     const deleteBtn = document.getElementById('doclib-bulk-delete');
-    const exportBtn = document.getElementById('doclib-bulk-export');
-    const archiveBtn = document.getElementById('doclib-bulk-archive');
-    const cloneBtn = document.getElementById('doclib-bulk-clone');
     if (deleteBtn) deleteBtn.disabled = _librarySelectedIds.size === 0;
-    if (exportBtn) exportBtn.disabled = _librarySelectedIds.size === 0;
-    if (cloneBtn) cloneBtn.disabled = _librarySelectedIds.size === 0;
-    if (archiveBtn) {
-      archiveBtn.disabled = _librarySelectedIds.size === 0;
-      archiveBtn.textContent = _libraryArchivedView ? 'Restore' : 'Archive';
-    }
   }
 
   async function libraryDeleteSingle(docId, card) {
@@ -2010,27 +1993,7 @@ function _setLibraryCountChipContent(chip, label, count) {
             });
           }
         } catch {}
-        // Replaced ~150 lines of inline drag/snap/dock with one helper call.
-        // Library intentionally disables top-edge fullscreen snap: that layout
-        // breaks dense icon/tool rows. Side docking still works.
         const FS_CLASS = 'doclib-fullscreen';
-        const enterFullscreen = () => {
-          if (modal.classList.contains(FS_CLASS)) return;
-          modal.classList.add(FS_CLASS);
-          content.style.position = 'fixed';
-          content.style.left = '0';
-          content.style.top = '0';
-          content.style.right = '0';
-          content.style.bottom = '0';
-          content.style.width = '100vw';
-          content.style.maxWidth = '100vw';
-          content.style.height = '100vh';
-          content.style.maxHeight = '100vh';
-          content.style.borderRadius = '0';
-          content.style.margin = '0';
-          content.style.transform = 'none';
-          try { localStorage.setItem('doclib-pos', JSON.stringify({ fullscreen: true })); } catch {}
-        };
         const exitFullscreen = (cx, cy) => {
           if (!modal.classList.contains(FS_CLASS)) return;
           modal.classList.remove(FS_CLASS);
@@ -2051,9 +2014,7 @@ function _setLibraryCountChipContent(chip, label, count) {
           header,
           fsClass: FS_CLASS,
           skipSelector: '.modal-close',
-          onEnterFullscreen: enterFullscreen,
           onExitFullscreen: exitFullscreen,
-          enableFullscreen: false,
           onDragEnd: () => {
             try { localStorage.setItem('doclib-pos', JSON.stringify({ left: content.style.left, top: content.style.top })); } catch {}
           },
@@ -2215,12 +2176,12 @@ function _setLibraryCountChipContent(chip, label, count) {
               let body;
               try {
                 body = markdownModule.mdToHtml(cleaned);
-              } catch { body = _esc(cleaned); }
+              } catch { body = uiModule.esc(cleaned); }
               // Per-message model can override the session default (e.g.
               // when comparing models in the same chat).
               const msgModel = (m.metadata && (m.metadata.model || m.metadata.model_name)) || '';
               const modelTag = !isUser && (msgModel || sessionModel)
-                ? `<span class="doclib-chat-msg-model">${_esc(msgModel || sessionModel)}</span>`
+                ? `<span class="doclib-chat-msg-model">${uiModule.esc(msgModel || sessionModel)}</span>`
                 : '';
               return `<div class="doclib-chat-bubble-row ${isUser ? 'user' : 'assistant'}">
                 <div class="doclib-chat-bubble">
@@ -2368,7 +2329,7 @@ function _setLibraryCountChipContent(chip, label, count) {
           '<div class="doclib-chat-header" style="display:flex;align-items:center;width:100%;gap:6px;">' +
             cbHtml +
             '<div style="flex:1;min-width:0;">' +
-              '<div class="memory-item-title">' + chatIconSvg + _esc(s.name || 'Untitled') + msgCountHtml + '</div>' +
+              '<div class="memory-item-title">' + chatIconSvg + uiModule.esc(s.name || 'Untitled') + msgCountHtml + '</div>' +
               '<div class="memory-item-meta" style="font-size:10px;opacity:0.4;margin-top:2px;">' + [model, _relTime(s.updated_at)].filter(Boolean).join(' \u00b7 ') + '</div>' +
             '</div>' +
             chevronSvg +
@@ -2732,7 +2693,7 @@ function _setLibraryCountChipContent(chip, label, count) {
           '<div class="doclib-chat-header" style="display:flex;align-items:center;width:100%;gap:6px;">' +
             cbHtml +
             '<div style="flex:1;min-width:0;">' +
-              '<div class="memory-item-title">' + arcIconSvg + _esc(s.name || 'Untitled') + '</div>' +
+              '<div class="memory-item-title">' + arcIconSvg + uiModule.esc(s.name || 'Untitled') + '</div>' +
               '<div class="memory-item-meta" style="font-size:10px;opacity:0.4;margin-top:2px;">' + [model, _relTime(s.updated_at)].filter(Boolean).join(' \u00b7 ') + '</div>' +
             '</div>' +
             '<span class="doclib-card-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>' +
@@ -2777,7 +2738,7 @@ function _setLibraryCountChipContent(chip, label, count) {
           '<div class="doclib-chat-header" style="display:flex;align-items:center;width:100%;gap:6px;">' +
             _dcb +
             '<div style="flex:1;min-width:0;">' +
-              '<div class="memory-item-title">' + _arcDocIco + _esc(d.title || 'Untitled') + '</div>' +
+              '<div class="memory-item-title">' + _arcDocIco + uiModule.esc(d.title || 'Untitled') + '</div>' +
               '<div class="memory-item-meta" style="font-size:10px;opacity:0.4;margin-top:2px;">' + ['Document', (d.language || 'text'), _relTime(d.updated_at)].filter(Boolean).join(' · ') + '</div>' +
             '</div>' +
             '<span class="doclib-card-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>' +
@@ -2815,7 +2776,7 @@ function _setLibraryCountChipContent(chip, label, count) {
           '<div class="doclib-chat-header" style="display:flex;align-items:center;width:100%;gap:6px;">' +
             _rcb +
             '<div style="flex:1;min-width:0;">' +
-              '<div class="memory-item-title">' + _arcResIco + _esc(r.query || 'Research') + '</div>' +
+              '<div class="memory-item-title">' + _arcResIco + uiModule.esc(r.query || 'Research') + '</div>' +
               '<div class="memory-item-meta" style="font-size:10px;opacity:0.4;margin-top:2px;">' + ['Research', (r.source_count ? r.source_count + ' sources' : ''), _relTime(r.completed_at ? new Date(r.completed_at * 1000).toISOString() : '')].filter(Boolean).join(' · ') + '</div>' +
             '</div>' +
             '<span class="doclib-card-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>' +
@@ -2965,7 +2926,7 @@ function _setLibraryCountChipContent(chip, label, count) {
         const data = await res.json();
         _researchItems = data.research || data || [];
       } catch (e) {
-        grid.innerHTML = `<div class="hwfit-loading">Failed to load: ${_esc(e.message)}</div>`;
+        grid.innerHTML = `<div class="hwfit-loading">Failed to load: ${uiModule.esc(e.message)}</div>`;
         return;
       }
       _renderResearchGrid();
@@ -3014,7 +2975,7 @@ function _setLibraryCountChipContent(chip, label, count) {
       } catch {}
       const sources = Array.isArray(detail.sources) ? detail.sources : [];
       const sourcesList = sources.slice(0, 12).map((src, i) => {
-        const title = _esc(src.title || src.url || `Source ${i + 1}`);
+        const title = uiModule.esc(src.title || src.url || `Source ${i + 1}`);
         const url = _safeResearchHref(src.url);
         return url
           ? `<li><a href="${url}" target="_blank" rel="noopener">${title}</a></li>`
@@ -3027,7 +2988,7 @@ function _setLibraryCountChipContent(chip, label, count) {
       // `raw_report` — there's no `summary` field, so the preview was empty.
       const summary = (detail.summary || detail.report_summary || detail.result || detail.raw_report || '').toString().trim();
       const summaryHtml = summary
-        ? `<div class="doclib-research-summary"><div class="doclib-research-section-label">Report</div><div>${markdownModule.mdToHtml ? markdownModule.mdToHtml(summary) : _esc(summary)}</div></div>`
+        ? `<div class="doclib-research-summary"><div class="doclib-research-section-label">Report</div><div>${markdownModule.mdToHtml ? markdownModule.mdToHtml(summary) : uiModule.esc(summary)}</div></div>`
         : '';
       preview.innerHTML =
         '<div class="doclib-chat-preview-messages">' +
@@ -3181,7 +3142,7 @@ function _setLibraryCountChipContent(chip, label, count) {
         html += `<div class="doclib-chat-header" style="display:flex;align-items:center;width:100%;gap:6px;">`;
         if (_researchSelectMode) html += `<input type="checkbox" class="memory-select-cb _res-cb" data-rid="${r.id}"${selected ? ' checked' : ''}>`;
         html += `<div style="flex:1;min-width:0;">`;
-        html += `<div class="memory-item-title"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;opacity:0.4;flex-shrink:0;"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>${_esc(r.query || 'Untitled Research')}</div>`;
+        html += `<div class="memory-item-title"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;opacity:0.4;flex-shrink:0;"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>${uiModule.esc(r.query || 'Untitled Research')}</div>`;
         html += `<div class="memory-item-meta" style="font-size:10px;opacity:0.4;margin-top:2px;">${metaText}</div>`;
         html += `</div>`;
         html += `<span class="doclib-card-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>`;
@@ -3420,10 +3381,6 @@ function _setLibraryCountChipContent(chip, label, count) {
       _renderResearchGrid();
       if (uiModule) uiModule.showToast(toArchived ? 'Archived' : 'Restored');
     });
-
-    // Shared dropdown for chats/archive menus — defined at module scope below
-    // (was here originally; hoisted so libraryCreateCard's mobile kebab
-    // handler — which lives outside openLibrary's closure — can call it).
 
     function _relTime(iso) {
       if (!iso) return '';

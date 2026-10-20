@@ -18,7 +18,7 @@ This spec covers current security and trust-boundary behavior in:
 - `src/tool_execution.py`;
 - `src/task_action_policy.py`;
 - `src/prompt_security.py`;
-- `src/url_safety.py` and `src/url_security.py`;
+- `src/url_safety.py`;
 - `src/host_docker_access.py`;
 - `src/attachment_refs.py` and upload lifecycle enforcement in `src/upload_handler.py` / `routes/upload_routes.py`;
 - `src/secret_storage.py`;
@@ -119,8 +119,7 @@ Current untrusted surfaces include fetched URLs, web results, emails, memories, 
 
 ## URL, Path, And Secret Policy
 
-- `src/url_security.py` owns public HTTP(S) validation for integration/API-token supplied URLs. It should fail closed for private IP, loopback, invalid scheme, and unsafe redirect targets.
-- `src/url_safety.py` owns local-first outbound URL safety for model endpoints and similar local services. Loopback/LAN can be allowed by default, and private-IP blocking is an explicit caller policy. Strict `block_private=True` also rejects RFC 6598 shared/CGNAT space (`100.64.0.0/10`) explicitly because Python does not classify that range as private.
+- `src/url_safety.py` owns outbound URL safety and the pinned-IP transports. Loopback/LAN can be allowed by default, and private-IP blocking is an explicit caller policy; public-only callers (webhooks, API-token base URLs, web fetch) pass `block_private=True`, which also rejects internal hostnames such as `*.local` and `metadata.google.internal`. Strict `block_private=True` also rejects RFC 6598 shared/CGNAT space (`100.64.0.0/10`) explicitly because Python does not classify that range as private.
 - `core.log_safety.redact_url()` strips URL userinfo, query strings, and fragments before endpoint URLs enter logs. Model, chat/research endpoint, contact/CardDAV, and similar diagnostics should use this helper instead of logging raw admin-configured URLs.
 - `src.webhook_manager` validates webhook URLs at create and delivery time, rejects private/internal targets, disables redirects, and pins delivery to the public IP set that passed validation immediately before the request.
 - `src.integrations` owns admin-configured integration base URLs and secret masking. `api_call` accepts only relative paths, rejects link-local/metadata destinations through `src.url_safety`, can additionally block RFC1918/loopback/private targets with `INTEGRATION_API_BLOCK_PRIVATE_IPS=true`, and pins requests to the IP set that passed SSRF validation while preserving the intended Host/TLS identity.

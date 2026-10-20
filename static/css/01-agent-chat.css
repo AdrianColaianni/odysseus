@@ -1,19 +1,3 @@
-/* 01-agent-chat - part of the former static/style.css.
- *
- * The stylesheet is split by area, but the split is mechanical: rules were
- * moved verbatim and NOT regrouped. The numeric prefix is the load order, and
- * that order is what preserves the cascade. A rule sits in the file its
- * original position fell into, so an area's rules are not all in its file and
- * a file is not only that area's rules.
- *
- * Do not reorder the <link> tags in static/index.html, and do not move a rule
- * between files: with 1,151 redeclarations and 1,886 !important in this
- * cascade, either can change which declaration wins.
- *
- * static/index.html and the PRECACHE list in static/sw.js must agree on this
- * order. tests/test_static_stylesheet_manifest.py and
- * tests/test_css_computed_style_snapshot.py fail if that drifts.
- */
 #cookbook-modal .modal-content             { height: 94vh; max-height: 94vh; }
 .pdf-export-overlay .modal-content { max-height: 86vh; }
 
@@ -241,7 +225,7 @@ body.bg-pattern-ascii-fireflies {
       display: flex; align-items: center;
       transition: color 0.08s, background 0.08s;
     }
-    .export-dl-btn > svg { color: var(--accent, var(--red)); }
+    .export-dl-btn > svg { color: var(--red); }
     .export-dl-btn:hover {
       color: var(--accent);
       background: color-mix(in srgb, var(--accent) 12%, transparent);
@@ -284,9 +268,7 @@ body.bg-pattern-ascii-fireflies {
       display: flex; align-items: center; justify-content: center;
       flex-shrink: 0; opacity: 0.5;
     }
-    /* On mobile the chat-header export dropdown was cramped — items
-       were 11px font with 6px padding. Bump to readable touch targets:
-       larger min-width, taller rows, bigger icons + text. */
+    /* Readable touch targets for the chat-header export dropdown on mobile. */
     @media (max-width: 768px) {
       .export-dropdown-menu {
         min-width: 200px;
@@ -501,9 +483,6 @@ body.bg-pattern-ascii-fireflies {
       top: 0;
       left: -10px;
     }
-    .sidebar-sep {
-      display: none;
-    }
     #sidebar-search-btn,
     #sidebar-new-chat-btn {
       margin: 0;
@@ -591,11 +570,10 @@ body.bg-pattern-ascii-fireflies {
     .hamburger-btn:hover {
       opacity: 1;
     }
-    /* Icon rail — mini sidebar that replaces the wide .sidebar when it's
-       hidden (mutually exclusive — see sidebar-layout.js:57). Fullscreen
-       panels reserve this strip of width via `left: var(--icon-rail-w)`
-       so the rail stays visible without needing a z-index hack (which
-       used to cover the fixed-position hamburger button). */
+    /* Icon rail: mini sidebar that replaces the wide .sidebar when it's
+       hidden (mutually exclusive, see sidebar-layout.js). Fullscreen panels
+       reserve its width via `left: var(--icon-rail-w)`, so the rail stays
+       visible without a z-index over the fixed hamburger button. */
     .icon-rail {
       width: 48px;
       flex-shrink: 0;
@@ -609,8 +587,8 @@ body.bg-pattern-ascii-fireflies {
       margin: 0;
       position: relative;
       box-sizing: border-box;
-      /* Allow hover labels (e.g. the rail-new-chat "New" tooltip) to extend
-         outside the 48px column. overflow:hidden was clipping them. */
+      /* Let hover labels (e.g. the rail-new-chat "New" tooltip) extend
+         outside the 48px column. */
       overflow: visible;
     }
     body.sidebar-collapsed:not(.hamburger-only) .icon-rail,
@@ -674,19 +652,13 @@ body.bg-pattern-ascii-fireflies {
         padding-bottom: calc(8px + var(--safe-bottom));
       }
     }
-    .icon-rail-divider {
-      width: 24px;
-      height: 1px;
-      background: var(--border);
-      margin: 4px 0;
-    }
     .icon-rail-btn {
       position: relative;
       width: 34px;
       height: 34px;
       border: none;
       background: transparent;
-      color: var(--accent, var(--red));
+      color: var(--red);
       font-size: 16px;
       border-radius: 6px;
       cursor: pointer;
@@ -746,7 +718,6 @@ body.bg-pattern-ascii-fireflies {
       font-weight: 600;
     }
     .icon-rail-btn:hover { opacity: 1; background: color-mix(in srgb, var(--accent) 12%, transparent); }
-    .icon-rail-btn.active-section { opacity: 1; background: color-mix(in srgb, var(--color-accent) 15%, transparent); }
     /* Unified "minimized" indicator for any rail/sidebar button whose modal is held open */
     .rail-minimized { position: relative; }
     .rail-minimized::after {
@@ -755,7 +726,7 @@ body.bg-pattern-ascii-fireflies {
          right of the element so it never overlaps the icon. */
       top: 50%; right: -10px; transform: translateY(-50%);
       width: 6px; height: 6px; border-radius: 50%;
-      background: var(--accent, var(--red));
+      background: var(--red);
       box-shadow: 0 0 0 2px var(--bg);
       pointer-events: none;
       animation: rail-min-pulse 2s ease-in-out infinite;
@@ -823,8 +794,8 @@ body.bg-pattern-ascii-fireflies {
     /* Window tile snap ghost (desktop only) */
     #tile-ghost {
       position: fixed; pointer-events: none; z-index: 9000;
-      background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);
-      border: 2px solid color-mix(in srgb, var(--accent, var(--red)) 55%, transparent);
+      background: color-mix(in srgb, var(--red) 14%, transparent);
+      border: 2px solid color-mix(in srgb, var(--red) 55%, transparent);
       border-radius: 8px;
       opacity: 0; transform: scale(0.96);
       transition: left 0.12s ease, top 0.12s ease, width 0.12s ease, height 0.12s ease, opacity 0.12s, transform 0.12s;
@@ -853,8 +824,8 @@ body.bg-pattern-ascii-fireflies {
       animation: dock-chip-in 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) both;
     }
     .minimized-dock-chip:hover {
-      background: color-mix(in srgb, var(--accent, var(--red)) 12%, var(--panel, var(--bg)));
-      border-color: color-mix(in srgb, var(--accent, var(--red)) 40%, var(--border));
+      background: color-mix(in srgb, var(--red) 12%, var(--panel, var(--bg)));
+      border-color: color-mix(in srgb, var(--red) 40%, var(--border));
     }
     .minimized-dock-chip:active { cursor: grabbing; }
     .minimized-dock-chip.dragging {
@@ -873,7 +844,7 @@ body.bg-pattern-ascii-fireflies {
     #minimized-dock .minimized-dock-chip:first-child:not(:only-child),
     #minimized-dock .minimized-dock-chip:last-child:not(:only-child) {
       box-shadow: 0 4px 14px rgba(0,0,0,0.35),
-                  inset 0 0 0 1px color-mix(in srgb, var(--accent, var(--red)) 25%, transparent);
+                  inset 0 0 0 1px color-mix(in srgb, var(--red) 25%, transparent);
     }
     .minimized-dock-chip svg { opacity: 0.7; flex-shrink: 0; }
     .minimized-dock-label { white-space: nowrap; }
@@ -896,7 +867,7 @@ body.bg-pattern-ascii-fireflies {
       .minimized-dock-x { display: none !important; }
       .minimized-dock-chip.chip-free-drag {
         box-shadow: 0 8px 22px rgba(0,0,0,0.55),
-                    0 0 0 2px color-mix(in srgb, var(--accent, var(--red)) 50%, transparent) !important;
+                    0 0 0 2px color-mix(in srgb, var(--red) 50%, transparent) !important;
       }
       /* Long-press hint — chip swells and settles while the detach timer
          counts down so the user feels feedback before the bubble peels out
@@ -906,10 +877,10 @@ body.bg-pattern-ascii-fireflies {
         background:
           radial-gradient(circle at 30% 25%, color-mix(in srgb, #fff 28%, transparent), transparent 36%),
           linear-gradient(135deg,
-            color-mix(in srgb, var(--accent, var(--red)) 34%, var(--panel, var(--bg))),
+            color-mix(in srgb, var(--red) 34%, var(--panel, var(--bg))),
             color-mix(in srgb, #7dd3fc 26%, var(--panel, var(--bg))) 52%,
             color-mix(in srgb, #f0abfc 22%, var(--panel, var(--bg))));
-        border-color: color-mix(in srgb, var(--accent, var(--red)) 72%, #fff 12%) !important;
+        border-color: color-mix(in srgb, var(--red) 72%, #fff 12%) !important;
         animation: chip-long-press-pulse 0.82s ease-in-out infinite;
         z-index: 10030;
       }
@@ -920,7 +891,7 @@ body.bg-pattern-ascii-fireflies {
         border-radius: inherit;
         background:
           radial-gradient(circle,
-            color-mix(in srgb, var(--accent, var(--red)) 42%, transparent) 0 18%,
+            color-mix(in srgb, var(--red) 42%, transparent) 0 18%,
             color-mix(in srgb, #7dd3fc 34%, transparent) 34%,
             color-mix(in srgb, #f0abfc 30%, transparent) 50%,
             transparent 72%);
@@ -932,7 +903,7 @@ body.bg-pattern-ascii-fireflies {
         0%, 100% { transform: scale(1); }
         50%      { transform: scale(1.42);
                    box-shadow: 0 14px 42px rgba(0,0,0,0.66),
-                               0 0 0 16px color-mix(in srgb, var(--accent, var(--red)) 42%, transparent),
+                               0 0 0 16px color-mix(in srgb, var(--red) 42%, transparent),
                                0 0 72px color-mix(in srgb, #7dd3fc 44%, transparent),
                                0 0 118px color-mix(in srgb, #f0abfc 32%, transparent); }
       }
@@ -945,9 +916,9 @@ body.bg-pattern-ascii-fireflies {
          tell at a glance which floating bubble belongs to the visible
          modal. Tap it to minimize. */
       .minimized-dock-chip.chip-active {
-        border-color: var(--accent, var(--red)) !important;
+        border-color: var(--red) !important;
         box-shadow: 0 4px 14px rgba(0,0,0,0.35),
-                    0 0 0 2px color-mix(in srgb, var(--accent, var(--red)) 35%, transparent);
+                    0 0 0 2px color-mix(in srgb, var(--red) 35%, transparent);
       }
       .minimized-dock-chip.chip-active svg { opacity: 1; }
     }
@@ -959,7 +930,7 @@ body.bg-pattern-ascii-fireflies {
       left: 50%;
       width: 88px; height: 88px;
       border-radius: 50%;
-      --trash-zone-color: var(--accent, var(--red, #e53935));
+      --trash-zone-color: var(--red, #e53935);
       background: var(--trash-zone-color);
       color: #fff;
       display: flex; align-items: center; justify-content: center;
@@ -996,7 +967,7 @@ body.bg-pattern-ascii-fireflies {
       border-bottom-color: color-mix(in srgb, var(--trash-zone-color) 30%, transparent);
       opacity: 0;
       pointer-events: none;
-      animation: whirlpool-spin 0.85s linear infinite;
+      animation: spin 0.85s linear infinite;
       transition: opacity 0.15s ease;
     }
     #dock-trash-zone.engaged .whirlpool { opacity: 1; }
@@ -1014,7 +985,6 @@ body.bg-pattern-ascii-fireflies {
       opacity: 0 !important;
       transition: opacity 0.16s ease-out !important;
     }
-    @keyframes whirlpool-spin { to { transform: rotate(360deg); } }
     @keyframes trash-zone-breathe {
       0%, 100% { box-shadow: 0 0 0 10px color-mix(in srgb, var(--trash-zone-color) 16%, transparent), 0 10px 30px color-mix(in srgb, var(--trash-zone-color) 48%, transparent); }
       50% { box-shadow: 0 0 0 16px color-mix(in srgb, var(--trash-zone-color) 25%, transparent), 0 14px 38px color-mix(in srgb, var(--trash-zone-color) 68%, transparent); }
@@ -1042,7 +1012,7 @@ body.bg-pattern-ascii-fireflies {
       min-width: 16px;
       height: 16px;
       padding: 0 4px;
-      background: var(--accent, var(--red));
+      background: var(--red);
       color: #fff;
       font-size: 9px;
       font-weight: 700;
@@ -1059,7 +1029,7 @@ body.bg-pattern-ascii-fireflies {
       right: 10px;
       height: 16px;
       padding: 0 6px;
-      background: var(--accent, var(--red));
+      background: var(--red);
       color: #fff;
       font-size: 9px;
       font-weight: 700;
@@ -1123,7 +1093,7 @@ body.bg-pattern-ascii-fireflies {
       width: 4px;
       height: 4px;
       border-radius: 50%;
-      background: var(--accent, var(--red));
+      background: var(--red);
       opacity: 0.7;
     }
     /* ── Sidebar sections (flat layout) ── */
@@ -1158,10 +1128,10 @@ body.bg-pattern-ascii-fireflies {
     .section-icon,
     .sidebar-action-icon {
       flex-shrink: 0;
-      stroke: var(--accent, var(--red));
+      stroke: var(--red);
       position: relative;
       left: -1px;
-      color: var(--accent, var(--red));
+      color: var(--red);
     }
     /* Shared notification dot for sidebar section titles. Single source of
        truth so chats / email / assistant / future-section dots all sit at
@@ -1175,7 +1145,7 @@ body.bg-pattern-ascii-fireflies {
          instead of trailing right after each (differently-sized) label. */
       margin-left: auto;
       border-radius: 50%;
-      background: var(--accent, var(--red));
+      background: var(--red);
       flex-shrink: 0;
       vertical-align: middle;
     }
@@ -1246,9 +1216,9 @@ body.bg-pattern-ascii-fireflies {
     #sessions-section .chats-manage-btn:focus-visible {
       opacity: 1 !important;
     }
-    /* No hover background on the Chats manage button — the inherited
-       section-header-btn rule was painting a tinted box behind the
-       'manage' label as it slid in. */
+    /* No hover background on the Chats manage button: the inherited
+       section-header-btn rule would tint the box behind the sliding
+       'manage' label. */
     #sessions-section .chats-manage-btn,
     #sessions-section .chats-manage-btn:hover,
     #sessions-section .chats-manage-btn:focus-visible {
@@ -1403,14 +1373,13 @@ body.bg-pattern-ascii-fireflies {
     .session-bulk-btn-danger:hover { opacity: 1; }
     /* Checkbox in select mode */
     .session-select-cb {
-      accent-color: var(--accent, var(--red));
+      accent-color: var(--red);
       margin: 0 4px 0 0;
       flex-shrink: 0;
       cursor: pointer;
     }
 
-    .session-icon,
-    .model-icon {
+    .session-icon {
       flex-shrink: 0;
       opacity: 0.35;
       display: inline-flex;
@@ -1441,7 +1410,7 @@ body.bg-pattern-ascii-fireflies {
       width: 14px; height: 14px;
       background: transparent;
       border-color: transparent;
-      color: var(--accent, var(--red));
+      color: var(--red);
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -1574,7 +1543,6 @@ body.bg-pattern-ascii-fireflies {
     .session-folder-header.drag-over {
       outline: 2px dashed var(--red); background: color-mix(in srgb, var(--red) 13%, transparent); opacity: 1;
     }
-    .session-folder.dragging-folder { opacity: 0.4; }
     .folder-toggle { font-size: 0.7em; width: 10px; text-align: center; }
     .folder-name { font-weight: inherit; flex: 1; }
     .folder-count { font-size: 0.85em; opacity: 0.5; }
@@ -1608,49 +1576,7 @@ body.bg-pattern-ascii-fireflies {
       transition: opacity 0.15s;
     }
     .session-show-more-btn:hover { opacity: 0.8; }
-    .drag-folder-placeholder {
-      height: 4px; margin: 2px 0; border-radius: 2px;
-      background: var(--red); opacity: 0.6;
-    }
-    .unfiled-drop-zone {
-      min-height: 8px; border-radius: 4px; transition: all 0.15s;
-    }
-    .unfiled-drop-zone.drag-over {
-      min-height: 24px; outline: 2px dashed var(--red);
-      background: color-mix(in srgb, var(--red) 9%, transparent);
-    }
 
-    /* Mobile swipe-to-delete */
-    .swipe-delete-action {
-      position: absolute;
-      right: 0;
-      top: 0;
-      bottom: 0;
-      width: 60px;
-      background: color-mix(in srgb, var(--color-error) 12%, transparent);
-      color: var(--color-error);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      border-radius: 0 4px 4px 0;
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity 0.15s;
-      cursor: pointer;
-      z-index: 1;
-    }
-    .swipe-delete-action::before {
-      content: '';
-      display: block;
-      width: 18px;
-      height: 18px;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='%23ff4444' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='3 6 5 6 21 6'/%3E%3Cpath d='M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2'/%3E%3C/svg%3E");
-      background-size: contain;
-      background-repeat: no-repeat;
-    }
-    .swipe-delete-action:active {
-      background: color-mix(in srgb, var(--color-error) 22%, transparent);
-    }
     .drag-placeholder {
       background: color-mix(in srgb, var(--red) 10%, transparent);
       border: 2px dashed color-mix(in srgb, var(--color-accent) 40%, transparent);
@@ -1747,8 +1673,8 @@ body.bg-pattern-ascii-fireflies {
       }
     }
     .list-item-plus-btn:hover {
-      background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);
-      color: var(--accent, var(--red));
+      background: color-mix(in srgb, var(--red) 14%, transparent);
+      color: var(--red);
     }
     .list-item span {
       color: var(--fg);
@@ -1863,8 +1789,8 @@ body.bg-pattern-ascii-fireflies {
     }
     .chat-pull-refresh.is-ready,
     .chat-pull-refresh.is-refreshing {
-      border-color: color-mix(in srgb, var(--accent, var(--red)) 58%, transparent);
-      color: var(--accent, var(--red));
+      border-color: color-mix(in srgb, var(--red) 58%, transparent);
+      color: var(--red);
     }
     .chat-pull-refresh .spinner-whirlpool {
       margin: 0 !important;
@@ -1878,9 +1804,8 @@ body.bg-pattern-ascii-fireflies {
       top: 112px;
       z-index: 4;
     }
-    /* Sortable Cookbook column headers had no visual cue, so users couldn't tell
-       a header was clickable (the Newest sort on the Model column was invisible).
-       Show a pointer + hover highlight, and underline the active sort column. */
+    /* Sortable Cookbook column headers: pointer, hover highlight and an
+       underlined active sort column, so a header reads as clickable. */
     .hwfit-header .hwfit-sortable { cursor: pointer; transition: color .12s; }
     .hwfit-header .hwfit-sortable:hover { color: var(--fg); text-decoration: underline dotted; }
     .hwfit-header .hwfit-sort-active { color: var(--fg); font-weight: 600; }
@@ -1899,8 +1824,7 @@ body.bg-pattern-ascii-fireflies {
       transition: top 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.3s ease, transform 0.3s ease;
     }
     #welcome-screen .welcome-tip,
-    #welcome-screen .welcome-sub,
-    #welcome-screen .welcome-version {
+    #welcome-screen .welcome-sub {
       transition: opacity 0.25s ease, max-height 0.25s ease, margin 0.25s ease;
       max-height: 60px;
       overflow: hidden;
@@ -1917,7 +1841,6 @@ body.bg-pattern-ascii-fireflies {
     @media (max-height: 650px) {
       #welcome-screen { top: 28%; }
       #welcome-screen .welcome-tip { opacity: 0; max-height: 0; margin: 0; }
-      #welcome-screen .welcome-version { margin-top: 6px; }
       .incognito-btn { margin-top: 8px; }
     }
     @media (max-height: 500px) {
@@ -1965,13 +1888,6 @@ body.bg-pattern-ascii-fireflies {
       opacity:0.6;
       line-height:1.5;
       max-width:300px;
-    }
-    #welcome-screen .welcome-version {
-      font-size:0.7rem;
-      opacity:0.25;
-      margin-top:12px;
-      pointer-events:none;
-      user-select:none;
     }
     #welcome-screen .welcome-tip {
       font-size:0.75rem;
@@ -2038,10 +1954,6 @@ body.bg-pattern-ascii-fireflies {
       width: 100%;
     }
     @media (max-width:768px) {
-      .chat-meta-overlay {
-        left: 36px;
-        right: 36px;
-      }
       #welcome-screen .welcome-name { font-size:1.8rem; }
       #welcome-screen .welcome-sub { font-size:0.8rem; }
       .chat-container.welcome-active .chat-input-bar {
@@ -2250,13 +2162,13 @@ body.bg-pattern-ascii-fireflies {
       opacity: 0.62;
       cursor: pointer;
       animation: none;
-      border: 1px dashed color-mix(in srgb, var(--accent, var(--red)) 55%, transparent);
-      background: color-mix(in srgb, var(--accent, var(--red)) 8%, var(--input-bg, var(--panel)));
+      border: 1px dashed color-mix(in srgb, var(--red) 55%, transparent);
+      background: color-mix(in srgb, var(--red) 8%, var(--input-bg, var(--panel)));
       transition: opacity 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
     }
     .msg-user.msg-user-queued:hover {
       opacity: 0.9;
-      border-color: color-mix(in srgb, var(--accent, var(--red)) 85%, transparent);
+      border-color: color-mix(in srgb, var(--red) 85%, transparent);
       transform: translateY(-1px);
     }
     .msg-user.msg-user-queued .queued-pill {
@@ -2267,9 +2179,9 @@ body.bg-pattern-ascii-fireflies {
       padding: 0 5px;
       margin-left: 5px;
       border-radius: 999px;
-      border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 45%, transparent);
-      color: var(--accent, var(--red));
-      background: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--red) 45%, transparent);
+      color: var(--red);
+      background: color-mix(in srgb, var(--red) 10%, transparent);
       font-size: 8px;
       font-weight: 700;
       text-transform: uppercase;
@@ -2378,11 +2290,6 @@ body.bg-pattern-ascii-fireflies {
       padding: 1px 5px;
     }
     .rag-file-delete:hover { color: var(--fg); border-color: var(--fg); }
-    .rag-file-size {
-      color: color-mix(in srgb, var(--fg) 50%, transparent);
-      font-size: 10px;
-      margin-left: 4px;
-    }
     .rag-upload-zone {
       border: 2px dashed var(--border);
       border-radius: 6px;
@@ -2411,12 +2318,10 @@ body.bg-pattern-ascii-fireflies {
       overflow: hidden;
       padding: 6px 4px 2px 4px;
       border: 1px solid var(--border);
-      background: var(--bg);
       position: relative;
       line-height: 1.4;
       font-size: 0.95em;
       font-family: 'Fira Code', 'Courier New', monospace;
-      min-height: 38px;
       max-width: 100%;
       margin: 8px 0;
       white-space: pre-wrap;
@@ -2432,13 +2337,6 @@ body.bg-pattern-ascii-fireflies {
       font-weight: bold;
       margin: 8px 0 4px 0;
       color: var(--fg);
-    }
-    .code-lang {
-      font-size:0.8em;
-      color:color-mix(in srgb, var(--fg) 60%, transparent);
-      display:block;
-      margin-bottom:2px;
-      font-style:italic;
     }
     code { font-family:inherit; }
     .loading { color:var(--red); font-style:italic; }
@@ -2461,8 +2359,8 @@ body.bg-pattern-ascii-fireflies {
 		    }
 		    body.plan-mode-active .chat-input-bar {
 		      border-style: dashed;
-		      border-color: color-mix(in srgb, var(--accent, var(--red)) 55%, transparent);
-		      background: color-mix(in srgb, var(--accent, var(--red)) 8%, var(--input-bg, var(--panel)));
+		      border-color: color-mix(in srgb, var(--red) 55%, transparent);
+		      background: color-mix(in srgb, var(--red) 8%, var(--input-bg, var(--panel)));
 		    }
 	    .chat-input-top {
 	      width: 100%;
@@ -2481,10 +2379,10 @@ body.bg-pattern-ascii-fireflies {
 	      gap: 7px;
 	      height: 22px;
 	      padding: 0 6px 0 8px;
-	      border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 35%, transparent);
+	      border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
 	      border-radius: 999px;
-	      background: color-mix(in srgb, var(--accent, var(--red)) 12%, var(--input-bg, var(--panel)));
-		      color: var(--accent, var(--red));
+	      background: color-mix(in srgb, var(--red) 12%, var(--input-bg, var(--panel)));
+		      color: var(--red);
 		      font-size: 10px;
 		      font-weight: 700;
 		      line-height: 1;
@@ -2502,9 +2400,9 @@ body.bg-pattern-ascii-fireflies {
 	      width: 26px;
 	      height: 14px;
 	      padding: 0;
-	      border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 55%, transparent);
+	      border: 1px solid color-mix(in srgb, var(--red) 55%, transparent);
 	      border-radius: 999px;
-	      background: color-mix(in srgb, var(--accent, var(--red)) 22%, transparent);
+	      background: color-mix(in srgb, var(--red) 22%, transparent);
 	      cursor: pointer;
 	      position: relative;
 	      flex-shrink: 0;
@@ -2516,10 +2414,10 @@ body.bg-pattern-ascii-fireflies {
 	      width: 8px;
 	      height: 8px;
 	      border-radius: 50%;
-	      background: var(--accent, var(--red));
+	      background: var(--red);
 	    }
 	    .plan-mode-status-toggle:hover {
-	      background: color-mix(in srgb, var(--accent, var(--red)) 30%, transparent);
+	      background: color-mix(in srgb, var(--red) 30%, transparent);
 	    }
 	    .chat-input-top > .model-picker-wrap {
 	      position: relative;
@@ -2620,14 +2518,6 @@ body.bg-pattern-ascii-fireflies {
       flex-shrink: 0;
       position: relative;
       z-index: 1;
-    }
-    .input-divider {
-      width: 1px;
-      height: 16px;
-      background: var(--border);
-      opacity: 0.4;
-      margin: 0 2px;
-      flex-shrink: 0;
     }
     .chat-input-right {
       display: flex;
@@ -2751,17 +2641,6 @@ body.bg-pattern-ascii-fireflies {
 	      color: var(--fg);
 	      background: color-mix(in srgb, var(--fg) 9%, transparent);
 	    }
-	    .plan-mode-btn {
-	      width: 28px;
-	      height: 28px;
-	      padding: 0;
-	      flex-shrink: 0;
-	      top: -2px;
-	    }
-	    .plan-mode-btn.active {
-	      color: var(--accent);
-	      background: color-mix(in srgb, var(--accent) 14%, transparent);
-	    }
     /* GitHub-style task lists (- [ ] / - [x]) */
     li.task-item {
       list-style: none;
@@ -2821,9 +2700,9 @@ body.bg-pattern-ascii-fireflies {
 	      cursor: pointer;
 	    }
 	    .plan-inline-execute {
-	      background: color-mix(in srgb, var(--accent, var(--red)) 16%, transparent);
-	      border-color: color-mix(in srgb, var(--accent, var(--red)) 35%, transparent);
-	      color: var(--accent, var(--red));
+	      background: color-mix(in srgb, var(--red) 16%, transparent);
+	      border-color: color-mix(in srgb, var(--red) 35%, transparent);
+	      color: var(--red);
 	      font-weight: 650;
 	    }
 	    .plan-review-panel {
@@ -2836,7 +2715,7 @@ body.bg-pattern-ascii-fireflies {
 	      display: flex;
 	      flex-direction: column;
 	      overflow: hidden;
-	      border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 35%, var(--border));
+	      border: 1px solid color-mix(in srgb, var(--red) 35%, var(--border));
 	      border-radius: 8px;
 	      background: var(--panel);
 	      color: var(--fg);
@@ -2901,9 +2780,9 @@ body.bg-pattern-ascii-fireflies {
 	      gap: 5px;
 	    }
 	    .plan-review-execute {
-	      border-color: color-mix(in srgb, var(--accent, var(--red)) 35%, transparent);
-	      background: color-mix(in srgb, var(--accent, var(--red)) 16%, transparent);
-	      color: var(--accent, var(--red));
+	      border-color: color-mix(in srgb, var(--red) 35%, transparent);
+	      background: color-mix(in srgb, var(--red) 16%, transparent);
+	      color: var(--red);
 	      font-weight: 650;
 	    }
     /* While the menu is open the chevron stays in its highlighted state
@@ -2969,22 +2848,18 @@ body.bg-pattern-ascii-fireflies {
       #doc-indicator-btn,
       #doc-indicator-btn.visible { display: none !important; }
     }
-    .doc-indicator-active {
-      color: var(--accent, var(--accent-primary, var(--red))) !important;
-      opacity: 1 !important;
-    }
     #doc-indicator-btn.active {
-      color: var(--accent, var(--accent-primary, var(--red))) !important;
+      color: var(--accent-primary, var(--red)) !important;
       opacity: 1 !important;
       background: color-mix(in srgb, var(--fg) 9%, transparent) !important;
     }
     #overflow-doc-btn.has-docs,
     #overflow-doc-btn.active {
-      color: var(--accent, var(--red));
+      color: var(--red);
       opacity: 1;
     }
     #overflow-doc-btn.has-docs.active {
-      background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);
+      background: color-mix(in srgb, var(--red) 12%, transparent);
     }
     .send-btn {
       /* Prefer the theme accent (--red). A stored custom `--send-btn-bg`
@@ -3311,7 +3186,7 @@ body.bg-pattern-ascii-fireflies {
     .chat-context-popup-title {
       font-weight: 650;
       margin-bottom: 8px;
-      color: var(--accent, var(--red));
+      color: var(--red);
     }
     .chat-context-popup-bar {
       height: 6px;
@@ -3359,7 +3234,7 @@ body.bg-pattern-ascii-fireflies {
 	    }
 	    .chat-context-toggle-copy > span:first-child {
 	      white-space: nowrap;
-	      color: var(--accent, var(--red));
+	      color: var(--red);
 	    }
 	    .chat-context-toggle-state {
 	      font-size: 10px;
@@ -3438,7 +3313,7 @@ body.bg-pattern-ascii-fireflies {
     }
     .chat-context-compact-btn svg { display: block; flex: 0 0 auto; margin-left: -2px; }
     .chat-context-compact-btn svg circle:last-child {
-      stroke: var(--accent, var(--red));
+      stroke: var(--red);
       transition: stroke-dasharray 0.22s ease;
     }
     .chat-context-compact-btn:hover svg circle:last-child {
@@ -3591,7 +3466,7 @@ body.bg-pattern-ascii-fireflies {
       cursor: default;
     }
     .model-picker-refresh-btn.spinning svg {
-      animation: model-picker-refresh-spin 0.75s linear infinite;
+      animation: spin 0.75s linear infinite;
     }
     .model-picker-action-btn {
       appearance: none;
@@ -3734,36 +3609,21 @@ body.bg-pattern-ascii-fireflies {
       color: color-mix(in srgb, var(--fg) 68%, transparent);
     }
     .model-picker-list .mp-fav-dot.active {
-      color: var(--accent, var(--red));
+      color: var(--red);
       opacity: 1;
     }
     .model-picker-list .mp-fav-dot svg { display: block; }
     .model-picker-list .mp-fav-dot.active:hover {
-      color: var(--accent, var(--red));
+      color: var(--red);
       opacity: 0.72;
     }
     .model-picker-list .mp-fav-dot.pulse {
       animation: mpFavPulse 0.32s ease-out;
     }
     @keyframes mpFavPulse {
-      0% { text-shadow: 0 0 0 color-mix(in srgb, var(--accent, var(--red)) 0%, transparent); }
-      45% { text-shadow: 0 0 10px color-mix(in srgb, var(--accent, var(--red)) 60%, transparent); }
-      100% { text-shadow: 0 0 0 color-mix(in srgb, var(--accent, var(--red)) 0%, transparent); }
-    }
-    /* First-run hint when a large catalog has no Recent/Favorites yet. */
-    .model-picker-list .mp-empty-hint {
-      flex-direction: column;
-      gap: 2px;
-      padding: 14px 8px;
-      text-align: center;
-    }
-    .model-picker-list .mp-empty-hint .mp-empty-title {
-      font-size: 1.05em;
-      color: color-mix(in srgb, var(--fg) 70%, transparent);
-    }
-    .model-picker-list .mp-empty-hint .mp-empty-sub {
-      font-size: 0.92em;
-      opacity: 0.7;
+      0% { text-shadow: 0 0 0 color-mix(in srgb, var(--red) 0%, transparent); }
+      45% { text-shadow: 0 0 10px color-mix(in srgb, var(--red) 60%, transparent); }
+      100% { text-shadow: 0 0 0 color-mix(in srgb, var(--red) 0%, transparent); }
     }
     /* Provider group headers */
     .model-picker-list .mp-provider-header {
@@ -3971,9 +3831,6 @@ body.bg-pattern-ascii-fireflies {
       margin: 0 0 8px;
       min-height: 0;
     }
-    .attach-strip:empty {
-      display: none;
-    }
     .attach-strip {
       display: flex;
       gap: 6px;
@@ -4007,14 +3864,6 @@ body.bg-pattern-ascii-fireflies {
     }
     .toggle input:checked + .slider { background:var(--red); }
     .toggle input:checked + .slider:before { transform:translateX(14px); }
-    .copy-btn {
-      position:absolute; top:6px; right:6px;
-      background:var(--bg); color:var(--fg);
-      border:1px solid var(--border); border-radius:6px;
-      font-size:12px; height:24px; padding:0 8px; cursor:pointer;
-      opacity:0; transition:.15s;
-    }
-    .msg:hover .copy-btn { opacity:1; }
     .role-timestamp {
       font-size:0.7rem; color:var(--color-muted-alt); font-weight:normal; margin-left:6px;
     }
@@ -4119,8 +3968,8 @@ body.bg-pattern-ascii-fireflies {
       transition: border-color 0.15s, color 0.15s;
     }
     .ctx-compact-btn:hover {
-      border-color: var(--accent, var(--red));
-      color: var(--accent, var(--red));
+      border-color: var(--red);
+      color: var(--red);
     }
     .ctx-compact-btn:disabled {
       opacity: 0.5;
@@ -4128,7 +3977,7 @@ body.bg-pattern-ascii-fireflies {
     }
     .compact-wave {
       display: inline-block;
-      color: var(--accent, var(--red));
+      color: var(--red);
       letter-spacing: 1px;
       font-size: 0.9em;
     }
@@ -4208,22 +4057,6 @@ body.bg-pattern-ascii-fireflies {
     /* Delete action — same chrome as copy/download/edit but hover reveals
        the destructive red tint so the user can tell it's not a benign op. */
     .footer-delete-btn:hover { color: var(--red); }
-    .regen-btn {
-      background:none; border:none;
-      color:var(--color-muted-alt); font-size:1.1rem; cursor:pointer;
-      padding:2px 6px; border-radius:4px;
-      transition: color .15s;
-      line-height:1;
-    }
-    .regen-btn:hover { color:var(--accent); }
-    .fork-btn {
-      background:none; border:none;
-      color:var(--color-muted-alt); font-size:1.1rem; cursor:pointer;
-      padding:2px 6px; border-radius:4px;
-      transition: color .15s;
-      line-height:1;
-    }
-    .fork-btn:hover { color:var(--accent); }
     .msg-action-btn {
       background:none; border:none;
       color:var(--muted, var(--color-muted-alt)); font-size:1.1rem; cursor:pointer;
@@ -4238,7 +4071,7 @@ body.bg-pattern-ascii-fireflies {
       height:13px;
       transform:translateY(1px);
     }
-    .msg-action-btn[data-action="shorten"] { position:relative; top:1px; font-size:1.25rem; }
+    .msg-action-btn[data-action="shorten"] { font-size:1.25rem; }
     .msg-delete-btn { position:relative; top:1px; }
     .msg-delete-btn:hover { color:var(--red); }
     .msg-more-btn {
@@ -4350,12 +4183,6 @@ body.bg-pattern-ascii-fireflies {
     .variant-slash {
       opacity:0.4;
       font-size:1em;
-    }
-    .continue-separator {
-      display:inline;
-      opacity:0.35;
-      font-size:0.85em;
-      font-style:italic;
     }
     .stopped-indicator {
       color:var(--red);
@@ -4476,17 +4303,13 @@ body.bg-pattern-ascii-fireflies {
       font-weight:600;
       opacity:1;
       color:var(--bg);
-      background:var(--accent, var(--red));
+      background:var(--red);
       border-radius:999px;
       padding:4px 14px;
       line-height:1.3;
     }
     .rounds-exhausted .continue-btn:hover {
       opacity:0.88;
-    }
-    .ctx-indicator {
-      display:inline-flex; align-items:center; gap:1px;
-      font-size:0.75rem;
     }
     .ctx-popup {
       position:fixed;
@@ -4524,8 +4347,8 @@ body.bg-pattern-ascii-fireflies {
       height:6px;
       flex:0 0 6px;
       border-radius:50%;
-      background:var(--accent, var(--red));
-      box-shadow:0 0 0 3px color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);
+      background:var(--red);
+      box-shadow:0 0 0 3px color-mix(in srgb, var(--red) 14%, transparent);
     }
     .ctx-stat-section {
       display:flex;
@@ -4555,14 +4378,6 @@ body.bg-pattern-ascii-fireflies {
       overflow:hidden;
       text-overflow:ellipsis;
     }
-    .edit-btn {
-      background:none; border:none;
-      color:var(--color-muted-alt); font-size:1.1rem; cursor:pointer;
-      padding:2px 6px; border-radius:4px;
-      transition: color .15s;
-      line-height:1;
-    }
-    .edit-btn:hover { color:var(--accent); }
     .edit-textarea {
       width:100%; background:var(--bg); color:var(--fg);
       border:1px solid var(--border); border-radius:6px;
@@ -4603,10 +4418,6 @@ body.bg-pattern-ascii-fireflies {
       50%  { transform: scale(1.15); }
       100% { transform: scale(1); }
     }
-    /* Slim text-button variant: swap "Copy" → "✓ Copied" via the
-       ::before content while still inheriting the green flash + pulse. */
-    pre.pre-compact .copy-code.copied::before { content: '✓ Copied'; }
-
     /* Edit code button — positioned left of copy button */
     pre .edit-code {
       position:absolute; right:42px; top:6px;
@@ -4652,7 +4463,7 @@ body.bg-pattern-ascii-fireflies {
     .setup-trigger-link:hover,
     .setup-clickable-provider:hover,
     .setup-clickable-code:hover {
-      color: var(--accent, var(--red)) !important;
+      color: var(--red) !important;
       opacity: 0.9;
     }
 
@@ -4663,9 +4474,8 @@ body.bg-pattern-ascii-fireflies {
     pre.buttons-hidden .run-code { opacity:0 !important; pointer-events:none !important; }
 
     /* Editing state — subtle border on the code block */
-    /* Editing state: was a 1px subtle outline that was almost invisible on
-       mobile, so users couldn't tell their tap-to-edit had actually engaged.
-       Use the accent colour + a tinted background so it reads at a glance. */
+    /* Editing state: accent outline and tinted background so tap-to-edit
+       reads at a glance on mobile. */
     pre.editing {
       outline: 2px solid var(--accent-primary, var(--red));
       outline-offset: -2px;
@@ -4790,12 +4600,6 @@ body.bg-pattern-ascii-fireflies {
     }
     .code-runner-error { color:var(--red); }
     .code-runner-loading { font-style:italic; color:var(--red); padding:4px 0; }
-    .code-runner-close {
-      position:absolute; top:4px; right:4px;
-      background:none; border:none; color:var(--fg);
-      cursor:pointer; opacity:0.5; font-size:14px; padding:2px 6px;
-    }
-    .code-runner-close:hover { opacity:1; }
     /* Labeled copy pill — pinned top-right INSIDE the run-output panel, not
        in a separate footer. Panel is position:relative so absolute works. */
     .code-runner-copy-inline {
@@ -4919,7 +4723,7 @@ body.bg-pattern-ascii-fireflies {
       margin-right: 0;
       position: relative;
       top: 4px;
-      color: var(--accent, var(--red));
+      color: var(--red);
       vertical-align: -3px;
       transform: scale(0.65);
       opacity: 0;
@@ -5015,27 +4819,8 @@ body.bg-pattern-ascii-fireflies {
       .toast-action-hint { display: none; }
     }
 
-    .stop-btn {
-      position:absolute; top:2px; right:2px;
-      background:var(--panel);
-      color:var(--fg);
-      border:1px solid var(--fg);
-      font-family:inherit;
-      font-size:1em; line-height:1; padding:2px 5px;
-      cursor:pointer;
-    }
-    .small-note { font-size:12px; color:color-mix(in srgb, var(--fg) 60%, transparent); margin-top:4px; }
-    .row-end { justify-content:flex-end; }
     .model-chat-btn {
       height:32px; padding:0 10px; margin-left:auto;
-    }
-    /* Nudge the "+ Chat" label down 1px to sit centered in the button. */
-    .model-chat-btn-label {
-      position: relative;
-      top: 1px;
-    }
-    .openai-row {
-      display:flex; align-items:center; gap:6px;
     }
     .models-row {
       display:flex; align-items:center; gap:6px; border:1px solid var(--border); padding:4px; margin:4px 0; border-radius: 4px;
@@ -5123,9 +4908,7 @@ body.bg-pattern-ascii-fireflies {
            backdrop-filter+background combo as semi-transparent on
            the slide-out drawer, letting the chat input model picker
            label show through the sidebar. */
-        /* Keep the drawer tied to the Sidebar color picker.  This used to
-           force --panel on mobile, leaving only the header responsive to
-           --sidebar-bg. */
+        /* Keep the drawer tied to the Sidebar color picker (--sidebar-bg). */
         background: var(--sidebar-bg, var(--panel)) !important;
         backdrop-filter: none !important;
         padding: var(--safe-top) 0 var(--safe-bottom) var(--safe-left);
@@ -5225,14 +5008,12 @@ body.bg-pattern-ascii-fireflies {
       }
       /* Search, New Chat & Assistant */
       #sidebar-search-btn,
-      #sidebar-new-chat-btn,
-      .sidebar-assistant-entry {
+      #sidebar-new-chat-btn {
         padding: 12px 10px !important;
         min-height: 48px !important;
       }
       #sidebar-search-btn .grow,
-      #sidebar-new-chat-btn .grow,
-      .sidebar-assistant-entry .grow {
+      #sidebar-new-chat-btn .grow {
         font-size: 14px !important;
         left: 0 !important;
       }
@@ -5461,12 +5242,7 @@ body.bg-pattern-ascii-fireflies {
       .gallery-modal-content {
         width: 100vw !important;
         max-width: 100vw !important;
-        /* vh fallback, dvh override so the modal adapts to mobile
-           URL-bar show/hide. Order matters: later same-specificity rule
-           wins, so dvh must come after vh. */
-        max-height: 100vh !important;
         max-height: calc(var(--app-height) - var(--sheet-top)) !important;
-        height: 100vh;
         height: calc(var(--app-height) - var(--sheet-top));
         border-radius: 14px 14px 0 0 !important;
         border: none !important;
@@ -5479,9 +5255,6 @@ body.bg-pattern-ascii-fireflies {
         -webkit-overflow-scrolling: touch;
       }
       #email-lib-modal .doclib-grid {
-        max-height: none;
-        flex: 1;
-        overflow-y: auto;
         -webkit-overflow-scrolling: touch;
       }
       /* Library modal layout: pin the header + tab strip, give the active
@@ -5556,10 +5329,9 @@ body.bg-pattern-ascii-fireflies {
         margin: 0 !important;
         padding: 8px 10px calc(8px + var(--safe-bottom)) !important;
         background: var(--bg) !important;
-        /* Flex column. JS (_fillSkillCardHeight) sets EXPLICIT px heights on
-           the preview + <pre>; in a flex column an explicit-height item
-           (flex:0 0 auto + height) is honoured. (Grid was worse here — the
-           collapsed 1fr track overrode the preview's explicit height.) */
+        /* Flex column: JS (_fillSkillCardHeight) sets explicit px heights on
+           the preview and <pre>, which a flex column honours and a collapsed
+           grid 1fr track would override. */
         display: flex !important;
         flex-direction: column !important;
         overflow: hidden !important;
@@ -5572,16 +5344,12 @@ body.bg-pattern-ascii-fireflies {
       #memory-modal .doclib-card.skill-card.doclib-card-expanded > .doclib-card-preview {
         display: flex !important;
         flex-direction: column !important;
-        min-height: 0 !important;
         overflow: hidden !important;
       }
-      /* The card now fills the screen, but a base rule (.skill-card...
-         .doclib-card-preview { flex: 0 1 auto }) sizes the preview to its
-         CONTENT — so a medium SKILL.md left the preview at ~half the card
-         (the "only 50%" the debug confirmed: card was full, content wasn't).
-         Force the preview AND the <pre> to FILL the card. Extra .skill-card
-         in the selector out-specifies both the base and the generic mobile
-         rule so this wins without ambiguity. */
+      /* A base rule (.skill-card .doclib-card-preview { flex: 0 1 auto })
+         sizes the preview to its content; force the preview and the <pre> to
+         fill the card. The extra .skill-card out-specifies both the base and
+         the generic mobile rule. */
       #memory-modal .doclib-card.skill-card.doclib-card-expanded > .doclib-card-preview {
         flex: 1 1 auto !important;
         min-height: 0 !important;
@@ -5630,8 +5398,8 @@ body.bg-pattern-ascii-fireflies {
       #doclib-modal [data-doclib-panel="documents"]:has(.doclib-card-expanded) .doclib-inline-load-more {
         display: none !important;
       }
-      /* Small bottom padding now that the load-more no longer steals space —
-         the action bar sits low, just clearing the home-indicator safe area. */
+      /* Small bottom padding: the action bar sits low, just clearing the
+         home-indicator safe area. */
       #doclib-modal [data-doclib-panel="documents"] .doclib-card.doclib-card-expanded .doclib-card-preview {
         padding-bottom: calc(18px + var(--safe-bottom)) !important;
       }
@@ -5807,9 +5575,8 @@ body.bg-pattern-ascii-fireflies {
       /* List-view cards keep the framed look from their own .doclib-card /
          .memory-item base styles — no extra grid padding here, so the
          spacing matches the documents/library tab exactly. */
-      /* Tighten the top of the email sheet — modal header + description +
-         account row + toolbar were stacking with full desktop spacing and
-         pushed the email subjects way down. */
+      /* Tighter top spacing on the email sheet, so the header rows do not
+         push the email subjects down. */
       #email-lib-modal .modal-header {
         padding: 4px 8px !important;
         min-height: 0 !important;
@@ -5899,9 +5666,6 @@ body.bg-pattern-ascii-fireflies {
       #email-lib-modal .email-reader-meta-row strong {
         min-width: 28px !important;
       }
-      #email-lib-modal .email-reader-atts {
-        padding: 6px 4px !important;
-      }
       #email-lib-modal .email-reader-body {
         padding: 8px 4px !important;
       }
@@ -5949,8 +5713,7 @@ body.bg-pattern-ascii-fireflies {
         padding: 10px 8px;
         gap: 4px;
       }
-      .doclib-card-session,
-      .doclib-card-time {
+      .doclib-card-session {
         display: none;
       }
       .doclib-card-expanded-actions {
@@ -6017,62 +5780,6 @@ body.bg-pattern-ascii-fireflies {
     #sidebar-backdrop { display:none !important; }
     /* ----- Loading spinner ----- */
 
-    .spinner {
-      width: 24px;
-      height: 24px;
-      margin: 8px auto;
-      border: 3px solid var(--border);
-      border-top-color: var(--red);
-      border-radius: 50%;
-      animation: spin 0.9s linear infinite;
-    }
-    /* Inline spinner for buttons */
-    .btn-spinner {
-      display: inline-block;
-      width: 12px;
-      height: 12px;
-      border: 2px solid transparent;
-      border-top-color: currentColor;
-      border-radius: 50%;
-      animation: spin 1s linear infinite;
-      margin-right: 6px;
-    }
-    .search-status {
-      font-size: 0.85em;
-      color: var(--red);
-      margin-top: 4px;
-      padding: 4px;
-      border-left: 2px solid var(--red);
-      background: color-mix(in srgb, var(--red) 5%, transparent);
-    }
-    /* Loading indicator for messages */
-    .loading-indicator {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 10px;
-    }
-    .loading-dots {
-      display: flex;
-      gap: 4px;
-    }
-    .loading-dot {
-      width: 6px;
-      height: 6px;
-      background-color: var(--red);
-      border-radius: 50%;
-    }
-    .loading-dot:nth-child(1) {
-      animation: loading-bounce 1.4s infinite ease-in-out both;
-    }
-    .loading-dot:nth-child(2) {
-      animation: loading-bounce 1.4s infinite ease-in-out both;
-      animation-delay: -0.32s;
-    }
-    .loading-dot:nth-child(3) {
-      animation: loading-bounce 1.4s infinite ease-in-out both;
-      animation-delay: -0.64s;
-    }
     .session-loading-state {
       min-height: 100%;
       display: flex;
@@ -6226,11 +5933,8 @@ body.bg-pattern-ascii-fireflies {
       top: 0;
       z-index: 5;
       /* Inherit the modal-content's background so the header matches the
-         panel body. Many tool modals set their content to var(--bg) inline
-         while this header was hard-coded to var(--panel) — making the title
-         strip a different shade in every theme. `inherit` tracks whatever
-         the content uses (var(--bg) or the default var(--panel)) and stays
-         opaque, so the sticky header still masks scrolled content. */
+         panel body, var(--bg) or var(--panel). It stays opaque, so the sticky
+         header still masks scrolled content. */
       background-color: inherit;
     }
     .modal-header:active { cursor:grabbing; }
@@ -6287,7 +5991,6 @@ body.bg-pattern-ascii-fireflies {
       display:inline-flex;
       align-items:center;
       justify-content:center;
-      line-height:1;
       text-indent:0;
       cursor:pointer;
       border-radius:999px;
@@ -6458,7 +6161,6 @@ body.bg-pattern-ascii-fireflies {
         width: 85vw;
         padding: 12px 16px;
         font-size: 0.88rem;
-        border-radius: 12px;
       }
       .styled-confirm-box .modal-header h4 { font-size: 0.9rem; }
       .styled-confirm-box .modal-body p { font-size: 0.85rem; margin: 6px 0 10px; }
@@ -6543,12 +6245,12 @@ body.bg-pattern-ascii-fireflies {
       transition:background 0.15s, border-color 0.15s, transform 0.12s;
     }
     .cookbook-gguf-delete-cb:hover {
-      border-color:var(--accent, var(--red));
+      border-color:var(--red);
       transform:scale(1.12);
     }
     .cookbook-gguf-delete-cb:checked {
-      background:var(--accent, var(--red));
-      border-color:var(--accent, var(--red));
+      background:var(--red);
+      border-color:var(--red);
     }
     .cookbook-gguf-delete-main,
     .cookbook-gguf-delete-path {
@@ -6651,7 +6353,7 @@ body.bg-pattern-ascii-fireflies {
         from 0deg,
         transparent 0deg,
         transparent 245deg,
-        color-mix(in srgb, var(--accent, var(--red)) 78%, transparent) 315deg,
+        color-mix(in srgb, var(--red) 78%, transparent) 315deg,
         transparent 360deg
       );
       -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
@@ -6660,10 +6362,7 @@ body.bg-pattern-ascii-fireflies {
       mask-composite: exclude;
       opacity: 0.65;
       pointer-events: none;
-      animation: scrollAgentWorkingRing 1.05s linear infinite;
-    }
-    @keyframes scrollAgentWorkingRing {
-      to { transform: rotate(360deg); }
+      animation: spin 1.05s linear infinite;
     }
     #scroll-bottom-btn.show { opacity:1; pointer-events:auto; }
     .scroll-nav-caret {
@@ -6691,16 +6390,8 @@ body.bg-pattern-ascii-fireflies {
     }
     /* Hamburger menu button */
     .hamburger {
-      display: inline-flex;
       align-items: center;
-      justify-content: center;
-      width: 32px;
-      height: 32px;
-      background: none;
-      border: 1px solid transparent;
       border-radius: 6px;
-      padding: 0;
-      cursor: pointer;
       transition: background 0.15s, border-color 0.15s;
     }
     .hamburger:hover {
@@ -6708,39 +6399,9 @@ body.bg-pattern-ascii-fireflies {
       border-color: var(--border);
     }
     .hamburger span {
-      display: block;
-      width: 16px;
-      height: 2px;
-      background: var(--fg);
-      border-radius: 1px;
       transition: transform 0.2s, opacity 0.2s;
     }
     .hamburger span + span { margin-top: 3px; }
-    /* Agent indicator */
-    #agent-indicator {
-      position: fixed;
-      top: calc(20px + var(--safe-top));
-      right: calc(20px + var(--safe-right));
-      background: var(--bg);
-      color: var(--fg);
-      border: 1px solid var(--border);
-      padding: 6px 12px;
-      border-radius: 6px;
-      font-size: 12px;
-      display: none;
-      z-index: 100;
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-    #agent-indicator.active {
-      display: block;
-      border-color: var(--color-agent-active);
-      box-shadow: 0 0 10px rgba(0, 255, 0, 0.3);
-    }
-    #agent-indicator:hover {
-      border-color: var(--color-agent-active);
-      background: var(--panel);
-    }
     #research-toggle-btn:disabled {
       opacity: 0.6;
       cursor: not-allowed;
@@ -6780,89 +6441,8 @@ body.bg-pattern-ascii-fireflies {
 /* ── UI Controls (Radio, Presets, Toolbar, Settings) ── */
 
 
-    /* Custom radio button styling */
-    .radio-option {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 8px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: color-mix(in srgb, var(--fg) 6%, transparent);
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-
-    .radio-option:hover {
-      background: color-mix(in srgb, var(--fg) 9%, transparent);
-      border-color: var(--fg);
-    }
-
-    .radio-option input[type="radio"] {
-      appearance: none;
-      -webkit-appearance: none;
-      width: 18px;
-      height: 18px;
-      border: 2px solid var(--border);
-      border-radius: 50%;
-      outline: none;
-      margin: 0;
-      background: var(--bg);
-      transition: all 0.2s ease;
-      position: relative;
-      flex-shrink: 0;
-    }
-
-    .radio-option input[type="radio"]:checked {
+    .preset-btn {
       border-color: var(--red);
-      background: var(--red);
-    }
-
-    .radio-option input[type="radio"]:focus {
-      box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 30%, transparent);
-    }
-
-    .radio-label {
-      color: var(--fg);
-      font-size: 14px;
-      user-select: none;
-    }
-
-    /* Preset buttons */
-    .preset-btn {
-      height: 27.2px; /* 15% smaller than 32px */
-      padding: 0 8.5px; /* 15% smaller than 10px */
-      margin-left: 4px;
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      background: var(--bg);
-      color: var(--fg);
-      font-family: 'Fira Code', monospace;
-      font-size: 10.2px; /* 15% smaller than 12px */
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-
-    .preset-btn:hover {
-      background: var(--panel);
-      border-color: var(--fg);
-    }
-
-    .preset-btn.active {
-      background: var(--panel);
-      border-color: var(--fg);
-      box-shadow: 0 0 0 1px var(--fg), 0 0 8px color-mix(in srgb, var(--fg) 16%, transparent);
-      font-weight: 600;
-    }
-
-    /* All preset buttons use the same blue color */
-    .preset-btn {
-      border-color: var(--red); /* Blue color */
-    }
-
-    .preset-btn.active {
-      border-color: var(--red); /* Blue color when active */
-      box-shadow: 0 0 0 1px var(--red), 0 0 8px color-mix(in srgb, var(--red) 30%, transparent);
     }
 
     /* Custom preset modal: the base .preset-modal-content sets overflow:hidden
@@ -6934,22 +6514,13 @@ body.bg-pattern-ascii-fireflies {
     }
 
     #custom-preset-modal .modal-footer button#save-custom-preset {
-      /* The theme's accent is stored in --red (theme.js sets --red = accentHex)
-         and --accent is undefined, so the canonical accent expression is
-         var(--accent, var(--red)). The old bare var(--accent) resolved to nothing
-         which, with color:var(--bg), made the button invisible. */
-      background: var(--accent, var(--red));
+      /* The theme accent lives in --red; --accent is never set. */
+      background: var(--red);
       color: var(--bg);
-      border-color: var(--accent, var(--red));
+      border-color: var(--red);
     }
     #custom-preset-modal .modal-footer button#save-custom-preset:hover {
       opacity: 0.85;
-    }
-    /* Toolbar visibility tab */
-    .toolbar-hint {
-      font-size: 12px;
-      color: color-mix(in srgb, var(--fg) 55%, transparent);
-      margin-bottom: 12px;
     }
     /* ── Appearance visibility toggles ── */
     .vis-toggles {
@@ -7061,24 +6632,18 @@ body.bg-pattern-ascii-fireflies {
       font-weight: 400;
       margin-left: 2px;
     }
-    /* Settings toggle — admin-only lock indicator */
-    .ui-vis-lock {
-      display: none;
-    }
-    /* (legacy toolbar-toggle styles removed — now using .vis-* classes) */
-
     /* Demo highlight pulse */
     .odysseus-highlight {
-      outline: 2px solid var(--accent, var(--red)) !important;
+      outline: 2px solid var(--red) !important;
       outline-offset: 1px;
-      box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
+      box-shadow: 0 0 0 4px color-mix(in srgb, var(--red) 18%, transparent);
       animation: ody-pulse 1.5s ease-in-out infinite;
       z-index: 100;
       position: relative;
     }
     @keyframes ody-pulse {
-      0%, 100% { outline-color: var(--accent, var(--red)); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, var(--red)) 18%, transparent); }
-      50%       { outline-color: color-mix(in srgb, var(--accent, var(--red)) 40%, transparent); box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent, var(--red)) 8%, transparent); }
+      0%, 100% { outline-color: var(--red); box-shadow: 0 0 0 4px color-mix(in srgb, var(--red) 18%, transparent); }
+      50%       { outline-color: color-mix(in srgb, var(--red) 40%, transparent); box-shadow: 0 0 0 6px color-mix(in srgb, var(--red) 8%, transparent); }
     }
     /* Floating breathing halo. Rendered as a body-level div positioned over
        the target, so we don't fight the target's own outline / box-shadow /
@@ -7086,7 +6651,7 @@ body.bg-pattern-ascii-fireflies {
     .tour-halo {
       position: fixed;
       pointer-events: none;
-      border: 3px solid var(--accent, var(--red));
+      border: 3px solid var(--red);
       border-radius: 10px;
       z-index: 10000;
       animation: ody-breathe 1.4s ease-in-out infinite;
@@ -7100,14 +6665,14 @@ body.bg-pattern-ascii-fireflies {
     }
     @keyframes ody-breathe {
       0%, 100% {
-        box-shadow: 0 0 0 3px  color-mix(in srgb, var(--accent, var(--red)) 55%, transparent),
-                    0 0 22px 4px color-mix(in srgb, var(--accent, var(--red)) 40%, transparent);
-        border-color: var(--accent, var(--red));
+        box-shadow: 0 0 0 3px  color-mix(in srgb, var(--red) 55%, transparent),
+                    0 0 22px 4px color-mix(in srgb, var(--red) 40%, transparent);
+        border-color: var(--red);
       }
       50% {
-        box-shadow: 0 0 0 6px  color-mix(in srgb, var(--accent, var(--red)) 30%, transparent),
-                    0 0 40px 14px color-mix(in srgb, var(--accent, var(--red)) 70%, transparent);
-        border-color: color-mix(in srgb, var(--accent, var(--red)) 80%, transparent);
+        box-shadow: 0 0 0 6px  color-mix(in srgb, var(--red) 30%, transparent),
+                    0 0 40px 14px color-mix(in srgb, var(--red) 70%, transparent);
+        border-color: color-mix(in srgb, var(--red) 80%, transparent);
       }
     }
     /* While the tour is active, lift overflow:hidden on common clipping
@@ -7116,7 +6681,6 @@ body.bg-pattern-ascii-fireflies {
     body.tour-active .sidebar-inner,
     body.tour-active .chat-input-bar,
     body.tour-active .chat-input-top,
-    body.tour-active .chat-input-wrap,
     body.tour-active .chat-input-right,
     body.tour-active .mode-toggle,
     body.tour-active .model-picker-wrap {
@@ -7147,11 +6711,11 @@ body.bg-pattern-ascii-fireflies {
       display: flex;
       justify-content: center;
       margin-bottom: 8px;
-      color: var(--accent, var(--red));
+      color: var(--red);
     }
     .tour-hint-visual svg { display: block; }
     .tour-hint-text { margin-bottom: 10px; opacity: 0.92; }
-    .tour-hint-text b { color: var(--accent, var(--red)); font-weight: 600; }
+    .tour-hint-text b { color: var(--red); font-weight: 600; }
     .tour-hint-dismiss {
       display: block;
       margin: 0 0 0 auto;
@@ -7230,38 +6794,6 @@ body.bg-pattern-ascii-fireflies {
       text-align: center;
     }
 
-    /* Setup wizard */
-    .setup-wizard { padding: 16px; max-width: 500px; }
-    .setup-wizard .setup-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 12px; color: var(--fg); }
-    .setup-wizard .setup-label { font-size: 0.85rem; color: var(--fg); opacity: 0.7; margin-bottom: 8px; }
-    .setup-wizard .setup-presets { display: flex; flex-wrap: wrap; gap: 8px; }
-    .setup-wizard .setup-preset-btn {
-      padding: 8px 14px; border: 1px solid var(--border); border-radius: 6px;
-      background: var(--panel); color: var(--fg); cursor: pointer;
-      font-size: 0.85rem; transition: all 0.2s;
-    }
-    .setup-wizard .setup-preset-btn:hover { border-color: var(--red); background: color-mix(in srgb, var(--red) 11%, transparent); }
-    .setup-wizard .setup-input {
-      display: block; width: 100%; padding: 8px 12px; margin-bottom: 8px;
-      background: var(--panel); border: 1px solid var(--border);
-      border-radius: 6px; color: var(--fg); font-size: 0.85rem; box-sizing: border-box;
-    }
-    .setup-wizard .setup-input:focus { border-color: var(--red); outline: none; }
-    .setup-wizard .setup-connect-btn {
-      padding: 8px 20px; background: var(--red); color: var(--bg);
-      border: none; border-radius: 6px; cursor: pointer; font-weight: 600; margin-top: 4px;
-    }
-    .setup-wizard .setup-connect-btn:hover { opacity: 0.9; }
-    .setup-wizard .setup-status { font-size: 0.8rem; margin-top: 8px; color: var(--fg); opacity: 0.7; }
-    .setup-wizard .setup-model-list { display: flex; flex-wrap: wrap; gap: 8px; }
-    .setup-wizard .setup-model-btn {
-      padding: 8px 14px; border: 1px solid var(--border); border-radius: 6px;
-      background: var(--panel); color: var(--fg); cursor: pointer;
-      font-size: 0.85rem; transition: all 0.2s;
-    }
-    .setup-wizard .setup-model-btn:hover { border-color: var(--red); background: color-mix(in srgb, var(--red) 11%, transparent); }
-    .setup-wizard .setup-step.hidden { display: none; }
-
     /* Dropdown menu styles */
     .dropdown {
       position: absolute;
@@ -7302,38 +6834,8 @@ body.bg-pattern-ascii-fireflies {
       border-bottom: none;
     }
 
-    .dropdown-item .menu-icon {
-      width: 28px;
-      height: 28px;
-      border-radius: 6px;
-      background: color-mix(in srgb, var(--fg) 5%, transparent);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 14px;
-      flex-shrink: 0;
-    }
-
-    .dropdown-item .menu-text h4 {
-      margin: 0;
-      font-size: 12.5px;
-      font-weight: 500;
-      color: var(--fg);
-      line-height: 1.3;
-    }
-
-    .dropdown-item .menu-text p {
-      margin: 0;
-      font-size: 10.5px;
-      color: var(--color-subheader);
-      line-height: 1.3;
-    }
-
     .dropdown-item:hover {
       background: color-mix(in srgb, var(--red) 10%, transparent);
-    }
-    .dropdown-item:hover .menu-icon {
-      background: color-mix(in srgb, var(--red) 15%, transparent);
     }
 
     /* Compact dropdown items (session/model context menus) */
@@ -7387,7 +6889,7 @@ body.bg-pattern-ascii-fireflies {
       width: 100%;
       background: var(--bg);
       color: var(--fg);
-      border: 1px solid var(--accent, var(--accent-primary));
+      border: 1px solid var(--accent-primary);
       border-radius: 4px;
       padding: 2px 6px;
       font-family: inherit;
@@ -7417,134 +6919,10 @@ body.bg-pattern-ascii-fireflies {
       padding: 4px;
     }
 
-    .dropdown-divider {
-      height: 1px;
-      background: var(--border);
-      margin: 4px 8px;
-    }
-
-    /* Search toggle styles */
-    .search-toggle {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 6px 0;
-      border-bottom: 1px solid var(--border);
-      margin-bottom: 8px;
-    }
-
-    .search-provider-label {
-      font-size: 14px;
-      color: var(--fg);
-    }
-
 /* ── Voice, Search, Themes, Comparison, Censor, Print ── */
 
-    /* Voice recording styles */
-    #mic-btn {
-      color: var(--fg);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      transition: all 0.2s ease;
-    }
-
-    #mic-btn:hover {
-      background: color-mix(in srgb, var(--fg) 6%, transparent);
-      border-color: var(--fg);
-    }
-
-    #mic-btn.recording {
-      background: var(--color-recording);
-      border-color: var(--color-recording);
-      animation: pulse 1.5s infinite;
-    }
-
-
-
-    #recording-indicator {
-      position: fixed;
-      top: calc(10px + var(--safe-top));
-      left: 0;
-      right: 0;
-      background: rgba(0, 0, 0, 0.8);
-      backdrop-filter: blur(10px);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 12px;
-      margin: 10px;
-      z-index: 1000;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-    }
-
-    #recording-indicator.hidden {
-      display: none !important;
-    }
-
-    .recording-content {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      color: white;
-    }
-
-    .recording-icon {
-      color: var(--color-recording);
-      font-size: 20px;
-      animation: pulse 1.5s infinite;
-    }
-
-    .recording-text {
-      font-size: 16px;
-      font-weight: 500;
-    }
-
-    #stop-recording {
-      background: var(--color-recording);
-      color: white;
-      border: none;
-      border-radius: 6px;
-      padding: 6px 12px;
-      font-size: 14px;
-      font-weight: 500;
-      cursor: pointer;
-      transition: background 0.2s ease;
-    }
-
-    #stop-recording:hover {
-      background: var(--color-recording-hover);
-    }
-
-    /* Error state for recording */
-    #recording-indicator.error {
-      background: rgba(173, 26, 26, 0.9);
-    }
-
-    .recording-error {
-      color: var(--color-recording);
-      font-size: 14px;
-      margin-top: 4px;
-    }
-
-    @media (max-width: 768px) {
-      #recording-indicator {
-        margin: 8px;
-        padding: 10px;
-      }
-
-      .recording-text {
-        font-size: 14px;
-      }
-
-      #stop-recording {
-        padding: 6px 10px;
-        font-size: 12px;
-      }
-    }
-/* SYNTAX HIGHLIGHTING — uses theme vars from style.css, no hardcoded overrides */
-.hljs { color: var(--hl-fg, #9cdef2); background: none !important; }
+/* Syntax highlighting: theme vars only, no hardcoded overrides */
+.hljs { background: none !important; }
 pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
 
     /* ---------- Search overlay (Ctrl+K command palette) ---------- */
@@ -7625,8 +7003,6 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
     }
     .search-result-snippet {
       flex: 1;
-      font-size: 12px;
-      color: var(--fg);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -7638,9 +7014,8 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
       white-space: nowrap;
     }
     mark.search-highlight {
-      /* Was orange-on-orange (0.35 alpha bg + orange text) — too low-contrast
-         to read. Solid accent fill with bg-colored text reads clearly. */
-      background: var(--accent, #e8a830);
+      /* Solid accent fill with bg-colored text, for contrast. */
+      background: #e8a830;
       color: var(--bg, #1a1a1a);
       border-radius: 2px;
       padding: 0 2px;
@@ -7655,11 +7030,8 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
 
     /* ---------- Theme popup (uses .modal > .modal-content frame) ---------- */
     #theme-modal { z-index: 260; }
-    #theme-popup .theme-popup-sub { color: color-mix(in srgb, var(--fg) 50%, transparent); font-size: 11px; margin-bottom: 10px; }
-    /* `max-height` instead of a fixed height so the popup shrinks to fit its
-       content (avoids the leftover whitespace after the time-based switching
-       card was removed). The inner .theme-tab-panel keeps overflow:auto, so
-       any taller content still scrolls inside. */
+    /* `max-height` so the popup shrinks to fit its content; the inner
+       .theme-tab-panel scrolls anything taller. */
     #theme-popup { overflow-y: hidden; max-height: min(85vh, 600px); }
     #theme-popup .modal-header { flex-shrink: 0; }
     #theme-popup .admin-tabs { margin: 0 -10px 8px; padding: 0 10px; flex-shrink: 0; }
@@ -7685,7 +7057,6 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
       border: 1.5px solid color-mix(in srgb, var(--fg) 12%, transparent);
     }
     .theme-swatch-colors span:first-child { margin-left: 0; }
-    .theme-custom-label { font-size: 11px; font-weight: 600; color: color-mix(in srgb, var(--fg) 50%, transparent); text-transform: uppercase; letter-spacing: 0.06em; margin: 10px 0 6px; }
     .theme-custom { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; }
     .color-row { display: flex; align-items: center; gap: 4px; position: relative; }
     .color-row label { font-size: 13px; font-weight: 500; color: var(--fg); opacity: 0.7; flex: 1; }
@@ -7728,11 +7099,6 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
     .color-row:has(.color-reset-btn.changed) input.cp-swatch-input { margin-right: 28px; }
     .color-reset-btn.changed { opacity: 0.4; pointer-events: auto; }
     .color-reset-btn.changed:hover { opacity: 1; color: var(--red); }
-    .theme-custom-divider {
-      grid-column: 1 / -1; font-size: 11px; color: var(--fg); opacity: 0.5;
-      text-transform: uppercase; letter-spacing: 0.04em; margin: 6px 0 2px;
-      border-top: 1px solid var(--border); padding-top: 6px;
-    }
     .theme-swatch[data-custom] { position: relative; overflow: visible; }
     /* Accent-coloured circular X — always visible (mobile-friendly), sits
        INSIDE the swatch's top-right corner so it never crops into a
@@ -7746,7 +7112,7 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
       padding: 0;
       border: none;
       border-radius: 50%;
-      background: var(--accent, var(--red, #d92534));
+      background: var(--red, #d92534);
       color: #fff;
       cursor: pointer;
       z-index: 2;
@@ -7757,7 +7123,7 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
       transition: transform 0.12s, background 0.12s;
     }
     .theme-delete-btn:hover {
-      background: color-mix(in srgb, var(--accent, var(--red)) 80%, white);
+      background: color-mix(in srgb, var(--red) 80%, white);
       transform: scale(1.12);
     }
     .theme-delete-btn:active { transform: scale(0.95); }
@@ -7797,7 +7163,7 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
 
     #memory-import-btn svg,
     #memory-export-btn svg {
-      color: var(--accent, var(--red));
+      color: var(--red);
     }
     .theme-import-area {
       width: 100%; margin-top: 6px; padding: 6px 8px;

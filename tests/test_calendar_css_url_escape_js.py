@@ -12,30 +12,15 @@ escaping). These tests pin the escaper: backslashes are doubled FIRST, then
 quotes, so no input can terminate the `url('...')` string early.
 """
 
-import json
 import re
-import shutil
-import subprocess
 import textwrap
 from pathlib import Path
 
-import pytest
+from tests.helpers.node import run_node_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _UTILS = (_REPO / "static" / "js" / "calendar" / "utils.js").as_posix()
 _CALENDAR_JS = _REPO / "static" / "js" / "calendar.js"
-_HAS_NODE = shutil.which("node") is not None
-
-pytestmark = pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
-
-
-def _run(js: str) -> str:
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, cwd=str(_REPO), timeout=30,
-    )
-    assert proc.returncode == 0, proc.stderr
-    return proc.stdout.strip()
 
 
 def test_cssurlescape_doubles_backslashes_before_quotes():
@@ -50,7 +35,7 @@ def test_cssurlescape_doubles_backslashes_before_quotes():
         }}));
         """
     )
-    out = json.loads(_run(js))
+    out = run_node_module(js)
     # one backslash -> two; the escape for "'" is not itself re-escaped
     assert out["backslash"] == r"a\\b"
     assert out["trailing"] == "img\\\\"   # 'img\' -> 'img\\'
@@ -72,7 +57,7 @@ def test_backslash_breakout_payload_cannot_close_the_url_string():
         }}));
         """
     )
-    out = json.loads(_run(js))
+    out = run_node_module(js)
     assert out["esc"] == "x\\\\"                       # doubled backslash
     # The rendered declaration keeps the backslash doubled inside url('...').
     assert "url('x\\\\')" in out["css"]
@@ -85,7 +70,7 @@ def test_calbgcss_escapes_quote_breakout():
         console.log(JSON.stringify(_calBgCss("bg:a'); X{{}}//", 'var(--accent)')));
         """
     )
-    css = json.loads(_run(js))
+    css = run_node_module(js)
     # the injected single quote is escaped, so the url() string is not closed early
     assert r"\'" in css
     assert "url('a\\'); X{}//')" in css

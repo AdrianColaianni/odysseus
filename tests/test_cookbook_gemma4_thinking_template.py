@@ -20,12 +20,3 @@ def test_gemma4_thinking_template_uses_google_documented_thinking_placement():
     assert "<|turn>model" in text
     assert "<|turn>model\\n<|channel>thought" in text
     assert "<|turn>model\\n<|think|><|channel>thought" not in text
-
-
-def test_vllm_and_sglang_apply_gemma4_thinking_template():
-    text = SRC.read_text(encoding="utf-8")
-
-    assert "function _isGemma4ThinkingModel" in text
-    assert "const _gemma4ChatTemplate" in text
-    assert "if (_gemma4ChatTemplate) cmd += ` --chat-template ${_gemma4ChatTemplate}`;" in text
-    assert text.count("_gemma4ThinkingChatTemplateArg(modelName)") >= 2

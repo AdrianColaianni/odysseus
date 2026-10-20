@@ -1,4 +1,3 @@
-import pytest
 
 from src.clean_agent_preview import draft_contact_evidence_error
 
@@ -26,11 +25,11 @@ def test_returned_address_and_explicit_cc_are_allowed():
                  [contact()], user_text='CC sam@example.com') is None
 
 
-@pytest.mark.parametrize('field', ['error', 'blocked'])
-def test_failed_lookup_does_not_ground_recipient(field):
-    observation = contact()
-    observation[field] = True
-    assert check({'to': 'jonathan@example.com'}, [observation])
+def test_failed_lookup_does_not_ground_recipient():
+    for field in ('error', 'blocked'):
+        observation = contact()
+        observation[field] = True
+        assert check({'to': 'jonathan@example.com'}, [observation])
 
 
 def test_unrelated_drafts_are_not_forced_to_lookup():

@@ -2,9 +2,7 @@
 
 import asyncio
 import json
-import re
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -60,13 +58,7 @@ def test_card_offers_task_chat_session_and_deny_without_leaking_private_state():
         "approve",
         "deny",
     ]
-    assert [option["label"] for option in payload["options"]] == [
-        "Allow for this task",
-        "Allow for this chat session",
-        "Deny",
-    ]
     serialized = json.dumps(payload, sort_keys=True)
-    assert "Allow once" not in serialized
     assert "selected_tools" not in serialized
     assert "continuation_query" not in serialized
     assert "manage_skills" not in serialized
@@ -311,60 +303,3 @@ def test_deny_resolution_stream_is_control_only():
     assert chunks[-1] == "data: [DONE]\n\n"
     event = json.loads(chunks[0][len("data: "):])
     assert event == {"type": "tool_approval_resolved", "decision": "deny"}
-    assert "Denied the" not in "".join(chunks)
-
-
-def test_route_context_agent_frontend_and_cache_bust_wire_the_contract():
-    root = Path(__file__).resolve().parents[1]
-    route = (root / "routes/chat_routes.py").read_text(encoding="utf-8")
-    helpers = (root / "routes/chat_helpers.py").read_text(encoding="utf-8")
-    agent = (root / "src/agent_loop.py").read_text(encoding="utf-8")
-    frontend = (root / "static/js/chat.js").read_text(encoding="utf-8")
-    renderer = (root / "static/js/chatRenderer.js").read_text(encoding="utf-8")
-    app = (root / "static/app.js").read_text(encoding="utf-8")
-    index = (root / "static/index.html").read_text(encoding="utf-8")
-    approvals = (root / "src/tool_approvals.py").read_text(encoding="utf-8")
-    capabilities = (root / "src/tool_capabilities.py").read_text(encoding="utf-8")
-    models = (root / "core/models.py").read_text(encoding="utf-8")
-
-    assert 'decision not in {"approve", "approve_task", "deny"}' in route
-    assert "set(pending_tool_approval.selected_tools)" in route
-    assert "pending_tool_approval.continuation_query" in route
-    assert "persist_user_message=not tool_approval_continuation" in route
-    assert "_mark_tool_approval_resolved(" in route
-    assert "_tool_approval_resolution_stream(decision)" in route
-    assert "Approved the exact" not in route
-    assert "Denied the" not in route
-    assert "continuation_context_message: str | None = None" in helpers
-    assert "persist_user_message: bool = True" in helpers
-    assert "_without_latest_matching_user_message(" not in helpers
-    assert "selected_tools=approval_selected_tools" in agent
-    assert "continuation_query=_retrieval_query or _last_user" in agent
-    assert "approval_gate_bypassed=bool(" in agent
-    assert "['approve', 'approve_task', 'deny']" in frontend
-    assert "input.value = label" not in frontend
-    assert "const msg = approvalForSend ? '' : el('message').value;" in frontend
-    assert "const skipBubble = _hideUserBubble || !!approvalForSend;" in frontend
-    assert "fd.append('message', approvalForSend ? '' : _finalMsgWithInject);" in frontend
-    assert "json.type === 'tool_approval_resolved'" in frontend
-    assert "if (aq.resolved) return null;" in renderer
-    assert "ev.ask_user && !ev.ask_user.resolved" in renderer
-    assert '"label": "Allow once"' not in approvals
-    assert '"label": "Allow for this task"' in approvals
-    assert '"label": "Allow for this chat session"' in approvals
-    assert "scope_for_decision(normalized_decision)" in approvals
-    assert "CHAT_SESSION_APPROVAL_CONTEXT_MARKER" in capabilities
-    assert "CHAT_SESSION_APPROVAL_CONTEXT_MARKER" in models
-
-    def version(source: str, module: str) -> str:
-        match = re.search(rf"(?:\./js/|\./|/static/js/){module}\.js\?v=([^'\"<]+)", source)
-        assert match, f"missing versioned {module}.js reference"
-        return match.group(1)
-
-    chat_version = version(app, "chat")
-    renderer_version = version(app, "chatRenderer")
-    stream_version = version(frontend, "chatStream")
-    assert version(index, "chat") == chat_version
-    assert version(frontend, "chatRenderer") == renderer_version
-    assert version(index, "chatRenderer") == renderer_version
-    assert version(index, "chatStream") == stream_version

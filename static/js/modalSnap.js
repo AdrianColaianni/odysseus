@@ -1,22 +1,8 @@
-// Right-edge snap docking for draggable modals.
-//
-// Adds a "drag-to-right" gesture that docks a modal as a right-side panel
-// (mirrors the snap-to-top fullscreen pattern used by _makeDraggable in
-// emailLibrary.js / documentLibrary.js / galleryEditor.js). While docked:
-//   - the modal-content lives at `right: 0; top: 0; bottom: 0` with a
-//     viewport-fraction width
-//   - body gets `right-dock-active` + `--right-dock-w` so the workspace
-//     underneath reserves room for the fixed side panel
-//   - if the remaining chat width would drop under 380px, the wide
-//     sidebar auto-collapses to the icon rail (mirrors notes-view UX)
-//
-// Drag-away from the right edge un-docks back to a centered window —
-// the same restore values the snap-to-top exit path uses.
+// Edge docking for draggable modals: a docked window sits flush against the
+// left or right nav, the body reserves room via `*-dock-active` plus
+// `--*-dock-w`, and the wide sidebar collapses to the rail when the chat would
+// drop under MIN_CHAT_WIDTH. Dragging away un-docks.
 
-// Wider snap zone than the top-snap fullscreen (6px) — the right edge
-// is harder to hit precisely since most users drag broadly toward the
-// side rather than aiming at a 1px line. 60px feels generous without
-// false-positive triggers from casual repositioning.
 const SNAP_PX = 60;
 const UNSNAP_PX = 80;
 const MIN_CHAT_WIDTH = 380;
@@ -108,14 +94,14 @@ function _clampDockWidthToSpace(width, min, max) {
 
 function _clampRightDockWidth(width) {
   const min = _minEdgeDockWidth();
-  const navRight = _leftNavRight();
+  const navRight = leftNavRight();
   const leftDockW = _activeDockWidth('left');
   const maxByChat = window.innerWidth - navRight - _rightNavInset() - leftDockW - MIN_CHAT_WIDTH;
   const max = Math.min(Math.round(window.innerWidth * 0.82), maxByChat);
   return _clampDockWidthToSpace(width, min, max);
 }
 
-function _clampLeftDockWidth(width, left = _leftNavRight()) {
+function _clampLeftDockWidth(width, left = leftNavRight()) {
   const min = _minEdgeDockWidth();
   const rightDockW = _activeDockWidth('right');
   const available = Math.max(0, window.innerWidth - left - _rightNavInset() - rightDockW);
@@ -127,7 +113,7 @@ function _resolveRightDockWidth(modal, content) {
   return _clampRightDockWidth(content?._userDockWidth || _storedDockWidth(modal, content, 'right') || _defaultDockWidth());
 }
 
-function _resolveLeftDockWidth(content, left = _leftNavRight()) {
+function _resolveLeftDockWidth(content, left = leftNavRight()) {
   return _clampLeftDockWidth(content?._userDockWidth || _storedDockWidth(content?._dockOwner, content, 'left') || _resolveEmailDocSplitWidth(content, left), left);
 }
 
@@ -175,17 +161,17 @@ function _navOnRight() {
 }
 
 // Body padding carries the device safe-area insets (notch, Dynamic Island).
-function _bodyPaddingPx(side) {
+export function safeInsetPx(side) {
   return parseFloat(window.getComputedStyle(document.body)[side === 'left' ? 'paddingLeft' : 'paddingRight']) || 0;
 }
 
 // Right edge (px) of whatever left navigation is currently showing — the
 // expanded sidebar if visible, otherwise the icon rail. Used to anchor the
 // left dock so it always sits flush to the right of the nav.
-function _leftNavRight() {
+export function leftNavRight() {
   const sidebar = document.getElementById('sidebar');
   const rail = document.getElementById('icon-rail');
-  let x = _bodyPaddingPx('left');
+  let x = safeInsetPx('left');
   if (_navOnRight()) return x;
   if (sidebar && !sidebar.classList.contains('hidden')) {
     const r = sidebar.getBoundingClientRect();
@@ -203,7 +189,7 @@ function _leftNavRight() {
 function _rightNavInset() {
   const sidebar = document.getElementById('sidebar');
   const rail = document.getElementById('icon-rail');
-  let inset = _bodyPaddingPx('right');
+  let inset = safeInsetPx('right');
   if (!_navOnRight()) return inset;
   if (sidebar && !sidebar.classList.contains('hidden')) {
     const r = sidebar.getBoundingClientRect();
@@ -216,17 +202,14 @@ function _rightNavInset() {
   return inset;
 }
 
-export function leftNavRight() { return _leftNavRight(); }
-export function rightNavInset() { return _rightNavInset(); }
-export function safeInsetPx(side) { return _bodyPaddingPx(side); }
 
 // Keeps a floating window between the nav and the safe areas
 export function clampWindowLeft(left, width) {
   const max = window.innerWidth - _rightNavInset() - width;
-  return Math.max(_leftNavRight(), Math.min(left, max));
+  return Math.max(leftNavRight(), Math.min(left, max));
 }
 
-function _clampEmailDocSplitWidth(width, left = _leftNavRight()) {
+function _clampEmailDocSplitWidth(width, left = leftNavRight()) {
   const available = Math.max(0, window.innerWidth - left - _rightNavInset());
   if (!available) return 0;
   const compact = available < 760;
@@ -253,10 +236,10 @@ function _saveEmailDocSplitWidth(width) {
 function _disconnectLeftDockObservers(content) {
   if (!content?._leftDockNavObs) return;
   const obs = content._leftDockNavObs;
-  try { obs.navObs && obs.navObs.disconnect(); } catch (_) {}
-  try { obs.bodyObs && obs.bodyObs.disconnect(); } catch (_) {}
-  try { obs.disconnectDocObs && obs.disconnectDocObs(); } catch (_) {}
-  try { window.removeEventListener('resize', obs.reanchor); } catch (_) {}
+  obs.navObs?.disconnect();
+  obs.bodyObs?.disconnect();
+  obs.disconnectDocObs?.();
+  window.removeEventListener('resize', obs.reanchor);
   delete content._leftDockNavObs;
 }
 
@@ -314,7 +297,7 @@ function _resolveEmailDocSplitWidth(content, left) {
 // and broke the whole tab).
 function _anchorLeftDock(content) {
   if (!content || content._dockSide !== 'left') return;
-  const left = _leftNavRight();
+  const left = leftNavRight();
   const w = document.body.classList.contains('doc-view')
     ? _resolveEmailDocSplitWidth(content, left)
     : _resolveLeftDockWidth(content, left);
@@ -340,8 +323,7 @@ function _anchorLeftDock(content) {
   }
 }
 
-export function collapseSidebarToRail() { return _collapseSidebarToRail(); }
-function _collapseSidebarToRail() {
+export function collapseSidebarToRail() {
   const sidebar = document.getElementById('sidebar');
   const rail = document.getElementById('icon-rail');
   if (!sidebar || !rail) return;
@@ -373,11 +355,6 @@ function _resolveDockNodes(target) {
 export function applyEdgeDock(modal, side = 'right', dockClass) {
   if (!dockClass) dockClass = side === 'left' ? 'modal-left-docked' : 'modal-right-docked';
   return _applyDockInternal(modal, side, dockClass);
-}
-
-// Backwards-compat: existing callers use applyRightDock for right snaps.
-export function applyRightDock(modal, dockClass = 'modal-right-docked') {
-  return _applyDockInternal(modal, 'right', dockClass);
 }
 
 function _applyDockInternal(modal, side, dockClass) {
@@ -444,7 +421,7 @@ function _applyDockInternal(modal, side, dockClass) {
     // Left dock: collapse the sidebar to the icon rail, then pin the window
     // beside the rail. Normal left docks reserve their width so chat shrinks;
     // the email+document split keeps its existing overlay geometry.
-    _collapseSidebarToRail();
+    collapseSidebarToRail();
     content._preDockSnapshot.collapsedSidebar = true;
     content.style.right = 'auto';
     content._dockSide = 'left';
@@ -462,7 +439,7 @@ function _applyDockInternal(modal, side, dockClass) {
     // body.doc-view) AND when the user drags the doc divider to resize it
     // (ResizeObserver) so the email shrinks/grows inversely to keep the two
     // sharing the row cleanly.
-    if (!content._leftDockNavObs && typeof MutationObserver !== 'undefined') {
+    if (!content._leftDockNavObs) {
       const sidebar = document.getElementById('sidebar');
       const _doAnchor = () => {
         if (modal.classList.contains(dockClass)) _anchorLeftDock(content);
@@ -505,8 +482,8 @@ function _applyDockInternal(modal, side, dockClass) {
       let docResizeObs = null;
       let chatResizeObs = null;
       const _bindDocResizeObs = () => {
-        if (docResizeObs) { try { docResizeObs.disconnect(); } catch (_) {} docResizeObs = null; }
-        if (chatResizeObs) { try { chatResizeObs.disconnect(); } catch (_) {} chatResizeObs = null; }
+        if (docResizeObs) { docResizeObs.disconnect(); docResizeObs = null; }
+        if (chatResizeObs) { chatResizeObs.disconnect(); chatResizeObs = null; }
         if (typeof ResizeObserver === 'undefined') return;
         const docPane = document.querySelector('.doc-editor-pane');
         if (docPane) {
@@ -527,8 +504,8 @@ function _applyDockInternal(modal, side, dockClass) {
         bodyObs,
         reanchor,
         disconnectDocObs: () => {
-          try { docResizeObs && docResizeObs.disconnect(); } catch (_) {}
-          try { chatResizeObs && chatResizeObs.disconnect(); } catch (_) {}
+          docResizeObs?.disconnect();
+          chatResizeObs?.disconnect();
         },
       };
     }
@@ -541,7 +518,7 @@ function _applyDockInternal(modal, side, dockClass) {
     document.body.classList.add('right-dock-active');
     document.documentElement.style.setProperty('--right-dock-w', w + 'px');
     if (_shouldAutoCollapseSidebar(w)) {
-      _collapseSidebarToRail();
+      collapseSidebarToRail();
       content._preDockSnapshot.collapsedSidebar = true;
     }
   }
@@ -553,7 +530,7 @@ function _applyDockInternal(modal, side, dockClass) {
   // case. Without this, closing a docked window leaves a phantom strip
   // of empty space on the right because nothing tells the body to drop
   // its padding-right.
-  if (!modal._dockCloseWatcher && typeof MutationObserver !== 'undefined') {
+  if (!modal._dockCloseWatcher) {
     const onGone = () => _onDockedModalGone(modal, dockClass);
     // Watch the modal for: the `.hidden` class flip, an inline
     // `display:none` (how the draggable modals — calendar, plan, workspace,
@@ -587,8 +564,8 @@ function _onDockedModalGone(modal, dockClass) {
   if (!modal) return;
   const watcher = modal._dockCloseWatcher;
   if (watcher) {
-    try { watcher.obs && watcher.obs.disconnect(); } catch (_) {}
-    try { watcher.parentObs && watcher.parentObs.disconnect(); } catch (_) {}
+    watcher.obs?.disconnect();
+    watcher.parentObs?.disconnect();
     delete modal._dockCloseWatcher;
   }
   const _c = modal.querySelector ? modal.querySelector('.modal-content') : null;
@@ -724,8 +701,8 @@ export function suspendDock(modal) {
   // Stop the close-watcher from tearing the dock fully down when `.hidden`
   // is added by minimize — we want to keep the dock, just release the push.
   if (modal._dockCloseWatcher) {
-    try { modal._dockCloseWatcher.obs && modal._dockCloseWatcher.obs.disconnect(); } catch (_) {}
-    try { modal._dockCloseWatcher.parentObs && modal._dockCloseWatcher.parentObs.disconnect(); } catch (_) {}
+    modal._dockCloseWatcher.obs?.disconnect();
+    modal._dockCloseWatcher.parentObs?.disconnect();
     delete modal._dockCloseWatcher;
   }
   // Release the body push + restore the sidebar so the chat fills the width.
@@ -767,22 +744,6 @@ export function resumeDock(modal) {
   return true;
 }
 
-// Wire right-edge snap detection into a drag session. Call this once per
-// modal that should support docking. Returns an object the caller's drag
-// handler can poll: { hovering(): boolean, commit(): void, release(): void }.
-// The drag handler is responsible for calling onMove(clientX, clientY)
-// during mousemove and commit() at mouseup if hovering().
-export function makeRightDockController(modal, dockClass = 'modal-right-docked') {
-  return makeEdgeDockController(modal, 'right', dockClass);
-}
-
-// Read the current visible left-nav edge for snap detection. Use measured
-// geometry instead of CSS vars because the sidebar can auto-collapse during a
-// dock operation while --sidebar-w is still settling.
-function _leftNavWidth() {
-  return _leftNavRight();
-}
-
 // Generic edge-snap controller. `side` is 'left' or 'right'. Same pattern
 // as the original right-only controller: caller drives onMove during
 // mousemove, then calls commit()/release() at mouseup based on hovering().
@@ -790,7 +751,7 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
   if (!dockClass) dockClass = side === 'left' ? 'modal-left-docked' : 'modal-right-docked';
   let _hoveringSnap = false;
   const _distFromEdge = (cx) => {
-    if (side === 'left') return cx - _leftNavWidth();
+    if (side === 'left') return cx - leftNavRight();
     return window.innerWidth - cx;
   };
   return {
@@ -916,11 +877,11 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
       document.body.classList.add('right-dock-active');
       document.documentElement.style.setProperty('--right-dock-w', w + 'px');
       if (_shouldAutoCollapseSidebar(w)) {
-        _collapseSidebarToRail();
+        collapseSidebarToRail();
         if (content._preDockSnapshot) content._preDockSnapshot.collapsedSidebar = true;
       }
     } else {
-      const left = _leftNavRight();
+      const left = leftNavRight();
       w = _clampLeftDockWidth(clientX - left, left);
       content._userDockWidth = w;
       content._emailDocSplitUserW = w;
@@ -1067,7 +1028,7 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
   const _dragTo = (clientX) => {
     const content = _activeLeftDockContent();
     if (!content) return;
-    const left = _leftNavRight();
+    const left = leftNavRight();
     const w = _clampEmailDocSplitWidth(clientX - left, left);
     content._emailDocSplitUserW = w;
     content.style.left = left + 'px';
@@ -1100,7 +1061,7 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
       document.body.style.cursor = prevCursor;
       document.body.style.userSelect = prevUserSelect;
       const rightX = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--email-doc-split-right-x')) || 0;
-      const left = _leftNavRight();
+      const left = leftNavRight();
       if (rightX > left) _saveEmailDocSplitWidth(rightX - left);
       ev.preventDefault();
     };

@@ -21,11 +21,12 @@ import logging
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.routing import APIRoute
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
-from core.database import EditorDraft, SessionLocal
+from core.database import EditorDraft, get_db
 from src.auth_helpers import get_current_user
 from src.upload_limits import EDITOR_DRAFT_MAX_BYTES
 
@@ -129,42 +130,34 @@ def setup_editor_draft_routes() -> APIRouter:
     router = APIRouter(tags=["editor-drafts"], route_class=EditorDraftRoute)
 
     @router.get("/api/editor-drafts")
-    async def list_drafts(request: Request) -> Dict[str, List[Dict[str, Any]]]:
+    def list_drafts(request: Request, db: Session = Depends(get_db)) -> Dict[str, List[Dict[str, Any]]]:
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            q = db.query(EditorDraft).filter(EditorDraft.is_active == True)
-            if user is not None:
-                q = q.filter(EditorDraft.owner == user)
-            rows = q.order_by(EditorDraft.updated_at.desc()).limit(200).all()
-            return {"drafts": [_summary(d) for d in rows]}
-        finally:
-            db.close()
+        q = db.query(EditorDraft).filter(EditorDraft.is_active == True)
+        if user is not None:
+            q = q.filter(EditorDraft.owner == user)
+        rows = q.order_by(EditorDraft.updated_at.desc()).limit(200).all()
+        return {"drafts": [_summary(d) for d in rows]}
 
     @router.get("/api/editor-drafts/{draft_id}")
-    async def get_draft(request: Request, draft_id: str) -> Dict[str, Any]:
+    def get_draft(request: Request, draft_id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            d = db.query(EditorDraft).filter(
-                EditorDraft.id == draft_id, EditorDraft.is_active == True
-            ).first()
-            if not d or not _owns(d, user):
-                raise HTTPException(404, "Draft not found")
-            return {
-                **_summary(d),
-                "payload": _load_payload(d.payload),
-            }
-        finally:
-            db.close()
+        d = db.query(EditorDraft).filter(
+            EditorDraft.id == draft_id, EditorDraft.is_active == True
+        ).first()
+        if not d or not _owns(d, user):
+            raise HTTPException(404, "Draft not found")
+        return {
+            **_summary(d),
+            "payload": _load_payload(d.payload),
+        }
 
     @router.post("/api/editor-drafts")
-    async def create_draft(
+    def create_draft(
         request: Request,
         body: DraftCreate,
+        db: Session = Depends(get_db),
     ) -> Dict[str, Any]:
         user = get_current_user(request)
-        db = SessionLocal()
         try:
             d = EditorDraft(
                 id=str(uuid.uuid4()),
@@ -186,17 +179,15 @@ def setup_editor_draft_routes() -> APIRouter:
             db.rollback()
             logger.warning(f"editor-draft create failed: {e}")
             raise HTTPException(500, "Could not save draft")
-        finally:
-            db.close()
 
     @router.put("/api/editor-drafts/{draft_id}")
-    async def update_draft(
+    def update_draft(
         request: Request,
         draft_id: str,
         body: DraftUpdate,
+        db: Session = Depends(get_db),
     ) -> Dict[str, Any]:
         user = get_current_user(request)
-        db = SessionLocal()
         try:
             d = db.query(EditorDraft).filter(
                 EditorDraft.id == draft_id, EditorDraft.is_active == True
@@ -222,13 +213,10 @@ def setup_editor_draft_routes() -> APIRouter:
             db.rollback()
             logger.warning(f"editor-draft update failed: {e}")
             raise HTTPException(500, "Could not update draft")
-        finally:
-            db.close()
 
     @router.delete("/api/editor-drafts/{draft_id}")
-    async def delete_draft(request: Request, draft_id: str) -> Dict[str, str]:
+    def delete_draft(request: Request, draft_id: str, db: Session = Depends(get_db)) -> Dict[str, str]:
         user = get_current_user(request)
-        db = SessionLocal()
         try:
             d = db.query(EditorDraft).filter(EditorDraft.id == draft_id).first()
             if not d or not _owns(d, user):
@@ -241,7 +229,5 @@ def setup_editor_draft_routes() -> APIRouter:
         except Exception as e:
             db.rollback()
             raise HTTPException(500, str(e))
-        finally:
-            db.close()
 
     return router

@@ -11,7 +11,7 @@ def test_signature_picker_allows_only_raster_data_urls():
 
     assert "function _safeSignatureDataUrl(raw)" in src
     assert r"^data:image\/png;base64," in src
-    assert '<img src="${_esc(dataUrl)}"/>' in src
+    assert '<img src="${esc(dataUrl)}"/>' in src
     assert 'dataUrl: s.data_url' not in src
 
 

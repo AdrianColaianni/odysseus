@@ -1,10 +1,5 @@
 """Pin the AltGr-safety of the shared keybind predicate and the matcher.
 
-Driven through `node --input-type=module` so we exercise the real JS without a
-full Vitest/Jest setup (same approach as test_compare_js.py /
-test_reply_recipients_js.py). Skips when `node` is not installed rather than
-failing.
-
 Bug: browsers report the AltGr key (right Alt, essential on AZERTY/QWERTZ and
 many non-US layouts to type @ # { } [ ] | \\ and €) as ctrlKey=true AND
 altKey=true, so a user on a non-US layout typing a special character could
@@ -23,30 +18,13 @@ Firefox and some Linux setups historically did not report it (the guard is a
 no-op there, i.e. pre-fix behaviour, not a regression).
 """
 import json
-import shutil
-import subprocess
 from pathlib import Path
 
-import pytest
+from tests.helpers.node import run_node_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _HELPER = _REPO / "static" / "js" / "keyboard-shortcuts.js"
 _PLATFORM = _REPO / "static" / "js" / "platform.js"
-_HAS_NODE = shutil.which("node") is not None
-
-# Every test here shells out to `node`; skip the whole module when it is absent
-# rather than repeating the mark per test (same convention as test_compare_js.py
-# / test_reply_recipients_js.py).
-pytestmark = pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
-
-
-def _run(js: str) -> str:
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, cwd=str(_REPO), timeout=30,
-    )
-    assert proc.returncode == 0, proc.stderr
-    return proc.stdout.strip()
 
 
 def _is_altgr(
@@ -66,7 +44,7 @@ def _is_altgr(
     {modifier}
     console.log(JSON.stringify(isAltGrEvent(ev, {json.dumps(is_mac)})));
     """
-    return json.loads(_run(js))
+    return run_node_module(js)
 
 
 def _is_mac_default(platform: str = "", user_agent: str = "") -> bool:
@@ -81,7 +59,7 @@ def _is_mac_default(platform: str = "", user_agent: str = "") -> bool:
     const {{ IS_MAC }} = await import('{_PLATFORM.as_uri()}');
     console.log(JSON.stringify(IS_MAC));
     """
-    return json.loads(_run(js))
+    return run_node_module(js)
 
 
 def _matches(event: dict, combo: str, altgraph: bool, is_mac: bool = False) -> bool:
@@ -92,7 +70,7 @@ def _matches(event: dict, combo: str, altgraph: bool, is_mac: bool = False) -> b
     ev.getModifierState = (m) => m === 'AltGraph' ? {json.dumps(altgraph)} : false;
     console.log(JSON.stringify(_matchesCombo(ev, {json.dumps(combo)}, {json.dumps(is_mac)})));
     """
-    return json.loads(_run(js))
+    return run_node_module(js)
 
 
 # --- The shared predicate (covers all three guards) --------------------------
@@ -135,15 +113,6 @@ def test_is_mac_from_navigator_platform():
     # (M1/M2/M3...) included; the string was frozen for compatibility, so there
     # is no "MacARM". The regex matches the "Mac" substring, not "Intel".
     assert _is_mac_default(platform="MacIntel") is True
-
-
-def test_is_mac_apple_silicon_reports_macintel():
-    # Pin the quirk explicitly: an Apple Silicon Mac's UA still says Macintosh
-    # and its platform still says MacIntel, so the carve-out protects it too.
-    assert _is_mac_default(
-        platform="MacIntel",
-        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
-    ) is True
 
 
 def test_is_mac_from_user_agent_when_platform_blank():

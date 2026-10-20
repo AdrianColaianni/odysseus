@@ -10,20 +10,16 @@
 
 import spinnerModule from '../spinner.js';
 import { topPortalZ } from '../toolWindowZOrder.js';
-import { showToast } from '../ui.js?v=20260916largetoolscroll1';
+import { esc, showError, showToast } from '../ui.js?v=20260916largetoolscroll1';
 import { state } from './state.js';
-import { _esc, _extractName } from './utils.js';
+import { _extractName } from './utils.js';
 import { _snapEmailModalToLeftSidebar, _translateEmail } from './index.js';
+import { jsonRequest } from '../shared/http.js';
 
 const API_BASE = window.location.origin;
 
 export function _aiReplyIcon(data) {
   return '<svg class="email-ai-reply-icon" width="14" height="14" viewBox="0 0 24 24" fill="var(--accent-primary, var(--red))" aria-hidden="true"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg>';
-}
-
-function _summaryIcon(data) {
-  const fill = data?.cached_summary ? 'var(--accent-primary, var(--red))' : 'currentColor';
-  return `<svg width="14" height="14" viewBox="0 0 24 24" fill="${fill}"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg>`;
 }
 
 async function _emailTranslateLanguage() {
@@ -234,8 +230,6 @@ export function _hasMultipleRecipients(data) {
   return recipients.size > 1;
 }
 
-// _esc lives in ./emailLibrary/utils.js
-
 export function _showEmailTranslateSubmenu(reader, parentDropdown) {
   parentDropdown.innerHTML = '';
   const header = document.createElement('div');
@@ -369,7 +363,7 @@ function _promptEmailNote(em) {
   card.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;min-width:280px;max-width:min(420px, 92vw);display:flex;flex-direction:column;gap:8px;box-shadow:0 12px 32px rgba(0,0,0,0.4);';
   const subject = em.subject || '(no subject)';
   card.innerHTML = `
-    <div style="font-size:11px;opacity:0.6;">Note about ${_esc(subject)}</div>
+    <div style="font-size:11px;opacity:0.6;">Note about ${esc(subject)}</div>
     <textarea data-note placeholder="Write your note…" rows="4" style="resize:vertical;min-height:80px;font-family:inherit;font-size:12px;padding:7px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-elev,#1a1a1a);color:var(--fg);box-sizing:border-box;width:100%;"></textarea>
     <div class="email-note-actions" style="display:flex;gap:6px;justify-content:flex-end;position:relative;top:4px;">
       <button class="memory-toolbar-btn" data-act="cancel"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true" style="vertical-align:-1px;margin-right:4px;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button>
@@ -427,13 +421,8 @@ async function _createEmailReplyReminder(em, dueDate, customText = '') {
   };
   if (iso) payload.due_date = iso;
   try {
-    const res = await fetch(`${API_BASE}/api/notes`, {
-      method: 'POST', credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
+    const res = await fetch(`${API_BASE}/api/notes`, jsonRequest('POST', payload));
     if (!res.ok) throw new Error('Failed');
-    const { showToast } = await import('../ui.js?v=20260916largetoolscroll1');
     if (dueDate) {
       const fmt = dueDate.toLocaleString([], { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
       showToast(`Todo reminder set for ${fmt}`);
@@ -444,7 +433,6 @@ async function _createEmailReplyReminder(em, dueDate, customText = '') {
       try { Notification.requestPermission(); } catch {}
     }
   } catch (e) {
-    const { showError } = await import('../ui.js?v=20260916largetoolscroll1');
     showError('Failed to create reminder');
   }
 }

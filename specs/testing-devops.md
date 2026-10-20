@@ -16,7 +16,7 @@ This spec covers development and validation surfaces in:
 - GPU helper scripts `scripts/check-docker-gpu.sh` and `scripts/check-docker-amd-gpu.sh`;
 - `.github/` templates, workflows, and description-check scripts;
 - contributor workflow docs in `CONTRIBUTING.md` and `website/pr-blocker-audit.md`;
-- platform launchers `launch-windows.ps1`, `launcher.py`, `Odysseus.spec`, `build-windows-portable.ps1`, `start-macos.sh`, `build-macos-app.sh`, and `update_windows.bat`;
+- platform launchers `launch-windows.ps1`, `launcher.py`, `build-windows-portable.ps1`, `start-macos.sh`, `build-macos-app.sh`, and `update_windows.bat`;
 - setup/service files such as `setup.py`, `install-service.sh`, and `odysseus-ui.service`.
 
 ## Test Runtime
@@ -45,7 +45,7 @@ Focused regression tests are preferred for narrow behavior changes. Broaden test
 
 ## JS And UI Tests
 
-`frontend/modules.json` maps canonical `frontend/src/` modules to committed outputs under `static/`. `scripts/build_frontend.py --check` verifies output freshness/publication attributes; `scripts/check_frontend.mjs` checks architecture/import boundaries. Root `package.json` owns Bombadil, Playwright and Acorn plus photo-editor browser-test scripts; the lockfile owns npm integrity/version state. This is an incremental source migration rather than a bundler-wide conversion.
+Root `package.json` owns Bombadil, Playwright and Acorn plus photo-editor browser-test scripts; the lockfile owns npm integrity/version state.
 
 Current frontend/JS validation includes:
 
@@ -101,7 +101,7 @@ Compose selects `ODYSSEUS_IMAGE` (default GHCR `latest`) alongside a local build
 
 ## GPU And Platform
 
-Base `docker-compose.yml` plus `docker/gpu.nvidia.yml` or `docker/gpu.amd.yml` are the GPU source of truth. Top-level `docker-compose.gpu-nvidia.yml` and `docker-compose.gpu-amd.yml` are standalone mirrors for stack-management UIs that accept one compose file. `tests/test_gpu_compose_standalone.py` guards drift between those forms.
+Base `docker-compose.yml` plus `docker/gpu.nvidia.yml` or `docker/gpu.amd.yml` are the GPU source of truth.
 
 GPU overlays pass host devices/runtime flags only. They do not install CUDA/ROCm userspace or serving engines; those are installed later through Cookbook/dependency flows.
 
@@ -119,7 +119,7 @@ AMD helper behavior:
 Native platform launchers:
 
 - `launch-windows.ps1` requires Python 3.11+, creates `venv`, installs `requirements.txt`, runs `setup.py`, discovers per-user Git Bash installs where possible, warns when Git Bash is missing, and starts uvicorn on port 7000 by default.
-- `launcher.py`, `Odysseus.spec`, and `build-windows-portable.ps1` own the PyInstaller-style portable Windows launcher path, including app-root/data-dir differences covered by `src.runtime_paths`.
+- `launcher.py` and `build-windows-portable.ps1` own the PyInstaller-style portable Windows launcher path, including app-root/data-dir differences covered by `src.runtime_paths`.
 - `start-macos.sh` reads `.env`, defaults to port 7860 to avoid AirPlay conflicts, prefers Homebrew arm64 Python, installs/tolerates Homebrew Cookbook deps, handles Chroma package conflicts, starts ChromaDB for native runs, runs `setup.py`, and starts uvicorn.
 - `build-macos-app.sh` builds a launcher app around the existing repo venv and logs to `logs/odysseus-app.log`.
 - `update_windows.bat` owns the tested Windows Docker update flow.
@@ -230,7 +230,7 @@ Focused regressions now cover invalid history truncation preserving messages, fa
 
 ## Notes Extraction Validation Surface
 
-Notes tests include domain/characterization/application/infrastructure/reminder/workflow contracts, recurrence differential cases across timezones, raw-state cloneability, draft timing and selected-context acceptance. Browser fixtures exercise canonical/facade identity, desktop/mobile/tablet interactions, teardown and first-time offline graph loading; source guards now read feature modules through `tests/helpers/notes_source.py`. `scripts/verify_frontend_runtime.py` checks all manifest outputs in a Python-only distribution, while `scripts/verify_notes_browser_runtime.py` probes an authenticated temporary native app. These require their declared dependencies/browser environment; committed receipts and screenshots are historical evidence, not a fresh acceptance run. Runtime serving still requires no frontend build or Node installation.
+Notes tests include domain/characterization/application/infrastructure/reminder/workflow contracts, recurrence differential cases across timezones, raw-state cloneability, draft timing and selected-context acceptance. Browser fixtures exercise canonical/facade identity, desktop/mobile/tablet interactions, teardown and first-time offline graph loading; source guards now read feature modules through `tests/helpers/notes_source.py`. `scripts/verify_notes_browser_runtime.py` probes an authenticated temporary native app. These require their declared dependencies/browser environment; committed receipts and screenshots are historical evidence, not a fresh acceptance run. Runtime serving still requires no frontend build or Node installation.
 
 ## Skills Extraction And Upload Contract Tests
 

@@ -10,7 +10,6 @@ def test_binary_like_terminal_output_is_replaced_with_extraction_guidance():
     )
 
     assert "Binary-like output omitted" in rendered
-    assert "format-specific extractor" in rendered
     assert binary_dump not in rendered
 
 

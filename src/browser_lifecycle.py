@@ -1,22 +1,14 @@
 """Lifecycle ownership for private_browser's agent-browser sessions.
 
-agent-browser runs a short-lived CLI client against a detached daemon. The
-daemon calls ``setsid`` and every Chrome process it launches stays in that
-POSIX session, so the daemon pid recorded in the session's own pid file
-identifies the complete browser tree. Cleanup here is limited to that tree,
-the session's runtime files and its ``agent-browser-chrome-*`` profile.
-
-This is browser-specific ownership only: session membership, the profile
-prefix, runtime files and navigation state. Process identity, verified
-signalling and death observation come from :mod:`src.process_lifecycle`,
-reached through the single seam ``kill_browser_tree``.
+The daemon calls ``setsid``, so the pid in the session's pid file identifies
+the whole browser tree. Process identity and signalling come from
+:mod:`src.process_lifecycle` through ``kill_browser_tree``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-import re
 import shutil
 import signal
 import time
@@ -29,19 +21,6 @@ from src import process_lifecycle
 
 PROFILE_PREFIX = "agent-browser-chrome-"
 RUNTIME_SUFFIXES = (".pid", ".sock", ".stream", ".version", ".engine")
-
-# Output that proves the browser never became ready. The daemon survives such
-# a failure and a later ``close`` cannot reach a browser to shut down.
-LAUNCH_FAILURE_RE = re.compile(
-    r"Chrome exited early|DevToolsActivePort|No usable sandbox|"
-    r"Failed to launch (?:the )?browser|Browser (?:process )?exited before",
-    re.IGNORECASE,
-)
-
-OBSERVATION_ACTIONS = frozenset(
-    {"snapshot", "read", "find", "evaluate", "screenshot", "scroll", "wait"}
-)
-
 
 def runtime_root(env: dict[str, str] | None) -> Path:
     """Directory where agent-browser keeps ``<session>.pid`` and its socket.
@@ -364,13 +343,6 @@ class BrowserSession:
             self._lock_loop = loop
         return self._lock
 
-    def navigated(self, url: str) -> None:
-        self.navigation_generation += 1
-        self.page_url = url
-        self.failed_navigation_url = ""
-        self.navigation_outcome_unknown = False
-        self.state = "ready"
-
     def navigation_failed(self, url: str) -> None:
         self.failed_navigation_url = url
         self.navigation_outcome_unknown = False
@@ -392,22 +364,6 @@ class BrowserSession:
         self.navigation_outcome_unknown = False
         self.state = state
 
-    def stale_observation_note(self) -> str:
-        if not self.failed_navigation_url:
-            return ""
-        if self.navigation_outcome_unknown:
-            return (
-                f"Browser lifecycle: the outcome of the most recent navigation to "
-                f"{self.failed_navigation_url} is unknown. This observation may not "
-                f"show {self.failed_navigation_url}."
-            )
-        shown = self.page_url or "an earlier page"
-        return (
-            f"Browser lifecycle: the most recent navigation to {self.failed_navigation_url} "
-            f"failed. This observation shows {shown} (navigation "
-            f"#{self.navigation_generation}), not {self.failed_navigation_url}."
-        )
-
     def receipt(self, clock: StageClock) -> dict[str, Any]:
         payload = {
             "session": self.key,
@@ -423,14 +379,6 @@ class BrowserSession:
 
 
 _SESSIONS: dict[str, BrowserSession] = {}
-
-
-def session_for(key: str, ephemeral: bool) -> BrowserSession:
-    record = _SESSIONS.get(key)
-    if record is None:
-        record = BrowserSession(key=key, ephemeral=ephemeral)
-        _SESSIONS[key] = record
-    return record
 
 
 def forget(key: str) -> None:

@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers.node import run_node_module
+
 _REPO = Path(__file__).resolve().parent.parent
 _HAS_NODE = shutil.which("node") is not None
 
@@ -95,22 +97,13 @@ def _run_markdown_case(markdown: str, render_expr: str = "mod.mdToHtml(input)", 
 
         const moduleUrl = 'data:text/javascript;base64,' + Buffer.from(source).toString('base64');
         const mod = await import(moduleUrl);
-        const input = JSON.parse(process.argv[1]);
+        const input = __INPUT__;
         console.log(JSON.stringify({ html: __RENDER_EXPR__ }));
         """
     ).replace("__RENDER_EXPR__", render_expr).replace(
         "__WITH_KATEX__", "true" if with_katex else "false"
-    )
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script, json.dumps(markdown)],
-        cwd=_REPO,
-        capture_output=True,
-        timeout=15,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise AssertionError(f"node failed:\nSTDERR:\n{result.stderr}\nSTDOUT:\n{result.stdout}")
-    return json.loads(result.stdout.splitlines()[-1])["html"]
+    ).replace("__INPUT__", json.dumps(markdown))
+    return run_node_module(script)["html"]
 
 
 def _run_svg_case(markdown: str):

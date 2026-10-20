@@ -25,9 +25,18 @@ def make_core_db_stub(
 
     db = types.ModuleType("core.database")
     db.SessionLocal = MagicMock()
+    db.get_db = lambda: stub_sessions(db)
     for name in models:
         setattr(db, name, MagicMock())
     for name, value in (attributes or {}).items():
         setattr(db, name, value)
     monkeypatch.setitem(sys.modules, "core.database", db)
     return db
+
+
+def stub_sessions(db):
+    session = db.SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()

@@ -142,7 +142,6 @@ def _save_local_contacts(contacts: List[Dict]) -> None:
     _contact_cache["failed_at"] = None
 
 
-# ── vCard parsing ──
 
 def _vunesc(value: str) -> str:
     """Reverse _vesc() — turn escaped vCard text back into the raw value.
@@ -282,7 +281,6 @@ def _build_vcard(name: str, email: str, uid: Optional[str] = None,
     return "\r\n".join(lines) + "\r\n"
 
 
-# ── In-memory cache ──
 
 _CONTACT_CACHE_TTL_SECONDS = 60
 _CONTACT_FAILURE_BACKOFF_SECONDS = 120
@@ -861,19 +859,18 @@ def _delete_contact(uid: str, owner: Optional[str] = None) -> bool:
         return False
 
 
-# ── Routes ──
 
 def setup_contacts_routes():
-    router = APIRouter(prefix="/api/contacts", tags=["contacts"])
+    router = APIRouter(prefix="/api/contacts", tags=["contacts"], dependencies=[Depends(require_admin)])
 
     @router.get("/list")
-    async def list_contacts(request: Request, _admin: str = Depends(require_admin)):
+    async def list_contacts(request: Request):
         """List all contacts."""
         contacts = await asyncio.to_thread(_fetch_contacts, owner=effective_user(request))
         return {"contacts": contacts, "count": len(contacts), "sync": _contact_sync_status()}
 
     @router.get("/search")
-    async def search_contacts(request: Request, q: str = Query(""), _admin: str = Depends(require_admin)):
+    async def search_contacts(request: Request, q: str = Query("")):
         """Search contacts by name or email. Returns up to 10 matches."""
         contacts = await asyncio.to_thread(_fetch_contacts, owner=effective_user(request))
         if not q:
@@ -891,7 +888,7 @@ def setup_contacts_routes():
         return {"results": results[:10], "sync": _contact_sync_status()}
 
     @router.post("/add")
-    async def add_contact(data: dict, request: Request, _admin: str = Depends(require_admin)):
+    async def add_contact(data: dict, request: Request):
         """Add a new contact."""
         owner = effective_user(request)
         name = (data.get("name") or "").strip()
@@ -943,7 +940,7 @@ def setup_contacts_routes():
         return {"success": ok}
 
     @router.post("/import")
-    async def import_vcf(data: dict, _admin: str = Depends(require_admin)):
+    async def import_vcf(data: dict):
         """Import contacts from .vcf or CSV. Body: {"vcf": "..."} or {"csv": "..."}."""
         # Coerce defensively: a non-string vcf/text/csv (e.g. a number or list
         # in the JSON body) would otherwise reach .strip() and 500 with an
@@ -965,7 +962,6 @@ def setup_contacts_routes():
     async def export_contacts(
         request: Request,
         format: str = Query("vcf", pattern="^(vcf|csv)$"),
-        _admin: str = Depends(require_admin),
     ):
         """Export all contacts as vCard or CSV."""
         contacts = await asyncio.to_thread(
@@ -988,7 +984,7 @@ def setup_contacts_routes():
         )
 
     @router.get("/config")
-    async def get_config(_admin: str = Depends(require_admin)):
+    async def get_config():
         cfg = _get_carddav_config()
         # Mask password
         if cfg["password"]:
@@ -996,7 +992,7 @@ def setup_contacts_routes():
         return cfg
 
     @router.put("/config")
-    async def update_config(data: dict, _admin: str = Depends(require_admin)):
+    async def update_config(data: dict):
         settings = _load_settings()
         for key in ("carddav_url", "carddav_username", "carddav_password"):
             if key in data:
@@ -1018,7 +1014,7 @@ def setup_contacts_routes():
         return {"success": True}
 
     @router.delete("/clear")
-    async def clear_contacts(request: Request, _admin: str = Depends(require_admin)):
+    async def clear_contacts(request: Request):
         """Clear all local contacts. If CardDAV is configured, only clears the local fallback cache."""
         owner = effective_user(request)
         if owner:
@@ -1035,7 +1031,7 @@ def setup_contacts_routes():
     # (/list, /search, /add, /config) win — otherwise PUT /config would
     # match PUT /{uid} with uid="config".
     @router.put("/{uid}")
-    async def edit_contact(uid: str, data: dict, request: Request, _admin: str = Depends(require_admin)):
+    async def edit_contact(uid: str, data: dict, request: Request):
         """Edit an existing contact — name / emails / phones / address."""
         name = (data.get("name") or "").strip()
         emails = data.get("emails")
@@ -1053,7 +1049,7 @@ def setup_contacts_routes():
         return {"success": ok}
 
     @router.delete("/{uid}")
-    async def delete_contact(uid: str, request: Request, _admin: str = Depends(require_admin)):
+    async def delete_contact(uid: str, request: Request):
         """Delete a contact by UID."""
         if not uid:
             return {"success": False, "error": "UID required"}

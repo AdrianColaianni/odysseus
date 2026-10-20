@@ -18,11 +18,12 @@ def test_detects_bare_local_ollama_as_native_provider():
 def test_llm_call_posts_native_ollama_payload(monkeypatch):
     seen = {}
 
-    def fake_post(url, headers=None, json=None, timeout=None):
+    def fake_post(url, headers=None, json=None, timeout=None, verify=None):
         seen["url"] = url
         seen["headers"] = headers
         seen["json"] = json
         seen["timeout"] = timeout
+        seen["verify"] = verify
         request = httpx.Request("POST", url)
         return httpx.Response(
             200,
@@ -31,6 +32,7 @@ def test_llm_call_posts_native_ollama_payload(monkeypatch):
         )
 
     monkeypatch.setattr(llm_core.httpx, "post", fake_post)
+    monkeypatch.setattr("src.tls_overrides.llm_verify", lambda: "/fake/ca.pem")
 
     result = llm_core.llm_call(
         "https://ollama.com/api",
@@ -45,6 +47,8 @@ def test_llm_call_posts_native_ollama_payload(monkeypatch):
     assert result == "OK"
     assert seen["url"] == "https://ollama.com/api/chat"
     assert seen["headers"]["Authorization"] == "Bearer ollama-key"
+    # The sync path once ignored the LLM TLS override.
+    assert seen["verify"] == "/fake/ca.pem"
     assert seen["json"]["stream"] is False
     assert seen["json"]["options"] == {"temperature": 0.2, "num_predict": 7}
 
@@ -52,7 +56,7 @@ def test_llm_call_posts_native_ollama_payload(monkeypatch):
 def test_llm_call_posts_bare_local_ollama_to_native_api(monkeypatch):
     seen = {}
 
-    def fake_post(url, headers=None, json=None, timeout=None):
+    def fake_post(url, headers=None, json=None, timeout=None, verify=None):
         seen["url"] = url
         seen["json"] = json
         request = httpx.Request("POST", url)
@@ -78,7 +82,7 @@ def test_llm_call_posts_bare_local_ollama_to_native_api(monkeypatch):
 def test_openai_compatible_chat_url_shapes(monkeypatch):
     seen = []
 
-    def fake_post(url, headers=None, json=None, timeout=None):
+    def fake_post(url, headers=None, json=None, timeout=None, verify=None):
         seen.append(url)
         request = httpx.Request("POST", url)
         return httpx.Response(
@@ -261,7 +265,7 @@ def test_llm_call_threads_discovered_num_ctx(monkeypatch):
 
     seen = {}
 
-    def fake_post(url, headers=None, json=None, timeout=None):
+    def fake_post(url, headers=None, json=None, timeout=None, verify=None):
         seen["json"] = json
         request = httpx.Request("POST", url)
         return httpx.Response(

@@ -299,7 +299,7 @@ _host_fails: Dict[str, int] = {}
 # threadpool (sync routes such as /sessions/auto-sort) while llm_call_async()
 # runs on the event loop, so these maps are mutated from multiple OS threads.
 # Without the lock the get()+1+set on _host_fails is a read-modify-write that
-# loses failure counts under concurrent connect errors (issue #659).
+# loses failure counts under concurrent connect errors.
 _host_health_lock = threading.Lock()
 _model_activity: Dict[str, float] = {}
 
@@ -544,6 +544,26 @@ def _model_actual_event(requested_model: str, reported_model) -> Optional[str]:
     return f'data: {json.dumps({"type": "model_actual", "requested_model": requested_model, "model": actual_model})}\n\n'
 
 
+class _ModelAnnouncer:
+    """Track the provider-reported model; announce it once when it differs."""
+
+    def __init__(self, requested_model: str):
+        self.requested_model = requested_model
+        self.actual_model = ""
+        self._announced = False
+
+    def observe(self, reported_model) -> Optional[str]:
+        name = _reported_model_name(reported_model)
+        if not name:
+            return None
+        self.actual_model = name
+        if self._announced:
+            return None
+        event = _model_actual_event(self.requested_model, name)
+        self._announced = event is not None
+        return event
+
+
 def _annotate_usage_model(usage: dict, requested_model: str, actual_model: str) -> dict:
     """Attach provider model provenance to a normalized usage payload."""
     actual_model = _reported_model_name(actual_model)
@@ -643,7 +663,7 @@ def _set_cached_response(
         for key in keys_to_remove:
             # pop(), not del: another thread (sync llm_call runs in FastAPI's
             # threadpool) may have already evicted the same snapshotted key,
-            # and del would raise KeyError mid-eviction (issue #659).
+            # and del would raise KeyError mid-eviction.
             _response_cache.pop(key, None)
             _response_model_cache.pop(key, None)
     _response_cache[cache_key] = response
@@ -652,7 +672,6 @@ def _set_cached_response(
     else:
         _response_model_cache.pop(cache_key, None)
 
-# ── Anthropic native API adapter ──
 
 ANTHROPIC_MODELS = [
     "claude-opus-4-20250514", "claude-opus-4",
@@ -749,7 +768,7 @@ def _ollama_normalize_messages(messages: List[Dict]) -> List[Dict]:
        dropped — it is meaningless to Ollama and only matters when the
        conversation is replayed to Gemini.
 
-    2. Images (issue #4723): Odysseus carries multimodal user content as an
+    2. Images: Odysseus carries multimodal user content as an
        OpenAI-style list ``[{type: "text", ...}, {type: "image_url",
        image_url: {url: "data:image/...;base64,XXX"}}, ...]``. Native Ollama
        does not accept a list for ``content`` — it wants ``content`` as a
@@ -824,11 +843,6 @@ def _ollama_normalize_messages(messages: List[Dict]) -> List[Dict]:
 
         out.append(nm)
     return out
-
-
-# Backward-compatible alias for callers/tests that imported the older name
-# (it only handled tool messages originally — issue #4723 broadened scope).
-_ollama_normalize_tool_messages = _ollama_normalize_messages
 
 
 def _build_ollama_payload(
@@ -1079,10 +1093,6 @@ def _detect_provider(url: str) -> str:
         return "ollama"
     if _host_match(url, "anthropic.com"):
         return "anthropic"
-    if _host_match(url, "opencode.ai/zen/go"):
-        return "opencode-go"
-    if _host_match(url, "opencode.ai/zen"):
-        return "opencode-zen"
     if _host_match(url, "openrouter.ai"):
         return "openrouter"
     if _host_match(url, "groq.com"):
@@ -1109,43 +1119,21 @@ def _detect_provider(url: str) -> str:
 
 
 def _is_self_hosted_openai_compatible(url: str) -> bool:
-    """True for custom/local OpenAI-compatible servers (llama.cpp, LM Studio,
-    vLLM, text-generation-webui, etc.) as opposed to cloud APIs.
+    """True for local OpenAI-compatible servers (llama.cpp, LM Studio, vLLM, ...).
 
-    Used to gate llama.cpp-server-specific payload extras (``session_id``,
-    ``cache_prompt``) used for KV-cache slot affinity (issue #2927). Strict
-    cloud providers reject unrecognized top-level fields (api.openai.com
-    returns 400, Mistral returns 422 "extra_forbidden", issue #3793), and any
-    unknown OpenAI-compatible host used to be treated as self-hosted, so those
-    fields leaked to every strict provider added as a custom endpoint.
-
-    A server only counts as self-hosted when it also resolves as local:
-    loopback/private/tailscale host, or the endpoint explicitly configured
-    with kind "local". A self-hosted server exposed via a public hostname
-    loses the affinity hint unless its endpoint kind is set to "local" -
-    a lost perf hint, versus a hard 4xx on every request the other way.
+    Strict cloud providers reject unknown top-level fields, so a public host
+    counts only when its endpoint kind is set to "local".
     """
     if _detect_provider(url) != "openai" or _host_match(url, "openai.com"):
         return False
-    from src.model_context import is_local_endpoint
     return is_local_endpoint(url)
 
 
 def _apply_local_cache_affinity(payload: Dict, url: str, session_id: Optional[str]) -> None:
-    """Add llama.cpp-server slot-affinity hints to an outgoing payload, in place.
+    """Add llama.cpp slot-affinity hints to a payload, in place.
 
-    As diagnosed in issue #2927, llama.cpp assigns requests to processing
-    slots via LRU when no stable identifier is present ("session_id=<empty>
-    server-selected (LCP/LRU)"), which means consecutive turns of the same
-    chat can land on different slots and lose their cached prefix entirely.
-    Sending a stable ``session_id`` (derived from the Odysseus session) lets
-    the server keep routing the same conversation to the same slot, and
-    ``cache_prompt: true`` asks it to retain/reuse the prefix it already has.
-
-    Both fields are llama.cpp / LM Studio extensions to the OpenAI schema; we
-    only set them for self-hosted OpenAI-compatible endpoints (never
-    api.openai.com or other cloud providers, which reject unrecognized
-    top-level request fields).
+    Without a stable session_id, llama.cpp picks slots by LRU and consecutive
+    turns lose their cached prefix.
     """
     if not session_id:
         return
@@ -1167,11 +1155,7 @@ def _is_local_minimax_mlx_request(url: str, model: str) -> bool:
     m = model.lower()
     if "minimax" not in m and "mini-max" not in m:
         return False
-    try:
-        from src.model_context import is_local_endpoint
-        return is_local_endpoint(url)
-    except Exception:
-        return False
+    return is_local_endpoint(url)
 
 
 def _is_odysseus_qwen_native_model(model: str) -> bool:
@@ -1325,8 +1309,8 @@ def _provider_label(url: str) -> str:
     if _host_match(url, "x.ai"): return "xAI"
     if _host_match(url, "openai.com"): return "OpenAI"
     if _host_match(url, "openrouter.ai"): return "OpenRouter"
-    if _host_match(url, "opencode.ai/zen/go"): return "OpenCode Go"
-    if _host_match(url, "opencode.ai/zen"): return "OpenCode Zen"
+    if _host_match(url, "opencode.ai"):
+        return "OpenCode Go" if "/zen/go" in urlparse(url).path else "OpenCode Zen"
     if _host_match(url, "groq.com"): return "Groq"
     from src.chatgpt_subscription import is_chatgpt_subscription_base
     if is_chatgpt_subscription_base(url): return "ChatGPT Subscription"
@@ -1702,11 +1686,8 @@ def _anthropic_rejects_temperature(model: str) -> bool:
     # the date as a giant major. Dated 4.7+ snapshots (`claude-opus-4-7-20260201`)
     # keep their explicit minor and are still matched.
     #
-    # The minor is optional and a missing minor reads as `.0`, so major-only ids
-    # like `claude-opus-5` are correctly treated as >= 4.7 (issue #5753). Without
-    # this, every Opus 5 call kept `temperature` and failed with HTTP 400 — visible
-    # only on paths that pass a temperature, e.g. scheduled tasks inheriting
-    # `stream_agent_loop`'s 0.3 default, which returned empty responses.
+    # A missing minor reads as `.0`, so major-only ids like `claude-opus-5`
+    # count as >= 4.7.
     match = re.search(
         r"(?<![a-z])opus[-_]?(\d{1,2})(?!\d)(?:[-_.](\d{1,2})(?!\d))?", model.lower()
     )
@@ -1975,13 +1956,8 @@ _REFERENCE_CONTEXT_BOUNDARY = "\u2063"
 def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
     """Strip Odysseus-only metadata before sending messages to providers.
 
-    Per the OpenAI chat format: user/system messages must have content; a tool
-    message needs content + tool_call_id; an assistant message may carry content,
-    tool_calls, or both. The old guard required content on every message, which
-    dropped a valid assistant message that has only tool_calls — e.g. the
-    follow-up message _append_tool_results builds for a no-prose native tool call
-    (content=None, since Gemini/Ollama reject tool_calls alongside ""). Dropping
-    it leaves the tool result dangling and breaks the next round.
+    An assistant message may carry only tool_calls (content=None); keep it, or
+    its tool result is left dangling.
     """
     allowed = {"role", "content", "name", "tool_call_id", "tool_calls", "function_call", "reasoning_content"}
     cleaned = []
@@ -2282,39 +2258,128 @@ def _apply_explicit_nonstream_reasoning_effort(
         payload["reasoning_effort"] = effort
 
 
+def _merge_system_messages(messages: List[Dict]) -> List[Dict]:
+    """Sanitize, then fold every system message into one leading message."""
+    # Some models (e.g. Qwen3.5) reject system messages that aren't first.
+    sanitized = _sanitize_llm_messages(messages)
+    system = [m.get("content") or "" for m in sanitized if m.get("role") == "system"]
+    rest = [m for m in sanitized if m.get("role") != "system"]
+    return ([{"role": "system", "content": "\n\n".join(system)}] if system else []) + rest
+
+
+def _build_request(
+    provider: str,
+    url: str,
+    model: str,
+    messages: List[Dict],
+    *,
+    temperature: float,
+    max_tokens: int,
+    headers: Optional[Dict],
+    stream: bool,
+    num_ctx: Optional[int] = None,
+    tools: Optional[List[Dict]] = None,
+    tool_choice_none: bool = False,
+    session_id: Optional[str] = None,
+    thinking_mode: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+) -> Tuple[str, Dict[str, str], Dict]:
+    """Return (target_url, headers, payload) for one chat request on any transport."""
+    if provider == "anthropic":
+        return (
+            _normalize_anthropic_url(url),
+            _build_anthropic_headers(headers),
+            _build_anthropic_payload(model, messages, temperature, max_tokens, stream=stream, tools=tools),
+        )
+    if provider == "ollama":
+        return (
+            _normalize_ollama_url(url),
+            _provider_headers(provider, headers),
+            _build_ollama_payload(
+                model, messages, temperature, max_tokens,
+                stream=stream, tools=tools, num_ctx=num_ctx,
+            ),
+        )
+    if provider == "chatgpt-subscription" and stream:
+        return (
+            _normalize_chatgpt_subscription_url(url),
+            _provider_headers(provider, headers),
+            _build_chatgpt_responses_payload(
+                model, messages, temperature, max_tokens, stream=True,
+                reasoning_effort=reasoning_effort,
+            ),
+        )
+    target_url = _normalize_openai_chat_url(url)
+    payload = {"model": model, "messages": messages, "temperature": temperature}
+    if stream:
+        payload["stream"] = True
+        if provider not in {"openrouter", "groq"}:
+            payload["stream_options"] = {"include_usage": True}
+    if _omit_temperature(provider, model):
+        payload.pop("temperature", None)
+    if max_tokens and max_tokens > 0:
+        tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
+        payload[tok_key] = max_tokens
+    if tools:
+        payload["tools"] = _alias_harmony_tools(tools, model)
+    elif tool_choice_none:
+        payload["tool_choice"] = "none"
+    # Mistral only returns structured reasoning_content when asked for an effort.
+    if provider == "mistral" and _supports_thinking(model):
+        payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
+    # Thinking models on Ollama /v1 swallow tool calls inside <think> blocks.
+    if (
+        _is_ollama_openai_compat_url(url)
+        and _supports_thinking(model)
+        and not _is_odysseus_qwen_tool_router_model(model)
+    ):
+        payload["think"] = False
+    _apply_local_cache_affinity(payload, url, session_id)
+    _apply_local_generation_stability(payload, target_url, model)
+    _apply_local_qwen_thinking_mode(payload, target_url, model, thinking_mode)
+    _apply_hosted_thinking_mode(payload, provider, model, thinking_mode)
+    _apply_deepseek_v4_reasoning_defaults(payload, target_url, model, thinking_mode)
+    _scrub_openai_chat_tool_reasoning(payload, target_url, model)
+    if not stream:
+        _apply_explicit_nonstream_reasoning_effort(payload, reasoning_effort)
+    h = _provider_headers(provider, headers)
+    if provider == "copilot":
+        from src.copilot import apply_request_headers
+        apply_request_headers(h, messages)
+    return target_url, h, payload
+
+
+def _parse_completion(provider: str, data: dict) -> str:
+    """Return the text of a non-streaming completion response."""
+    if provider == "anthropic":
+        return _parse_anthropic_response(data)
+    if provider == "ollama":
+        return _parse_ollama_response(data)
+    msg = data["choices"][0]["message"]
+    content = msg.get("content")
+    if isinstance(content, list):
+        # Mistral structured content: thinking first, then text.
+        text_part, thinking_part = _normalize_mistral_content(content)
+        if thinking_part:
+            return thinking_part + "\n\n" + (text_part or "")
+        return text_part or msg.get("reasoning_content") or ""
+    return content or msg.get("reasoning_content") or ""
+
+
 def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
              max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
              timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None,
              thinking_mode: Optional[str] = None,
              reasoning_effort: Optional[str] = None) -> str:
     """Synchronous LLM call with optional prompt type enhancement."""
-    h = _provider_headers(_detect_provider(url))
-    # Tolerate headers that arrive as a JSON string (some sessions stored them
-    # double-encoded) — otherwise h.update() throws "dictionary update sequence
-    # element #0 has length 1; 2 is required".
+    # Some sessions stored headers double-encoded as a JSON string.
     if isinstance(headers, str):
         try:
             headers = json.loads(headers)
-        except Exception:
+        except json.JSONDecodeError:
+            logger.warning("llm_call: dropping headers stored as an unparseable string")
             headers = None
-    if isinstance(headers, dict):
-        h.update(headers)
-
-    messages_copy = _sanitize_llm_messages(messages)
-
-    # Consolidate multiple system messages into one at the start.
-    sys_parts = []
-    non_sys = []
-    for m in messages_copy:
-        if m.get("role") == "system":
-            sys_parts.append(m.get('content') or '')
-        else:
-            non_sys.append(m)
-    if sys_parts:
-        messages_copy = [{"role": "system", "content": "\n\n".join(sys_parts)}] + non_sys
-    else:
-        messages_copy = non_sys
-
+    messages_copy = _merge_system_messages(messages)
     provider = _detect_provider(url)
     cache_key = _get_cache_key(
         url, model, messages_copy, temperature, max_tokens, headers=headers,
@@ -2325,65 +2390,23 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         logger.debug(f"Returning cached response for key: {cache_key}")
         return cached_response
 
-    if provider == "anthropic":
-        target_url = _normalize_anthropic_url(url)
-        h = _build_anthropic_headers(headers)
-        payload = _build_anthropic_payload(model, messages_copy, temperature, max_tokens)
-    elif provider == "ollama":
-        target_url = _normalize_ollama_url(url)
-        payload = _build_ollama_payload(
-            model, messages_copy, temperature, max_tokens,
-            stream=False, num_ctx=get_context_length(url, model),
-        )
-    else:
-        target_url = _normalize_openai_chat_url(url)
-        if provider == "copilot":
-            from src.copilot import apply_request_headers
-            apply_request_headers(h, messages_copy)
-        payload = {
-            "model": model,
-            "messages": messages_copy,
-            "temperature": temperature,
-        }
-        if _omit_temperature(provider, model):
-            payload.pop("temperature", None)
-        if max_tokens and max_tokens > 0:
-            tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
-            payload[tok_key] = max_tokens
-        _apply_local_generation_stability(payload, target_url, model)
-        _apply_local_qwen_thinking_mode(payload, target_url, model, thinking_mode)
-        _apply_hosted_thinking_mode(payload, provider, model, thinking_mode)
-        _apply_deepseek_v4_reasoning_defaults(
-            payload, target_url, model, thinking_mode
-        )
-        if provider == "mistral" and _supports_thinking(model):
-            payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
-        _apply_explicit_nonstream_reasoning_effort(payload, reasoning_effort)
+    target_url, h, payload = _build_request(
+        provider, url, model, messages_copy,
+        temperature=temperature, max_tokens=max_tokens, headers=headers, stream=False,
+        num_ctx=get_context_length(url, model) if provider == "ollama" else None,
+        thinking_mode=thinking_mode, reasoning_effort=reasoning_effort,
+    )
+    from src.tls_overrides import llm_verify
     try:
         note_model_activity(target_url, model)
-        r = httpx_post_kimi_aware(target_url, h, json=payload, timeout=timeout)
+        r = httpx_post_kimi_aware(target_url, h, json=payload, timeout=timeout, verify=llm_verify())
     except Exception as e:
         raise HTTPException(502, f"POST {target_url} failed: {e}")
     if not r.is_success:
         raise HTTPException(502, f"Upstream {target_url} -> {r.status_code}: {r.text}")
     data = r.json()
     try:
-        if provider == "anthropic":
-            response = _parse_anthropic_response(data)
-        elif provider == "ollama":
-            response = _parse_ollama_response(data)
-        else:
-            msg = data["choices"][0]["message"]
-            content = msg.get("content")
-            if isinstance(content, list):
-                # Mistral structured content — extract thinking + text
-                text_part, thinking_part = _normalize_mistral_content(content)
-                if thinking_part:
-                    response = thinking_part + "\n\n" + (text_part or "")
-                else:
-                    response = text_part or msg.get("reasoning_content") or ""
-            else:
-                response = content or msg.get("reasoning_content") or ""
+        response = _parse_completion(provider, data)
         _set_cached_response(cache_key, response)
         return response
     except Exception:
@@ -2619,32 +2642,16 @@ async def llm_call_async(
 ) -> str | tuple[str, str]:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
     provider = _detect_provider(url)
-    messages_copy = _sanitize_llm_messages(messages)
+    messages_copy = _merge_system_messages(messages)
 
-    # Consolidate multiple system messages into one at the start.
-    sys_parts = []
-    non_sys = []
-    for m in messages_copy:
-        if m.get("role") == "system":
-            sys_parts.append(m.get('content') or '')
-        else:
-            non_sys.append(m)
-    if sys_parts:
-        messages_copy = [{"role": "system", "content": "\n\n".join(sys_parts)}] + non_sys
-    else:
-        messages_copy = non_sys
-
-    # Non-streaming background callers historically inherited the 32k global
-    # default even when the selected local endpoint exposed a smaller context
-    # window.  Streaming requests already apply this bound; enforce the same
-    # invariant here before cache-key construction and payload creation.
+    # Bound the output budget by the endpoint's window, as streaming does.
     if max_tokens and max_tokens > 0:
         try:
             from src.generation_budget import fit_output_token_budget
 
             max_tokens = fit_output_token_budget(
                 max_tokens,
-                get_context_length(url, model),
+                await asyncio.to_thread(get_context_length, url, model),
                 messages_copy,
             )
         except Exception:
@@ -2727,52 +2734,15 @@ async def llm_call_async(
         _set_cached_response(cache_key, response, actual_model=actual_model)
         return (response, actual_model) if return_model_metadata else response
 
-    if provider == "anthropic":
-        target_url = _normalize_anthropic_url(url)
-        h = _build_anthropic_headers(headers)
-        payload = _build_anthropic_payload(model, messages_copy, temperature, max_tokens)
-    elif provider == "ollama":
-        target_url = _normalize_ollama_url(url)
-        h = {"Content-Type": "application/json"}
-        if headers:
-            h.update(headers)
-        payload = _build_ollama_payload(
-            model, messages_copy, temperature, max_tokens,
-            stream=False, num_ctx=get_context_length(url, model),
-        )
-    else:
-        target_url = _normalize_openai_chat_url(url)
-        h = _provider_headers(provider, headers)
-        if provider == "copilot":
-            from src.copilot import apply_request_headers
-            apply_request_headers(h, messages_copy)
-        payload = {
-            "model": model,
-            "messages": messages_copy,
-            "temperature": temperature,
-        }
-        if _omit_temperature(provider, model):
-            payload.pop("temperature", None)
-        if max_tokens and max_tokens > 0:
-            tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
-            payload[tok_key] = max_tokens
-        # Suppress thinking for qwen3/gemma4 on Ollama /v1 — same as stream_llm.
-        if (
-            _is_ollama_openai_compat_url(url)
-            and _supports_thinking(model)
-            and not _is_odysseus_qwen_tool_router_model(model)
-        ):
-            payload["think"] = False
-        if provider == "mistral" and _supports_thinking(model):
-            payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
-        _apply_local_cache_affinity(payload, url, session_id)
-        _apply_local_generation_stability(payload, target_url, model)
-        _apply_local_qwen_thinking_mode(payload, target_url, model, thinking_mode)
-        _apply_hosted_thinking_mode(payload, provider, model, thinking_mode)
-        _apply_deepseek_v4_reasoning_defaults(
-            payload, target_url, model, thinking_mode
-        )
-        _apply_explicit_nonstream_reasoning_effort(payload, reasoning_effort)
+    target_url, h, payload = _build_request(
+        provider, url, model, messages_copy,
+        temperature=temperature, max_tokens=max_tokens, headers=headers, stream=False,
+        num_ctx=(
+            await asyncio.to_thread(get_context_length, url, model)
+            if provider == "ollama" else None
+        ),
+        session_id=session_id, thinking_mode=thinking_mode, reasoning_effort=reasoning_effort,
+    )
 
     if _is_host_dead(target_url):
         raise HTTPException(503, f"Upstream {_host_key(target_url)} marked unreachable (cooldown active)")
@@ -2816,23 +2786,7 @@ async def llm_call_async(
                     if isinstance(reported_model, str) and reported_model.strip()
                     else model
                 )
-                if provider == "anthropic":
-                    response = _parse_anthropic_response(data)
-                elif provider == "ollama":
-                    response = _parse_ollama_response(data)
-                else:
-                    msg = data["choices"][0]["message"]
-                    content = msg.get("content")
-                    if isinstance(content, list):
-                        # Mistral structured content — extract thinking + text
-                        # (same contract as llm_call / stream_llm; see #5435).
-                        text_part, thinking_part = _normalize_mistral_content(content)
-                        if thinking_part:
-                            response = thinking_part + "\n\n" + (text_part or "")
-                        else:
-                            response = text_part or msg.get("reasoning_content") or ""
-                    else:
-                        response = content or msg.get("reasoning_content") or ""
+                response = _parse_completion(provider, data)
                 _set_cached_response(
                     cache_key,
                     response,
@@ -2919,6 +2873,32 @@ async def llm_call_async(
                 f"POST {target_url} could not be configured: {e}",
             )
 
+def _has_usable_value(value) -> bool:
+    # Whitespace heartbeats are not output; counting them disables the
+    # first-event watchdog and leaves the request waiting for the full timeout.
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, dict)):
+        return bool(value)
+    return value is not None
+
+
+def _choice_has_meaningful_output(choice) -> bool:
+    """True when a stream choice carries real output; role-only preambles do not count."""
+    if not isinstance(choice, dict):
+        return False
+    if choice.get("finish_reason") is not None:
+        return True
+    for field in ("delta", "message"):
+        value = choice.get(field) or {}
+        if isinstance(value, dict) and any(
+            _has_usable_value(value.get(key))
+            for key in ("content", "tool_calls", "reasoning_content", "reasoning", "thinking")
+        ):
+            return True
+    return False
+
+
 def _stream_target_url(url: str) -> str:
     provider = _detect_provider(url)
     if provider == "anthropic":
@@ -2972,88 +2952,17 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
       - data: [DONE]                       — end of stream
     """
     provider = _detect_provider(url)
-    messages_copy = _sanitize_llm_messages(messages)
-
-    # Consolidate multiple system messages into one at the start.
-    # Some models (e.g. Qwen3.5) reject system messages that aren't first.
-    sys_parts = []
-    non_sys = []
-    for m in messages_copy:
-        if m.get("role") == "system":
-            sys_parts.append(m.get('content') or '')
-        else:
-            non_sys.append(m)
-    if sys_parts:
-        messages_copy = [{"role": "system", "content": "\n\n".join(sys_parts)}] + non_sys
-    else:
-        messages_copy = non_sys
-
-    if provider == "anthropic":
-        target_url = _normalize_anthropic_url(url)
-        h = _build_anthropic_headers(headers)
-        payload = _build_anthropic_payload(model, messages_copy, temperature, max_tokens, stream=True, tools=tools)
-    elif provider == "ollama":
-        target_url = _normalize_ollama_url(url)
-        h = {"Content-Type": "application/json"}
-        if headers:
-            h.update(headers)
-        payload = _build_ollama_payload(
-            model, messages_copy, temperature, max_tokens,
-            stream=True, tools=tools, num_ctx=get_context_length(url, model),
-        )
-    elif provider == "chatgpt-subscription":
-        target_url = _normalize_chatgpt_subscription_url(url)
-        h = _provider_headers(provider, headers)
-        payload = _build_chatgpt_responses_payload(
-            model, messages_copy, temperature, max_tokens, stream=True,
-            reasoning_effort=reasoning_effort,
-        )
-    else:
-        target_url = _normalize_openai_chat_url(url)
-        payload = {
-            "model": model,
-            "messages": messages_copy,
-            "temperature": temperature,
-            "stream": True,
-        }
-        if _omit_temperature(provider, model):
-            payload.pop("temperature", None)
-        if provider not in {"openrouter", "groq"}:
-            payload["stream_options"] = {"include_usage": True}
-        if max_tokens and max_tokens > 0:
-            tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
-            payload[tok_key] = max_tokens
-        if tools:
-            payload["tools"] = _alias_harmony_tools(tools, model)
-        elif tool_choice_none:
-            payload["tool_choice"] = "none"
-        # Mistral thinking-capable models — send reasoning_effort so Mistral
-        # activates thinking mode and returns structured reasoning_content.
-        # Effort level is configurable via ODYSSEUS_MISTRAL_REASONING_EFFORT
-        # (high / medium / low / none); default "high".
-        if provider == "mistral" and _supports_thinking(model):
-            payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
-        # For Ollama's OpenAI-compat /v1 endpoint with thinking models (qwen3,
-        # gemma4, etc.), suppress thinking so tool calls aren't swallowed inside
-        # <think> blocks. Ollama /v1 accepts "think": false as a top-level param.
-        if (
-            _is_ollama_openai_compat_url(url)
-            and _supports_thinking(model)
-            and not _is_odysseus_qwen_tool_router_model(model)
-        ):
-            payload["think"] = False
-        _apply_local_cache_affinity(payload, url, session_id)
-        _apply_local_generation_stability(payload, target_url, model)
-        _apply_local_qwen_thinking_mode(payload, target_url, model, thinking_mode)
-        _apply_hosted_thinking_mode(payload, provider, model, thinking_mode)
-        _apply_deepseek_v4_reasoning_defaults(
-            payload, target_url, model, thinking_mode
-        )
-        _scrub_openai_chat_tool_reasoning(payload, target_url, model)
-        h = _provider_headers(provider, headers)
-        if provider == "copilot":
-            from src.copilot import apply_request_headers
-            apply_request_headers(h, messages_copy)
+    messages_copy = _merge_system_messages(messages)
+    target_url, h, payload = _build_request(
+        provider, url, model, messages_copy,
+        temperature=temperature, max_tokens=max_tokens, headers=headers, stream=True,
+        num_ctx=(
+            await asyncio.to_thread(get_context_length, url, model)
+            if provider == "ollama" else None
+        ),
+        tools=tools, tool_choice_none=tool_choice_none, session_id=session_id,
+        thinking_mode=thinking_mode, reasoning_effort=reasoning_effort,
+    )
 
     # Connect budget from LLMConfig.CONNECT_TIMEOUT (env LLM_CONNECT_TIMEOUT).
     # The dead-host cooldown still bounds a genuinely unreachable upstream, so a
@@ -3069,13 +2978,11 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     note_model_activity(target_url, model)
     degenerate_guard = _DegenerateStreamGuard(model)
 
-    # ── ChatGPT Subscription / Codex Responses streaming ──
     if provider == "chatgpt-subscription":
         event_name = ""
         input_tokens = 0
         output_tokens = 0
-        _responses_actual_model = ""
-        _responses_model_announced = False
+        announcer = _ModelAnnouncer(model)
         try:
             client = _get_http_client()
             async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
@@ -3102,21 +3009,12 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                         continue
                     evt = data.get("type") or event_name
                     response_data = data.get("response") or {}
-                    reported_model = (
-                        response_data.get("model")
-                        if isinstance(response_data, dict)
-                        else None
+                    model_event = announcer.observe(
+                        (response_data.get("model") if isinstance(response_data, dict) else None)
+                        or data.get("model")
                     )
-                    reported_model = _reported_model_name(
-                        reported_model or data.get("model")
-                    )
-                    if reported_model:
-                        _responses_actual_model = reported_model
-                        if not _responses_model_announced:
-                            model_event = _model_actual_event(model, reported_model)
-                            if model_event:
-                                _responses_model_announced = True
-                                yield model_event
+                    if model_event:
+                        yield model_event
                     if evt == "response.output_text.delta":
                         delta = data.get("delta") or ""
                         if delta:
@@ -3151,7 +3049,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                 _annotate_usage_model(
                                     normalized_usage,
                                     model,
-                                    _responses_actual_model,
+                                    announcer.actual_model,
                                 )
                                 yield f'data: {json.dumps({"type": "usage", "data": normalized_usage})}\n\n'
                         yield "data: [DONE]\n\n"
@@ -3171,32 +3069,14 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                         yield f'event: error\ndata: {json.dumps({"status": status, "text": _chatgpt_safe_error(text, h)})}\n\n'
                         return
                 yield "data: [DONE]\n\n"
-        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-            _cooled = _mark_host_dead(target_url)
-            _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
-            logger.warning("ChatGPT Subscription stream connect failed: %s%s", type(e).__name__, _tail)
-            yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
-        except httpx.ReadTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
-        except httpx.PoolTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
-        except httpx.WriteTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Upstream timeout", "status": 504, "fallback_eligible": False})}\n\n'
-        except httpx.ProtocolError:
-            yield f'event: error\ndata: {json.dumps({"error": "Upstream protocol error", "status": 502, "fallback_eligible": False})}\n\n'
-        except httpx.NetworkError:
-            yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502, "fallback_eligible": False})}\n\n'
         except Exception as e:
-            logger.error("ChatGPT Subscription stream error: %s", type(e).__name__)
-            yield f'event: error\ndata: {json.dumps({"error": "ChatGPT Subscription stream failed", "status": 502, "fallback_eligible": False})}\n\n'
+            yield _stream_exception_chunk(e, target_url, "ChatGPT Subscription", failure_text="ChatGPT Subscription stream failed")
         return
 
-    # ── Native Ollama streaming ──
     if provider == "ollama":
         _ollama_tool_calls: List[Dict] = []
         _harmony_router = _HarmonyStreamRouter()
-        _ollama_actual_model = ""
-        _ollama_model_announced = False
+        announcer = _ModelAnnouncer(model)
         try:
             client = _get_http_client()
             async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
@@ -3219,14 +3099,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                         text = err.get("message") if isinstance(err, dict) else str(err)
                         yield f'event: error\ndata: {json.dumps({"error": text or "Ollama request failed", "status": status})}\n\n'
                         return
-                    reported_model = _reported_model_name(j.get("model"))
-                    if reported_model:
-                        _ollama_actual_model = reported_model
-                        if not _ollama_model_announced:
-                            model_event = _model_actual_event(model, reported_model)
-                            if model_event:
-                                _ollama_model_announced = True
-                                yield model_event
+                    model_event = announcer.observe(j.get("model"))
+                    if model_event:
+                        yield model_event
                     message = j.get("message") or {}
                     thinking = message.get("thinking") or ""
                     if thinking and _normalize_thinking_mode(thinking_mode) != "off":
@@ -3257,7 +3132,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                 _annotate_usage_model(
                                     normalized_usage,
                                     model,
-                                    _ollama_actual_model,
+                                    announcer.actual_model,
                                 )
                                 yield f'data: {json.dumps({"type": "usage", "data": normalized_usage})}\n\n'
                         yield "data: [DONE]\n\n"
@@ -3265,33 +3140,15 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 for part, is_thinking in _harmony_router.flush():
                     yield _stream_delta_event(part, thinking=is_thinking)
                 yield "data: [DONE]\n\n"
-        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-            _cooled = _mark_host_dead(target_url)
-            _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
-            logger.warning(f"Ollama stream connect to {target_url} failed: {e}{_tail}")
-            yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
-        except httpx.ReadTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
-        except httpx.PoolTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
-        except httpx.WriteTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Upstream timeout", "status": 504, "fallback_eligible": False})}\n\n'
-        except httpx.ProtocolError:
-            yield f'event: error\ndata: {json.dumps({"error": "Upstream protocol error", "status": 502, "fallback_eligible": False})}\n\n'
-        except httpx.NetworkError:
-            yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502, "fallback_eligible": False})}\n\n'
         except Exception as e:
-            logger.error(f"Ollama stream error: {e}")
-            yield f'event: error\ndata: {json.dumps({"error": _stream_failure_message(e), "status": 502, "fallback_eligible": False})}\n\n'
+            yield _stream_exception_chunk(e, target_url, "Ollama")
         return
 
-    # ── Anthropic streaming ──
     if provider == "anthropic":
         _anth_input_tokens = 0
         _anth_output_tokens = 0
         _anth_usage_seen = False
-        _anth_actual_model = ""
-        _anth_model_announced = False
+        announcer = _ModelAnnouncer(model)
         # Track tool_use blocks: {index: {id, name, arguments_json}}
         _anth_tool_blocks: Dict[int, Dict] = {}
         _anth_block_idx = -1
@@ -3346,18 +3203,11 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                         yield f'data: {json.dumps({"type": "tool_call_delta", "index": idx, "name": _anth_tool_blocks[idx]["name"], "arg_delta": partial})}\n\n'
                         elif evt == "message_start":
                             message_data = j.get("message") or {}
-                            reported_model = _reported_model_name(
-                                message_data.get("model")
-                                if isinstance(message_data, dict)
-                                else None
+                            model_event = announcer.observe(
+                                message_data.get("model") if isinstance(message_data, dict) else None
                             )
-                            if reported_model:
-                                _anth_actual_model = reported_model
-                                if not _anth_model_announced:
-                                    model_event = _model_actual_event(model, reported_model)
-                                    if model_event:
-                                        _anth_model_announced = True
-                                        yield model_event
+                            if model_event:
+                                yield model_event
                             _u = (
                                 message_data.get("usage")
                                 if isinstance(message_data, dict)
@@ -3404,7 +3254,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                 _annotate_usage_model(
                                     normalized_usage,
                                     model,
-                                    _anth_actual_model,
+                                    announcer.actual_model,
                                 )
                                 yield f'data: {json.dumps({"type": "usage", "data": normalized_usage})}\n\n'
                             yield "data: [DONE]\n\n"
@@ -3418,27 +3268,10 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                     except json.JSONDecodeError:
                         continue
                 yield "data: [DONE]\n\n"
-        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-            _cooled = _mark_host_dead(target_url)
-            _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
-            logger.warning(f"Anthropic stream connect to {target_url} failed: {e}{_tail}")
-            yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
-        except httpx.ReadTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
-        except httpx.PoolTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
-        except httpx.WriteTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Upstream timeout", "status": 504, "fallback_eligible": False})}\n\n'
-        except httpx.ProtocolError:
-            yield f'event: error\ndata: {json.dumps({"error": "Upstream protocol error", "status": 502, "fallback_eligible": False})}\n\n'
-        except httpx.NetworkError:
-            yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502, "fallback_eligible": False})}\n\n'
         except Exception as e:
-            logger.error(f"Anthropic stream error: {e}")
-            yield f'event: error\ndata: {json.dumps({"error": _stream_failure_message(e), "status": 502, "fallback_eligible": False})}\n\n'
+            yield _stream_exception_chunk(e, target_url, "Anthropic")
         return
 
-    # ── OpenAI-compatible streaming ──
     # Accumulate native tool_calls across streaming chunks
     _tc_acc: Dict[int, Dict] = {}  # index -> {id, name, arguments}
     _tc_last_idx = [-1]  # most-recently-touched slot, for providers that omit `index`
@@ -3451,8 +3284,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     _think_open_stripped = False  # opening <think> tag already removed
     _harmony_router = _HarmonyStreamRouter()
     _harmony_active = False       # sticky: gpt-oss harmony <|channel|> stream detected
-    _actual_model = ""
-    _actual_model_announced = False
+    announcer = _ModelAnnouncer(model)
     _response_id_announced = ""
 
     def _emit_tool_calls():
@@ -3539,45 +3371,6 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                 # real response/error/usage frame as the
                                 # provider's first event.
                                 choices = j.get("choices") or []
-                                def _choice_has_meaningful_output(choice):
-                                    if not isinstance(choice, dict):
-                                        return False
-                                    if choice.get("finish_reason") is not None:
-                                        return True
-
-                                    def _meaningful(value):
-                                        # Gate on usable content, not merely a
-                                        # present field. Some local gateways
-                                        # emit whitespace heartbeats as
-                                        # ``content``; treating those as the
-                                        # first event disables the watchdog
-                                        # and can leave the request waiting
-                                        # for the full stream timeout.
-                                        if isinstance(value, str):
-                                            return bool(value.strip())
-                                        if isinstance(value, (list, tuple, dict)):
-                                            return bool(value)
-                                        return value is not None
-
-                                    for field in ("delta", "message"):
-                                        value = choice.get(field) or {}
-                                        if not isinstance(value, dict):
-                                            continue
-                                        if any(_meaningful(value.get(key)) for key in (
-                                            "content",
-                                            "tool_calls",
-                                            "reasoning_content",
-                                            "reasoning",
-                                            "thinking",
-                                        )):
-                                            return True
-                                    # A role-only message is a normal stream
-                                    # preamble, not usable output. Treating it
-                                    # as meaningful disables the local
-                                    # first-event watchdog and can leave a
-                                    # request waiting for the full read timeout.
-                                    return False
-
                                 has_meaningful_choice = any(
                                     _choice_has_meaningful_output(choice)
                                     for choice in choices
@@ -3611,15 +3404,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                 ):
                                     _response_id_announced = response_id.strip()
                                     yield f'data: {json.dumps({"type": "model_response_ref", "response_id": _response_id_announced, "model": str(j.get("model") or model)})}\n\n'
-                                chunk_model = j.get("model")
-                                if isinstance(chunk_model, str) and chunk_model.strip():
-                                    _actual_model = chunk_model.strip()
-                                    if (
-                                        not _actual_model_announced
-                                        and not _same_model_identity(_actual_model, model)
-                                    ):
-                                        _actual_model_announced = True
-                                        yield f'data: {json.dumps({"type": "model_actual", "requested_model": model, "model": _actual_model})}\n\n'
+                                model_event = announcer.observe(j.get("model"))
+                                if model_event:
+                                    yield model_event
                                 # Usage chunk (from stream_options)
                                 _choices = j.get("choices") or []
                                 _delta0 = _choices[0].get("delta") if (_choices and _choices[0] is not None) else None
@@ -3672,10 +3459,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                             _usage_data["gen_tps"] = round(_tm["predicted_per_second"], 2)
                                         if _tm.get("prompt_per_second"):
                                             _usage_data["prefill_tps"] = round(_tm["prompt_per_second"], 2)
-                                    if _actual_model:
-                                        _usage_data["model"] = _actual_model
-                                        if not _same_model_identity(_actual_model, model):
-                                            _usage_data["requested_model"] = model
+                                    _annotate_usage_model(_usage_data, model, announcer.actual_model)
                                     yield f'data: {json.dumps({"type": "usage", "data": _usage_data})}\n\n'
                                 elif "choices" in j:
                                     _c0 = (j["choices"] or [None])[0]
@@ -3722,7 +3506,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                             stripped = content.lstrip()
                                             # gpt-oss harmony format (<|channel|>analysis/final): route via the harmony
                                             # stream router. Sticky once the first marker appears — distinct from the
-                                            # <think> path below (handled in the else, preserving #2588 behaviour).
+                                            # <think> path below (handled in the else).
                                             if _harmony_active or "<|" in content:
                                                 _harmony_active = True
                                                 for event in _format_routed_content(_harmony_router.feed(content)):
@@ -3854,11 +3638,6 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 yield tc_event
             yield "data: [DONE]\n\n"
 
-    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-        _cooled = _mark_host_dead(target_url)
-        _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
-        logger.warning(f"Stream connect to {target_url} failed: {e}{_tail}")
-        yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
     except httpx.ReadTimeout as exc:
         # Some self-hosted OpenAI-compatible servers accept a multimodal
         # follow-up but never emit its first SSE event.  Retry once without
@@ -3894,102 +3673,83 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 yield retry_chunk
             return
         logger.warning("LLM stream read timeout: %s", exc)
-        yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
-    except httpx.PoolTimeout:
-        yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
-    except httpx.WriteTimeout:
-        yield f'event: error\ndata: {json.dumps({"error": "Upstream timeout", "status": 504, "fallback_eligible": False})}\n\n'
-    except httpx.ProtocolError:
-        yield f'event: error\ndata: {json.dumps({"error": "Upstream protocol error", "status": 502, "fallback_eligible": False})}\n\n'
-    except httpx.NetworkError:
-        yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502, "fallback_eligible": False})}\n\n'
+        yield _stream_exception_chunk(exc, target_url, "LLM")
     except Exception as e:
-        logger.error(f"Stream error: {e}")
-        yield f'event: error\ndata: {json.dumps({"error": _stream_failure_message(e), "status": 502, "fallback_eligible": False})}\n\n'
+        yield _stream_exception_chunk(e, target_url, "LLM")
 
 
 def _stream_failure_message(error: BaseException) -> str:
-    """Client-facing text for an unexpected streaming failure.
-
-    The raw exception can carry request URLs, local paths or provider internals;
-    callers log it server-side and stream only this generic message, like the
-    named transport failures above it.
-    """
+    # The raw exception can carry URLs, local paths or provider internals.
     return f"Model stream failed ({type(error).__name__})"
 
 
+def _stream_exception_chunk(
+    exc: BaseException, target_url: str, label: str, *, failure_text: Optional[str] = None,
+) -> str:
+    """SSE error chunk for an exception raised while streaming from target_url."""
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+        cooled = _mark_host_dead(target_url)
+        tail = f", host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if cooled else ", transient, will retry"
+        logger.warning("%s stream connect to %s failed: %s%s", label, _host_key(target_url), type(exc).__name__, tail)
+        body = {"error": f"Cannot reach {_host_key(target_url)}", "status": 503}
+    elif isinstance(exc, httpx.ReadTimeout):
+        body = {"error": "Read timeout", "status": 504}
+    elif isinstance(exc, httpx.PoolTimeout):
+        body = {"error": "Connection pool timeout", "status": 504}
+    elif isinstance(exc, httpx.WriteTimeout):
+        body = {"error": "Upstream timeout", "status": 504, "fallback_eligible": False}
+    elif isinstance(exc, httpx.ProtocolError):
+        body = {"error": "Upstream protocol error", "status": 502, "fallback_eligible": False}
+    elif isinstance(exc, httpx.NetworkError):
+        body = {"error": "Network error", "status": 502, "fallback_eligible": False}
+    else:
+        # A caller-supplied failure_text means the raw error may carry account details.
+        logger.error("%s stream error: %s", label, type(exc).__name__ if failure_text else exc)
+        body = {"error": failure_text or _stream_failure_message(exc), "status": 502, "fallback_eligible": False}
+    return f'event: error\ndata: {json.dumps(body)}\n\n'
+
+
+def _error_chunk_payload(err_chunk: Optional[str]) -> dict:
+    """The JSON body of the first `data: ` line of an SSE error chunk, or {}."""
+    for line in (err_chunk or "").split("\n"):
+        if line.startswith("data: "):
+            try:
+                payload = json.loads(line[6:])
+            except json.JSONDecodeError:
+                return {}
+            return payload if isinstance(payload, dict) else {}
+    return {}
+
+
 def _summarize_stream_error(err_chunk: Optional[str]) -> str:
-    """Pull a short human reason out of an `event: error` SSE chunk for the
-    fallback notice. Returns a generic message if it can't be parsed."""
-    if not err_chunk:
-        return "primary model failed"
-    try:
-        for line in err_chunk.split("\n"):
-            if line.startswith("data: "):
-                j = json.loads(line[6:])
-                txt = j.get("text") or j.get("error") or ""
-                status = j.get("status")
-                msg = (f"HTTP {status}: " if status else "") + str(txt)
-                return msg[:200].strip() or "primary model failed"
-    except Exception:
-        pass
-    return "primary model failed"
+    """Short human reason from an `event: error` SSE chunk, for the fallback notice."""
+    payload = _error_chunk_payload(err_chunk)
+    status = payload.get("status")
+    msg = (f"HTTP {status}: " if status else "") + str(payload.get("text") or payload.get("error") or "")
+    return msg[:200].strip() or "primary model failed"
 
 
 def _stream_error_status(err_chunk: Optional[str]) -> Optional[int]:
-    """Return the integer status from an SSE error chunk when present."""
-
-    if not err_chunk:
-        return None
-    try:
-        for line in err_chunk.split("\n"):
-            if not line.startswith("data: "):
-                continue
-            status = json.loads(line[6:]).get("status")
-            return _normalize_http_status(status)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None
-    return None
+    return _normalize_http_status(_error_chunk_payload(err_chunk).get("status"))
 
 
 def _stream_error_fallback_override(err_chunk: Optional[str]) -> Optional[bool]:
     """Return an adapter's explicit eligibility decision when present."""
-
-    if not err_chunk:
-        return None
-    try:
-        for line in err_chunk.split("\n"):
-            if not line.startswith("data: "):
-                continue
-            value = json.loads(line[6:]).get("fallback_eligible")
-            return value if isinstance(value, bool) else None
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None
-    return None
+    value = _error_chunk_payload(err_chunk).get("fallback_eligible")
+    return value if isinstance(value, bool) else None
 
 
 def _stream_error_text(err_chunk: Optional[str]) -> str:
     """Collect provider error fields used by context-window recovery."""
-
-    if not err_chunk:
-        return ""
+    payload = _error_chunk_payload(err_chunk)
     parts = []
-    try:
-        for line in err_chunk.splitlines():
-            if not line.startswith("data: "):
-                continue
-            payload = json.loads(line[6:])
-            if not isinstance(payload, dict):
-                continue
-            for key in ("text", "error", "raw", "message", "detail"):
-                value = payload.get(key)
-                if isinstance(value, str) and value:
-                    parts.append(value)
-                elif isinstance(value, dict):
-                    parts.append(json.dumps(value, ensure_ascii=False))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return err_chunk
-    return "\n".join(parts) or err_chunk
+    for key in ("text", "error", "raw", "message", "detail"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            parts.append(value)
+        elif isinstance(value, dict):
+            parts.append(json.dumps(value, ensure_ascii=False))
+    return "\n".join(parts) or (err_chunk or "")
 
 
 def _is_degenerate_stream_error(err_chunk: Optional[str]) -> bool:
@@ -4533,7 +4293,7 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
 
                 bounded_max_tokens = fit_output_token_budget(
                     requested_max_tokens,
-                    get_context_length(url, model),
+                    await asyncio.to_thread(get_context_length, url, model),
                     candidate_messages,
                     candidate_kwargs.get("tools"),
                 )

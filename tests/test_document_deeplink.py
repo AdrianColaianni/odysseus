@@ -6,7 +6,6 @@ no JS unit harness for it — these pin the source-level invariants that the
 """
 
 from pathlib import Path
-from tests.helpers.document_source import document_source
 
 _REPO = Path(__file__).resolve().parents[1]
 
@@ -17,18 +16,3 @@ def test_chat_document_links_use_the_document_id():
     src = (_REPO / "src" / "agent_tools" /"document_tools.py").read_text(encoding="utf-8")
     assert "(#document-{d.id})" in src
     assert "(#document-{doc.id})" in src
-
-
-def test_document_deeplink_handled_on_hashchange_and_load():
-    """#document-<id> in the URL must open the doc on refresh / URL-bar nav,
-    not just on click."""
-    js = document_source()
-    assert "addEventListener('hashchange', _maybeOpenDocFromHash)" in js
-    assert "#document-" in js
-
-
-def test_failed_document_load_surfaces_user_error():
-    """A missing/failed document must tell the user, not fail silently."""
-    js = document_source()
-    assert "uiModule.showError" in js
-    assert "Document not found" in js

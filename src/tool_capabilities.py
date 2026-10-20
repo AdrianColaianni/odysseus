@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 
 from src.tool_approval_scopes import CHAT_SESSION_APPROVAL_CONTEXT_MARKER
 from src.tool_security import BUILTIN_EMAIL_TOOLS, is_public_blocked_tool
@@ -614,6 +614,39 @@ def tool_result_is_successful(result: Any) -> bool:
         and result.get("exit_code") in (None, 0)
         and result.get("success") is not False
     )
+
+
+def _json_object(value: Any) -> dict:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def iter_history_tool_events(
+    history: Iterable, *, user_turns: int | None = None, include_failed: bool = False,
+) -> Iterator[tuple[dict, dict]]:
+    """Yield (event, decoded command) from persisted turn metadata, newest first.
+
+    Stops at the user row past `user_turns`. Failed events are skipped unless
+    `include_failed`.
+    """
+    turns = 0
+    for row in reversed(tuple(history)):
+        if isinstance(row, dict):
+            role, metadata = row.get("role"), row.get("metadata")
+        else:
+            role, metadata = getattr(row, "role", ""), getattr(row, "metadata", None)
+        if role == "user" and user_turns is not None:
+            turns += 1
+            if turns > user_turns:
+                return
+        for event in reversed(_json_object(metadata).get("tool_events") or []):
+            if not include_failed and (event.get("error") is True or event.get("exit_code") not in (None, 0)):
+                continue
+            yield event, _json_object(event.get("command"))
 
 
 def tool_result_should_arm_gate(

@@ -1,28 +1,8 @@
 """Node-driven tests for the shared provider device-flow runner."""
 
-import json
-import shutil
-import subprocess
-from pathlib import Path
+from tests.helpers.node import ROOT, run_node_module
 
-import pytest
-
-_REPO = Path(__file__).resolve().parent.parent
-_HELPER = _REPO / "static" / "js" / "providerDeviceFlow.js"
-pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node not on PATH")
-
-
-def _run_node(script: str):
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=script,
-        capture_output=True,
-        text=True,
-        cwd=str(_REPO),
-        timeout=30,
-    )
-    assert proc.returncode == 0, proc.stderr
-    return json.loads(proc.stdout.strip())
+_HELPER = ROOT / "static" / "js" / "providerDeviceFlow.js"
 
 
 def test_copilot_success_uses_complete_verification_uri():
@@ -58,7 +38,7 @@ def test_copilot_success_uses_complete_verification_uri():
       }});
       console.log(JSON.stringify({{ result, calls, opened }}));
     """
-    out = _run_node(js)
+    out = run_node_module(js)
     assert out["result"]["status"] == "authorized"
     assert out["result"]["endpoint"]["id"] == "ep1"
     assert out["opened"] == ["https://github.com/login/device?user_code=GH-CODE"]
@@ -90,7 +70,7 @@ def test_chatgpt_success_uses_plain_verification_uri():
       }});
       console.log(JSON.stringify({{ result, opened }}));
     """
-    out = _run_node(js)
+    out = run_node_module(js)
     assert out["result"]["status"] == "authorized"
     assert out["opened"] == ["https://auth.openai.com/codex/device"]
 
@@ -110,7 +90,7 @@ def test_start_errors_surface_backend_detail():
         console.log(JSON.stringify({{ message: err.message }}));
       }}
     """
-    out = _run_node(js)
+    out = run_node_module(js)
     assert out["message"] == "GitHub device-code request failed: upstream down"
 
 
@@ -128,7 +108,7 @@ def test_thrown_fetch_errors_are_preserved():
         console.log(JSON.stringify({{ message: err.message }}));
       }}
     """
-    out = _run_node(js)
+    out = run_node_module(js)
     assert out["message"] == "network offline"
 
 
@@ -153,5 +133,5 @@ def test_expired_flow_returns_expired_status():
       }});
       console.log(JSON.stringify(result));
     """
-    out = _run_node(js)
+    out = run_node_module(js)
     assert out == {"status": "expired"}

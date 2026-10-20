@@ -19,33 +19,25 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException
 
-from routes.research_routes import setup_research_routes
+from routes.research.research_routes import setup_research_routes
 from routes.research.research_routes import (
     _find_owned_research_path,
     _find_research_path,
     _require_research_path,
 )
+from tests.helpers.routes import route_endpoint
 
 
 @pytest.fixture(autouse=True)
 def _redirect_research_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "routes.research_routes.DEEP_RESEARCH_DIR",
+        "routes.research.research_routes.DEEP_RESEARCH_DIR",
         str(tmp_path / "deep_research"),
     )
 
 
 def _request(user: str):
     return SimpleNamespace(state=SimpleNamespace(current_user=user))
-
-
-def _route(router, path: str, method: str):
-    for route in router.routes:
-        if getattr(route, "path", "") != path:
-            continue
-        if method in getattr(route, "methods", set()):
-            return route.endpoint
-    raise AssertionError(f"{method} {path} route not registered")
 
 
 def _write_research(data_dir, session_id: str, **data):
@@ -68,46 +60,46 @@ def _research_handler():
 def test_find_returns_existing_trusted_research_path(tmp_path, monkeypatch):
     data_dir = tmp_path / "deep_research"
     expected = _write_research(data_dir, "rp-abc123de4567", owner="alice")
-    monkeypatch.setattr("routes.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
+    monkeypatch.setattr("routes.research.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
     assert _find_research_path("rp-abc123de4567") == expected.resolve()
 
 
 def test_find_returns_none_for_missing_valid_session_id(tmp_path, monkeypatch):
     data_dir = tmp_path / "deep_research"
     data_dir.mkdir()
-    monkeypatch.setattr("routes.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
+    monkeypatch.setattr("routes.research.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
     assert _find_research_path("rp-missing12345") is None
 
 
 def test_require_returns_404_for_missing_valid_session_id(tmp_path, monkeypatch):
     data_dir = tmp_path / "deep_research"
     data_dir.mkdir()
-    monkeypatch.setattr("routes.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
+    monkeypatch.setattr("routes.research.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
     with pytest.raises(HTTPException) as exc:
         _require_research_path("rp-missing12345")
     assert exc.value.status_code == 404
 
 
-@pytest.mark.parametrize("bad_id", [
-    "../escape",
-    "../../etc/passwd",
-    "/etc/passwd",
-    "safe/../../x",
-    "",
-    "rp_bad",          # underscore not in allowed charset
-    "rp-bad.json",     # dot not in allowed charset
-    "a" * 129,         # exceeds length limit
-])
-def test_find_rejects_bad_session_ids_before_enumeration(monkeypatch, bad_id):
-    storage_root = MagicMock()
-    monkeypatch.setattr(
-        "routes.research.research_routes._research_storage_root",
-        MagicMock(return_value=storage_root),
-    )
-    with pytest.raises(HTTPException) as exc:
-        _find_research_path(bad_id)
-    assert exc.value.status_code == 400
-    storage_root.glob.assert_not_called()
+def test_find_rejects_bad_session_ids_before_enumeration(monkeypatch):
+    for bad_id in [
+        "../escape",
+        "../../etc/passwd",
+        "/etc/passwd",
+        "safe/../../x",
+        "",
+        "rp_bad",          # underscore not in allowed charset
+        "rp-bad.json",     # dot not in allowed charset
+        "a" * 129,         # exceeds length limit
+    ]:
+        storage_root = MagicMock()
+        monkeypatch.setattr(
+            "routes.research.research_routes.Path",
+            lambda _path: SimpleNamespace(resolve=lambda: storage_root),
+        )
+        with pytest.raises(HTTPException) as exc:
+            _find_research_path(bad_id)
+        assert exc.value.status_code == 400
+        storage_root.glob.assert_not_called()
 
 
 def test_find_matches_names_from_trusted_enumeration_without_joining_input(
@@ -129,8 +121,8 @@ def test_find_matches_names_from_trusted_enumeration_without_joining_input(
             raise AssertionError("user-derived path segment was joined to root")
 
     monkeypatch.setattr(
-        "routes.research.research_routes._research_storage_root",
-        lambda: EnumeratedRoot(),
+        "routes.research.research_routes.Path",
+        lambda _path: SimpleNamespace(resolve=EnumeratedRoot),
     )
     assert _find_research_path("rp-abc123de4567") == expected
 
@@ -141,7 +133,7 @@ def test_find_ignores_symlink_escape(tmp_path, monkeypatch):
     outside = tmp_path / "outside"
     data_dir.mkdir()
     outside.mkdir()
-    monkeypatch.setattr("routes.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
+    monkeypatch.setattr("routes.research.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
     target = outside / "rp-linktest1234.json"
     target.write_text("{}", encoding="utf-8")
     link = data_dir / "rp-linktest1234.json"
@@ -156,7 +148,7 @@ def test_find_ignores_symlink_escape(tmp_path, monkeypatch):
 def test_find_owned_returns_path_for_matching_owner(tmp_path, monkeypatch):
     data_dir = tmp_path / "deep_research"
     expected = _write_research(data_dir, "rp-ownedalice1", owner="alice")
-    monkeypatch.setattr("routes.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
+    monkeypatch.setattr("routes.research.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
 
     assert _find_owned_research_path("rp-ownedalice1", "alice") == expected.resolve()
 
@@ -164,7 +156,7 @@ def test_find_owned_returns_path_for_matching_owner(tmp_path, monkeypatch):
 def test_find_owned_returns_none_for_other_owner(tmp_path, monkeypatch):
     data_dir = tmp_path / "deep_research"
     _write_research(data_dir, "rp-ownedbybob12", owner="bob")
-    monkeypatch.setattr("routes.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
+    monkeypatch.setattr("routes.research.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
 
     assert _find_owned_research_path("rp-ownedbybob12", "alice") is None
 
@@ -177,14 +169,14 @@ def test_detail_returns_data_for_owner(tmp_path):
     data_dir = tmp_path / "deep_research"
     _write_research(data_dir, "rp-validid12345", owner="alice", query="valid query")
     router = setup_research_routes(_research_handler())
-    target = _route(router, "/api/research/detail/{session_id}", "GET")
+    target = route_endpoint(router, "/api/research/detail/{session_id}", "GET")
     out = asyncio.run(target(session_id="rp-validid12345", request=_request("alice")))
     assert out["query"] == "valid query"
 
 
 def test_detail_returns_404_for_missing_valid_id():
     router = setup_research_routes(_research_handler())
-    target = _route(router, "/api/research/detail/{session_id}", "GET")
+    target = route_endpoint(router, "/api/research/detail/{session_id}", "GET")
     with pytest.raises(HTTPException) as exc:
         asyncio.run(target(session_id="rp-missing12345", request=_request("alice")))
     assert exc.value.status_code == 404
@@ -194,7 +186,7 @@ def test_detail_hides_other_owners_research_with_404(tmp_path):
     data_dir = tmp_path / "deep_research"
     _write_research(data_dir, "rp-ownedbybob12", owner="bob")
     router = setup_research_routes(_research_handler())
-    target = _route(router, "/api/research/detail/{session_id}", "GET")
+    target = route_endpoint(router, "/api/research/detail/{session_id}", "GET")
     with pytest.raises(HTTPException) as exc:
         asyncio.run(target(session_id="rp-ownedbybob12", request=_request("alice")))
     assert exc.value.status_code == 404
@@ -214,31 +206,31 @@ _TRAVERSAL_IDS = [
 ]
 
 
-@pytest.mark.parametrize("bad_id", _TRAVERSAL_IDS)
-def test_detail_rejects_traversal(bad_id):
-    router = setup_research_routes(_research_handler())
-    target = _route(router, "/api/research/detail/{session_id}", "GET")
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(target(session_id=bad_id, request=_request("alice")))
-    assert exc.value.status_code == 400
+def test_detail_rejects_traversal():
+    for bad_id in _TRAVERSAL_IDS:
+        router = setup_research_routes(_research_handler())
+        target = route_endpoint(router, "/api/research/detail/{session_id}", "GET")
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(target(session_id=bad_id, request=_request("alice")))
+        assert exc.value.status_code == 400
 
 
-@pytest.mark.parametrize("bad_id", _TRAVERSAL_IDS)
-def test_archive_rejects_traversal(bad_id):
-    router = setup_research_routes(_research_handler())
-    target = _route(router, "/api/research/{session_id}/archive", "POST")
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(target(session_id=bad_id, request=_request("alice"), archived=True))
-    assert exc.value.status_code == 400
+def test_archive_rejects_traversal():
+    for bad_id in _TRAVERSAL_IDS:
+        router = setup_research_routes(_research_handler())
+        target = route_endpoint(router, "/api/research/{session_id}/archive", "POST")
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(target(session_id=bad_id, request=_request("alice"), archived=True))
+        assert exc.value.status_code == 400
 
 
-@pytest.mark.parametrize("bad_id", _TRAVERSAL_IDS)
-def test_delete_rejects_traversal(bad_id):
-    router = setup_research_routes(_research_handler())
-    target = _route(router, "/api/research/{session_id}", "DELETE")
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(target(session_id=bad_id, request=_request("alice")))
-    assert exc.value.status_code == 400
+def test_delete_rejects_traversal():
+    for bad_id in _TRAVERSAL_IDS:
+        router = setup_research_routes(_research_handler())
+        target = route_endpoint(router, "/api/research/{session_id}", "DELETE")
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(target(session_id=bad_id, request=_request("alice")))
+        assert exc.value.status_code == 400
 
 
 # ---------------------------------------------------------------------------
@@ -250,10 +242,10 @@ def test_delete_traversal_does_not_delete_outside_file(tmp_path, monkeypatch):
     data_dir.mkdir(parents=True)
     outside = tmp_path / "sensitive.json"
     outside.write_text('{"secret": true}', encoding="utf-8")
-    monkeypatch.setattr("routes.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
+    monkeypatch.setattr("routes.research.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
 
     router = setup_research_routes(_research_handler())
-    target = _route(router, "/api/research/{session_id}", "DELETE")
+    target = route_endpoint(router, "/api/research/{session_id}", "DELETE")
     with pytest.raises(HTTPException) as exc:
         asyncio.run(target(session_id="../sensitive", request=_request("alice")))
     assert exc.value.status_code == 400
@@ -265,10 +257,10 @@ def test_archive_traversal_does_not_mutate_outside_file(tmp_path, monkeypatch):
     data_dir.mkdir(parents=True)
     outside = tmp_path / "sensitive.json"
     outside.write_text('{"owner": "alice", "archived": false}', encoding="utf-8")
-    monkeypatch.setattr("routes.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
+    monkeypatch.setattr("routes.research.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
 
     router = setup_research_routes(_research_handler())
-    target = _route(router, "/api/research/{session_id}/archive", "POST")
+    target = route_endpoint(router, "/api/research/{session_id}/archive", "POST")
     with pytest.raises(HTTPException) as exc:
         asyncio.run(target(session_id="../sensitive", request=_request("alice"), archived=True))
     assert exc.value.status_code == 400
@@ -281,10 +273,10 @@ def test_detail_traversal_does_not_read_outside_file(tmp_path, monkeypatch):
     data_dir.mkdir(parents=True)
     outside = tmp_path / "sensitive.json"
     outside.write_text('{"owner": "alice", "result": "secret data"}', encoding="utf-8")
-    monkeypatch.setattr("routes.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
+    monkeypatch.setattr("routes.research.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
 
     router = setup_research_routes(_research_handler())
-    target = _route(router, "/api/research/detail/{session_id}", "GET")
+    target = route_endpoint(router, "/api/research/detail/{session_id}", "GET")
     with pytest.raises(HTTPException) as exc:
         asyncio.run(target(session_id="../sensitive", request=_request("alice")))
     assert exc.value.status_code == 400
@@ -316,10 +308,10 @@ def test_detail_rejects_symlink_escape(tmp_path, monkeypatch):
         "rp-linktest5678",
         {"owner": "alice", "result": "secret"},
     )
-    monkeypatch.setattr("routes.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
+    monkeypatch.setattr("routes.research.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
 
     router = setup_research_routes(_research_handler())
-    target = _route(router, "/api/research/detail/{session_id}", "GET")
+    target = route_endpoint(router, "/api/research/detail/{session_id}", "GET")
     with pytest.raises(HTTPException) as exc:
         asyncio.run(target(session_id="rp-linktest5678", request=_request("alice")))
     assert exc.value.status_code == 404
@@ -331,10 +323,10 @@ def test_archive_does_not_write_through_symlink_escape(tmp_path, monkeypatch):
         "rp-linkarchive1",
         {"owner": "alice", "archived": False},
     )
-    monkeypatch.setattr("routes.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
+    monkeypatch.setattr("routes.research.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
 
     router = setup_research_routes(_research_handler())
-    target = _route(router, "/api/research/{session_id}/archive", "POST")
+    target = route_endpoint(router, "/api/research/{session_id}/archive", "POST")
     with pytest.raises(HTTPException) as exc:
         asyncio.run(
             target(
@@ -354,10 +346,10 @@ def test_delete_does_not_unlink_symlink_escape(tmp_path, monkeypatch):
         {"owner": "alice"},
     )
     link = data_dir / "rp-linkdelete12.json"
-    monkeypatch.setattr("routes.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
+    monkeypatch.setattr("routes.research.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
 
     router = setup_research_routes(_research_handler())
-    target = _route(router, "/api/research/{session_id}", "DELETE")
+    target = route_endpoint(router, "/api/research/{session_id}", "DELETE")
     out = asyncio.run(
         target(session_id="rp-linkdelete12", request=_request("alice"))
     )
@@ -374,7 +366,7 @@ def test_owner_scoped_paths_stay_within_research_root(tmp_path, monkeypatch):
     """Owner-scoped persisted files resolve within DEEP_RESEARCH_DIR."""
     data_dir = tmp_path / "deep_research"
     data_dir.mkdir(parents=True)
-    monkeypatch.setattr("routes.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
+    monkeypatch.setattr("routes.research.research_routes.DEEP_RESEARCH_DIR", str(data_dir))
 
     root = data_dir.resolve()
     for session_id in ("rp-abc123456789", "rp-000000000001", "abc-xyz-123"):
@@ -384,22 +376,22 @@ def test_owner_scoped_paths_stay_within_research_root(tmp_path, monkeypatch):
             f"{session_id!r} produced path outside research root: {path}"
         )
 
-@pytest.mark.parametrize("bad_id", _TRAVERSAL_IDS)
-def test_result_peek_rejects_traversal(bad_id):
-    router = setup_research_routes(_research_handler())
-    target = _route(router, "/api/research/result-peek/{session_id}", "POST")
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(target(session_id=bad_id, request=_request("alice")))
-    assert exc.value.status_code == 400
+def test_result_peek_rejects_traversal():
+    for bad_id in _TRAVERSAL_IDS:
+        router = setup_research_routes(_research_handler())
+        target = route_endpoint(router, "/api/research/result-peek/{session_id}", "POST")
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(target(session_id=bad_id, request=_request("alice")))
+        assert exc.value.status_code == 400
 
 
-@pytest.mark.parametrize("bad_id", _TRAVERSAL_IDS)
-def test_spinoff_rejects_traversal(bad_id):
-    router = setup_research_routes(_research_handler())
-    target = _route(router, "/api/research/spinoff/{session_id}", "POST")
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(target(session_id=bad_id, request=_request("alice")))
-    assert exc.value.status_code == 400
+def test_spinoff_rejects_traversal():
+    for bad_id in _TRAVERSAL_IDS:
+        router = setup_research_routes(_research_handler())
+        target = route_endpoint(router, "/api/research/spinoff/{session_id}", "POST")
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(target(session_id=bad_id, request=_request("alice")))
+        assert exc.value.status_code == 400
 
 def test_result_peek_uses_single_disk_lookup_for_completed_result(tmp_path, monkeypatch):
     data_dir = tmp_path / "deep_research"
@@ -427,7 +419,7 @@ def test_result_peek_uses_single_disk_lookup_for_completed_result(tmp_path, monk
     handler = _research_handler()
     handler.get_result.return_value = None
     router = setup_research_routes(handler)
-    target = _route(router, "/api/research/result-peek/{session_id}", "POST")
+    target = route_endpoint(router, "/api/research/result-peek/{session_id}", "POST")
 
     out = asyncio.run(target(session_id="rp-peeksingle1", request=_request("alice")))
 
@@ -494,7 +486,7 @@ def test_spinoff_uses_single_disk_lookup_for_completed_result(tmp_path, monkeypa
     handler.get_sources.return_value = []
     session_manager = FakeSessionManager()
     router = setup_research_routes(handler, session_manager=session_manager)
-    target = _route(router, "/api/research/spinoff/{session_id}", "POST")
+    target = route_endpoint(router, "/api/research/spinoff/{session_id}", "POST")
 
     out = asyncio.run(target(session_id="rp-spinsingle1", request=_request("alice")))
 
@@ -553,7 +545,7 @@ def test_spinoff_reads_saved_query_for_done_active_task(tmp_path, monkeypatch):
 
     session_manager = FakeSessionManager()
     router = setup_research_routes(handler, session_manager=session_manager)
-    target = _route(router, "/api/research/spinoff/{session_id}", "POST")
+    target = route_endpoint(router, "/api/research/spinoff/{session_id}", "POST")
 
     out = asyncio.run(target(session_id=session_id, request=_request("alice")))
 

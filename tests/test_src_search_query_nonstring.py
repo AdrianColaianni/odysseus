@@ -1,8 +1,4 @@
-"""Query helpers must tolerate non-string input.
-
-`src.search.query` is a compatibility shim that aliases the canonical
-`services.search.query`, so this exercises the live implementation.
-"""
+"""Query helpers must tolerate non-string input."""
 import services.search.query as q
 
 

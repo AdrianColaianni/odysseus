@@ -1,4 +1,3 @@
-# src/personal_docs.py
 import os
 import re
 import json
@@ -423,10 +422,6 @@ class PersonalDocsManager:
         """Retrieve relevant documents for a query."""
         return retrieve_personal(self.index, query, k, self.rag_manager)
 
-    def get_file_list(self) -> List[Dict[str, Any]]:
-        """Get list of indexed files with metadata."""
-        return [{"name": f["name"], "size": f["size"]} for f in self.index]
-
     def get_stats(self) -> Dict[str, Any]:
         """Get statistics about indexed documents."""
         total_docs = len(self.index)
@@ -449,43 +444,3 @@ class PersonalDocsManager:
             'additional_directories': self.indexed_directories
         }
         
-    def index_all_directories(self):
-        """Re-index all tracked directories in the RAG system."""
-        if not self.rag_manager:
-            logger.warning("No RAG manager available for indexing")
-            return
-        
-        success_count = 0
-        failure_count = 0
-        
-        # Index the base personal directory
-        try:
-            result = self.rag_manager.index_personal_documents(self.personal_dir)
-            if result.get('success'):
-                success_count += 1
-                logger.info(f"Indexed base directory: {self.personal_dir}")
-        except Exception as e:
-            failure_count += 1
-            logger.error(f"Failed to index base directory {self.personal_dir}: {e}")
-        
-        # Index additional directories
-        for directory in self.indexed_directories:
-            if not os.path.exists(directory):
-                logger.warning(f"Skipping non-existent directory: {directory}")
-                failure_count += 1
-                continue
-            
-            try:
-                result = self.rag_manager.index_personal_documents(directory)
-                if result.get('success'):
-                    success_count += 1
-                    logger.info(f"Indexed directory: {directory}")
-                else:
-                    failure_count += 1
-                    logger.error(f"Failed to index directory {directory}: {result.get('message')}")
-            except Exception as e:
-                failure_count += 1
-                logger.error(f"Failed to index directory {directory}: {e}")
-        
-        logger.info(f"Indexing complete: {success_count} succeeded, {failure_count} failed")
-        return {"success": success_count, "failed": failure_count}

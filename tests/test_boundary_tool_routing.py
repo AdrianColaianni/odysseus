@@ -1,6 +1,6 @@
 """Regression tests for tool selection on implicit retrieval requests."""
 
-from src.agent_loop import _classify_agent_request, _minimal_native_tool_prompt
+from src.agent_loop import _classify_agent_request
 
 
 def domains(prompt: str) -> set[str]:
@@ -66,15 +66,3 @@ def test_short_ambiguous_fragment_is_not_a_tool_retrieval_request():
     assert _is_ambiguous_short_low_signal("sned links") is True
     assert _is_ambiguous_short_low_signal("list my notes") is False
     assert _is_ambiguous_short_low_signal("run tests") is False
-
-
-def test_minimal_prompt_requires_memory_tool_for_memory_lookup():
-    prompt = _minimal_native_tool_prompt({"manage_memory"})
-    assert "manage_memory" in prompt
-    assert "injected memory context alone" in prompt
-
-
-def test_minimal_prompt_requires_chat_search_for_past_chat_lookup():
-    prompt = _minimal_native_tool_prompt({"search_chats"})
-    assert "search_chats" in prompt
-    assert "past chat or conversation" in prompt

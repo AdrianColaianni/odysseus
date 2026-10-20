@@ -1,4 +1,3 @@
-# src/endpoint_resolver.py
 """Unified endpoint resolution for all backend services.
 
 Consolidates the 4+ copies of normalize_base / resolve_endpoint logic into one place.
@@ -378,6 +377,18 @@ def build_chat_url(base: str) -> str:
     if _pathless_host(base, "api.openai.com"):
         base = _append_endpoint_path(base, "/v1")
     return _append_endpoint_path(base, "/chat/completions")
+
+
+def session_url_matches_endpoint(session_url: str, endpoint_base: str) -> bool:
+    """True when a session's stored chat URL points at the endpoint with this base URL."""
+    if not session_url or not endpoint_base:
+        return False
+    base = normalize_base(endpoint_base).rstrip("/")
+    try:
+        chat_url = build_chat_url(base).rstrip("/")
+    except ValueError:
+        return False
+    return session_url.rstrip("/") in {base, base + "/chat/completions", chat_url}
 
 
 def build_models_url(base: str) -> Optional[str]:

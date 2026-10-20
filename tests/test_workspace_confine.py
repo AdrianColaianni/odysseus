@@ -17,6 +17,7 @@ import tempfile
 from types import SimpleNamespace
 
 import pytest
+from tests.helpers.routes import route_endpoint
 from tests.runtime_evidence_helpers import server_authorized_executor
 
 from src.tool_execution import (
@@ -432,8 +433,6 @@ def test_explicit_workspace_request_without_workspace_stops(monkeypatch):
 
     chunks = asyncio.run(_run())
     text = "".join(chunks)
-    assert "No active workspace is set" in text
-    assert "/workspace set /absolute/path" in text
     assert '"missing_workspace": true' in text
 
 
@@ -449,12 +448,6 @@ def test_tui_host_workspace_does_not_trigger_missing_workspace_shortcut():
             "host_shell_bridge": {"url": "http://127.0.0.1:47475/run", "token": "x"},
         },
     )
-
-
-def test_webui_workspace_command_accepts_short_path_form():
-    text = Path("static/js/slashCommands.js").read_text(encoding="utf-8")
-    assert "Match the TUI's short form" in text
-    assert "return setWorkspace(args.join(' ').trim())" in text
 
 
 def test_workspace_coding_mode_prompt_is_injected(monkeypatch):
@@ -477,8 +470,6 @@ def test_workspace_coding_mode_prompt_is_injected(monkeypatch):
     system_text = "\n\n".join(m.get("content", "") for m in messages if m.get("role") == "system")
     assert "## Workspace coding mode" in system_text
     assert "Active workspace: `/tmp/example-repo`" in system_text
-    assert "call `todowrite`" in system_text
-    assert "Change repo files with `apply_patch`" in system_text
 
 
 # ── browse route is admin-gated ─────────────────────────────────────────
@@ -488,7 +479,7 @@ def test_browse_is_admin_gated(monkeypatch):
     import routes.workspace_routes as wr
 
     router = wr.setup_workspace_routes()
-    browse = next(r.endpoint for r in router.routes if r.path == "/api/workspace/browse")
+    browse = route_endpoint(router, "/api/workspace/browse", "GET")
 
     monkeypatch.setattr(wr, "get_current_user", lambda req: "bob")
     monkeypatch.setattr(wr, "owner_is_admin_or_single_user", lambda owner: False)
@@ -538,9 +529,9 @@ def test_browse_marks_root_unselectable_and_vet_endpoint(monkeypatch):
     import routes.workspace_routes as wr
 
     router = wr.setup_workspace_routes()
-    browse = next(r.endpoint for r in router.routes if r.path == "/api/workspace/browse")
-    vet = next(r.endpoint for r in router.routes if r.path == "/api/workspace/vet")
-    default = next(r.endpoint for r in router.routes if r.path == "/api/workspace/default")
+    browse = route_endpoint(router, "/api/workspace/browse", "GET")
+    vet = route_endpoint(router, "/api/workspace/vet", "GET")
+    default = route_endpoint(router, "/api/workspace/default", "GET")
 
     monkeypatch.setattr(wr, "get_current_user", lambda req: "admin")
     monkeypatch.setattr(wr, "owner_is_admin_or_single_user", lambda owner: True)

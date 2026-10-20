@@ -5,19 +5,19 @@ import logging
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request, Form
+from fastapi import APIRouter, HTTPException, Request, Form, Depends
+from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 
-from core.database import SessionLocal, Webhook, ModelEndpoint
+from core.database import SessionLocal, Webhook, ModelEndpoint, get_db
 from src.auth_helpers import owner_filter
-from src.url_security import validate_public_http_url
+from src.url_safety import check_outbound_url
 from src.webhook_manager import WebhookManager, validate_webhook_url, validate_events
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["webhooks"])
 
-# Input limits
 MAX_NAME_LEN = 100
 MAX_URL_LEN = 2048
 MAX_SECRET_LEN = 256
@@ -28,12 +28,9 @@ from core.middleware import require_admin as _require_admin
 
 
 def _select_api_chat_fallback_endpoint(db, token_owner: Optional[str]):
-    """First enabled ModelEndpoint visible to token_owner — their own rows plus
-    legacy null-owner ("shared") rows. Owner-scoped: an unscoped .first() would
-    let a chat-scoped token fall back onto another user's private endpoint and
-    silently spend that owner's API key/quota. Prefer owner rows before shared
-    rows. Fails closed to null-owner rows only when token_owner is absent.
-    Does not validate base_url — admin-configured local/LAN endpoints remain allowed.
+    """First enabled ModelEndpoint visible to token_owner: their own rows, then
+    null-owner shared rows. With no token_owner only shared rows qualify.
+    base_url is not validated, so admin-configured LAN endpoints stay usable.
     """
     query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)  # noqa: E712
     if token_owner:
@@ -43,18 +40,8 @@ def _select_api_chat_fallback_endpoint(db, token_owner: Optional[str]):
 
 
 def _caller_owns_session(sess_owner, caller) -> bool:
-    """Strict session-ownership gate for the token-authenticated sync-chat
-    endpoint (`POST /api/v1/chat`).
-
-    Mirrors ``_verify_session_owner`` in session_routes.py and the null-owner
-    gates in notes/calendar/gallery: a caller may resume a session ONLY when
-    its owner matches them exactly. A null/empty session owner (legacy or
-    migrated rows) is deliberately NOT resumable by an arbitrary token — the
-    old ``sess_owner and sess_owner != caller`` form skipped the check whenever
-    ``sess_owner`` was falsy, so any chat-scoped token (e.g. a paired mobile
-    device) could resume such a session, inject a message, and read back its
-    history and reuse the owner's endpoint credentials. Fail closed: an
-    unresolvable caller also returns False.
+    """Whether `POST /api/v1/chat` may resume the session: only on an exact
+    owner match, so null-owner sessions and unresolved callers are refused.
     """
     if not caller:
         return False
@@ -69,28 +56,24 @@ def setup_webhook_routes(
 ) -> APIRouter:
 
     @router.get("/webhooks")
-    def list_webhooks(request: Request):
+    def list_webhooks(request: Request, db: Session = Depends(get_db)):
         _require_admin(request)
-        db = SessionLocal()
-        try:
-            hooks = db.query(Webhook).all()
-            return [
-                {
-                    "id": w.id,
-                    "name": w.name,
-                    "url": w.url,
-                    "has_secret": bool(w.secret),
-                    "events": w.events.split(",") if w.events else [],
-                    "is_active": w.is_active,
-                    "last_triggered_at": w.last_triggered_at.isoformat() if w.last_triggered_at else None,
-                    "last_status_code": w.last_status_code,
-                    "last_error": w.last_error,
-                    "created_at": w.created_at.isoformat() if w.created_at else None,
-                }
-                for w in hooks
-            ]
-        finally:
-            db.close()
+        hooks = db.query(Webhook).all()
+        return [
+            {
+                "id": w.id,
+                "name": w.name,
+                "url": w.url,
+                "has_secret": bool(w.secret),
+                "events": w.events.split(",") if w.events else [],
+                "is_active": w.is_active,
+                "last_triggered_at": w.last_triggered_at.isoformat() if w.last_triggered_at else None,
+                "last_status_code": w.last_status_code,
+                "last_error": w.last_error,
+                "created_at": w.created_at.isoformat() if w.created_at else None,
+            }
+            for w in hooks
+        ]
 
     @router.post("/webhooks")
     def create_webhook(
@@ -99,6 +82,7 @@ def setup_webhook_routes(
         url: str = Form(""),
         secret: str = Form(""),
         events: str = Form(""),
+        db: Session = Depends(get_db),
     ):
         _require_admin(request)
         name = name.strip()[:MAX_NAME_LEN]
@@ -122,68 +106,49 @@ def setup_webhook_routes(
             encrypted_secret = secret_val  # Fallback if no encryption available
 
         webhook_id = str(uuid.uuid4())[:8]
-        db = SessionLocal()
-        try:
-            db.add(Webhook(
-                id=webhook_id,
-                name=name,
-                url=url,
-                secret=encrypted_secret,
-                events=events,
-                is_active=True,
-            ))
-            db.commit()
-        finally:
-            db.close()
+        db.add(Webhook(
+            id=webhook_id,
+            name=name,
+            url=url,
+            secret=encrypted_secret,
+            events=events,
+            is_active=True,
+        ))
+        db.commit()
 
         return {"id": webhook_id, "name": name}
 
     @router.post("/webhooks/{webhook_id}/test")
-    async def test_webhook(request: Request, webhook_id: str):
+    async def test_webhook(request: Request, webhook_id: str, db: Session = Depends(get_db)):
         _require_admin(request)
-        db = SessionLocal()
-        try:
-            wh = db.query(Webhook).filter(Webhook.id == webhook_id).first()
-            if not wh:
-                raise HTTPException(404, "Webhook not found")
-            url, secret = wh.url, wh.secret
-        finally:
-            db.close()
+        wh = db.query(Webhook).filter(Webhook.id == webhook_id).first()
+        if not wh:
+            raise HTTPException(404, "Webhook not found")
+        url, secret = wh.url, wh.secret
 
         await webhook_manager.deliver_test(webhook_id, url, secret)
         return {"status": "sent"}
 
     @router.patch("/webhooks/{webhook_id}")
-    def toggle_webhook(request: Request, webhook_id: str):
+    def toggle_webhook(request: Request, webhook_id: str, db: Session = Depends(get_db)):
         _require_admin(request)
-        db = SessionLocal()
-        try:
-            wh = db.query(Webhook).filter(Webhook.id == webhook_id).first()
-            if not wh:
-                raise HTTPException(404, "Webhook not found")
-            wh.is_active = not wh.is_active
-            db.commit()
-            return {"id": webhook_id, "is_active": wh.is_active}
-        finally:
-            db.close()
+        wh = db.query(Webhook).filter(Webhook.id == webhook_id).first()
+        if not wh:
+            raise HTTPException(404, "Webhook not found")
+        wh.is_active = not wh.is_active
+        db.commit()
+        return {"id": webhook_id, "is_active": wh.is_active}
 
     @router.delete("/webhooks/{webhook_id}")
-    def delete_webhook(request: Request, webhook_id: str):
+    def delete_webhook(request: Request, webhook_id: str, db: Session = Depends(get_db)):
         _require_admin(request)
-        db = SessionLocal()
-        try:
-            deleted = db.query(Webhook).filter(Webhook.id == webhook_id).delete()
-            db.commit()
-            if not deleted:
-                raise HTTPException(404, "Webhook not found")
-        finally:
-            db.close()
+        deleted = db.query(Webhook).filter(Webhook.id == webhook_id).delete()
+        db.commit()
+        if not deleted:
+            raise HTTPException(404, "Webhook not found")
         return {"status": "deleted"}
 
-    # ================================================================
-    # Sync Chat Endpoint (for n8n / Make / Activepieces)
-    # ================================================================
-
+    # Sync chat endpoint for n8n / Make / Activepieces.
     # Known provider base URLs — auto-resolved from api_key prefix or model name
     KNOWN_PROVIDERS = {
         "deepseek": "https://api.deepseek.com/v1",
@@ -260,18 +225,11 @@ def setup_webhook_routes(
                 sess = session_manager.get_session(session_id)
             except (KeyError, Exception):
                 raise HTTPException(404, "Session not found")
-            # SECURITY: verify the API-token's user owns this session — without
-            # this any token holder could resume any user's chat by passing its
-            # ID. The token's user is on request.state.user (set by API-token
-            # middleware); fall back to require_user if not present.
             try:
                 from src.auth_helpers import get_current_user as _gcu
                 _tok_user = token_owner or getattr(request.state, "user", None) or _gcu(request)
             except Exception:
                 _tok_user = None
-            # Strict ownership (see _caller_owns_session): fail closed so a
-            # null-owner / cross-owner session can't be resumed by an arbitrary
-            # chat-scoped token.
             _sess_owner = getattr(sess, "owner", None)
             if not _caller_owns_session(_sess_owner, _tok_user):
                 raise HTTPException(404, "Session not found")
@@ -285,11 +243,9 @@ def setup_webhook_routes(
             # URLs are not subject to extra local/LAN blocking beyond existing provider logic.
             direct_base_url = body.base_url.strip().rstrip("/") if body.base_url else None
             if direct_base_url:
-                try:
-                    base_url = validate_public_http_url(direct_base_url)
-                except ValueError as e:
-                    detail = str(e).replace("URL", "base_url", 1)
-                    raise HTTPException(400, detail)
+                if len(direct_base_url) > 2048 or not check_outbound_url(direct_base_url, block_private=True)[0]:
+                    raise HTTPException(400, "base_url must point to a public HTTP(S) endpoint")
+                base_url = direct_base_url
             else:
                 base_url = _resolve_base_url(model, body.provider)
             if not base_url:

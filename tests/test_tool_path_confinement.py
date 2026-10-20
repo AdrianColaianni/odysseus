@@ -316,9 +316,6 @@ async def test_write_file_dispatch_rejects_empty_directory_like_workspace_path(m
         security_context=NO_TOOL_SECURITY_CONTEXT,
     )
     assert "BLOCKED" in desc
-    assert "content required; missing content section" in (
-        result.get("error") or ""
-    )
     assert result.get("exit_code") == 1
     assert not (tmp_path / "papers").exists()
 
@@ -351,8 +348,12 @@ async def test_write_file_dispatch_blocks_cron(monkeypatch):
     assert result.get("failure_kind") == "resource_identity_denied"
     assert "sealed resource root" in (result.get("error") or "")
     assert result.get("exit_code") == 1
-@pytest.mark.parametrize("filename", ["auth.json", "app.db", "settings.json"])
-def test_application_secrets_are_sensitive_paths(filename):
-    from src.tool_execution import _is_sensitive_path
+def test_application_secrets_are_sensitive_paths():
+    for filename in [
+        "auth.json",
+        "app.db",
+        "settings.json",
+    ]:
+        from src.tool_execution import _is_sensitive_path
 
-    assert _is_sensitive_path(f"/tmp/odysseus-data/{filename}")
+        assert _is_sensitive_path(f"/tmp/odysseus-data/{filename}")

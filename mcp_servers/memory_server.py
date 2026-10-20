@@ -1,11 +1,7 @@
-"""
-memory_server.py
-
-MCP server exposing memory management (list, add, edit, delete, search).
-Imports MemoryManager and MemoryVectorStore from the Odysseus codebase.
-"""
+"""MCP server exposing memory management (list, add, edit, delete, search)."""
 
 import asyncio
+import logging
 import os
 import sys
 import time
@@ -20,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.memory import MemoryStoreUnreadable
 
 server = Server("memory")
+logger = logging.getLogger(__name__)
 
 # Late-initialized managers (set during first tool call)
 _memory_manager = None
@@ -62,8 +59,7 @@ def _scope_entries(for_update: bool = False) -> tuple[str | None, list[dict], li
 
     ``for_update=True`` is for read-modify-write callers. They save the ``all
     entries`` list back, so an unreadable store must be reported as an error
-    instead of degrading to ``[]`` — otherwise the save writes their one new
-    entry over the whole store (issue #5673).
+    instead of degrading to ``[]``, or the save writes one entry over the store.
     """
     if for_update:
         try:
@@ -101,14 +97,15 @@ def _ensure_init():
 
     from src.constants import DATA_DIR
     from src.memory import MemoryManager
-    _memory_manager = MemoryManager(DATA_DIR)
+    _memory_manager = MemoryManager()
 
     try:
         from src.memory_vector import MemoryVectorStore
         _memory_vector = MemoryVectorStore(DATA_DIR)
         if not _memory_vector.healthy:
             _memory_vector = None
-    except Exception:
+    except Exception as e:
+        logger.warning("Memory vector store unavailable: %s", e)
         _memory_vector = None
 
 
@@ -188,8 +185,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if _memory_vector and _memory_vector.healthy:
             try:
                 _memory_vector.add(entry["id"], text)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Memory vector add failed for %s: %s", entry["id"], e)
         return _text_result(f"Memory added: [{category}] {text} (id: {entry['id'][:8]})")
 
     elif action == "edit":
@@ -217,8 +214,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             try:
                 _memory_vector.remove(full_id)
                 _memory_vector.add(full_id, new_text)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Memory vector update failed for %s: %s", full_id, e)
         return _text_result(f"Memory updated: {new_text}")
 
     elif action == "delete":
@@ -244,8 +241,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if _memory_vector and _memory_vector.healthy and full_id:
             try:
                 _memory_vector.remove(full_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Memory vector remove failed for %s: %s", full_id, e)
         cat = f"[{deleted_category}] " if deleted_category else ""
         snippet = deleted_text if len(deleted_text) <= 120 else deleted_text[:117] + "..."
         return _text_result(f"Memory deleted: {cat}{snippet} (id: {memory_id})")

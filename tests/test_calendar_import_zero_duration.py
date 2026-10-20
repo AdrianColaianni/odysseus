@@ -26,14 +26,17 @@ import core.database as cdb  # noqa: E402
 import routes.calendar_routes as cr  # noqa: E402
 from core.database import CalendarCal, CalendarEvent  # noqa: E402
 from routes.calendar_routes import _ensure_positive_duration  # noqa: E402
+from tests.helpers.route_call import with_db
 
 _TS, _ENGINE, _TMPDB = make_temp_sqlite(cdb.Base.metadata)
 
 
 @pytest.fixture(autouse=True)
 def _bind_temp_db(monkeypatch):
-    monkeypatch.setattr(cdb, "SessionLocal", _TS)
-    monkeypatch.setattr(cr, "SessionLocal", _TS)
+    monkeypatch.setattr(cdb, "SessionLocal", _TS, raising=False)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", _TS)
+    monkeypatch.setattr(cr, "SessionLocal", _TS, raising=False)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", _TS)
     monkeypatch.setattr(cr, "require_user", lambda request: "tester")
     yield
 
@@ -84,9 +87,9 @@ def _endpoints():
     eps = {}
     for route in router.routes:
         if route.path == "/api/calendar/import" and "POST" in route.methods:
-            eps["import"] = route.endpoint
+            eps["import"] = with_db(route.endpoint)
         if route.path == "/api/calendar/events" and "GET" in route.methods:
-            eps["list"] = route.endpoint
+            eps["list"] = with_db(route.endpoint)
     return eps
 
 
@@ -101,9 +104,9 @@ def test_single_day_all_day_event_with_same_date_end_appears_in_list():
     ))
     assert res["imported"] == 1
 
-    out = asyncio.run(eps["list"](
+    out = eps["list"](
         _request(), start="2026-06-20T00:00:00", end="2026-06-23T00:00:00",
-    ))
+    )
     assert [e["summary"] for e in out["events"]] == ["Public Holiday"]
 
 
@@ -115,9 +118,9 @@ def test_normal_multi_day_all_day_event_still_appears():
     ))
     assert res["imported"] == 1
 
-    out = asyncio.run(eps["list"](
+    out = eps["list"](
         _request(), start="2026-07-10T00:00:00", end="2026-07-12T00:00:00",
-    ))
+    )
     assert [e["summary"] for e in out["events"]] == ["Public Holiday"]
 
 
@@ -144,9 +147,9 @@ def test_reimport_repairs_legacy_zero_duration_row():
         db.close()
 
     # Confirm the seeded row is invisible (proves the bug it repairs).
-    before = asyncio.run(eps["list"](
+    before = eps["list"](
         _request(), start="2026-08-01T00:00:00", end="2026-08-04T00:00:00",
-    ))
+    )
     assert before["events"] == []
 
     res = asyncio.run(eps["import"](
@@ -157,9 +160,9 @@ def test_reimport_repairs_legacy_zero_duration_row():
     assert res["skipped"] == 1
     assert res["repaired"] == 1
 
-    after = asyncio.run(eps["list"](
+    after = eps["list"](
         _request(), start="2026-08-01T00:00:00", end="2026-08-04T00:00:00",
-    ))
+    )
     assert [e["summary"] for e in after["events"]] == ["Public Holiday"]
 
     # Re-importing once more is a no-op: the row is already positive-duration.

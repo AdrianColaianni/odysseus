@@ -1,4 +1,4 @@
-from src.youtube_handler import format_transcript_for_context
+from services.youtube.youtube_handler import format_transcript_for_context
 
 
 def test_format_transcript_skips_non_dict_segments():

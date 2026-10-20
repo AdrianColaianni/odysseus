@@ -1,10 +1,4 @@
-/**
- * Pure helpers + constants for layers and adjustment sub-layers.
- *
- * Everything in this module is stateless — feed in a layer object and
- * get back a value. The legacy gallery editor's module-level helpers
- * re-export from here so existing call sites keep working unchanged.
- */
+/** Stateless helpers and constants for layers and adjustment sub-layers. */
 
 /** True if the layer has at least one FX/adjustment sub-layer. */
 export function layerHasAdjustments(layer) {
@@ -30,22 +24,6 @@ export function layerNeedsPixelPass(layer) {
     }
   }
   return false;
-}
-
-
-/**
- * Compact hash of a layer's Levels + Color-Balance values. Used to
- * key the per-pixel adjustment cache so we can skip recomputing when
- * nothing changed.
- */
-export function adjustmentsKey(adj) {
-  const l = adj.levels || {};
-  const cb = adj.colorBalance || {};
-  const s = cb.shadows || {}, m = cb.midtones || {}, h = cb.highlights || {};
-  return [
-    l.inBlack|0, l.inWhite|0, l.gamma || 1, l.outBlack|0, l.outWhite|0,
-    s.r|0, s.g|0, s.b|0, m.r|0, m.g|0, m.b|0, h.r|0, h.g|0, h.b|0,
-  ].join('|');
 }
 
 

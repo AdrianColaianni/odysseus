@@ -2,17 +2,13 @@
 
 import asyncio
 import json
-import os
 import shutil
 import signal
-import tempfile
-import time
 from pathlib import Path
 
 import pytest
 
 from core import platform_compat
-import src.agent_tools.web_tools as web_tools
 from src import browser_lifecycle, process_ownership
 from src.agent_tools.web_tools import PrivateBrowserTool
 
@@ -187,63 +183,6 @@ def test_forced_cleanup_without_procfs_never_kills_unverified_processes(monkeypa
     assert dead.verified and not (root / "ody-k.pid").exists()
 
 
-class _Proc:
-    """Fake agent-browser CLI client driven by a per-test behaviour."""
-
-    def __init__(self, command, kwargs, behaviour):
-        self.command = list(command)
-        self.kwargs = kwargs
-        self.behaviour = behaviour
-        self.returncode = None
-        self.pid = None
-
-    async def communicate(self, stdin=None):
-        rc, out = await self.behaviour(self.command)
-        self.returncode = rc
-        target = self.kwargs.get("stdout")
-        if hasattr(target, "write"):
-            target.write(out.encode())
-            return None, None
-        return out.encode(), b""
-
-    async def wait(self):
-        await self.communicate()
-        return self.returncode
-
-    def kill(self):
-        self.returncode = -9
-
-
-@pytest.fixture
-def browser_env(monkeypatch, tmp_path):
-    monkeypatch.setattr(web_tools.shutil, "which", lambda name: "/usr/bin/agent-browser")
-    monkeypatch.setattr(PrivateBrowserTool, "_AUTO_SCREENSHOT_ACTIONS", set())
-    monkeypatch.setattr("src.tool_execution.get_active_workspace", lambda: str(tmp_path))
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "xdg"))
-    swept = []
-    monkeypatch.setattr(PrivateBrowserTool, "_terminate_owned_chrome", staticmethod(lambda env: swept.append(env)))
-    cleaned = []
-
-    def _cleanup(env, session_id=None):
-        cleaned.append(session_id)
-        return {"method": "forced", "verified": True}
-
-    monkeypatch.setattr(PrivateBrowserTool, "_terminate_owned_daemon", staticmethod(_cleanup))
-    calls = []
-    state = {"behaviour": None}
-
-    async def _spawn(*command, **kwargs):
-        calls.append(list(command))
-        return _Proc(command, kwargs, state["behaviour"])
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
-    return state, calls, cleaned, swept
-
-
-def _run(payload, ctx):
-    return asyncio.run(PrivateBrowserTool().execute(json.dumps(payload), ctx))
-
-
 def test_research_reader_passes_its_timeout_to_the_browser(monkeypatch) -> None:
     from src.research_navigator import ResearchNavigator
 
@@ -260,59 +199,6 @@ def test_research_reader_passes_its_timeout_to_the_browser(monkeypatch) -> None:
     asyncio.run(navigator.browser_read("https://example.com", timeout=12))
 
     assert seen["timeout_ms"] == 12000
-
-
-# Real browser: open/extract a local HTML page, then prove the cleanup paths
-# leave no process, profile or runtime file behind.
-
-def _real_browser():
-    binary = shutil.which("agent-browser") or PrivateBrowserTool._local_agent_browser_binary()
-    chrome = web_tools._browser_executable_candidates()
-    if not binary or not chrome or not platform_compat.has_procfs():
-        return None
-    return binary, str(chrome[0])
-
-
-REAL = _real_browser()
-real_browser = pytest.mark.skipif(REAL is None, reason="agent-browser and Chromium are not installed")
-
-
-@pytest.fixture
-def real_runtime(monkeypatch, tmp_path):
-    # agent-browser's Unix socket path must stay under ~103 bytes.
-    runtime = Path(tempfile.mkdtemp(prefix="abt", dir="/tmp"))
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    monkeypatch.setattr("src.tool_execution.get_active_workspace", lambda: str(workspace))
-    monkeypatch.setattr(web_tools.shutil, "which", lambda name: REAL[0] if name == "agent-browser" else shutil.which(name))
-    env = {
-        "XDG_RUNTIME_DIR": str(runtime),
-        "TMPDIR": str(runtime / "tmp"),
-        "AGENT_BROWSER_EXECUTABLE_PATH": REAL[1],
-        "AGENT_BROWSER_IDLE_TIMEOUT_MS": "60000",
-        # Hosts that restrict unprivileged user namespaces cannot start
-        # Chrome's sandbox. Test-only; production launch flags are unchanged.
-        "AGENT_BROWSER_ARGS": "--no-sandbox",
-    }
-    (runtime / "tmp").mkdir()
-    yield workspace, runtime, env
-    for pid_file in (runtime / "agent-browser").glob("*.pid"):
-        browser_lifecycle.force_cleanup(runtime / "agent-browser", pid_file.stem)
-    shutil.rmtree(runtime, ignore_errors=True)
-
-
-def _owned_processes(runtime: Path) -> list[int]:
-    owned = []
-    for entry in platform_compat.PROC_ROOT.iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            text = (entry / "cmdline").read_bytes().decode(errors="replace")
-        except OSError:
-            continue
-        if str(runtime) in text:
-            owned.append(int(entry.name))
-    return owned
 
 
 def test_browser_mcp_call_is_bounded_and_never_replayed(monkeypatch) -> None:

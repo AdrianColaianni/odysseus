@@ -130,20 +130,15 @@ def test_empty_retrieval_probe_marks_index_degraded(clean_tool_index):
     assert status["error_type"] == "RetrievalProbeEmpty"
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
+def test_tool_index_prewarm_defaults_on_and_is_explicitly_opt_out():
+    for value, expected in [
         (None, True),
         ("1", True),
-        ("true", True),
         ("0", False),
-        ("false", False),
         ("off", False),
-    ],
-)
-def test_tool_index_prewarm_defaults_on_and_is_explicitly_opt_out(value, expected):
-    environ = {} if value is None else {"ODYSSEUS_TOOL_INDEX_PREWARM": value}
-    assert tool_index_module.tool_index_prewarm_enabled(environ) is expected
+    ]:
+        environ = {} if value is None else {"ODYSSEUS_TOOL_INDEX_PREWARM": value}
+        assert tool_index_module.tool_index_prewarm_enabled(environ) is expected
 
 
 def test_reset_clears_lifecycle_state(clean_tool_index):

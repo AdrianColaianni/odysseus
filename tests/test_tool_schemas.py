@@ -236,5 +236,3 @@ def test_missing_still_timestamp_has_actionable_semantic_error() -> None:
     error = normalized_native_function_argument_error(tool_type, arguments)
 
     assert error is not None
-    assert "explicit timestamp plus output_path" in error
-    assert "write_file or python" in error

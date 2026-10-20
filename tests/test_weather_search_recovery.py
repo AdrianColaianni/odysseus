@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-import src.search as search
+import services.search as search
 from src.agent_tools import TOOL_HANDLERS
 from src.agent_tools.weather_tools import WeatherTool, weather_location_from_query
 from src.agent_tools.web_tools import WebSearchTool

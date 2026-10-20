@@ -9,9 +9,6 @@ import { transformFrameGeometry } from './transform-frame-geometry.js';
  * trial offset + a context describing zoom + the other layers, and
  * returns the snapped position plus any guides to draw.
  *
- * The legacy gallery editor's `_computeSnap` is a one-line wrapper
- * that builds the context from module state.
- *
  * @param {{canvas: HTMLCanvasElement, id: string}} layer
  *   The layer currently being moved.
  * @param {number} nx / ny

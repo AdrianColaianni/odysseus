@@ -15,6 +15,7 @@ the facts still land in the JSON store.
 """
 
 import asyncio
+import os
 import tempfile
 
 import src.llm_core
@@ -66,7 +67,7 @@ def test_extraction_persists_facts_when_vector_store_fails_at_runtime(monkeypatc
     monkeypatch.setattr(src.event_bus, "fire_event", lambda *a, **k: None)
 
     with tempfile.TemporaryDirectory() as data_dir:
-        mgr = MemoryManager(data_dir)
+        mgr = MemoryManager(os.path.join(data_dir, "memory.json"))
 
         _run(extract_and_store(
             _FakeSession(),
@@ -100,7 +101,7 @@ def test_healthy_vector_store_still_dedups_normally(monkeypatch):
     monkeypatch.setattr(src.event_bus, "fire_event", lambda *a, **k: None)
 
     with tempfile.TemporaryDirectory() as data_dir:
-        mgr = MemoryManager(data_dir)
+        mgr = MemoryManager(os.path.join(data_dir, "memory.json"))
         # Seed alice's own memory (persisted so load_all sees it) and point
         # find_similar at its real id.
         seeded = mgr.add_entry("Alice's home city is Lisbon", source="auto",

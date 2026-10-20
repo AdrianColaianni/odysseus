@@ -1,12 +1,9 @@
 // Text-to-speech and speech-to-text settings panels.
-// Extracted verbatim from static/js/settings.js. Behaviour is unchanged: the
-// functions moved, their bodies did not. settings.js imports them and calls
-// them from the same places, so load order and init sequence are untouched.
 
 import { byId as el } from './dom.js';
-import { postSettings as _postSettings } from './api.js';
+import { postSettings as _postSettings, flashStatus, flashSaveError } from './api.js';
 
-export async function initTtsSettings() {
+export async function initTtsSettings(settingsLoad, endpointsLoad) {
   var provSel = el('set-ttsProviderSelect');
   var modelSelect = el('set-ttsModelSelect');
   var modelInput = el('set-ttsModelInput');
@@ -40,8 +37,7 @@ export async function initTtsSettings() {
 
   var ttsKeywords = ['tts', 'audio'];
   try {
-    var epRes = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
-    var endpoints = await epRes.json();
+    var endpoints = await endpointsLoad;
     endpoints.forEach(function(ep) {
       if (!ep.is_enabled) return;
       var hasTTS = (ep.models || []).some(m => ttsKeywords.some(kw => m.toLowerCase().includes(kw)));
@@ -51,8 +47,7 @@ export async function initTtsSettings() {
   } catch (e) { console.warn('Failed to load endpoints for TTS', e); }
 
   try {
-    var settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    var settings = await settingsRes.json();
+    var settings = await settingsLoad;
     if (settings.tts_provider) provSel.value = settings.tts_provider;
     if (settings.tts_model) { modelSelect.value = settings.tts_model; modelInput.value = settings.tts_model; }
     if (settings.tts_voice) { voiceSelect.value = settings.tts_voice; voiceInput.value = settings.tts_voice; }
@@ -72,9 +67,9 @@ export async function initTtsSettings() {
   async function saveTTS() {
     try {
       await _postSettings({ tts_enabled: ttsEnabledToggle ? ttsEnabledToggle.checked : true, tts_provider: provSel.value, tts_model: getModel() || 'tts-1', tts_voice: getVoice() || 'alloy', tts_speed: speedSelect.value || '1' });
-      ttsMsg.textContent = 'Saved'; ttsMsg.style.color = 'var(--fg)'; setTimeout(() => { ttsMsg.textContent = ''; }, 2000);
+      flashStatus(ttsMsg, 'Saved', false);
       if (window.aiTTSManager) window.aiTTSManager.checkAvailability();
-    } catch (e) { ttsMsg.textContent = e.status === 403 ? 'Admin access is required to change these settings.' : 'Failed to save'; ttsMsg.style.color = 'var(--red)'; }
+    } catch (e) { flashSaveError(ttsMsg, e); }
   }
 
   async function saveAndClearCache() {
@@ -112,7 +107,7 @@ export async function initTtsSettings() {
       }
       var prov = provSel.value;
       if (prov === 'disabled') {
-        ttsMsg.textContent = 'Select a provider first'; ttsMsg.style.color = 'var(--red, #e55)';
+        ttsMsg.textContent = 'Select a provider first'; ttsMsg.style.color = 'var(--red)';
         setTimeout(function() { ttsMsg.textContent = ''; }, 2000); return;
       }
       var testText = 'Hello, this is a test of text to speech.';
@@ -130,7 +125,7 @@ export async function initTtsSettings() {
             if (match) utt.voice = match;
           }
           utt.rate = parseFloat(speedSelect.value) || 1;
-          previewBtn.textContent = 'Stop'; previewBtn.style.borderColor = 'var(--red, #e55)';
+          previewBtn.textContent = 'Stop'; previewBtn.style.borderColor = 'var(--red)';
           await new Promise(function(resolve, reject) {
             utt.onend = resolve;
             utt.onerror = function(e) { reject(new Error('Browser TTS: ' + e.error)); };
@@ -146,7 +141,7 @@ export async function initTtsSettings() {
           var blob = await res.blob();
           var url = URL.createObjectURL(blob);
           previewAudio = new Audio(url);
-          previewBtn.textContent = 'Stop'; previewBtn.style.borderColor = 'var(--red, #e55)';
+          previewBtn.textContent = 'Stop'; previewBtn.style.borderColor = 'var(--red)';
           await new Promise(function(resolve, reject) {
             previewAudio.onended = function() { URL.revokeObjectURL(url); previewAudio = null; resolve(); };
             previewAudio.onerror = function() { URL.revokeObjectURL(url); previewAudio = null; reject(new Error('Playback failed')); };
@@ -154,7 +149,7 @@ export async function initTtsSettings() {
           });
         }
       } catch (e) {
-        ttsMsg.textContent = 'Preview failed: ' + e.message; ttsMsg.style.color = 'var(--red, #e55)';
+        ttsMsg.textContent = 'Preview failed: ' + e.message; ttsMsg.style.color = 'var(--red)';
         setTimeout(function() { ttsMsg.textContent = ''; }, 3000);
       } finally {
         resetPreview();
@@ -163,7 +158,7 @@ export async function initTtsSettings() {
   }
 }
 
-export async function initSttSettings() {
+export async function initSttSettings(settingsLoad, endpointsLoad) {
   var provSel = el('set-sttProviderSelect');
   var modelSelect = el('set-sttModelSelect');
   var modelInput = el('set-sttModelInput');
@@ -207,8 +202,7 @@ export async function initSttSettings() {
 
   // Add API endpoints that might support STT
   try {
-    var epRes = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
-    var endpoints = await epRes.json();
+    var endpoints = await endpointsLoad;
     endpoints.forEach(function(ep) {
       if (!ep.is_enabled) return;
       var opt = document.createElement('option'); opt.value = 'endpoint:' + ep.id; opt.textContent = ep.name + ' (API)'; provSel.appendChild(opt);
@@ -217,8 +211,7 @@ export async function initSttSettings() {
 
   // Load saved settings
   try {
-    var settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    var settings = await settingsRes.json();
+    var settings = await settingsLoad;
     if (settings.stt_provider) provSel.value = settings.stt_provider;
     if (settings.stt_model) { modelSelect.value = settings.stt_model; modelInput.value = settings.stt_model; }
     if (settings.stt_language) langInput.value = settings.stt_language;
@@ -232,11 +225,11 @@ export async function initSttSettings() {
     try {
       var enabled = sttEnabledToggle ? sttEnabledToggle.checked : false;
       await _postSettings({ stt_enabled: enabled, stt_provider: provSel.value, stt_model: getModel() || 'base', stt_language: langInput.value.trim() });
-      sttMsg.textContent = 'Saved'; sttMsg.style.color = 'var(--fg)'; setTimeout(() => { sttMsg.textContent = ''; }, 2000);
+      flashStatus(sttMsg, 'Saved', false);
       // Notify voiceRecorder of effective provider and update send button icon
       if (window.voiceRecorderModule) window.voiceRecorderModule._sttProvider = effectiveProvider();
       if (window._updateSendBtnIcon) window._updateSendBtnIcon();
-    } catch (e) { sttMsg.textContent = e.status === 403 ? 'Admin access is required to change these settings.' : 'Failed to save'; sttMsg.style.color = 'var(--red)'; }
+    } catch (e) { flashSaveError(sttMsg, e); }
   }
 
   provSel.addEventListener('change', function() { updateVisibility(); saveSTT(); });

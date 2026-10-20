@@ -7,6 +7,7 @@ from fastapi.datastructures import State
 from services.memory.skills import SkillsManager
 from services.memory.skill_format import slugify
 from routes.skills_routes import setup_skills_routes
+from tests.helpers.routes import route_endpoint
 
 
 def _write_skill_md(skills_root: Path, category: str, name: str,
@@ -81,10 +82,7 @@ async def test_delete_skill_route_handler_scoping(tmp_path):
     router = setup_skills_routes(sm)
     
     # Find the delete route handler endpoint
-    delete_route_handler = next(
-        route.endpoint for route in router.routes
-        if route.path == "/api/skills/{skill_id}" and "DELETE" in route.methods
-    )
+    delete_route_handler = route_endpoint(router, "/api/skills/{skill_id}", "DELETE")
     
     # Construct a mock FastAPI Request
     class DummyApp:

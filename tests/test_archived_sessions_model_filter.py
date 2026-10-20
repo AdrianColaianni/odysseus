@@ -18,6 +18,8 @@ from sqlalchemy.pool import NullPool
 
 import core.database as cdb
 from core.database import Session as DbSession
+from tests.helpers.route_call import with_db
+from tests.helpers.routes import route_endpoint
 
 _TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _ENGINE = create_engine(
@@ -30,10 +32,7 @@ _TS = sessionmaker(bind=_ENGINE, autoflush=False, autocommit=False)
 
 
 def _route(router, path, method="GET"):
-    for r in router.routes:
-        if r.path == path and method in getattr(r, "methods", set()):
-            return r.endpoint
-    raise AssertionError(f"route not found: {path}")
+    return with_db(route_endpoint(router, path, method))
 
 
 def _stub_multipart_if_missing(monkeypatch):
@@ -62,7 +61,8 @@ def archived_endpoint(monkeypatch):
     from unittest.mock import MagicMock
 
     _stub_multipart_if_missing(monkeypatch)
-    monkeypatch.setattr(sr, "SessionLocal", _TS)
+    monkeypatch.setattr(sr, "SessionLocal", _TS, raising=False)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", _TS)
     monkeypatch.setattr(sr, "effective_user", lambda request: "alice")
     router = sr.setup_session_routes(MagicMock(), {})
     return _route(router, "/api/sessions/archived")

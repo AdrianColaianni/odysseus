@@ -1,9 +1,8 @@
 """Regression coverage for Clone / Healing sample-source selection."""
 
 import json
-import subprocess
-import textwrap
 from pathlib import Path
+from tests.helpers.node import run_node_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,19 +11,8 @@ PIPELINE_MODULE = (ROOT / "static/js/editor/stroke-pipeline.js").as_uri()
 STATE_MODULE = (ROOT / "static/js/editor/state.js").as_uri()
 
 
-def run_node(source: str):
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", textwrap.dedent(source)],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
-
-
 def test_clone_can_snapshot_the_rendered_composite_surface():
-    result = run_node(f"""
+    result = run_node_module(f"""
         import {{ createCloneTool }} from {json.dumps(CLONE_MODULE)};
         import {{ state }} from {json.dumps(STATE_MODULE)};
         const draws = [];
@@ -57,7 +45,7 @@ def test_clone_can_snapshot_the_rendered_composite_surface():
 
 
 def test_clone_stamp_converts_document_source_to_active_layer_coordinates():
-    result = run_node(f"""
+    result = run_node_module(f"""
         import {{ createStrokePipeline }} from {json.dumps(PIPELINE_MODULE)};
         import {{ state }} from {json.dumps(STATE_MODULE)};
         const draws = [];

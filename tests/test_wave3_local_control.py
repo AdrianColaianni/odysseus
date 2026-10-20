@@ -20,6 +20,7 @@ from src.agent_runtime.resources import ResourceIdentityError
 from src.tools import cookbook
 from src.tool_capabilities import ToolRunSecurityContext
 from src.tool_types import ToolBlock
+from tests.helpers.routes import route_endpoint
 
 
 def request(host='127.0.0.1', headers=None, user=None):
@@ -53,14 +54,20 @@ def test_auth_disabled_operator_transport(monkeypatch, host, headers, allowed):
         assert error.value.status_code == 403
 
 
-@pytest.mark.parametrize('user,allowed', [('alice', True), ('bob', False), (None, False), ('api', False), (INTERNAL_TOOL_USER, False)])
-def test_auth_enabled_administration(monkeypatch, user, allowed):
-    monkeypatch.setenv('AUTH_ENABLED', 'true')
-    if allowed:
-        shell_routes._require_admin(request('192.0.2.1', user=user))
-    else:
-        with pytest.raises(HTTPException):
-            shell_routes._require_admin(request(user=user))
+def test_auth_enabled_administration(monkeypatch):
+    for user, allowed in [
+        ('alice', True),
+        ('bob', False),
+        (None, False),
+        ('api', False),
+        (INTERNAL_TOOL_USER, False),
+    ]:
+        monkeypatch.setenv('AUTH_ENABLED', 'true')
+        if allowed:
+            shell_routes._require_admin(request('192.0.2.1', user=user))
+        else:
+            with pytest.raises(HTTPException):
+                shell_routes._require_admin(request(user=user))
 
 
 @pytest.fixture
@@ -238,7 +245,7 @@ async def test_direct_endpoint_call_keeps_producer_gate(control_app, monkeypatch
     from routes.cookbook_helpers import ModelDownloadRequest
     app, spawned, _ = control_app
     router = cookbook_routes.setup_cookbook_routes()
-    endpoint = next(route.endpoint for route in router.routes if getattr(route, 'path', '') == '/api/model/download')
+    endpoint = route_endpoint(router, '/api/model/download', 'POST')
     monkeypatch.setenv('AUTH_ENABLED', 'false')
     req = request('192.0.2.1')
     with pytest.raises(HTTPException) as exc:

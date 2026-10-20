@@ -15,8 +15,6 @@ patterns took seconds, the loose budget is seconds, so the margin is ~100x.
 
 import time
 
-import pytest
-
 import src.agent_tools  # noqa: F401  (break agent_tools<->agent_loop import cycle)
 from services.skills.evaluation import _VERDICT_PROSE_RE
 from src.agent_loop import _EXPLICIT_CONTINUATION_RE, _is_explicit_continuation
@@ -32,18 +30,18 @@ def _timed(fn, *args):
 
 # ── #229 verdict-from-prose: matches unchanged ──────────────────────────────
 
-@pytest.mark.parametrize("text,expected", [
-    ('verdict": "FAIL"', "fail"),
-    ("verdict needs_work", "needs_work"),
-    ("Verdict:   inconclusive", "inconclusive"),
-    ("verdict\t\t'pass'", "pass"),
-    ("verdictpass", "pass"),  # all separators optional — keyword may abut, as before
-    ("the verdict is: pass overall", None),  # intervening "is" breaks the run
-    ("no clear decision here", None),
-])
-def test_verdict_prose_extraction(text, expected):
-    m = _VERDICT_PROSE_RE.search(text)
-    assert (m.group(1).lower() if m else None) == expected
+def test_verdict_prose_extraction():
+    for text, expected in [
+        ('verdict": "FAIL"', "fail"),
+        ("verdict needs_work", "needs_work"),
+        ("Verdict:   inconclusive", "inconclusive"),
+        ("verdict\t\t'pass'", "pass"),
+        ("verdictpass", "pass"),  # all separators optional: the keyword may abut, as before
+        ("the verdict is: pass overall", None),  # intervening "is" breaks the run
+        ("no clear decision here", None),
+    ]:
+        m = _VERDICT_PROSE_RE.search(text)
+        assert (m.group(1).lower() if m else None) == expected
 
 
 def test_verdict_prose_flood_is_fast():
@@ -55,19 +53,19 @@ def test_verdict_prose_flood_is_fast():
 
 # ── #472 explicit-continuation: classification unchanged ────────────────────
 
-@pytest.mark.parametrize("text", [
-    "yes", "y", "ok!", "okay ...", "sure!!", "do it", "1", "a", "2.",
-    "the second one", "  yes  ", "continue", "run it!", "third???",
-])
-def test_continuation_accepts_terse_confirmations(text):
-    assert _is_explicit_continuation(text)
+def test_continuation_accepts_terse_confirmations():
+    for text in [
+        "yes", "y", "ok!", "okay ...", "sure!!", "do it", "1", "a", "2.",
+        "the second one", "  yes  ", "continue", "run it!", "third???",
+    ]:
+        assert _is_explicit_continuation(text)
 
 
-@pytest.mark.parametrize("text", [
-    "no", "maybe yes", "yesx", "let's not", "y . ! .", "", "run the script please",
-])
-def test_continuation_rejects_non_confirmations(text):
-    assert not _is_explicit_continuation(text)
+def test_continuation_rejects_non_confirmations():
+    for text in [
+        "no", "maybe yes", "yesx", "let's not", "y . ! .", "", "run the script please",
+    ]:
+        assert not _is_explicit_continuation(text)
 
 
 def test_continuation_flood_is_fast():

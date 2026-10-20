@@ -7,49 +7,33 @@ tool to fall back to its default 14-day window.
 
 import json
 import sys
-import tempfile
 import uuid
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
-
+from tests.helpers.database import disposable_database
 from tests.helpers.import_state import clear_fake_database_modules
 
 clear_fake_database_modules()
 
 import core.database as cdb
 
-_TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_ENGINE = create_engine(
-    f"sqlite:///{_TMPDB.name}",
-    connect_args={"check_same_thread": False},
-    poolclass=NullPool,
-)
-cdb.Base.metadata.create_all(_ENGINE)
-_TS = sessionmaker(bind=_ENGINE, autoflush=False, autocommit=False)
-
-
 @pytest.fixture(autouse=True)
-def _bind_temp_db(monkeypatch):
+def _bind_temp_db(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "core.database", cdb)
     parent = sys.modules.get("core")
     if parent is not None:
         monkeypatch.setattr(parent, "database", cdb, raising=False)
-    monkeypatch.setattr(cdb, "SessionLocal", _TS)
-    yield
+    with disposable_database(tmp_path) as factory:
+        monkeypatch.setattr(cdb, "SessionLocal", factory)
+        yield
 
 
-@pytest.mark.parametrize(
-    ("start_key", "end_key"),
-    [
-        ("start_date", "end_date"),
-        ("from", "to"),
-        ("range_start", "range_end"),
-    ],
-)
-async def test_list_events_honors_range_aliases(start_key, end_key):
+async def test_list_events_honors_range_aliases():
+    for start_key, end_key in [("start_date", "end_date"), ("from", "to"), ("range_start", "range_end")]:
+        await _assert_range_alias_honored(start_key, end_key)
+
+
+async def _assert_range_alias_honored(start_key, end_key):
     from src.tool_implementations import do_manage_calendar
 
     owner = "calendar-alias-" + uuid.uuid4().hex[:8]

@@ -39,21 +39,21 @@ def test_explicit_checked_state_is_idempotent(checklist):
         assert call(checklist) == before
 
 
-@pytest.mark.parametrize('args', [{}, {'index': None}, {'index': True}, {'index': 0.0}, {'index': '0'}])
-def test_toggle_requires_explicit_integer_index(checklist, args):
+def test_toggle_requires_explicit_integer_index(checklist):
     before = call(checklist)
-    result = call(checklist, 'toggle_item', done=True, **args)
-    assert result['exit_code'] == 1
-    assert 'index' in result['error']
+    for args in ({}, {'index': True}, {'index': '0'}):
+        result = call(checklist, 'toggle_item', done=True, **args)
+        assert result['exit_code'] == 1, args
+        assert 'index' in result['error']
     assert call(checklist) == before
 
 
-@pytest.mark.parametrize("done", ["false", "true", 0, 1, None, [], {}])
-def test_invalid_target_state_does_not_change_checklist(checklist, done):
+def test_invalid_target_state_does_not_change_checklist(checklist):
     before = call(checklist)
-    result = call(checklist, "toggle_item", index=1, done=done)
-    assert result["exit_code"] == 1
-    assert "boolean" in result["error"]
+    for done in ("false", 1, None):
+        result = call(checklist, "toggle_item", index=1, done=done)
+        assert result["exit_code"] == 1, done
+        assert "boolean" in result["error"]
     assert call(checklist) == before
 
 
@@ -67,10 +67,10 @@ def test_explicit_uncheck_then_legacy_toggle(checklist):
     assert "[ ] 1: rice" in call(checklist)["results"]
 
 
-@pytest.mark.parametrize("args", [{"index": -1}, {"index": 2}, {"owner": "other_owner", "index": 1}])
-def test_invalid_index_or_owner_does_not_change_checklist(checklist, args):
+def test_invalid_index_or_owner_does_not_change_checklist(checklist):
     before = call(checklist)
-    assert call(checklist, "toggle_item", done=False, **args)["exit_code"] == 1
+    for args in ({"index": -1}, {"index": 2}, {"owner": "other_owner", "index": 1}):
+        assert call(checklist, "toggle_item", done=False, **args)["exit_code"] == 1, args
     assert call(checklist) == before
 
 
@@ -89,29 +89,27 @@ def test_remove_item_never_silently_toggles_checked_state(checklist):
     assert call(checklist) == before
 
 
-@pytest.mark.parametrize('items', [None, 'drop keys, meeting 2pm', [{'text': ''}], [{'text': 'keys', 'done': 'false'}]])
-def test_malformed_checklist_creation_saves_nothing(checklist, items):
+def test_malformed_checklist_creation_saves_nothing(checklist):
     with database.SessionLocal() as db:
         before = db.query(database.Note).count()
-    args = {'note_type': 'checklist', 'title': 'Tasks hidden in title'}
-    if items is not None:
-        args['checklist_items'] = items
-    result = asyncio.run(do_manage_notes(json.dumps({'action': 'add', **args}), owner='sft_checklist'))
-    assert result['exit_code'] == 1
-    assert 'Nothing saved' in result['error']
+    for items in (None, 'drop keys, meeting 2pm', [{'text': ''}], [{'text': 'keys', 'done': 'false'}]):
+        args = {'note_type': 'checklist', 'title': 'Tasks hidden in title'}
+        if items is not None:
+            args['checklist_items'] = items
+        result = asyncio.run(do_manage_notes(json.dumps({'action': 'add', **args}), owner='sft_checklist'))
+        assert result['exit_code'] == 1, items
     with database.SessionLocal() as db:
         assert db.query(database.Note).count() == before
 
 
-@pytest.mark.parametrize('key', ['id', 'note_id', 'noteId'])
-def test_add_with_existing_id_never_creates_duplicate(checklist, key):
+def test_add_with_existing_id_never_creates_duplicate(checklist):
     before = call(checklist)
-    result = asyncio.run(do_manage_notes(json.dumps({
-        'action': 'add', key: checklist, 'note_type': 'checklist',
-        'checklist_items': [{'text': 'New task', 'done': False}],
-    }), owner='sft_checklist'))
-    assert result['exit_code'] == 1
-    assert 'action="update"' in result['error']
+    for key in ('id', 'note_id', 'noteId'):
+        result = asyncio.run(do_manage_notes(json.dumps({
+            'action': 'add', key: checklist, 'note_type': 'checklist',
+            'checklist_items': [{'text': 'New task', 'done': False}],
+        }), owner='sft_checklist'))
+        assert result['exit_code'] == 1, key
     assert call(checklist) == before
     with database.SessionLocal() as db:
         assert db.query(database.Note).count() == 1

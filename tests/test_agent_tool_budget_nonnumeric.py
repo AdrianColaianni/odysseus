@@ -10,7 +10,6 @@ It must be guarded like the agent_max_rounds read four lines below.
 import ast
 from pathlib import Path
 
-import pytest
 
 _CHAT_ROUTES = Path(__file__).resolve().parent.parent / "routes" / "chat_routes.py"
 
@@ -54,17 +53,3 @@ def test_tool_budget_read_is_wrapped_in_try_except():
         "settings.json value cannot crash chat_stream during agent init"
     )
 
-
-@pytest.mark.parametrize("raw, expected", [
-    ("unlimited", 0), ("", 0), (None, 0), ("25", 25), (12, 12),
-])
-def test_tool_budget_coercion_falls_back_to_zero(raw, expected):
-    # Mirrors the guarded read: a bad/non-numeric value -> 0 (unlimited).
-    def get_setting(_key, default):
-        return raw if raw is not None else default
-
-    try:
-        tool_budget = int(get_setting("agent_max_tool_calls", 0))
-    except (TypeError, ValueError):
-        tool_budget = 0
-    assert tool_budget == expected

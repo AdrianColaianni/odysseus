@@ -1,5 +1,5 @@
 // static/js/chatRenderer.js
-// Extracted from chat.js — message rendering, sources, images, metrics
+// Message rendering, sources, images, metrics
 
 import uiModule from './ui.js?v=20260916largetoolscroll1';
 import markdownModule from './markdown.js';
@@ -114,7 +114,7 @@ export function safeDisplayImageSrc(raw) {
   return '';
 }
 
-function _isPrivateBrowserTool(tool) {
+export function _isPrivateBrowserTool(tool) {
   const name = String(tool || '').toLowerCase();
   return name === 'private_browser'
     || name.includes('private_browser')
@@ -123,9 +123,9 @@ function _isPrivateBrowserTool(tool) {
     || name.includes('__browser_');
 }
 
-function _privateBrowserActionLabel(command) {
+export function _privateBrowserActionLabel(command, emptyLabel = 'screenshot') {
   const raw = String(command || '').trim();
-  if (!raw) return 'screenshot';
+  if (!raw) return emptyLabel;
   try {
     const parsed = JSON.parse(raw);
     const action = String(parsed && parsed.action || '').trim();
@@ -137,7 +137,7 @@ function _privateBrowserActionLabel(command) {
   return raw.slice(0, 110);
 }
 
-function _privateBrowserUrlFromCommand(command) {
+export function _privateBrowserUrlFromCommand(command) {
   const raw = String(command || '').trim();
   if (!raw) return '';
   try {
@@ -182,20 +182,6 @@ function _webSearchQueryFromCommand(command) {
     if (args && Array.isArray(args.queries) && args.queries.length) return String(args.queries[0] || '').trim();
   } catch (_) {}
   return raw;
-}
-
-function _searxngSearchUrl(query) {
-  const q = String(query || '').trim();
-  if (!q) return '';
-  try {
-    const url = new URL('/search/web', window.location.origin);
-    url.search = '';
-    url.hash = '';
-    url.searchParams.set('q', q);
-    return url.href;
-  } catch (_) {
-    return '';
-  }
 }
 
 function _toolHeaderLinkHtml(url, title = 'Open link') {
@@ -354,7 +340,7 @@ function _renderAssistantBody(text, metadata) {
   return markdownModule.processWithThinking(text);
 }
 
-function _toolDisplayInfo(tool, command, data = null) {
+export function _toolDisplayInfo(tool, command, data = null) {
   const rawTool = String(tool || '');
   const lower = rawTool.toLowerCase();
   let args = null;
@@ -383,7 +369,6 @@ function _toolDisplayInfo(tool, command, data = null) {
     const summary = args && args.summary ? String(args.summary) : '';
     const start = args && args.start ? String(args.start).slice(0, 10) : '';
     const end = args && args.end ? String(args.end).slice(0, 10) : '';
-    const uid = _calendarEventUidFromToolData(command, data || {});
     const actionLabel = action.includes('create') ? 'Create event'
       : action.includes('update') ? 'Update event'
       : action.includes('delete') ? 'Delete event'
@@ -391,8 +376,7 @@ function _toolDisplayInfo(tool, command, data = null) {
     const rangeSummary = start && end ? `${start} to ${end}` : '';
     return {
       label: actionLabel,
-      // The calendar glyph itself is the navigation target. Keeping the old
-      // trailing action link here produced two calendar icons in one row.
+      // The calendar glyph is the navigation target, so no header link.
       headerActionHtml: '',
       commandHtml: summary
         ? `<div class="agent-thread-summary">${uiModule.esc(summary)}</div>`
@@ -435,7 +419,7 @@ function _toolDisplayInfo(tool, command, data = null) {
   return { label: '', commandHtml: '' };
 }
 
-function _suppressRawToolOutput(tool, ok) {
+export function _suppressRawToolOutput(tool, ok) {
   if (!ok) return false;
   const lower = String(tool || '').toLowerCase();
   if (lower === 'manage_calendar' || lower.endsWith('manage_calendar')) return true;
@@ -450,6 +434,49 @@ function _suppressRawToolOutput(tool, ok) {
       || lower.includes('scan_email_unsubscribes')
     )
   );
+}
+
+function _toolDiffHtml(d) {
+  const esc = uiModule.esc;
+  const stat = [
+    d.new_file ? '<span class="diff-stat-new">new</span>' : '',
+    d.added ? `<span class="diff-stat-add">+${d.added}</span>` : '',
+    d.removed ? `<span class="diff-stat-del">\u2212${d.removed}</span>` : '',
+  ].filter(Boolean).join(' ');
+  const rows = d.text.split('\n').map(line => {
+    let cls = 'diff-ctx', text = line;
+    if (line.startsWith('+++') || line.startsWith('---')) cls = 'diff-meta';
+    else if (line.startsWith('@@')) cls = 'diff-hunk';
+    // Drop the leading +/-/space marker: the row colour already encodes it,
+    // and keeping it doubles up with markdown "- " bullets.
+    else if (line.startsWith('+')) { cls = 'diff-add'; text = line.slice(1); }
+    else if (line.startsWith('-')) { cls = 'diff-del'; text = line.slice(1); }
+    else if (line.startsWith(' ')) { text = line.slice(1); }
+    return `<span class="${cls}">${esc(text) || '&nbsp;'}</span>`;
+  }).join('');  // spans are display:block, so a literal \n would double-space
+  return `<details class="agent-tool-output agent-tool-diff"><summary><span class="diff-file">${esc(d.file || 'diff')}</span> <span class="diff-summary-stats">${stat}</span></summary><pre class="diff-pre">${rows}</pre></details>`;
+}
+
+/** Inner HTML of a running tool node. */
+export function runningToolNodeHtml({ iconHtml, label, headerActionHtml = '', contentHtml = '' }) {
+  return `<div class="agent-thread-dot"></div><div class="agent-thread-header">${iconHtml}<span class="agent-thread-tool">${uiModule.esc(label)}</span>${headerActionHtml}<span class="agent-thread-wave">▁▂▃</span></div><div class="agent-thread-content">${contentHtml}</div>`;
+}
+
+/**
+ * Inner HTML of a finished tool node, shared by the live stream, stream
+ * resume and history reload. leadHtml sits before the raw output, trailHtml after.
+ */
+export function finishedToolNodeHtml(ev, { ok, leadHtml = '', trailHtml = '' }) {
+  const esc = uiModule.esc;
+  const command = ev.command || '';
+  const hasDiff = !!(ev.diff && ev.diff.text);
+  const info = _toolDisplayInfo(ev.tool, command, ev);
+  const outHtml = (!_suppressRawToolOutput(ev.tool, ok) && ev.output && ev.output.trim())
+    ? `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(ev.output)}</pre></details>`
+    : '';
+  // For file edits the command is the raw JSON args, redundant next to the diff.
+  const cmdHtml = _isPrivateBrowserTool(ev.tool) ? '' : (info.commandHtml || ((command && !hasDiff) ? `<pre class="agent-thread-cmd">${esc(command)}</pre>` : ''));
+  return `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span>${renderToolIcon(ev.tool, command, ev)}<span class="agent-thread-tool">${esc(info.label || ev.tool)}</span>${info.headerActionHtml || ''}<span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron" aria-hidden="true"></span></div><div class="agent-thread-content">${cmdHtml}${leadHtml}${outHtml}${trailHtml}${hasDiff ? _toolDiffHtml(ev.diff) : ''}</div>`;
 }
 
 function _makeActionBtn(className, title, text, handler) {
@@ -483,7 +510,7 @@ function _formatSize(bytes) {
 // Build the `.attach-cards` element for a message's attachment list. Shared by
 // addMessage and updateMessageAttachments so a live (optimistic) user bubble
 // can be re-rendered with real upload ids once the upload resolves.
-export function buildAttachCards(attachments) {
+function buildAttachCards(attachments) {
   const attachWrap = document.createElement('div');
   attachWrap.className = 'attach-cards';
   for (const att of attachments) {
@@ -541,7 +568,7 @@ export function buildAttachCards(attachments) {
           _revealed = true;
           if (_revealTimer) { clearTimeout(_revealTimer); _revealTimer = null; }
           img.style.display = 'block';
-          try { sp && sp.stop(); } catch {}
+          sp?.stop();
           if (skel) skel.remove();
         };
         img.addEventListener('load', _reveal);
@@ -660,7 +687,7 @@ function _openImageLightbox(att) {
   const _onKey = (e) => { if (e.key === 'Escape') _close(); };
   const _close = () => {
     document.removeEventListener('keydown', _onKey);
-    if (_overlayObs) { try { _overlayObs.disconnect(); } catch {} }
+    if (_overlayObs) _overlayObs.disconnect();
     overlay.remove();
   };
   // If the overlay is removed via any path other than our close handler
@@ -1097,7 +1124,7 @@ export function modelColor(name) {
 }
 
 /** Look up model info (pricing + context) by substring match */
-export function getModelInfo(modelName) {
+function getModelInfo(modelName) {
   if (!modelName) return null;
   const key = matchModelKey(modelName, Object.keys(MODEL_INFO));
   return key ? { key, ...MODEL_INFO[key] } : null;
@@ -1247,7 +1274,7 @@ export function isLocalEndpoint(url) {
   return false;
 }
 
-export function isSubscriptionEndpoint(url) {
+function isSubscriptionEndpoint(url) {
   if (!url) return false;
   try {
     const parsed = new URL(url);
@@ -2514,7 +2541,7 @@ function _trackUserAction(id) {
   localStorage.setItem(_USER_ACTION_RECENTS_KEY, JSON.stringify(recent));
 }
 
-export function createUserMsgFooter(msgElement) {
+function createUserMsgFooter(msgElement) {
   const footer = document.createElement('div');
   footer.className = 'msg-footer';
 
@@ -3199,7 +3226,7 @@ export function renderAskUserCard(payload, options) {
     card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
   if (renderOptions.focus !== false) {
-    try { card.focus(); } catch (_) {}
+    card.focus();
   }
   return card;
 }
@@ -3388,50 +3415,19 @@ export function addMessage(role, content, modelName, metadata) {
           for (const ev of roundTools) {
             if (ev.ask_user && !ev.ask_user.resolved) pendingAskUser = ev.ask_user;
             const ok = (ev.exit_code === 0 || ev.exit_code == null);
-            let outHtml = '';
-            if (!_suppressRawToolOutput(ev.tool, ok) && ev.output && ev.output.trim()) {
-              outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(ev.output)}</pre></details>`;
-            }
             const screenshotSrc = safeToolScreenshotSrc(ev.screenshot);
-            if (_isPrivateBrowserTool(ev.tool)) {
+            const browserTool = _isPrivateBrowserTool(ev.tool);
+            let mediaHtml = '';
+            if (browserTool) {
               const currentBrowserUrl = _privateBrowserUrlFromCommand(ev.command) || lastPrivateBrowserUrl;
               if (currentBrowserUrl) lastPrivateBrowserUrl = currentBrowserUrl;
-              outHtml += _browserPreviewHtml(ev.command, screenshotSrc, currentBrowserUrl);
+              mediaHtml = _browserPreviewHtml(ev.command, screenshotSrc, currentBrowserUrl);
             } else if (screenshotSrc) {
-              outHtml += `<details class="agent-tool-output"><summary>Screenshot</summary><img src="${uiModule.esc(screenshotSrc)}" style="max-width:100%;border-radius:6px;margin-top:6px;border:1px solid var(--border)" /></details>`;
-            }
-            // File-write/edit diff (persisted in the tool event) \u2014 re-render it
-            // so it survives reload, matching the live stream.
-            let evDiffHtml = '';
-            if (ev.diff && ev.diff.text) {
-              const d = ev.diff;
-              const stat = [
-                d.new_file ? '<span class="diff-stat-new">new</span>' : '',
-                d.added ? `<span class="diff-stat-add">+${d.added}</span>` : '',
-                d.removed ? `<span class="diff-stat-del">\u2212${d.removed}</span>` : '',
-              ].filter(Boolean).join(' ');
-              const rows = d.text.split('\n').map(line => {
-                let cls = 'diff-ctx', text = line;
-                if (line.startsWith('+++') || line.startsWith('---')) cls = 'diff-meta';
-                else if (line.startsWith('@@')) cls = 'diff-hunk';
-                // Drop the leading diff marker (+/-/space) — colour encodes add/del.
-                else if (line.startsWith('+')) { cls = 'diff-add'; text = line.slice(1); }
-                else if (line.startsWith('-')) { cls = 'diff-del'; text = line.slice(1); }
-                else if (line.startsWith(' ')) { text = line.slice(1); }
-                return `<span class="${cls}">${esc(text) || '&nbsp;'}</span>`;
-              }).join('');  // spans are display:block \u2014 a literal \n would double-space
-              evDiffHtml = `<details class="agent-tool-output agent-tool-diff"><summary><span class="diff-file">${esc(d.file || 'diff')}</span> <span class="diff-summary-stats">${stat}</span></summary><pre class="diff-pre">${rows}</pre></details>`;
+              mediaHtml = `<details class="agent-tool-output"><summary>Screenshot</summary><img src="${uiModule.esc(screenshotSrc)}" style="max-width:100%;border-radius:6px;margin-top:6px;border:1px solid var(--border)" /></details>`;
             }
             const node = document.createElement('div');
-            const browserTool = _isPrivateBrowserTool(ev.tool);
             node.className = 'agent-thread-node' + (ok ? '' : ' error') + (browserTool ? ' open browser-preview-node' : '');
-            // Hide raw JSON for high-level app tools and diffs; show the same
-            // compact command summary that live streaming uses.
-            const evToolInfo = _toolDisplayInfo(ev.tool, ev.command, ev);
-            const evHeaderAction = evToolInfo.headerActionHtml || '';
-            const evToolIcon = renderToolIcon(ev.tool, ev.command, ev);
-            const evCmdHtml = browserTool ? '' : (evToolInfo.commandHtml || ((ev.command && !(ev.diff && ev.diff.text)) ? `<pre class="agent-thread-cmd">${esc(ev.command)}</pre>` : ''));
-            node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span>${evToolIcon}<span class="agent-thread-tool">${esc(evToolInfo.label || ev.tool)}</span>${evHeaderAction}<span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron" aria-hidden="true"></span></div><div class="agent-thread-content">${evCmdHtml}${outHtml}${evDiffHtml}</div>`;
+            node.innerHTML = finishedToolNodeHtml(ev, { ok, trailHtml: mediaHtml });
             // Click handling is delegated globally \u2014 see chat.js init.
             threadWrap.appendChild(node);
           }
@@ -3846,7 +3842,6 @@ const chatRenderer = {
   applyModelColor,
   getModelCost,
   isCostTrackedEndpoint,
-  isSubscriptionEndpoint,
   getImageCost,
   getSessionCost,
   resetSessionCost,
@@ -3869,7 +3864,6 @@ const chatRenderer = {
   createMsgFooter,
   displayMetrics,
   addMessage,
-  buildAttachCards,
   updateMessageAttachments,
 };
 

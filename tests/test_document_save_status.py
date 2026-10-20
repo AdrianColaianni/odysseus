@@ -1,12 +1,7 @@
 """Browser regression coverage for document autosave state and ordering."""
 
-import json
-import subprocess
-from pathlib import Path
 from tests.helpers.stylesheets import stylesheet_link_tags
-
-
-ROOT = Path(__file__).resolve().parents[1]
+from tests.helpers.node import run_node_module
 
 
 def test_save_status_is_dirty_race_safe_and_reports_failures():
@@ -83,15 +78,7 @@ def test_save_status_is_dirty_race_safe_and_reports_failures():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
     assert data["initial"] == "saved"
     assert data["dirty"] == "dirty"
     assert data["duringSave"] == "saving"

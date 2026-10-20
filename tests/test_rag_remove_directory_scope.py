@@ -16,9 +16,6 @@ collection, PersonalDocsManager against a fake rag manager.
 """
 import os
 
-os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
-
-import pytest
 
 import src.rag_vector as rag_vector
 import src.personal_docs as personal_docs

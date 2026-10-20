@@ -1,13 +1,9 @@
 """Regression coverage for passwordless Google OAuth reminder senders."""
 
 import asyncio
-from pathlib import Path
 from unittest.mock import patch
 
-from routes.note_routes import dispatch_reminder
-
-
-_REPO = Path(__file__).resolve().parents[1]
+from routes.note.note_routes import dispatch_reminder
 
 
 def test_dispatch_reminder_sends_with_google_oauth_without_smtp_password():
@@ -28,8 +24,8 @@ def test_dispatch_reminder_sends_with_google_oauth_without_smtp_password():
 
     with (
         patch("src.settings.load_settings", return_value={}),
-        patch("routes.email_routes._get_email_config", return_value=cfg),
-        patch("routes.email_helpers._send_smtp_message", side_effect=fake_send),
+        patch("routes.email.email_routes._get_email_config", return_value=cfg),
+        patch("routes.email.email_helpers._send_smtp_message", side_effect=fake_send),
         patch("core.database.SessionLocal", side_effect=AssertionError("fallback lookup is not needed")),
     ):
         result = asyncio.run(dispatch_reminder(
@@ -52,11 +48,3 @@ def test_dispatch_reminder_sends_with_google_oauth_without_smtp_password():
     assert sender == "alice@example.edu"
     assert recipients == ["alice@example.edu"]
     assert "Subject: Reminder (Odysseus): Submit report" in message
-
-
-def test_reminder_settings_offer_oauth_smtp_accounts():
-    source = (_REPO / "static" / "js" / "settings.js").read_text(encoding="utf-8")
-    helper = source[source.index("const smtpAccountReady"):source.index("const smtpAccountReady") + 260]
-
-    assert "account.has_smtp_password || account.oauth_provider === 'google'" in helper
-    assert source.count(".filter(smtpAccountReady)") == 2

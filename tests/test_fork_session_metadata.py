@@ -10,7 +10,8 @@ import asyncio
 from types import SimpleNamespace
 
 from core.models import ChatMessage
-import routes.history_routes as mod
+import routes.history.history_routes as mod
+from tests.helpers.routes import route_endpoint
 
 
 class _FakeSession:
@@ -49,13 +50,6 @@ class _FakeSessionManager:
         pass
 
 
-def _fork_handler(router):
-    for route in router.routes:
-        if "/fork" in getattr(route, "path", "") and "POST" in getattr(route, "methods", set()):
-            return route.endpoint
-    raise AssertionError("fork route not found")
-
-
 def test_fork_does_not_corrupt_source_message_metadata(monkeypatch):
     monkeypatch.setattr(mod, "_verify_session_owner", lambda *a, **k: None)
 
@@ -75,7 +69,7 @@ def test_fork_does_not_corrupt_source_message_metadata(monkeypatch):
     req.json = _json
 
     router = mod.setup_history_routes(sm)
-    fork = _fork_handler(router)
+    fork = route_endpoint(router, "/api/session/{session_id}/fork", "POST")
     result = asyncio.run(fork(request=req, session_id="src-id"))
 
     assert result["status"] == "ok"

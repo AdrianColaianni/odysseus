@@ -1,21 +1,8 @@
-"""Background job execution for the agent's `bash` tool.
+"""Detached background jobs for the agent's `bash` tool (launch and on-disk state).
 
-Long commands (installs, ffmpeg, model downloads) should NOT block the chat
-stream — a multi-minute held SSE connection is fragile (model-stops-early,
-timeouts, tab suspend). Instead we launch them **detached** and let an
-always-on monitor re-invoke the agent when they finish ("auto-continue").
-
-Design goals:
-  * Restart-safe: status is derived from an on-disk exit-code file, not a live
-    PID, so a uvicorn restart never loses a job or its result.
-  * Idempotent follow-up: a job stays {done, followed_up: False} until the
-    agent has actually been re-invoked, so completion can never silently
-    "do nothing" — the monitor retries on the next tick.
-  * Bounded: a hard max-runtime marks a runaway job failed and STILL triggers
-    a follow-up ("timed out"), so you always hear back.
-
-This module only owns launch + state. The monitor / agent re-invocation lives
-in the caller (so this stays import-light and unit-testable).
+Status comes from an exit-code file, not a live PID, so a restart loses no job.
+A job stays {done, followed_up: False} until the agent is re-invoked; the
+monitor in src/bg_monitor.py does that.
 """
 
 from __future__ import annotations

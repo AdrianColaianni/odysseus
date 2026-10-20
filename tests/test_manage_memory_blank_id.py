@@ -15,7 +15,7 @@ def test_manage_memory_delete_blank_id_rejected(tmp_path, monkeypatch):
     ]
     memory_file.write_text(json.dumps(initial_memories), encoding="utf-8")
 
-    manager = MemoryManager(str(tmp_path))
+    manager = MemoryManager(str(tmp_path / "memory.json"))
     monkeypatch.setattr(ai_interaction, "_memory_manager", manager)
     monkeypatch.setattr(ai_interaction, "_memory_vector", None)
 
@@ -41,7 +41,7 @@ def test_manage_memory_edit_blank_id_rejected(tmp_path, monkeypatch):
     ]
     memory_file.write_text(json.dumps(initial_memories), encoding="utf-8")
 
-    manager = MemoryManager(str(tmp_path))
+    manager = MemoryManager(str(tmp_path / "memory.json"))
     monkeypatch.setattr(ai_interaction, "_memory_manager", manager)
     monkeypatch.setattr(ai_interaction, "_memory_vector", None)
 

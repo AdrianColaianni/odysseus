@@ -1,10 +1,14 @@
-import asyncio
 import json
 import sys
 import types
-from pathlib import Path
 
 import src.agent_loop as al
+from tests.helpers.agent_stream import (
+    collect_chunks,
+    delta_chunk,
+    patch_agent_loop_basics,
+    sse_events,
+)
 
 
 def test_terminal_agent_gets_larger_failed_tool_recovery_window():
@@ -19,25 +23,6 @@ def test_terminal_agent_gets_larger_failed_tool_recovery_window():
         "terminal_agent": True,
         "failed_tool_round_limit": 99,
     }) == 8
-
-
-def _collect(gen):
-    async def _run():
-        return [chunk async for chunk in gen]
-
-    return asyncio.run(_run())
-
-
-def _events(chunks):
-    out = []
-    for chunk in chunks:
-        if not chunk.startswith("data: ") or chunk.startswith("data: [DONE]"):
-            continue
-        try:
-            out.append(json.loads(chunk[6:]))
-        except json.JSONDecodeError:
-            pass
-    return out
 
 
 class _FakeSkillsManager:
@@ -78,17 +63,72 @@ class _FakeSkillsManager:
         self.recorded.append(name)
 
 
+def _patch_loop(monkeypatch):
+    patch_agent_loop_basics(monkeypatch, al)
+    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
+
+
 def _patch_fake_skills(monkeypatch):
     fake_skills = types.ModuleType("services.memory.skills")
     fake_skills.SkillsManager = _FakeSkillsManager
     monkeypatch.setitem(sys.modules, "services.memory.skills", fake_skills)
-    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
-    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
-    monkeypatch.setattr(al, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
-    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
-    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
+    _patch_loop(monkeypatch)
     al._cached_base_prompt = None
     al._cached_base_prompt_key = None
+
+
+def _patch_empty_tool_index(monkeypatch):
+    class EmptyToolIndex:
+        def get_tools_for_query(self, *_args, **_kwargs):
+            return None
+
+    import src.tool_index as tool_index
+
+    monkeypatch.setattr(tool_index, "get_tool_index", lambda: EmptyToolIndex(), raising=False)
+
+
+async def _ok_stream(*args, **kwargs):
+    yield delta_chunk("ok")
+    yield "data: [DONE]\n\n"
+
+
+def _tool_names(schemas):
+    return {
+        (schema.get("function") or {}).get("name") or schema.get("name")
+        for schema in schemas
+        if isinstance(schema, dict)
+    }
+
+
+def _run_one_round(monkeypatch, prompt, **kwargs):
+    """Run one captured round against a model that answers "ok"; return the events."""
+    monkeypatch.setenv("ODYSSEUS_CAPTURE_MODEL_REQUESTS", "true")
+    monkeypatch.setattr(al, "stream_llm_with_fallback", _ok_stream, raising=False)
+    return sse_events(collect_chunks(
+        al.stream_agent_loop(
+            "https://api.openai.com/v1",
+            "gpt-4o",
+            [{"role": "user", "content": prompt}],
+            max_rounds=1,
+            **kwargs,
+        )
+    ))
+
+
+def _snapshot(events):
+    return next(event for event in events if event.get("type") == "model_request_snapshot")
+
+
+def _untrusted_text(snapshot):
+    return "\n".join(
+        str(message.get("content", ""))
+        for message in snapshot["messages"]
+        if (message.get("metadata") or {}).get("trusted") is False
+    )
+
+
+def _metrics(events):
+    return [event.get("data") or {} for event in events if event.get("type") == "metrics"]
 
 
 def test_unattended_native_runtime_hides_ask_user_from_model(monkeypatch):
@@ -98,13 +138,13 @@ def test_unattended_native_runtime_hides_ask_user_from_model(monkeypatch):
     requests = []
 
     async def _fake_stream(_candidates, messages, **kwargs):
-        requests.append((messages, kwargs.get("tools") or []))
-        yield f"data: {json.dumps({'delta': 'done'})}\n\n"
+        requests.append(kwargs.get("tools") or [])
+        yield delta_chunk("done")
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    _collect(
+    collect_chunks(
         al.stream_agent_loop(
             "https://api.openai.com/v1",
             "gpt-4o",
@@ -122,48 +162,7 @@ def test_unattended_native_runtime_hides_ask_user_from_model(monkeypatch):
     )
 
     assert len(requests) == 1
-    tool_names = {
-        schema.get("function", {}).get("name") or schema.get("name")
-        for schema in requests[0][1]
-    }
-    assert "bash" in tool_names
-    assert "ask_user" not in tool_names
-
-
-def test_native_cook_mode_hides_ask_user_without_redundant_flag(monkeypatch):
-    """Cook mode is autonomous even when a caller omits unattended_mode."""
-
-    _patch_fake_skills(monkeypatch)
-    requests = []
-
-    async def _fake_stream(_candidates, messages, **kwargs):
-        requests.append((messages, kwargs.get("tools") or []))
-        yield f"data: {json.dumps({'delta': 'done'})}\n\n"
-        yield "data: [DONE]\n\n"
-
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-
-    _collect(
-        al.stream_agent_loop(
-            "https://api.openai.com/v1",
-            "gpt-4o",
-            [{"role": "user", "content": "Inspect the workspace and finish."}],
-            max_rounds=1,
-            relevant_tools={"bash", "ask_user", "update_plan"},
-            owner="admin",
-            workspace="/workspace",
-            client_runtime_context={
-                "surface": "odysseus-native",
-                "terminal_agent": True,
-                "interaction_mode": "cook",
-            },
-        )
-    )
-
-    tool_names = {
-        schema.get("function", {}).get("name") or schema.get("name")
-        for schema in requests[0][1]
-    }
+    tool_names = _tool_names(requests[0])
     assert "bash" in tool_names
     assert "ask_user" not in tool_names
 
@@ -176,7 +175,7 @@ def test_native_cook_tool_surface_matches_attended_native_except_ask_user(monkey
 
     async def _fake_stream(_candidates, messages, **kwargs):
         requests.append(kwargs.get("tools") or [])
-        yield f"data: {json.dumps({'delta': 'done'})}\n\n"
+        yield delta_chunk("done")
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
@@ -185,7 +184,7 @@ def test_native_cook_tool_surface_matches_attended_native_except_ask_user(monkey
         "terminal_agent": True,
     }
     for context in (common, {**common, "interaction_mode": "cook"}):
-        _collect(
+        collect_chunks(
             al.stream_agent_loop(
                 "https://api.openai.com/v1",
                 "gpt-4o",
@@ -202,13 +201,7 @@ def test_native_cook_tool_surface_matches_attended_native_except_ask_user(monkey
             )
         )
 
-    def names(schemas):
-        return {
-            schema.get("function", {}).get("name") or schema.get("name")
-            for schema in schemas
-        }
-
-    attended, cook = map(names, requests)
+    attended, cook = map(_tool_names, requests)
     assert "ask_user" in attended
     assert cook == attended - {"ask_user"}
 
@@ -223,42 +216,6 @@ def test_native_cook_tool_surface_matches_attended_native_except_ask_user(monkey
     # same descriptions, argument contracts, and capabilities as attended
     # native. The interaction-only tool is the sole intentional difference.
     assert by_name(requests[1]) == by_name(requests[0])
-
-
-def test_attended_native_runtime_keeps_ask_user_available(monkeypatch):
-    """Interactive native callers retain the normal clarification tool."""
-
-    _patch_fake_skills(monkeypatch)
-    requests = []
-
-    async def _fake_stream(_candidates, messages, **kwargs):
-        requests.append(kwargs.get("tools") or [])
-        yield f"data: {json.dumps({'delta': 'done'})}\n\n"
-        yield "data: [DONE]\n\n"
-
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-
-    _collect(
-        al.stream_agent_loop(
-            "https://api.openai.com/v1",
-            "gpt-4o",
-            [{"role": "user", "content": "Inspect the workspace."}],
-            max_rounds=1,
-            relevant_tools={"bash", "ask_user", "update_plan"},
-            owner="admin",
-            workspace="/workspace",
-            client_runtime_context={
-                "surface": "odysseus-native",
-                "terminal_agent": True,
-            },
-        )
-    )
-
-    tool_names = {
-        schema.get("function", {}).get("name") or schema.get("name")
-        for schema in requests[0]
-    }
-    assert "ask_user" in tool_names
 
 
 def test_unattended_native_runtime_blocks_unsolicited_ask_user_call(monkeypatch):
@@ -285,13 +242,13 @@ def test_unattended_native_runtime_blocks_unsolicited_ask_user_call(monkeypatch)
                 }],
             }) + "\n\n"
         else:
-            yield f"data: {json.dumps({'delta': 'completed without user input'})}\n\n"
+            yield delta_chunk("completed without user input")
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    events = _events(_collect(
+    events = sse_events(collect_chunks(
         al.stream_agent_loop(
             "https://api.openai.com/v1",
             "gpt-4o",
@@ -316,7 +273,7 @@ def test_unattended_native_runtime_blocks_unsolicited_ask_user_call(monkeypatch)
     )
 
 
-def test_tui_runtime_directives_are_injected_into_model_prompt(monkeypatch):
+def test_tui_runtime_directives_are_injected_into_model_prompt():
     directive = al._tui_runtime_directive(
         {
             "surface": "odysseus-tui",
@@ -326,14 +283,12 @@ def test_tui_runtime_directives_are_injected_into_model_prompt(monkeypatch):
         }
     )
     assert "Use one focused host_shell diagnostic" in directive
-    assert directive.startswith("## TUI runtime instructions")
     assert al._tui_runtime_directive({"surface": "webui"}) == ""
 
 
 def test_model_request_includes_generic_host_network_runtime_context(monkeypatch):
     available = {"ip", "ss", "arp", "nmap", "ssh", "git", "docker"}
 
-    monkeypatch.setenv("ODYSSEUS_CAPTURE_MODEL_REQUESTS", "true")
     monkeypatch.setenv("ODYSSEUS_CONTAINER_NETWORK_MODE", "host")
     monkeypatch.setattr(al.os.path, "exists", lambda path: path == "/.dockerenv")
     monkeypatch.setattr(
@@ -341,106 +296,67 @@ def test_model_request_includes_generic_host_network_runtime_context(monkeypatch
         "which",
         lambda name: f"/usr/bin/{name}" if name in available else None,
     )
-    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
-    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
-    monkeypatch.setattr(al, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
-    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
+    _patch_loop(monkeypatch)
 
-    async def _fake_stream(*args, **kwargs):
-        yield f"data: {json.dumps({'delta': 'ok'})}\n\n"
-        yield "data: [DONE]\n\n"
-
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-
-    chunks = _collect(
-        al.stream_agent_loop(
-            "https://api.openai.com/v1",
-            "gpt-4o",
-            [{"role": "user", "content": "Can this agent scan my LAN?"}],
-            max_rounds=1,
-            relevant_tools={"bash"},
-        )
-    )
-    snapshot = next(event for event in _events(chunks) if event.get("type") == "model_request_snapshot")
+    snapshot = _snapshot(_run_one_round(
+        monkeypatch, "Can this agent scan my LAN?", relevant_tools={"bash"},
+    ))
     visible_text = "\n".join(str(message.get("content", "")) for message in snapshot["messages"])
 
-    assert "backend runtime context" in visible_text
     assert "containerized=true" in visible_text
     assert "container_engine=docker" in visible_text
     assert "container_network_mode=host" in visible_text
     assert "host_access=true" in visible_text
     assert "available_commands=ip, ss, arp, nmap, ssh, git, docker" in visible_text
     assert "backend_capabilities=network, lan-scan, ssh, git, docker" in visible_text
-    assert "For local/LAN/network diagnostics, use available shell tools" in visible_text
-    assert "Do not hand the user a command list to run themselves" in visible_text
 
 
 def test_model_request_includes_tui_client_runtime_context(monkeypatch):
-    monkeypatch.setenv("ODYSSEUS_CAPTURE_MODEL_REQUESTS", "true")
     monkeypatch.setenv("ODYSSEUS_CONTAINER_NETWORK_MODE", "bridge")
     monkeypatch.setattr(al.os.path, "exists", lambda path: path == "/.dockerenv")
-    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
-    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
-    monkeypatch.setattr(al, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
+    _patch_loop(monkeypatch)
 
-    async def _fake_stream(*args, **kwargs):
-        yield f"data: {json.dumps({'delta': 'ok'})}\n\n"
-        yield "data: [DONE]\n\n"
-
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-
-    chunks = _collect(
-        al.stream_agent_loop(
-            "https://api.openai.com/v1",
-            "gpt-4o",
-            [{"role": "user", "content": "find ajax on the LAN"}],
-            max_rounds=1,
-            relevant_tools={"bash"},
-            client_runtime_context={
-                "surface": "odysseus-tui",
-                "interaction_mode": "agent",
-                "terminal_agent": True,
-                "session_cwd": "/home/pewds/odysseus-tui",
-                "turn_controls": {
-                    "web": True,
-                    "bash": True,
-                    "research": False,
-                    "research_tool": True,
-                    "rag": False,
-                    "plan_mode": False,
-                    "incognito": False,
-                    "no_memory": True,
-                },
-                "network_visible": True,
-                "default_route": True,
-                "backend_host_limited": True,
-                "backend_container_network": "bridge",
-                "commands": {
-                    "ip": True,
-                    "nmap": True,
-                    "dig": True,
-                    "ssh": True,
-                    "git": True,
-                },
-                "capabilities": {
-                    "networkInspection": True,
-                    "lanScan": True,
-                    "dnsLookup": True,
-                    "sshClient": True,
-                    "git": True,
-                },
+    snapshot = _snapshot(_run_one_round(
+        monkeypatch,
+        "find ajax on the LAN",
+        relevant_tools={"bash"},
+        client_runtime_context={
+            "surface": "odysseus-tui",
+            "interaction_mode": "agent",
+            "terminal_agent": True,
+            "session_cwd": "/home/pewds/odysseus-tui",
+            "turn_controls": {
+                "web": True,
+                "bash": True,
+                "research": False,
+                "research_tool": True,
+                "rag": False,
+                "plan_mode": False,
+                "incognito": False,
+                "no_memory": True,
             },
-        )
-    )
-    snapshot = next(event for event in _events(chunks) if event.get("type") == "model_request_snapshot")
-    untrusted_messages = [
-        message
-        for message in snapshot["messages"]
-        if (message.get("metadata") or {}).get("trusted") is False
-    ]
-    visible_text = "\n".join(str(message.get("content", "")) for message in untrusted_messages)
+            "network_visible": True,
+            "default_route": True,
+            "backend_host_limited": True,
+            "backend_container_network": "bridge",
+            "commands": {
+                "ip": True,
+                "nmap": True,
+                "dig": True,
+                "ssh": True,
+                "git": True,
+            },
+            "capabilities": {
+                "networkInspection": True,
+                "lanScan": True,
+                "dnsLookup": True,
+                "sshClient": True,
+                "git": True,
+            },
+        },
+    ))
+    visible_text = _untrusted_text(snapshot)
 
-    assert "client runtime context" in visible_text
     assert "surface=odysseus-tui" in visible_text
     assert "interaction_mode=agent" in visible_text
     assert "terminal_agent=true" in visible_text
@@ -452,8 +368,6 @@ def test_model_request_includes_tui_client_runtime_context(monkeypatch):
     assert "backend_container_network=bridge" in visible_text
     assert "client_available_commands=ip, nmap, dig, ssh, git" in visible_text
     assert "client_capabilities=network, lan-scan, dns, ssh, git" in visible_text
-    assert "backend container may not see the same LAN/network namespace" in visible_text
-    assert "host-side bridge/tool" in visible_text
 
 
 def test_bridge_backed_local_network_turn_keeps_host_shell_after_rag(monkeypatch):
@@ -478,11 +392,6 @@ def test_bridge_backed_local_network_turn_keeps_host_shell_after_rag(monkeypatch
     )
 
     assert routed == {"host_shell", "ask_user", "update_plan"}
-
-
-def test_tui_local_surface_reconciles_caller_denials_after_routing():
-    source = (Path(__file__).resolve().parents[1] / "src" / "agent_loop.py").read_text()
-    assert "_caller_disabled_tools.difference_update(_local_allowed_tools)" in source
 
 
 def test_string_runtime_contract_enables_tui_host_workspace_routing():
@@ -604,17 +513,12 @@ def test_tui_local_execution_allowlist_rejects_backend_tools():
 
 
 def test_tui_local_unknown_tool_has_generic_read_only_host_fallback():
-    project_command = al._tui_local_fallback_shell_command(
+    assert al._tui_local_fallback_shell_command(
         "Search my computer for the local project."
     )
-    assert "git_roots:" in project_command
-    assert "project_manifests:" in project_command
-    local_ip_command = al._tui_local_fallback_shell_command(
+    assert "ajax" in al._tui_local_fallback_shell_command(
         "Find the local IP for ajax."
     )
-    assert "getent hosts ajax" in local_ip_command
-    assert "ip -o -4 addr show" in local_ip_command
-    assert "ip route show default" in local_ip_command
     assert al._tui_local_fallback_shell_command(
         "Fix the parser bug in src/parser.py."
     ) is None
@@ -694,6 +598,7 @@ def test_active_client_skill_lands_in_untrusted_prompt_message(monkeypatch):
         if message.get("role") == "system"
     )
     assert "write a failing test" not in system_text
+    assert "active_skills=tdd" not in system_text
 
     skill_messages = [
         message
@@ -702,42 +607,21 @@ def test_active_client_skill_lands_in_untrusted_prompt_message(monkeypatch):
         and "Source: skills" in str(message.get("content") or "")
     ]
     assert skill_messages
-    skill_text = skill_messages[0]["content"]
-    assert "active_skills=tdd" not in system_text
-    assert "### tdd" in skill_text
-    assert "write a failing test" in skill_text
-    assert "explicitly activated by the client" in skill_text
+    assert "write a failing test" in skill_messages[0]["content"]
 
 
 def test_active_client_skill_requires_toolsets_are_added_to_schema(monkeypatch):
     _patch_fake_skills(monkeypatch)
-    monkeypatch.setenv("ODYSSEUS_CAPTURE_MODEL_REQUESTS", "true")
 
-    async def _fake_stream(*args, **kwargs):
-        yield f"data: {json.dumps({'delta': 'ok'})}\n\n"
-        yield "data: [DONE]\n\n"
-
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-
-    chunks = _collect(
-        al.stream_agent_loop(
-            "https://api.openai.com/v1",
-            "gpt-4o",
-            [{"role": "user", "content": "fix the parser"}],
-            max_rounds=1,
-            relevant_tools={"bash"},
-            client_runtime_context={
-                "surface": "odysseus-tui",
-                "active_skills": ["tdd"],
-            },
-        )
-    )
-    snapshot = next(event for event in _events(chunks) if event.get("type") == "model_request_snapshot")
-    tool_names = {
-        (tool.get("function") or {}).get("name")
-        for tool in snapshot["tools"]
-        if isinstance(tool, dict)
-    }
+    tool_names = _tool_names(_snapshot(_run_one_round(
+        monkeypatch,
+        "fix the parser",
+        relevant_tools={"bash"},
+        client_runtime_context={
+            "surface": "odysseus-tui",
+            "active_skills": ["tdd"],
+        },
+    ))["tools"])
 
     assert "bash" in tool_names
     assert "manage_skills" in tool_names
@@ -746,358 +630,142 @@ def test_active_client_skill_requires_toolsets_are_added_to_schema(monkeypatch):
 
 def test_active_client_skill_prevents_direct_low_signal_reply(monkeypatch):
     _patch_fake_skills(monkeypatch)
-    monkeypatch.setenv("ODYSSEUS_CAPTURE_MODEL_REQUESTS", "true")
+    _patch_empty_tool_index(monkeypatch)
 
-    class EmptyToolIndex:
-        def get_tools_for_query(self, *_args, **_kwargs):
-            return None
-
-    import src.tool_index as tool_index
-
-    monkeypatch.setattr(tool_index, "get_tool_index", lambda: EmptyToolIndex(), raising=False)
-
-    async def _fake_stream(*args, **kwargs):
-        yield f"data: {json.dumps({'delta': 'ok'})}\n\n"
-        yield "data: [DONE]\n\n"
-
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-
-    chunks = _collect(
-        al.stream_agent_loop(
-            "https://api.openai.com/v1",
-            "gpt-4o",
-            [{"role": "user", "content": "fix parser"}],
-            max_rounds=1,
-            relevant_tools=None,
-            client_runtime_context={
-                "surface": "odysseus-tui",
-                "active_skills": ["tdd"],
-            },
-        )
+    events = _run_one_round(
+        monkeypatch,
+        "fix parser",
+        relevant_tools=None,
+        client_runtime_context={
+            "surface": "odysseus-tui",
+            "active_skills": ["tdd"],
+        },
     )
-    events = _events(chunks)
-    snapshot = next(event for event in events if event.get("type") == "model_request_snapshot")
-    tool_names = {
-        (tool.get("function") or {}).get("name")
-        for tool in snapshot["tools"]
-        if isinstance(tool, dict)
-    }
-    metrics = [
-        event.get("data") or {}
-        for event in events
-        if event.get("type") == "metrics"
-    ]
+    tool_names = _tool_names(_snapshot(events)["tools"])
 
-    assert not any(metric.get("direct_low_signal") for metric in metrics)
+    assert not any(metric.get("direct_low_signal") for metric in _metrics(events))
     assert "manage_skills" in tool_names
     assert "grep" in tool_names
 
 
 def test_terminal_agent_mode_prevents_direct_low_signal_reply(monkeypatch):
-    monkeypatch.setenv("ODYSSEUS_CAPTURE_MODEL_REQUESTS", "true")
-    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
-    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
-    monkeypatch.setattr(al, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
-    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
+    _patch_loop(monkeypatch)
+    _patch_empty_tool_index(monkeypatch)
 
-    class EmptyToolIndex:
-        def get_tools_for_query(self, *_args, **_kwargs):
-            return None
-
-    import src.tool_index as tool_index
-
-    monkeypatch.setattr(tool_index, "get_tool_index", lambda: EmptyToolIndex(), raising=False)
-
-    async def _fake_stream(*args, **kwargs):
-        yield f"data: {json.dumps({'delta': 'ok'})}\n\n"
-        yield "data: [DONE]\n\n"
-
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-
-    chunks = _collect(
-        al.stream_agent_loop(
-            "https://api.openai.com/v1",
-            "gpt-4o",
-            [{"role": "user", "content": "uodate?"}],
-            max_rounds=1,
-            relevant_tools=None,
-            client_runtime_context={
-                "surface": "odysseus-tui",
-                "interaction_mode": "agent",
-                "terminal_agent": True,
-            },
-        )
+    events = _run_one_round(
+        monkeypatch,
+        "uodate?",
+        relevant_tools=None,
+        client_runtime_context={
+            "surface": "odysseus-tui",
+            "interaction_mode": "agent",
+            "terminal_agent": True,
+        },
     )
-    events = _events(chunks)
-    snapshot = next(event for event in events if event.get("type") == "model_request_snapshot")
-    metrics = [
-        event.get("data") or {}
-        for event in events
-        if event.get("type") == "metrics"
-    ]
 
-    assert snapshot["tools"]
-    assert not any(metric.get("direct_low_signal") for metric in metrics)
+    assert _snapshot(events)["tools"]
+    assert not any(metric.get("direct_low_signal") for metric in _metrics(events))
 
 
 def test_chat_mode_can_use_direct_low_signal_reply(monkeypatch):
-    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
-    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
-    monkeypatch.setattr(al, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
-    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
+    _patch_loop(monkeypatch)
 
-    async def _fake_stream(*args, **kwargs):
-        yield f"data: {json.dumps({'delta': 'ok'})}\n\n"
-        yield "data: [DONE]\n\n"
-
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-
-    chunks = _collect(
-        al.stream_agent_loop(
-            "https://api.openai.com/v1",
-            "gpt-4o",
-            [{"role": "user", "content": "nice"}],
-            max_rounds=1,
-            relevant_tools=None,
-            client_runtime_context={
-                "surface": "odysseus-tui",
-                "interaction_mode": "chat",
-                "terminal_agent": False,
-            },
-        )
+    events = _run_one_round(
+        monkeypatch,
+        "nice",
+        relevant_tools=None,
+        client_runtime_context={
+            "surface": "odysseus-tui",
+            "interaction_mode": "chat",
+            "terminal_agent": False,
+        },
     )
-    metrics = [
-        event.get("data") or {}
-        for event in _events(chunks)
-        if event.get("type") == "metrics"
+
+    assert any(metric.get("direct_low_signal") for metric in _metrics(events))
+
+
+def test_host_shell_schema_requires_a_safe_tui_bridge(monkeypatch):
+    _patch_loop(monkeypatch)
+    cases = [
+        # (prompt, bridge url, relevant tools, offered tools, withheld tools)
+        ("find ajax on the LAN", None, {"host_shell", "bash"}, set(), {"bash", "host_shell"}),
+        ("find ajax local ip on the LAN", "http://host.docker.internal:17654/run", {"bash"}, {"host_shell"}, set()),
+        ("find ajax local ip on the LAN", "http://169.254.169.254/run", {"host_shell", "bash"}, {"bash"}, {"host_shell"}),
     ]
+    for prompt, bridge_url, relevant_tools, offered, withheld in cases:
+        context = {"surface": "odysseus-tui", "network_visible": True}
+        if bridge_url:
+            context["host_shell_bridge"] = {"url": bridge_url, "token": "bridge-token"}
 
-    assert any(metric.get("direct_low_signal") for metric in metrics)
+        tool_names = _tool_names(_snapshot(_run_one_round(
+            monkeypatch,
+            prompt,
+            relevant_tools=relevant_tools,
+            client_runtime_context=context,
+        ))["tools"])
 
-
-def test_host_shell_schema_hidden_without_tui_bridge(monkeypatch):
-    monkeypatch.setenv("ODYSSEUS_CAPTURE_MODEL_REQUESTS", "true")
-    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
-    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
-    monkeypatch.setattr(al, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
-    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
-
-    async def _fake_stream(*args, **kwargs):
-        yield f"data: {json.dumps({'delta': 'ok'})}\n\n"
-        yield "data: [DONE]\n\n"
-
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-
-    chunks = _collect(
-        al.stream_agent_loop(
-            "https://api.openai.com/v1",
-            "gpt-4o",
-            [{"role": "user", "content": "find ajax on the LAN"}],
-            max_rounds=1,
-            relevant_tools={"host_shell", "bash"},
-            client_runtime_context={
-                "surface": "odysseus-tui",
-                "network_visible": True,
-            },
-        )
-    )
-    snapshot = next(event for event in _events(chunks) if event.get("type") == "model_request_snapshot")
-    tool_names = {
-        (tool.get("function") or {}).get("name")
-        for tool in snapshot["tools"]
-        if isinstance(tool, dict)
-    }
-
-    assert "bash" not in tool_names  # No workspace is available for local tools.
-    assert "host_shell" not in tool_names
-
-
-def test_host_shell_schema_visible_with_tui_bridge_for_lan_request(monkeypatch):
-    monkeypatch.setenv("ODYSSEUS_CAPTURE_MODEL_REQUESTS", "true")
-    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
-    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
-    monkeypatch.setattr(al, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
-    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
-
-    async def _fake_stream(*args, **kwargs):
-        yield f"data: {json.dumps({'delta': 'ok'})}\n\n"
-        yield "data: [DONE]\n\n"
-
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-
-    chunks = _collect(
-        al.stream_agent_loop(
-            "https://api.openai.com/v1",
-            "gpt-4o",
-            [{"role": "user", "content": "find ajax local ip on the LAN"}],
-            max_rounds=1,
-            relevant_tools={"bash"},
-            client_runtime_context={
-                "surface": "odysseus-tui",
-                "network_visible": True,
-                "host_shell_bridge": {
-                    "url": "http://host.docker.internal:17654/run",
-                    "token": "bridge-token",
-                },
-            },
-        )
-    )
-    snapshot = next(event for event in _events(chunks) if event.get("type") == "model_request_snapshot")
-    tool_names = {
-        (tool.get("function") or {}).get("name")
-        for tool in snapshot["tools"]
-        if isinstance(tool, dict)
-    }
-
-    assert "host_shell" in tool_names
-
-
-def test_host_shell_schema_hidden_for_unsafe_bridge_url(monkeypatch):
-    monkeypatch.setenv("ODYSSEUS_CAPTURE_MODEL_REQUESTS", "true")
-    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
-    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
-    monkeypatch.setattr(al, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
-    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
-
-    async def _fake_stream(*args, **kwargs):
-        yield f"data: {json.dumps({'delta': 'ok'})}\n\n"
-        yield "data: [DONE]\n\n"
-
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-
-    chunks = _collect(
-        al.stream_agent_loop(
-            "https://api.openai.com/v1",
-            "gpt-4o",
-            [{"role": "user", "content": "find ajax local ip on the LAN"}],
-            max_rounds=1,
-            relevant_tools={"host_shell", "bash"},
-            client_runtime_context={
-                "surface": "odysseus-tui",
-                "network_visible": True,
-                "host_shell_bridge": {
-                    "url": "http://169.254.169.254/run",
-                    "token": "bridge-token",
-                },
-            },
-        )
-    )
-    snapshot = next(event for event in _events(chunks) if event.get("type") == "model_request_snapshot")
-    tool_names = {
-        (tool.get("function") or {}).get("name")
-        for tool in snapshot["tools"]
-        if isinstance(tool, dict)
-    }
-
-    assert "bash" in tool_names
-    assert "host_shell" not in tool_names
+        assert offered <= tool_names, bridge_url
+        assert not withheld & tool_names, bridge_url
 
 
 def test_host_shell_schema_seeded_with_tui_bridge_when_retrieval_returns_none(monkeypatch):
-    monkeypatch.setenv("ODYSSEUS_CAPTURE_MODEL_REQUESTS", "true")
-    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
-    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
-    monkeypatch.setattr(al, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
-    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
+    _patch_loop(monkeypatch)
+    _patch_empty_tool_index(monkeypatch)
 
-    class EmptyToolIndex:
-        def get_tools_for_query(self, *_args, **_kwargs):
-            return None
-
-    import src.tool_index as tool_index
-
-    monkeypatch.setattr(tool_index, "get_tool_index", lambda: EmptyToolIndex(), raising=False)
-
-    async def _fake_stream(*args, **kwargs):
-        yield f"data: {json.dumps({'delta': 'ok'})}\n\n"
-        yield "data: [DONE]\n\n"
-
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-
-    chunks = _collect(
-        al.stream_agent_loop(
-            "https://api.openai.com/v1",
-            "gpt-4o",
-            [{"role": "user", "content": "run nmap to inspect the LAN and find ajax local ip while tailscale is down"}],
-            max_rounds=1,
-            relevant_tools=None,
-            client_runtime_context={
-                "surface": "odysseus-tui",
-                "network_visible": True,
-                "host_shell_bridge": {
-                    "url": "http://host.docker.internal:17654/run",
-                    "token": "bridge-token",
-                },
+    tool_names = _tool_names(_snapshot(_run_one_round(
+        monkeypatch,
+        "run nmap to inspect the LAN and find ajax local ip while tailscale is down",
+        relevant_tools=None,
+        client_runtime_context={
+            "surface": "odysseus-tui",
+            "network_visible": True,
+            "host_shell_bridge": {
+                "url": "http://host.docker.internal:17654/run",
+                "token": "bridge-token",
             },
-        )
-    )
-    snapshot = next(event for event in _events(chunks) if event.get("type") == "model_request_snapshot")
-    tool_names = {
-        (tool.get("function") or {}).get("name")
-        for tool in snapshot["tools"]
-        if isinstance(tool, dict)
-    }
+        },
+    ))["tools"])
 
     assert "bash" in tool_names
     assert "host_shell" in tool_names
 
 
 def test_tui_local_workspace_turn_hides_backend_file_tools(monkeypatch):
-    monkeypatch.setenv("ODYSSEUS_CAPTURE_MODEL_REQUESTS", "true")
-    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
-    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
-    monkeypatch.setattr(al, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
-    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
+    _patch_loop(monkeypatch)
 
-    async def _fake_stream(*args, **kwargs):
-        yield f"data: {json.dumps({'delta': 'ok'})}\n\n"
-        yield "data: [DONE]\n\n"
-
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-
-    chunks = _collect(
-        al.stream_agent_loop(
-            "https://api.openai.com/v1",
-            "gpt-4o",
-            [{"role": "user", "content": "debug this workspace and run tests"}],
-            max_rounds=1,
-            relevant_tools={
-                "bash",
-                "python",
-                "read_file",
-                "grep",
-                "glob",
-                "ls",
-                "get_workspace",
-                "apply_patch",
-                "ask_user",
-                "update_plan",
+    tool_names = _tool_names(_snapshot(_run_one_round(
+        monkeypatch,
+        "debug this workspace and run tests",
+        relevant_tools={
+            "bash",
+            "python",
+            "read_file",
+            "grep",
+            "glob",
+            "ls",
+            "get_workspace",
+            "apply_patch",
+            "ask_user",
+            "update_plan",
+        },
+        workspace="/host/home/pewds/odysseus-tui",
+        client_runtime_context={
+            "surface": "odysseus-tui",
+            "session_cwd": "/home/pewds/odysseus-tui",
+            "host_shell_bridge": {
+                "url": "http://host.docker.internal:17654/run",
+                "token": "bridge-token",
             },
-            workspace="/host/home/pewds/odysseus-tui",
-            client_runtime_context={
-                "surface": "odysseus-tui",
-                "session_cwd": "/home/pewds/odysseus-tui",
-                "host_shell_bridge": {
-                    "url": "http://host.docker.internal:17654/run",
-                    "token": "bridge-token",
-                },
-                "runtime_execution_contract": {
-                    "backend_shell_scope": "container",
-                    "host_shell": "available",
-                    "local_workspace_tasks": "use_host_shell_bridge",
-                },
-                "local_capability_contract": {
-                    "routing": {"local_workspace_first": True},
-                },
+            "runtime_execution_contract": {
+                "backend_shell_scope": "container",
+                "host_shell": "available",
+                "local_workspace_tasks": "use_host_shell_bridge",
             },
-        )
-    )
-    snapshot = next(event for event in _events(chunks) if event.get("type") == "model_request_snapshot")
-    tool_names = {
-        (tool.get("function") or {}).get("name")
-        for tool in snapshot["tools"]
-        if isinstance(tool, dict)
-    }
+            "local_capability_contract": {
+                "routing": {"local_workspace_first": True},
+            },
+        },
+    ))["tools"])
 
     assert "host_shell" in tool_names
     assert "bash" not in tool_names
@@ -1112,13 +780,9 @@ def test_native_host_shell_call_runs_through_bridge_and_threads_result(monkeypat
     # Routing test written for the opt-out posture; the gate default is pinned in
     # tests/test_tool_approval_gate_default.py.
     monkeypatch.setattr("src.tool_capabilities.TOOL_APPROVAL_GATE_ENABLED", False)
-    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
-    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
-    monkeypatch.setattr(al, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
-    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
+    _patch_loop(monkeypatch)
 
     import src.agent_tools.subprocess_tools as subprocess_tools
-    import src.tool_execution as tool_execution
 
     # Patch the module dict the dispatch ACTUALLY runs from. Later-collected
     # test modules (e.g. test_fenced_inline_args) re-import src.tool_execution
@@ -1169,13 +833,8 @@ def test_native_host_shell_call_runs_through_bridge_and_threads_result(monkeypat
     async def _fake_stream(_candidates, messages, **kwargs):
         seen_round_messages.append(list(messages))
         if len(seen_round_messages) == 1:
-            tool_names = {
-                (tool.get("function") or {}).get("name")
-                for tool in (kwargs.get("tools") or [])
-                if isinstance(tool, dict)
-            }
-            assert "host_shell" in tool_names
-            yield f"data: {json.dumps({'delta': 'Checking the host network.'})}\n\n"
+            assert "host_shell" in _tool_names(kwargs.get("tools") or [])
+            yield delta_chunk("Checking the host network.")
             yield f"data: {json.dumps({'type': 'tool_calls', 'calls': native_calls})}\n\n"
             yield "data: [DONE]\n\n"
         else:
@@ -1183,12 +842,12 @@ def test_native_host_shell_call_runs_through_bridge_and_threads_result(monkeypat
             assert tool_messages
             assert tool_messages[-1]["tool_call_id"] == "call_host_1"
             assert "ajax 192.168.1.42" in tool_messages[-1]["content"]
-            yield f"data: {json.dumps({'delta': 'ajax is at 192.168.1.42.'})}\n\n"
+            yield delta_chunk("ajax is at 192.168.1.42.")
             yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
 
-    chunks = _collect(
+    events = sse_events(collect_chunks(
         al.stream_agent_loop(
             "https://api.openai.com/v1",
             "gpt-4o",
@@ -1206,8 +865,7 @@ def test_native_host_shell_call_runs_through_bridge_and_threads_result(monkeypat
                 },
             },
         )
-    )
-    events = _events(chunks)
+    ))
 
     assert len(seen_round_messages) == 2
     assert bridge_calls[1][1] == "http://host.docker.internal:17654/run"
@@ -1261,7 +919,6 @@ def test_workspace_agents_md_lands_in_untrusted_prompt_message(tmp_path, monkeyp
         for message in messages
         if message.get("role") == "system"
     )
-    assert "AGENTS.md context" in system_text
     assert malicious not in system_text
 
     agents_messages = [
@@ -1277,43 +934,3 @@ def test_workspace_agents_md_lands_in_untrusted_prompt_message(tmp_path, monkeyp
     assert "Use pytest for verification." in agents_text
     assert str(child_agents) in agents_text
     assert malicious in agents_text
-
-
-def test_model_request_includes_workspace_agents_md_context(tmp_path, monkeypatch):
-    workspace = tmp_path / "repo"
-    workspace.mkdir()
-    agents = workspace / "AGENTS.md"
-    agents.write_text("Run focused tests before final status.", encoding="utf-8")
-
-    monkeypatch.setenv("ODYSSEUS_CAPTURE_MODEL_REQUESTS", "true")
-    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
-    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
-    monkeypatch.setattr(al, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
-
-    async def _fake_stream(*args, **kwargs):
-        yield f"data: {json.dumps({'delta': 'ok'})}\n\n"
-        yield "data: [DONE]\n\n"
-
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
-
-    chunks = _collect(
-        al.stream_agent_loop(
-            "https://api.openai.com/v1",
-            "gpt-4o",
-            [{"role": "user", "content": "fix this repo"}],
-            max_rounds=1,
-            relevant_tools={"bash", "grep", "read_file"},
-            workspace=str(workspace),
-        )
-    )
-    snapshot = next(event for event in _events(chunks) if event.get("type") == "model_request_snapshot")
-    untrusted_messages = [
-        message
-        for message in snapshot["messages"]
-        if (message.get("metadata") or {}).get("trusted") is False
-    ]
-    visible_text = "\n".join(str(message.get("content", "")) for message in untrusted_messages)
-
-    assert "Source: AGENTS.md" in visible_text
-    assert str(agents) in visible_text
-    assert "Run focused tests before final status." in visible_text

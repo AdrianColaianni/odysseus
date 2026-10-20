@@ -1,13 +1,7 @@
-"""Adaptive input-token budget for the agent loop (#1170).
+"""Effective input-token budget for the agent loop.
 
-The agent soft-trims its input context to ``agent_input_token_budget`` (default
-6000). The old computation was ``min(context_length or budget, budget)``, which
-made the 6000 default a hard ceiling for *every* model — so a 128K or 1M context
-model was silently capped at 6000 input tokens even though it can hold far more.
-
-This derives the effective budget from the model's discovered context window when
-the user has NOT set an explicit budget, while still honouring an explicit setting
-exactly (clamped to the window). Pure and side-effect free so it is unit-testable.
+With no explicit budget, scale to the model's context window; an explicit
+setting is honoured exactly, clamped to the window.
 """
 
 # Generous ceiling so long-context models are unblocked without sending a

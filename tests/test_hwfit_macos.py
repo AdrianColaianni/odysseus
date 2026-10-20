@@ -31,7 +31,7 @@ def _metal_system(ram_gb=16.0, vram_gb=10.7):
 
 
 def _fake_sysctl(brand="Apple M2 Pro", memsize_gb=32, wired_mb=None, display_json=None, display_text=None):
-    def run(cmd):
+    def run(cmd, remote=None):
         joined = " ".join(cmd)
         if "machdep.cpu.brand_string" in joined:
             return brand
@@ -110,7 +110,6 @@ def test_safetensors_models_still_recommended_on_cuda():
 def test_apple_silicon_detected_as_metal(monkeypatch):
     """On local Apple Silicon, detection reports a Metal GPU with a RAM-scaled
     unified-memory budget."""
-    monkeypatch.setattr(hardware, "_remote_host", None)
     monkeypatch.setattr(hardware.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(hardware.platform, "machine", lambda: "arm64")
     monkeypatch.setattr(hardware, "_run", _fake_sysctl(
@@ -128,7 +127,6 @@ def test_apple_silicon_detected_as_metal(monkeypatch):
 
 
 def test_apple_silicon_gpu_cores_fall_back_to_plain_text(monkeypatch):
-    monkeypatch.setattr(hardware, "_remote_host", None)
     monkeypatch.setattr(hardware.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(hardware.platform, "machine", lambda: "arm64")
     monkeypatch.setattr(hardware, "_run", _fake_sysctl(
@@ -144,7 +142,6 @@ def test_apple_silicon_gpu_cores_fall_back_to_plain_text(monkeypatch):
 
 
 def test_apple_silicon_gpu_cores_are_optional(monkeypatch):
-    monkeypatch.setattr(hardware, "_remote_host", None)
     monkeypatch.setattr(hardware.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(hardware.platform, "machine", lambda: "arm64")
     monkeypatch.setattr(hardware, "_run", _fake_sysctl(memsize_gb=32))
@@ -156,7 +153,6 @@ def test_apple_silicon_gpu_cores_are_optional(monkeypatch):
 
 def test_apple_silicon_skipped_on_linux(monkeypatch):
     """Guarantee Linux detection is untouched: the Metal probe bails immediately."""
-    monkeypatch.setattr(hardware, "_remote_host", None)
     monkeypatch.setattr(hardware.platform, "system", lambda: "Linux")
     monkeypatch.setattr(hardware.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(hardware, "_run", _fake_sysctl())
@@ -165,7 +161,6 @@ def test_apple_silicon_skipped_on_linux(monkeypatch):
 
 def test_intel_mac_skipped(monkeypatch):
     """Intel Macs have no Metal GPU worth serving LLMs on — fall through to CPU."""
-    monkeypatch.setattr(hardware, "_remote_host", None)
     monkeypatch.setattr(hardware.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(hardware.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(hardware, "_run", _fake_sysctl())
@@ -174,7 +169,6 @@ def test_intel_mac_skipped(monkeypatch):
 
 def test_plain_arm_mac_skipped(monkeypatch):
     """Only ARM64-class Macs should enter the Apple Silicon Metal path."""
-    monkeypatch.setattr(hardware, "_remote_host", None)
     monkeypatch.setattr(hardware.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(hardware.platform, "machine", lambda: "armv7l")
     monkeypatch.setattr(hardware, "_run", _fake_sysctl())
@@ -184,15 +178,15 @@ def test_plain_arm_mac_skipped(monkeypatch):
 def test_detect_system_propagates_unified_memory(monkeypatch):
     """The unified_memory flag set by GPU detection must survive into the
     system dict so the API and UI can report it (it was being dropped)."""
-    monkeypatch.setattr(hardware, "_detect_apple_silicon", lambda: {
+    monkeypatch.setattr(hardware, "_detect_apple_silicon", lambda remote=None: {
         "gpu_name": "Apple M4", "gpu_vram_gb": 10.7, "gpu_count": 1,
         "gpus": [], "gpu_groups": [], "homogeneous": True,
         "backend": "metal", "unified_memory": True, "gpu_cores": 10,
     })
-    monkeypatch.setattr(hardware, "_get_ram_gb", lambda: 16.0)
-    monkeypatch.setattr(hardware, "_get_available_ram_gb", lambda: 11.0)
-    monkeypatch.setattr(hardware, "_get_cpu_count", lambda: 10)
-    monkeypatch.setattr(hardware, "_get_cpu_name", lambda: "Apple M4")
+    monkeypatch.setattr(hardware, "_get_ram_gb", lambda remote=None: 16.0)
+    monkeypatch.setattr(hardware, "_get_available_ram_gb", lambda remote=None: 11.0)
+    monkeypatch.setattr(hardware, "_get_cpu_count", lambda remote=None: 10)
+    monkeypatch.setattr(hardware, "_get_cpu_name", lambda remote=None: "Apple M4")
 
     s = hardware.detect_system(fresh=True)
     assert s["backend"] == "metal"

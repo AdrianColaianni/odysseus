@@ -2,7 +2,6 @@
 
 P2-2 invariant: external bridge execution != local containment.
 """
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 

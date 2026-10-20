@@ -116,7 +116,6 @@ export function wireTopbarMenus({
     applyImageResize(result.w, result.h, result);
   }
 
-  // ── Image menu ──
   {
     const btn = document.getElementById('ge-image-menu-btn');
     const menu = document.getElementById('ge-image-menu');
@@ -147,7 +146,6 @@ export function wireTopbarMenus({
     }
   }
 
-  // ── Select menu ──
   const renderSelectionMenu = () => {
     const hasSelection = !!state.wandMask || (state.lassoPoints?.length >= 3 && !state.lassoActive);
     const menu = document.getElementById('ge-selection-menu');
@@ -237,7 +235,6 @@ export function wireTopbarMenus({
     }
   }
 
-  // ── Filter menu (Blur sub-menu — Gaussian / Zoom) ──
   {
     const btn = document.getElementById('ge-filter-menu-btn');
     const menu = document.getElementById('ge-filter-menu');
@@ -271,7 +268,6 @@ export function wireTopbarMenus({
     }
   }
 
-  // ── Resize popup (preset items + Custom… → resizeCustomPrompt) ──
   {
     const btn = document.getElementById('ge-resize-menu-btn');
     const menu = document.getElementById('ge-resize-menu');

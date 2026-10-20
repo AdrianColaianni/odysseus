@@ -77,6 +77,39 @@ def _chat_smoke_source(extra_source: str) -> str:
     return source
 
 
+_STATE_AND_STOP = _extract_source(_CHAT, "const _backgroundStreams", "// Sources box builder")
+_RESERVATION = _extract_source(
+    _CHAT,
+    "const streamGeneration = (_streamGenerations.get(streamSessionId) || 0) + 1;",
+    "_sendInFlight = false;",
+)
+_HEADER_CAPTURE = _extract_source(
+    _CHAT,
+    "const streamRunId = res.headers.get('X-Odysseus-Run-Id')",
+    "// Mark the chat log busy",
+)
+_FINALLY_CLEANUP = _extract_source(
+    _CHAT,
+    "const _ownsStreamState =",
+    "// Streaming done — let screen readers announce",
+)
+
+
+def _stop_harness(is_streaming: bool = False) -> str:
+    """Node prelude: the real stream state and Stop blocks, with fake fetch."""
+    return f"""
+      let currentAbort = null;
+      let isStreaming = {'true' if is_streaming else 'false'};
+      let currentHolder = null;
+      let _sendInFlight = false;
+      const calls = [];
+      function _setForegroundChatBusy() {{}}
+      const window = {{}};
+      const sessionModule = {{ getCurrentSessionId() {{ return 'session-1'; }} }};
+      const fetch = async (url, options) => {{ calls.push({{ url, options }}); return {{ ok: true }}; }};
+      {_STATE_AND_STOP}
+    """
+
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_chat_runtime_stream_state_helpers_are_all_callable(tmp_path):
     """Import the real module and execute all three rebased-away helpers."""
@@ -270,21 +303,8 @@ async def _collect_run_events(session_id: str, run: object) -> list[str]:
 def test_stop_before_response_headers_waits_for_exact_run_identity():
     """Never send headerless Stop, but flush the queued Stop once headers arrive."""
 
-    state_and_stop = _extract_source(
-        _CHAT, "const _backgroundStreams", "// Sources box builder"
-    )
-    header_capture = _extract_source(
-        _CHAT,
-        "const streamRunId = res.headers.get('X-Odysseus-Run-Id')",
-        "// Mark the chat log busy",
-    )
     script = f"""
-      const calls = [];
-      function _setForegroundChatBusy() {{}}
-      const window = {{}};
-      const sessionModule = {{ getCurrentSessionId() {{ return 'session-1'; }} }};
-      const fetch = async (url, options) => {{ calls.push({{ url, options }}); return {{ ok: true }}; }};
-      {state_and_stop}
+      {_stop_harness()}
       {{
         const streamSessionId = 'normal-session';
         const streamGeneration = 1;
@@ -292,7 +312,7 @@ def test_stop_before_response_headers_waits_for_exact_run_identity():
         const res = {{ headers: {{ get(name) {{
           return name === 'X-Odysseus-Run-Id' ? 'normal-run' : null;
         }} }} }};
-        {header_capture}
+        {_HEADER_CAPTURE}
       }}
       await new Promise(resolve => setTimeout(resolve, 0));
       const normalHeaderCalls = calls.length;
@@ -306,7 +326,7 @@ def test_stop_before_response_headers_waits_for_exact_run_identity():
         const res = {{ headers: {{ get(name) {{
           return name === 'X-Odysseus-Run-Id' ? 'run-1' : null;
         }} }} }};
-        {header_capture}
+        {_HEADER_CAPTURE}
       }}
       await new Promise(resolve => setTimeout(resolve, 0));
       console.log(JSON.stringify({{
@@ -368,26 +388,8 @@ def test_resend_preserves_queued_stop_until_old_run_identity_arrives():
     it). The old run id must not leak into the replacement's identity map.
     """
 
-    state_and_stop = _extract_source(
-        _CHAT, "const _backgroundStreams", "// Sources box builder"
-    )
-    resend_reset = _extract_source(
-        _CHAT,
-        "const streamGeneration = (_streamGenerations.get(streamSessionId) || 0) + 1;",
-        "_sendInFlight = false;",
-    )
-    header_capture = _extract_source(
-        _CHAT,
-        "const streamRunId = res.headers.get('X-Odysseus-Run-Id')",
-        "// Mark the chat log busy",
-    )
     script = f"""
-      const calls = [];
-      function _setForegroundChatBusy() {{}}
-      const window = {{}};
-      const sessionModule = {{ getCurrentSessionId() {{ return 'session-1'; }} }};
-      const fetch = async (url, options) => {{ calls.push({{ url, options }}); return {{ ok: true }}; }};
-      {state_and_stop}
+      {_stop_harness()}
       const oldCtrl = {{
         _reason: '',
         signal: {{ aborted: false }},
@@ -401,7 +403,7 @@ def test_resend_preserves_queued_stop_until_old_run_identity_arrives():
       // Replacement send starts: bumps the generation, leaves the queued Stop.
       {{
         const streamSessionId = 'session-1';
-        {resend_reset}
+        {_RESERVATION}
       }}
       // The replacement is ALSO stopped before its headers arrive: both
       // sends' cancellation intents must coexist, neither displacing the
@@ -428,7 +430,7 @@ def test_resend_preserves_queued_stop_until_old_run_identity_arrives():
         const res = {{ headers: {{ get(name) {{
           return name === 'X-Odysseus-Run-Id' ? 'old-run' : null;
         }} }} }};
-        {header_capture}
+        {_HEADER_CAPTURE}
       }}
       await new Promise(resolve => setTimeout(resolve, 0));
       console.log(JSON.stringify({{
@@ -486,30 +488,15 @@ def test_superseded_stream_cleanup_leaves_replacement_state_alone():
     would call it the owner).
     """
 
-    state_and_stop = _extract_source(
-        _CHAT, "const _backgroundStreams", "// Sources box builder"
-    )
-    finally_cleanup = _extract_source(
-        _CHAT,
-        "const _ownsStreamState =",
-        "// Streaming done — let screen readers announce",
-    )
     script = f"""
-      let currentAbort = null;
-      let isStreaming = false;
-      let currentHolder = null;
-      let _sendInFlight = false;
-      function _setForegroundChatBusy() {{}}
-      const window = {{}};
-      const sessionModule = {{ getCurrentSessionId() {{ return 'session-1'; }} }};
       let docFinalized = 0;
       const documentModule = {{ streamDocFinalize() {{ docFinalized += 1; }} }};
-      {state_and_stop}
+      {_stop_harness()}
       function runCleanup(abortCtrl, streamGeneration) {{
         const streamSessionId = 'session-1';
         const _sendState = {{ generation: streamGeneration, abortCtrl }};
         const _streamSawDone = false;
-        {finally_cleanup}
+        {_FINALLY_CLEANUP}
         return _ownsStreamState;
       }}
       const oldCtrl = {{ signal: {{ aborted: true }}, abort() {{}} }};
@@ -587,28 +574,8 @@ def test_real_reservation_supersedes_and_stale_cleanup_keeps_gate_closed():
     replacement registers).
     """
 
-    state_and_stop = _extract_source(
-        _CHAT, "const _backgroundStreams", "// Sources box builder"
-    )
-    reservation = _extract_source(
-        _CHAT,
-        "const streamGeneration = (_streamGenerations.get(streamSessionId) || 0) + 1;",
-        "_sendInFlight = false;",
-    )
-    finally_cleanup = _extract_source(
-        _CHAT,
-        "const _ownsStreamState =",
-        "// Streaming done — let screen readers announce",
-    )
     script = f"""
-      let currentAbort = null;
-      let isStreaming = true;
-      let currentHolder = null;
-      let _sendInFlight = false;
-      function _setForegroundChatBusy() {{}}
-      const window = {{}};
-      const sessionModule = {{ getCurrentSessionId() {{ return 'session-1'; }} }};
-      {state_and_stop}
+      {_stop_harness(is_streaming=True)}
       const oldCtrl = {{ signal: {{ aborted: false }}, abort() {{ this.signal.aborted = true; }} }};
       // Old send (generation 1) is mid-stream and registered.
       _streamGenerations.set('session-1', 1);
@@ -618,7 +585,7 @@ def test_real_reservation_supersedes_and_stale_cleanup_keeps_gate_closed():
       let installed;
       {{
         const streamSessionId = 'session-1';
-        {reservation}
+        {_RESERVATION}
         installed = {{ generation: streamGeneration, sendState: _sendState }};
       }}
       const afterReservation = {{
@@ -634,7 +601,7 @@ def test_real_reservation_supersedes_and_stale_cleanup_keeps_gate_closed():
         const streamGeneration = 1;
         const abortCtrl = oldCtrl;
         const _sendState = {{ generation: 1, abortCtrl: oldCtrl }};
-        {finally_cleanup}
+        {_FINALLY_CLEANUP}
         staleOwns = _ownsStreamState;
       }}
       console.log(JSON.stringify({{
@@ -669,24 +636,14 @@ def test_real_reservation_supersedes_and_stale_cleanup_keeps_gate_closed():
 def test_stale_preflight_bails_before_creating_controller():
     """A send superseded during preflight must not proceed to register/POST."""
 
-    state_and_stop = _extract_source(
-        _CHAT, "const _backgroundStreams", "// Sources box builder"
-    )
     preflight_gate = _extract_source(
         _CHAT, "// Superseded during preflight", "currentAbort = abortCtrl;"
     ) + "currentAbort = abortCtrl;"
     script = f"""
-      let currentAbort = null;
-      let isStreaming = false;
-      let currentHolder = null;
-      let _sendInFlight = false;
-      function _setForegroundChatBusy() {{}}
-      const window = {{}};
       const document = {{
         createElement() {{ return {{ style: {{}}, textContent: '' }}; }},
       }};
-      const sessionModule = {{ getCurrentSessionId() {{ return 'session-1'; }} }};
-      {state_and_stop}
+      {_stop_harness()}
       function runPreflightGate(streamGeneration, _sendState, _userMsgEl) {{
         const streamSessionId = 'session-1';
         let abortCtrl = null;
@@ -743,28 +700,11 @@ def test_stop_during_replacement_preflight_never_borrows_old_controller():
     queues under the new generation and nothing is aborted yet.
     """
 
-    state_and_stop = _extract_source(
-        _CHAT, "const _backgroundStreams", "// Sources box builder"
-    )
     abort_current = _extract_source(
         _CHAT, "export function abortCurrentRequest", "// ── Stall watchdog"
     ).replace("export function", "function")
-    reservation = _extract_source(
-        _CHAT,
-        "const streamGeneration = (_streamGenerations.get(streamSessionId) || 0) + 1;",
-        "_sendInFlight = false;",
-    )
     script = f"""
-      let currentAbort = null;
-      let isStreaming = false;
-      let currentHolder = null;
-      let _sendInFlight = false;
-      function _setForegroundChatBusy() {{}}
-      const calls = [];
-      const fetch = async (url, options) => {{ calls.push({{ url, options }}); return {{ ok: true }}; }};
-      const window = {{}};
-      const sessionModule = {{ getCurrentSessionId() {{ return 'session-1'; }} }};
-      {state_and_stop}
+      {_stop_harness()}
       {abort_current}
       const oldCtrl = {{ signal: {{ aborted: false }}, abort() {{ this.signal.aborted = true; }} }};
       // Generation 1 is registered, streaming, and its run id is KNOWN — the
@@ -778,7 +718,7 @@ def test_stop_during_replacement_preflight_never_borrows_old_controller():
       // controller exists yet and the model-switch await has not resolved.
       {{
         const streamSessionId = 'session-1';
-        {reservation}
+        {_RESERVATION}
       }}
       abortCurrentRequest(true);
       const preRegistration = {{
@@ -847,22 +787,14 @@ def test_timeout_grace_hard_aborts_when_run_identity_never_arrives():
 def _timeout_harness_prelude() -> str:
     """Shared Node harness: real stop/state and timeout blocks, fake timers."""
 
-    state_and_stop = _extract_source(
-        _CHAT, "const _backgroundStreams", "// Sources box builder"
-    )
     timeout_setup = _extract_source(
         _CHAT, "timeoutId = setTimeout(() =>", "}, timeoutMs);"
     ) + "}, timeoutMs);"
     return f"""
-      const calls = [];
       const callbacks = [];
-      function _setForegroundChatBusy() {{}}
       function setTimeout(callback) {{ callbacks.push(callback); return 1; }}
-      const window = {{}};
-      const sessionModule = {{ getCurrentSessionId() {{ return 'session-1'; }} }};
-      const fetch = async (url, options) => {{ calls.push({{ url, options }}); return {{ ok: true }}; }};
       const RUN_ID_ABORT_GRACE_MS = 2000;
-      {state_and_stop}
+      {_stop_harness()}
       const streamSessionId = 'session-1';
       const streamGeneration = 1;
       _streamGenerations.set(streamSessionId, streamGeneration);

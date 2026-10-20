@@ -1,7 +1,7 @@
 import json
-import subprocess
 import textwrap
 from pathlib import Path
+from tests.helpers.node import run_node_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,14 +31,7 @@ def run_node(body: str):
         {body}
         """
     )
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
+    return run_node_module(script)
 
 
 def test_text_renderer_keeps_editable_metadata_and_builds_raster_cache():
@@ -114,47 +107,3 @@ def test_rasterize_text_layer_clears_retained_metadata_only_for_text():
     assert result["text"] == {"kind": "raster", "text": None}
     assert result["rasterChanged"] is False
     assert result["raster"] == {"kind": "raster", "text": None}
-
-
-def test_text_tool_is_retained_across_editor_subsystems():
-    editor = (ROOT / "static/js/galleryEditor.js").read_text(encoding="utf-8")
-    toolbar = (ROOT / "static/js/editor/build/toolbar.js").read_text(encoding="utf-8")
-    shortcuts = (ROOT / "static/js/editor/tool-shortcuts.js").read_text(encoding="utf-8")
-    controls = (ROOT / "static/js/editor/build/controls.js").read_text(encoding="utf-8")
-    codec = (ROOT / "static/js/editor/document-codec.js").read_text(encoding="utf-8")
-    geometry = (ROOT / "static/js/editor/document-geometry.js").read_text(encoding="utf-8")
-    transform = (ROOT / "static/js/editor/tools/transform-session.js").read_text(encoding="utf-8")
-    panel = (ROOT / "static/js/editor/layer-panel.js").read_text(encoding="utf-8")
-    merge = (ROOT / "static/js/editor/wire-merge-buttons.js").read_text(encoding="utf-8")
-
-    assert "{ id: 'text', label: 'Text'" in toolbar
-    assert "t.key = TOOL_SHORTCUTS[t.id]" in toolbar
-    assert "text: 'T'" in shortcuts
-    assert 'id="ge-text-section"' in controls
-    assert "if (state.tool === 'text') return _placeText(e);" in editor
-    assert "kind: l.kind || 'raster'" in editor
-    assert "text: _cloneDocumentValue(l.text, null)" in editor
-    assert "kind: layer.kind || 'raster'" in codec
-    assert "text: cloneDocumentValue(layer.text, null)" in codec
-    assert "scaleTextLayer(layer, scaleX, scaleY)" in geometry
-    assert "rotateTextLayer(layer, normalized)" in geometry
-    assert "renderTextLayer(layer)" in transform
-    assert 'id="ge-text-rasterize"' in controls
-    assert "layer.kind = 'raster'" in editor
-    assert "layer.text = null" in editor
-    assert "rasterizeTextLayer(layer);" in panel
-    assert "rasterizeTextLayer(layer);" in merge
-    assert "_rasterizeTextLayer(layer)" in editor
-    assert 'id="ge-text-letter-spacing"' in controls
-    assert 'id="ge-text-frame-width"' in controls
-    assert 'id="ge-text-frame-height"' in controls
-    assert 'id="ge-text-vertical-align"' in controls
-    assert 'id="ge-text-auto-width"' in controls
-    assert 'autoWidth: !!document.getElementById(\'ge-text-auto-width\')?.checked' in editor
-    assert "createTextEditOverlay" in editor
-
-
-def test_text_auto_width_control_does_not_share_move_tool_selector():
-    controls = (ROOT / "static/js/editor/build/controls.js").read_text(encoding="utf-8")
-    assert 'class="ge-text-auto-width-option"' in controls
-    assert 'class="ge-auto-select-option ge-text-auto-width-option"' not in controls

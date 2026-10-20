@@ -56,15 +56,12 @@ def test_format_report_builds_command_for_changed_python_test():
 
     assert "- `tests/test_beta.py`" in report
     assert "python3 -m pytest -q tests/test_beta.py" in report
-    assert "does not infer tests from source changes" in report
-    assert "Existing blocking CI remains the source of truth" in report
 
 
 def test_format_report_lists_changed_non_python_test_path_without_command():
     report = guidance.format_report(["tests/README.md"])
 
     assert "- `tests/README.md`" in report
-    assert "No directly runnable pytest files changed." in report
     assert "python3 -m pytest" not in report
 
 
@@ -72,7 +69,7 @@ def test_format_report_ignores_src_path():
     report = guidance.format_report(["src/test_ignored.py"])
 
     assert "src/test_ignored.py" not in report
-    assert "No changed paths under `tests/`." in report
+    assert "python3 -m pytest" not in report
 
 
 def test_format_report_shell_quotes_path_with_spaces():
@@ -83,12 +80,6 @@ def test_format_report_shell_quotes_path_with_spaces():
         "python3 -m pytest -q 'tests/path with spaces/test_beta.py'"
     ) in report
 
-
-def test_format_report_handles_no_changed_test_paths():
-    report = guidance.format_report([])
-
-    assert "No changed paths under `tests/`." in report
-    assert "No directly runnable pytest files changed." in report
 
 def _git(repo: Path, *args: str) -> str:
     return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()

@@ -10,11 +10,13 @@ import uuid
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import func
+from sqlalchemy.orm import Session
 
-from core.database import SessionLocal, GalleryImage, GalleryAlbum, ModelEndpoint
+from core.database import SessionLocal, GalleryImage, GalleryAlbum, ModelEndpoint, get_db
 from core.database import Session as DbSession
-from src.auth_helpers import get_current_user, owner_filter, require_privilege
+from src.auth_helpers import get_current_user, get_owned_or_404, owner_filter, require_privilege
 from src.upload_limits import (
     read_upload_limited,
     GALLERY_UPLOAD_MAX_BYTES,
@@ -25,10 +27,12 @@ from src.path_confinement import confine
 from src.optional_deps import patch_realesrgan_torchvision_compat
 
 from routes.gallery.gallery_helpers import (
-    GalleryPatch, _extract_exif, _image_to_dict, _owner_filter, _human_size,
+    GalleryPatch, _extract_exif, _image_to_dict, _owner_filter,
 )
 
 logger = logging.getLogger(__name__)
+
+_IMAGE_BLOCK_PRIVATE_IPS = os.getenv("IMAGE_BLOCK_PRIVATE_IPS", "false").lower() == "true"
 
 _SAM_STATE: Dict[str, Any] = {}
 _GROUNDING_STATE: Dict[str, Any] = {}
@@ -206,17 +210,12 @@ def _ground_text_to_box(image, text: str, *, threshold: float = 0.05):
         raise HTTPException(500, f"Object mask failed: {exc}") from exc
 
 
-def _current_user_is_admin(request: Request, user: str | None) -> bool:
-    if not user:
-        return False
-    auth_mgr = getattr(request.app.state, "auth_manager", None)
-    is_admin = getattr(auth_mgr, "is_admin", None)
-    if not callable(is_admin):
-        return False
-    try:
-        return bool(is_admin(user))
-    except Exception:
-        return False
+def _get_or_404_album(db, album_id: str, user):
+    return get_owned_or_404(db, GalleryAlbum, album_id, user, detail="Album not found", allow_anonymous=False)
+
+
+def _get_or_404_image(db, image_id: str, user):
+    return get_owned_or_404(db, GalleryImage, image_id, user, detail="Image not found", allow_anonymous=False)
 
 
 def _sanitize_gallery_filename(filename: str) -> str:
@@ -334,6 +333,37 @@ def _visible_image_endpoint_for_base(db, base: str, owner: str | None, model: st
     return fallback
 
 
+def _resolve_image_endpoint(user: str | None, requested_base: str = "", model: str = "",
+                            missing: str = "No image generation endpoint configured."):
+    """Return ``(base ending in /v1, api_key)`` for the caller's image endpoint.
+
+    A client-supplied base must pass the outbound URL check and match a
+    registered endpoint the caller can see, so the outbound URL always comes
+    from a DB row and never directly from the request body.
+    """
+    if requested_base:
+        from src.url_safety import check_outbound_url
+        ok, reason = check_outbound_url(requested_base, block_private=_IMAGE_BLOCK_PRIVATE_IPS)
+        if not ok:
+            raise HTTPException(400, f"Rejected endpoint URL: {reason}")
+    db = SessionLocal()
+    try:
+        if requested_base:
+            ep = _visible_image_endpoint_for_base(db, requested_base, user, model)
+            if not ep:
+                raise HTTPException(403, "Choose a registered image endpoint")
+        else:
+            ep = _first_visible_image_endpoint(db, user)
+            if not ep:
+                raise HTTPException(400, missing)
+        base, api_key = ep.base_url.rstrip("/"), ep.api_key
+    finally:
+        db.close()
+    if not base.endswith("/v1"):
+        base += "/v1"
+    return base, api_key
+
+
 async def _fetch_result_image_b64(url: str) -> Optional[str]:
     """Fetch an image URL returned in an upstream response body, base64-encoded
     (or None on a non-200).
@@ -347,10 +377,7 @@ async def _fetch_result_image_b64(url: str) -> Optional[str]:
     import httpx
     from src.url_safety import check_outbound_url
 
-    ok, reason = check_outbound_url(
-        url,
-        block_private=os.getenv("IMAGE_BLOCK_PRIVATE_IPS", "false").lower() == "true",
-    )
+    ok, reason = check_outbound_url(url, block_private=_IMAGE_BLOCK_PRIVATE_IPS)
     if not ok:
         raise HTTPException(502, f"Upstream returned an unsafe image URL: {reason}")
     async with httpx.AsyncClient(timeout=60) as c2:
@@ -363,9 +390,8 @@ async def _fetch_result_image_b64(url: str) -> Optional[str]:
 def setup_gallery_routes() -> APIRouter:
     router = APIRouter(tags=["gallery"])
 
-    # ---- POST /api/gallery/upload ----
     @router.post("/api/gallery/upload")
-    async def gallery_upload(request: Request):
+    async def gallery_upload(request: Request, db: Session = Depends(get_db)):
         """Upload an image file to the gallery with EXIF extraction and dedup."""
         import uuid
         from pathlib import Path
@@ -381,116 +407,100 @@ def setup_gallery_routes() -> APIRouter:
 
         # Duplicate detection via SHA-256
         file_hash = hashlib.sha256(content).hexdigest()
-        db = SessionLocal()
-        try:
-            if album_id and user is not None:
-                _get_or_404_album(db, album_id, user)
+        if album_id and user is not None:
+            _get_or_404_album(db, album_id, user)
 
-            # SECURITY: scope the dup-detect to THIS user — otherwise a
-            # caller can probe whether someone else uploaded the same
-            # file (the response leaks the existing row's id+filename).
-            _dup_q = db.query(GalleryImage).filter(
-                GalleryImage.file_hash == file_hash,
-                GalleryImage.is_active == True,
-            )
-            if user:
-                _dup_q = _dup_q.filter(GalleryImage.owner == user)
-            existing = _dup_q.first()
-            if existing:
-                return {"ok": False, "duplicate": True, "filename": existing.filename,
-                        "id": existing.id, "message": "Duplicate photo skipped"}
+        # SECURITY: scope the dup-detect to THIS user — otherwise a
+        # caller can probe whether someone else uploaded the same
+        # file (the response leaks the existing row's id+filename).
+        _dup_q = db.query(GalleryImage).filter(
+            GalleryImage.file_hash == file_hash,
+            GalleryImage.is_active == True,
+        )
+        if user:
+            _dup_q = _dup_q.filter(GalleryImage.owner == user)
+        existing = _dup_q.first()
+        if existing:
+            return {"ok": False, "duplicate": True, "filename": existing.filename,
+                    "id": existing.id, "message": "Duplicate photo skipped"}
 
-            img_dir = Path(GENERATED_IMAGES_DIR)
-            img_dir.mkdir(parents=True, exist_ok=True)
+        img_dir = Path(GENERATED_IMAGES_DIR)
+        img_dir.mkdir(parents=True, exist_ok=True)
 
-            ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else "png"
-            VIDEO_EXTS = {"mp4", "mov", "webm", "mkv", "m4v"}
-            IMAGE_EXTS = {"png", "jpg", "jpeg", "webp", "gif"}
-            if ext not in VIDEO_EXTS and ext not in IMAGE_EXTS:
-                raise HTTPException(400, f"Unsupported file type: .{ext}")
-            is_video = ext in VIDEO_EXTS
-            filename = f"{uuid.uuid4().hex[:12]}.{ext}"
-            img_path = img_dir / filename
-            img_path.write_bytes(content)
+        ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else "png"
+        VIDEO_EXTS = {"mp4", "mov", "webm", "mkv", "m4v"}
+        IMAGE_EXTS = {"png", "jpg", "jpeg", "webp", "gif"}
+        if ext not in VIDEO_EXTS and ext not in IMAGE_EXTS:
+            raise HTTPException(400, f"Unsupported file type: .{ext}")
+        is_video = ext in VIDEO_EXTS
+        filename = f"{uuid.uuid4().hex[:12]}.{ext}"
+        img_path = img_dir / filename
+        img_path.write_bytes(content)
 
-            # Extract EXIF for images only — PIL can't parse video containers
-            # and the failure path logs a noisy WARNING. We'll add ffprobe-based
-            # video metadata extraction in a follow-up.
-            exif = {} if is_video else _extract_exif(content)
-            original_name = file.filename.rsplit(".", 1)[0] if "." in file.filename else file.filename
+        # PIL cannot parse video containers.
+        exif = {} if is_video else _extract_exif(content)
+        original_name = file.filename.rsplit(".", 1)[0] if "." in file.filename else file.filename
 
-            img_id = str(uuid.uuid4())
-            db.add(GalleryImage(
-                id=img_id,
-                filename=filename,
-                prompt=original_name,
-                model="imported",
-                owner=user,
-                file_hash=file_hash,
-                file_size=len(content),
-                width=exif.get("width"),
-                height=exif.get("height"),
-                taken_at=exif.get("taken_at"),
-                camera_make=exif.get("camera_make"),
-                camera_model=exif.get("camera_model"),
-                gps_lat=exif.get("gps_lat"),
-                gps_lng=exif.get("gps_lng"),
-                album_id=album_id,
-            ))
-            db.commit()
-            resp = {"ok": True, "filename": filename, "id": img_id}
-            if exif.get("exif_error"):
-                resp["exif_warning"] = exif["exif_error"]
-            return resp
-        finally:
-            db.close()
+        img_id = str(uuid.uuid4())
+        db.add(GalleryImage(
+            id=img_id,
+            filename=filename,
+            prompt=original_name,
+            model="imported",
+            owner=user,
+            file_hash=file_hash,
+            file_size=len(content),
+            width=exif.get("width"),
+            height=exif.get("height"),
+            taken_at=exif.get("taken_at"),
+            camera_make=exif.get("camera_make"),
+            camera_model=exif.get("camera_model"),
+            gps_lat=exif.get("gps_lat"),
+            gps_lng=exif.get("gps_lng"),
+            album_id=album_id,
+        ))
+        db.commit()
+        resp = {"ok": True, "filename": filename, "id": img_id}
+        if exif.get("exif_error"):
+            resp["exif_warning"] = exif["exif_error"]
+        return resp
 
-    # ---- POST /api/gallery/{id}/replace ----
     @router.post("/api/gallery/{image_id}/replace")
-    async def gallery_replace(request: Request, image_id: str):
+    async def gallery_replace(request: Request, image_id: str, db: Session = Depends(get_db)):
         """Replace an existing gallery image file with a new one."""
         user = get_current_user(request)
-        db = SessionLocal()
+        img = _get_or_404_image(db, image_id, user)
+
+        form = await request.form()
+        file = form.get("image")
+        if not file or not hasattr(file, 'read'):
+            raise HTTPException(400, "No image provided")
+
+        content = await read_upload_limited(file, GALLERY_UPLOAD_MAX_BYTES, "Gallery replacement")
+        GALLERY_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+        img_path = _gallery_image_path(img.filename)
+        img_path.write_bytes(content)
+
+        # Refresh dimensions in case the editor resized the canvas.
+        # updated_at auto-bumps via TimestampMixin's onupdate hook.
         try:
-            img = db.query(GalleryImage).filter(GalleryImage.id == image_id).first()
-            if not img:
-                raise HTTPException(404, "Image not found")
-            if not user or img.owner != user:
-                raise HTTPException(403, "Not your image")
+            from PIL import Image
+            from io import BytesIO
+            with Image.open(BytesIO(content)) as new_im:
+                img.width = new_im.width
+                img.height = new_im.height
+        except Exception as e:
+            logger.warning("gallery_replace: could not read new dimensions for %s: %s", image_id, e)
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("gallery_replace: DB commit failed")
+            raise HTTPException(500, "Image update failed")
+        return {"ok": True, "width": img.width, "height": img.height}
 
-            form = await request.form()
-            file = form.get("image")
-            if not file or not hasattr(file, 'read'):
-                raise HTTPException(400, "No image provided")
-
-            content = await read_upload_limited(file, GALLERY_UPLOAD_MAX_BYTES, "Gallery replacement")
-            GALLERY_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-            img_path = _gallery_image_path(img.filename)
-            img_path.write_bytes(content)
-
-            # Refresh dimensions in case the editor resized the canvas.
-            # updated_at auto-bumps via TimestampMixin's onupdate hook.
-            try:
-                from PIL import Image
-                from io import BytesIO
-                with Image.open(BytesIO(content)) as new_im:
-                    img.width = new_im.width
-                    img.height = new_im.height
-            except Exception:
-                pass
-            try:
-                db.commit()
-            except Exception:
-                db.rollback()
-                logger.exception("gallery_replace: DB commit failed")
-                raise HTTPException(500, "Image update failed")
-            return {"ok": True, "width": img.width, "height": img.height}
-        finally:
-            db.close()
-
-    # ---- POST /api/gallery/{image_id}/rename ----
     @router.post("/api/gallery/{image_id}/rename")
-    async def gallery_rename(request: Request, image_id: str):
+    async def gallery_rename(request: Request, image_id: str, db: Session = Depends(get_db)):
         """Rename a gallery photo. Stores the new name in the `prompt`
         column (which serves as the user-facing label for uploaded
         photos that have no AI prompt)."""
@@ -501,22 +511,13 @@ def setup_gallery_routes() -> APIRouter:
             raise HTTPException(400, "Name cannot be empty")
         if len(new_name) > 500:
             raise HTTPException(400, "Name too long")
-        db = SessionLocal()
-        try:
-            img = db.query(GalleryImage).filter(GalleryImage.id == image_id).first()
-            if not img:
-                raise HTTPException(404, "Image not found")
-            if not user or img.owner != user:
-                raise HTTPException(403, "Not your image")
-            img.prompt = new_name
-            db.commit()
-            return {"ok": True, "name": new_name}
-        finally:
-            db.close()
+        img = _get_or_404_image(db, image_id, user)
+        img.prompt = new_name
+        db.commit()
+        return {"ok": True, "name": new_name}
 
-    # ---- POST /api/gallery/{image_id}/rotate ----
     @router.post("/api/gallery/{image_id}/rotate")
-    async def gallery_rotate(request: Request, image_id: str):
+    async def gallery_rotate(request: Request, image_id: str, db: Session = Depends(get_db)):
         """Rotate an image by ±90° or 180°. Updates the file on disk and the
         width/height in the DB. Body: {angle: 90 | -90 | 180}."""
         from pathlib import Path
@@ -532,90 +533,37 @@ def setup_gallery_routes() -> APIRouter:
             raise HTTPException(400, "Angle must be 90, -90, 180, or 270")
 
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            img = db.query(GalleryImage).filter(GalleryImage.id == image_id).first()
-            if not img:
-                raise HTTPException(404, "Image not found")
-            if not user or img.owner != user:
-                raise HTTPException(403, "Not your image")
+        img = _get_or_404_image(db, image_id, user)
 
-            img_path = _gallery_image_path(img.filename)
-            if not img_path.exists():
-                raise HTTPException(404, "Image file not found")
+        img_path = _gallery_image_path(img.filename)
+        if not img_path.exists():
+            raise HTTPException(404, "Image file not found")
 
-            # PIL rotates counter-clockwise; the API takes "clockwise"
-            # convention so we negate to match user expectation.
-            with Image.open(img_path) as pil:
-                rotated = pil.rotate(-angle, expand=True)
-                # Recompute hash so dedupe stays accurate.
-                buf = BytesIO()
-                ext = img.filename.rsplit(".", 1)[-1].lower()
-                save_kwargs = {}
-                if ext in ("jpg", "jpeg"):
-                    save_kwargs["quality"] = 95
-                    fmt = "JPEG"
-                elif ext == "webp":
-                    fmt = "WEBP"
-                    save_kwargs["quality"] = 95
-                else:
-                    fmt = "PNG"
-                rotated.save(buf, format=fmt, **save_kwargs)
-                content = buf.getvalue()
-                img_path.write_bytes(content)
-                img.file_hash = hashlib.sha256(content).hexdigest()
-                img.file_size = len(content)
-                img.width, img.height = rotated.size
-            db.commit()
-            return {"ok": True, "width": img.width, "height": img.height}
-        finally:
-            db.close()
+        # PIL rotates counter-clockwise; the API takes "clockwise"
+        # convention so we negate to match user expectation.
+        with Image.open(img_path) as pil:
+            rotated = pil.rotate(-angle, expand=True)
+            # Recompute hash so dedupe stays accurate.
+            buf = BytesIO()
+            ext = img.filename.rsplit(".", 1)[-1].lower()
+            save_kwargs = {}
+            if ext in ("jpg", "jpeg"):
+                save_kwargs["quality"] = 95
+                fmt = "JPEG"
+            elif ext == "webp":
+                fmt = "WEBP"
+                save_kwargs["quality"] = 95
+            else:
+                fmt = "PNG"
+            rotated.save(buf, format=fmt, **save_kwargs)
+            content = buf.getvalue()
+            img_path.write_bytes(content)
+            img.file_hash = hashlib.sha256(content).hexdigest()
+            img.file_size = len(content)
+            img.width, img.height = rotated.size
+        db.commit()
+        return {"ok": True, "width": img.width, "height": img.height}
 
-    # ---- POST /api/gallery/ai-upscale ----
-    @router.post("/api/gallery/ai-upscale")
-    async def gallery_ai_upscale(request: Request):
-        """AI upscale using img2img with the diffusion server."""
-        import base64, httpx
-
-        user = require_privilege(request, "can_generate_images")
-        form = await request.form()
-        file = form.get("image")
-        if not file: raise HTTPException(400, "No image")
-        scale = int(form.get("scale", "2"))
-
-        image_bytes = await read_upload_limited(file, GALLERY_TRANSFORM_UPLOAD_MAX_BYTES, "Image upload")
-        b64 = base64.b64encode(image_bytes).decode()
-
-        # Find image endpoint
-        db = SessionLocal()
-        try:
-            ep = _first_visible_image_endpoint(db, user)
-        finally:
-            db.close()
-
-        if not ep:
-            raise HTTPException(400, "No image generation endpoint configured. Add one in Settings → Add Models.")
-
-        base_url = ep.base_url.rstrip("/")
-        if not base_url.endswith("/v1"):
-            base_url += "/v1"
-
-        # Use img2img endpoint if available, otherwise upscale via canvas on client
-        try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post(f"{base_url}/images/upscale", json={
-                    "image": b64, "scale": scale,
-                })
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return {"image": data.get("data", [{}])[0].get("b64_json", "")}
-                # Fallback: no upscale endpoint — return error
-                return {"error": f"Upscale endpoint not available ({resp.status_code})"}
-        except Exception:
-            logger.exception("ai_upscale: request failed")
-            return {"error": "Upscale request failed"}
-
-    # ---- POST /api/gallery/style-transfer ----
     @router.post("/api/gallery/style-transfer")
     async def gallery_style_transfer(request: Request):
         """Style transfer using img2img with the diffusion server."""
@@ -631,18 +579,7 @@ def setup_gallery_routes() -> APIRouter:
         image_bytes = await read_upload_limited(file, GALLERY_TRANSFORM_UPLOAD_MAX_BYTES, "Image upload")
         b64 = base64.b64encode(image_bytes).decode()
 
-        db = SessionLocal()
-        try:
-            ep = _first_visible_image_endpoint(db, user)
-        finally:
-            db.close()
-
-        if not ep:
-            raise HTTPException(400, "No image generation endpoint configured.")
-
-        base_url = ep.base_url.rstrip("/")
-        if not base_url.endswith("/v1"):
-            base_url += "/v1"
+        base_url, _ = _resolve_image_endpoint(user)
 
         try:
             async with httpx.AsyncClient(timeout=180) as client:
@@ -662,31 +599,8 @@ def setup_gallery_routes() -> APIRouter:
             logger.exception("style_transfer: request failed")
             return {"error": "Style transfer failed"}
 
-    # ---- GET /api/gallery/tags ----
-    @router.get("/api/gallery/tags")
-    async def gallery_tags(request: Request) -> Dict[str, Any]:
-        """Return distinct tags across all active gallery images."""
-        user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            q = db.query(GalleryImage.tags).filter(
-                GalleryImage.is_active == True, GalleryImage.tags != None, GalleryImage.tags != ""
-            )
-            q = _owner_filter(q, user)
-            rows = q.all()
-            tag_set = set()
-            for (raw,) in rows:
-                for t in raw.split(","):
-                    t = t.strip()
-                    if t:
-                        tag_set.add(t)
-            return {"tags": sorted(tag_set)}
-        finally:
-            db.close()
-
-    # ---- GET /api/gallery/library ----
     @router.get("/api/gallery/library")
-    async def gallery_library(
+    def gallery_library(
         request: Request,
         search: Optional[str] = Query(None),
         tag: Optional[str] = Query(None),
@@ -697,9 +611,9 @@ def setup_gallery_routes() -> APIRouter:
         seed: Optional[int] = Query(None),
         offset: int = Query(0, ge=0),
         limit: int = Query(24, ge=1, le=100),
+        db: Session = Depends(get_db),
     ) -> Dict[str, Any]:
         user = get_current_user(request)
-        db = SessionLocal()
         try:
             # Distinct tags for filter UI
             tag_q = db.query(GalleryImage.tags).filter(
@@ -819,150 +733,99 @@ def setup_gallery_routes() -> APIRouter:
         except Exception:
             logger.exception("Failed to fetch gallery library")
             raise HTTPException(500, "Failed to fetch gallery library")
-        finally:
-            db.close()
 
-    # ---- Album CRUD (must be before {image_id} catch-all) ----
+    # Album routes must register before the {image_id} catch-all.
 
     @router.get("/api/gallery/albums")
-    async def list_albums(request: Request):
+    def list_albums(request: Request, db: Session = Depends(get_db)):
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            q = db.query(GalleryAlbum)
-            q = _owner_filter(q, user, GalleryAlbum)
-            albums = q.order_by(GalleryAlbum.created_at.desc()).all()
-            result = []
-            for a in albums:
-                _count_q = db.query(GalleryImage).filter(
-                    GalleryImage.album_id == a.id, GalleryImage.is_active == True
-                )
-                _count_q = _owner_filter(_count_q, user)
-                count = _count_q.count()
-                cover_url = None
-                if a.cover_id:
-                    cover_q = db.query(GalleryImage).filter(GalleryImage.id == a.cover_id)
-                    cover = _owner_filter(cover_q, user).first()
-                    if cover:
-                        cover_url = f"/api/generated-image/{cover.filename}"
-                elif count > 0:
-                    _cover_q = db.query(GalleryImage).filter(
-                        GalleryImage.album_id == a.id, GalleryImage.is_active == True
-                    )
-                    _cover_q = _owner_filter(_cover_q, user)
-                    first = _cover_q.order_by(GalleryImage.created_at.desc()).first()
-                    if first:
-                        cover_url = f"/api/generated-image/{first.filename}"
-                result.append({
-                    "id": a.id, "name": a.name, "description": a.description or "",
-                    "cover_url": cover_url, "count": count,
-                    "created_at": a.created_at.isoformat() if a.created_at else None,
-                })
-            return {"albums": result}
-        finally:
-            db.close()
+        q = db.query(GalleryAlbum)
+        q = _owner_filter(q, user, GalleryAlbum)
+        albums = q.order_by(GalleryAlbum.created_at.desc()).all()
+        active = _owner_filter(db.query(GalleryImage).filter(
+            GalleryImage.album_id.in_([a.id for a in albums]), GalleryImage.is_active == True
+        ), user)
+        counts = dict(
+            active.with_entities(GalleryImage.album_id, func.count(GalleryImage.id))
+            .group_by(GalleryImage.album_id)
+        )
+        latest = {}
+        for album_id, filename in active.with_entities(
+            GalleryImage.album_id, GalleryImage.filename
+        ).order_by(GalleryImage.created_at.desc()):
+            latest.setdefault(album_id, filename)
+        covers = dict(_owner_filter(db.query(GalleryImage).filter(
+            GalleryImage.id.in_([a.cover_id for a in albums if a.cover_id])
+        ), user).with_entities(GalleryImage.id, GalleryImage.filename))
+        result = []
+        for a in albums:
+            count = counts.get(a.id, 0)
+            filename = covers.get(a.cover_id) if a.cover_id else latest.get(a.id)
+            cover_url = f"/api/generated-image/{filename}" if filename else None
+            result.append({
+                "id": a.id, "name": a.name, "description": a.description or "",
+                "cover_url": cover_url, "count": count,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+            })
+        return {"albums": result}
 
     @router.post("/api/gallery/albums")
-    async def create_album(request: Request):
+    async def create_album(request: Request, db: Session = Depends(get_db)):
         import uuid
         user = get_current_user(request)
         data = await request.json()
         name = (data.get("name") or "").strip()
         if not name:
             raise HTTPException(400, "Album name required")
-        db = SessionLocal()
-        try:
-            a = GalleryAlbum(
-                id=str(uuid.uuid4()), name=name,
-                description=data.get("description", ""),
-                owner=user,
-            )
-            db.add(a)
-            db.commit()
-            return {"ok": True, "id": a.id, "name": a.name}
-        finally:
-            db.close()
-
-    @router.get("/api/gallery/stats")
-    async def gallery_stats(request: Request):
-        user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            from sqlalchemy import func
-            base = db.query(GalleryImage).filter(GalleryImage.is_active == True)
-            size_q = db.query(func.sum(GalleryImage.file_size)).filter(GalleryImage.is_active == True)
-            album_q = db.query(GalleryAlbum)
-            base = _owner_filter(base, user)
-            size_q = _owner_filter(size_q, user)
-            album_q = _owner_filter(album_q, user, GalleryAlbum)
-            total = base.count()
-            total_size = size_q.scalar() or 0
-            fav_count = base.filter(GalleryImage.favorite == True).count()
-            album_count = album_q.count()
-            return {
-                "total_photos": total,
-                "total_size": total_size,
-                "total_size_human": _human_size(total_size),
-                "favorites": fav_count,
-                "albums": album_count,
-            }
-        finally:
-            db.close()
+        a = GalleryAlbum(
+            id=str(uuid.uuid4()), name=name,
+            description=data.get("description", ""),
+            owner=user,
+        )
+        db.add(a)
+        db.commit()
+        return {"ok": True, "id": a.id, "name": a.name}
 
     @router.post("/api/gallery/ai-tag-batch")
-    async def ai_tag_batch(
+    def ai_tag_batch(
         request: Request,
         album_id: Optional[str] = Query(None),
         limit: int = Query(200),
+        db: Session = Depends(get_db),
     ):
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            q = db.query(GalleryImage).filter(
-                GalleryImage.is_active == True,
-                (GalleryImage.ai_tags == None) | (GalleryImage.ai_tags == ""),
-            )
-            q = _owner_filter(q, user)
-            if album_id:
-                q = q.filter(GalleryImage.album_id == album_id)
-            untagged = q.count()
-            ids = [img.id for img in q.limit(max(1, min(limit, 500))).all()]
-            return {"ok": True, "queued": len(ids), "total_untagged": untagged, "image_ids": ids}
-        finally:
-            db.close()
+        q = db.query(GalleryImage).filter(
+            GalleryImage.is_active == True,
+            (GalleryImage.ai_tags == None) | (GalleryImage.ai_tags == ""),
+        )
+        q = _owner_filter(q, user)
+        if album_id:
+            q = q.filter(GalleryImage.album_id == album_id)
+        untagged = q.count()
+        ids = [img.id for img in q.limit(max(1, min(limit, 500))).all()]
+        return {"ok": True, "queued": len(ids), "total_untagged": untagged, "image_ids": ids}
 
-    # ---- GET /api/gallery/{image_id} ----
     @router.get("/api/gallery/{image_id}")
-    async def get_gallery_image(request: Request, image_id: str) -> Dict[str, Any]:
+    def get_gallery_image(request: Request, image_id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            row = (
-                db.query(GalleryImage, DbSession.name)
-                .outerjoin(DbSession, GalleryImage.session_id == DbSession.id)
-                .filter(GalleryImage.id == image_id)
-                .first()
-            )
-            if not row:
-                raise HTTPException(404, "Image not found")
-            img, session_name = row
-            if not user or img.owner != user:
-                raise HTTPException(404, "Image not found")
-            return _image_to_dict(img, session_name)
-        finally:
-            db.close()
+        row = (
+            db.query(GalleryImage, DbSession.name)
+            .outerjoin(DbSession, GalleryImage.session_id == DbSession.id)
+            .filter(GalleryImage.id == image_id)
+            .first()
+        )
+        if not row:
+            raise HTTPException(404, "Image not found")
+        img, session_name = row
+        if not user or img.owner != user:
+            raise HTTPException(404, "Image not found")
+        return _image_to_dict(img, session_name)
 
-    # ---- PATCH /api/gallery/{image_id} ----
     @router.patch("/api/gallery/{image_id}")
-    async def patch_gallery_image(request: Request, image_id: str, req: GalleryPatch) -> Dict[str, Any]:
+    def patch_gallery_image(request: Request, image_id: str, req: GalleryPatch, db: Session = Depends(get_db)) -> Dict[str, Any]:
         user = get_current_user(request)
-        db = SessionLocal()
         try:
-            img = db.query(GalleryImage).filter(GalleryImage.id == image_id).first()
-            if not img:
-                raise HTTPException(404, "Image not found")
-            if not user or img.owner != user:
-                raise HTTPException(404, "Image not found")
+            img = _get_or_404_image(db, image_id, user)
             if req.tags is not None:
                 # Drop any tag from the user-tags field that already lives in
                 # ai_tags — earlier flows wrote AI suggestions to both fields
@@ -998,15 +861,9 @@ def setup_gallery_routes() -> APIRouter:
             db.rollback()
             logger.exception("patch_gallery_image: update failed")
             raise HTTPException(500, "Image update failed")
-        finally:
-            db.close()
 
-    # ---- POST /api/gallery/download-zip ----
-    # Bundle the given image ids into a single .zip for download. Used by the
-    # gallery's bulk "Download" when many photos are selected (one file instead
-    # of a flood of individual downloads).
     @router.post("/api/gallery/download-zip")
-    async def gallery_download_zip(request: Request):
+    async def gallery_download_zip(request: Request, db: Session = Depends(get_db)):
         user = get_current_user(request)
         if not user:
             raise HTTPException(401, "Not authenticated")
@@ -1017,78 +874,44 @@ def setup_gallery_routes() -> APIRouter:
         ids = data.get("ids") or []
         if not ids:
             raise HTTPException(400, "No images specified")
-        db = SessionLocal()
-        try:
-            imgs = db.query(GalleryImage).filter(
-                GalleryImage.id.in_(ids),
-                GalleryImage.owner == user,
-            ).all()
-            if not imgs:
-                raise HTTPException(404, "No images found")
-            import io
-            import re
-            import zipfile
-            buf = io.BytesIO()
-            used = set()
-            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                for img in imgs:
-                    src = _gallery_image_path(img.filename)
-                    if not src.exists():
-                        continue
-                    ext = src.suffix or ".png"
-                    base = (img.prompt or "").strip() or src.stem
-                    base = re.sub(r"[^\w\-. ]+", "", base)[:60].strip() or img.id
-                    name = f"{base}{ext}"
-                    i = 1
-                    while name in used:
-                        name = f"{base}-{i}{ext}"
-                        i += 1
-                    used.add(name)
-                    zf.write(src, arcname=name)
-            if not used:
-                raise HTTPException(404, "No image files found on disk")
-            from fastapi import Response
-            return Response(
-                content=buf.getvalue(),
-                media_type="application/zip",
-                headers={"Content-Disposition": 'attachment; filename="gallery-photos.zip"'},
-            )
-        finally:
-            db.close()
+        imgs = db.query(GalleryImage).filter(
+            GalleryImage.id.in_(ids),
+            GalleryImage.owner == user,
+        ).all()
+        if not imgs:
+            raise HTTPException(404, "No images found")
+        import io
+        import re
+        import zipfile
+        buf = io.BytesIO()
+        used = set()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for img in imgs:
+                src = _gallery_image_path(img.filename)
+                if not src.exists():
+                    continue
+                ext = src.suffix or ".png"
+                base = (img.prompt or "").strip() or src.stem
+                base = re.sub(r"[^\w\-. ]+", "", base)[:60].strip() or img.id
+                name = f"{base}{ext}"
+                i = 1
+                while name in used:
+                    name = f"{base}-{i}{ext}"
+                    i += 1
+                used.add(name)
+                zf.write(src, arcname=name)
+        if not used:
+            raise HTTPException(404, "No image files found on disk")
+        from fastapi import Response
+        return Response(
+            content=buf.getvalue(),
+            media_type="application/zip",
+            headers={"Content-Disposition": 'attachment; filename="gallery-photos.zip"'},
+        )
 
-    # ---- POST /api/gallery/clear-user-tags ----
-    # Wipe the `tags` field on every image owned by the current user.
-    # Leaves `ai_tags` intact. Use after a bug populated user-tags with
-    # AI-suggested values you never added.
-    @router.post("/api/gallery/clear-user-tags")
-    async def clear_gallery_user_tags(request: Request) -> Dict[str, Any]:
-        user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            q = db.query(GalleryImage).filter(GalleryImage.is_active == True)
-            q = _owner_filter(q, user)
-            cleared = 0
-            for img in q.all():
-                if img.tags:
-                    img.tags = ''
-                    cleared += 1
-            db.commit()
-            return {"ok": True, "cleared": cleared}
-        except Exception:
-            db.rollback()
-            logger.exception("clear_gallery_user_tags: failed")
-            raise HTTPException(500, "Tag update failed")
-        finally:
-            db.close()
-
-    # ---- POST /api/gallery/clear-ai-tags ----
-    # Wipe the `ai_tags` field on every image owned by the current user.
-    # Leaves user `tags` intact. Use when AI-suggested tags like "dog" /
-    # "woman" have leaked into the gallery and you want them gone.
     @router.post("/api/gallery/clear-ai-tags")
-    async def clear_gallery_ai_tags(request: Request, image_id: Optional[str] = Query(None)) -> Dict[str, Any]:
+    def clear_gallery_ai_tags(request: Request, image_id: Optional[str] = Query(None), db: Session = Depends(get_db)) -> Dict[str, Any]:
         user = get_current_user(request)
-        db = SessionLocal()
         try:
             q = db.query(GalleryImage).filter(GalleryImage.is_active == True)
             q = _owner_filter(q, user)
@@ -1105,59 +928,12 @@ def setup_gallery_routes() -> APIRouter:
             db.rollback()
             logger.exception("clear_gallery_ai_tags: failed")
             raise HTTPException(500, "Tag update failed")
-        finally:
-            db.close()
 
-    # ---- POST /api/gallery/dedupe-tags ----
-    # One-shot cleanup: for every image owned by the current user, drop any
-    # tag from `tags` that also appears in `ai_tags` (case-insensitive).
-    # Returns how many rows were touched + how many tags removed.
-    @router.post("/api/gallery/dedupe-tags")
-    async def dedupe_gallery_tags(request: Request) -> Dict[str, Any]:
-        user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            q = db.query(GalleryImage).filter(GalleryImage.is_active == True)
-            q = _owner_filter(q, user)
-            rows_touched = 0
-            tags_removed = 0
-            for img in q.all():
-                ai_set = {t.strip().lower() for t in (img.ai_tags or '').split(',') if t.strip()}
-                if not ai_set:
-                    continue
-                original = [t.strip() for t in (img.tags or '').split(',') if t.strip()]
-                cleaned = []
-                seen = set()
-                for t in original:
-                    k = t.lower()
-                    if k in ai_set or k in seen:
-                        continue
-                    seen.add(k)
-                    cleaned.append(t)
-                if len(cleaned) != len(original):
-                    rows_touched += 1
-                    tags_removed += len(original) - len(cleaned)
-                    img.tags = ', '.join(cleaned)
-            db.commit()
-            return {"ok": True, "rows_touched": rows_touched, "tags_removed": tags_removed}
-        except Exception:
-            db.rollback()
-            logger.exception("dedupe_gallery_tags: failed")
-            raise HTTPException(500, "Tag deduplication failed")
-        finally:
-            db.close()
-
-    # ---- DELETE /api/gallery/{image_id} ----
     @router.delete("/api/gallery/{image_id}")
-    async def delete_gallery_image(request: Request, image_id: str) -> Dict[str, str]:
+    def delete_gallery_image(request: Request, image_id: str, db: Session = Depends(get_db)) -> Dict[str, str]:
         user = get_current_user(request)
-        db = SessionLocal()
         try:
-            img = db.query(GalleryImage).filter(GalleryImage.id == image_id).first()
-            if not img:
-                raise HTTPException(404, "Image not found")
-            if not user or img.owner != user:
-                raise HTTPException(404, "Image not found")
+            img = _get_or_404_image(db, image_id, user)
 
             img_filename = img.filename
             # Soft-delete the record first; the DB is the source of truth.
@@ -1265,10 +1041,7 @@ def setup_gallery_routes() -> APIRouter:
             db.rollback()
             logger.exception("delete_gallery_image: failed")
             raise HTTPException(500, "Image deletion failed")
-        finally:
-            db.close()
 
-    # ---- POST /api/image/inpaint — proxy to diffusion server OR OpenAI ----
     @router.post("/api/image/inpaint")
     async def inpaint_proxy(request: Request):
         """Forward inpaint request. If the selected endpoint is OpenAI, re-shape
@@ -1280,48 +1053,15 @@ def setup_gallery_routes() -> APIRouter:
         # Use endpoint from request body (editor dropdown) or fall back to DB lookup.
         # Store as requested_base to avoid carrying user input into the outbound request.
         requested_base = (body.pop("_endpoint", "") or "").rstrip("/")
-        # SSRF hardening: validate a client-supplied endpoint before any
-        # outbound request (mirrors routes/embedding_routes.py).
-        if requested_base:
-            from src.url_safety import check_outbound_url
-            ok, reason = check_outbound_url(
-                requested_base,
-                block_private=os.getenv("IMAGE_BLOCK_PRIVATE_IPS", "false").lower() == "true",
-            )
-            if not ok:
-                raise HTTPException(400, f"Rejected endpoint URL: {reason}")
         chosen_model = (body.pop("_model", "") or "").strip()
-        api_key = None
-        if not requested_base:
-            db = SessionLocal()
-            try:
-                ep = _first_visible_image_endpoint(db, user)
-                if not ep:
-                    raise HTTPException(400, "No image generation endpoint configured. Serve a diffusion model via Cookbook first.")
-                base = ep.base_url.rstrip("/")
-                api_key = ep.api_key
-            finally:
-                db.close()
-        else:
-            # Resolve the client-supplied base to a registered visible endpoint.
-            # Admins are not exempted — gallery proxy routes must use a DB row
-            # so the outbound URL never depends directly on request-body input.
-            db = SessionLocal()
-            try:
-                ep = _visible_image_endpoint_for_base(db, requested_base, user, chosen_model)
-                if not ep:
-                    raise HTTPException(403, "Choose a registered image endpoint")
-                base = ep.base_url.rstrip("/")
-                api_key = ep.api_key
-            finally:
-                db.close()
-
-        if not base.endswith("/v1"):
-            base += "/v1"
+        base, api_key = _resolve_image_endpoint(
+            user, requested_base, chosen_model,
+            missing="No image generation endpoint configured. Serve a diffusion model via Cookbook first.",
+        )
 
         is_openai = _is_openai_api_base(base)
-        from src.model_capability_readers.base import detect_vendor
-        is_openrouter = detect_vendor(base) == "openrouter"
+        from src.llm_core import _host_match
+        is_openrouter = _host_match(base, "openrouter.ai")
 
         if is_openai or is_openrouter:
             # OpenAI path: /v1/images/edits with gpt-image-1.
@@ -1538,12 +1278,6 @@ def setup_gallery_routes() -> APIRouter:
             logger.exception("inpaint_proxy: request failed")
             raise HTTPException(502, "Inpaint request failed")
 
-    # ---- POST /api/image/harmonize — proper img2img call ----
-    # Earlier version routed through inpaint with a full-white mask, but
-    # most backends interpret "100% mask coverage" as "regenerate from
-    # scratch using the prompt", ignoring the source. Real img2img sends
-    # the image alongside a `strength` (denoising strength) and the model
-    # mixes that fraction of new noise into the existing pixels.
     @router.post("/api/image/harmonize")
     async def harmonize_image(request: Request):
         """Harmonize = img2img. The model preserves (1 - strength) of the
@@ -1559,47 +1293,8 @@ def setup_gallery_routes() -> APIRouter:
             raise HTTPException(400, "No image provided")
 
         requested_base = (body.get("_endpoint") or "").rstrip("/")
-        # SSRF hardening: a client-supplied endpoint is fetched server-side
-        # below, so validate it first (mirrors routes/embedding_routes.py).
-        # Local-first means loopback/LAN is allowed by default; the cloud
-        # metadata range and non-HTTP(S) schemes are always rejected.
-        if requested_base:
-            from src.url_safety import check_outbound_url
-            ok, reason = check_outbound_url(
-                requested_base,
-                block_private=os.getenv("IMAGE_BLOCK_PRIVATE_IPS", "false").lower() == "true",
-            )
-            if not ok:
-                raise HTTPException(400, f"Rejected endpoint URL: {reason}")
         model = (body.get("_model") or "").strip()
-
-        api_key = None
-        if not requested_base:
-            db = SessionLocal()
-            try:
-                ep = _first_visible_image_endpoint(db, user)
-                if not ep:
-                    raise HTTPException(400, "No image generation endpoint configured.")
-                base = ep.base_url.rstrip("/")
-                api_key = ep.api_key
-            finally:
-                db.close()
-        else:
-            # Resolve the client-supplied base to a registered visible endpoint.
-            # Admins are not exempted — gallery proxy routes must use a DB row
-            # so the outbound URL never depends directly on request-body input.
-            db = SessionLocal()
-            try:
-                ep = _visible_image_endpoint_for_base(db, requested_base, user)
-                if not ep:
-                    raise HTTPException(403, "Choose a registered image endpoint")
-                base = ep.base_url.rstrip("/")
-                api_key = ep.api_key
-            finally:
-                db.close()
-
-        if not base.endswith("/v1"):
-            base += "/v1"
+        base, api_key = _resolve_image_endpoint(user, requested_base)
 
         prompt = body.get("prompt") or "natural lighting, harmonious color, seamless blend"
         # Legacy single-strength control (old clients) → maps to color_match
@@ -1743,7 +1438,6 @@ def setup_gallery_routes() -> APIRouter:
             "Your diffusion server needs to expose one of: "
             "/v1/images/harmonize, /v1/images/img2img, /v1/images/variations, /sdapi/v1/img2img.")
 
-    # ---- POST /api/image/sharpen ----
     @router.post("/api/image/sharpen")
     async def sharpen_image(request: Request):
         """Apply unsharp-mask sharpening to an image."""
@@ -1765,7 +1459,6 @@ def setup_gallery_routes() -> APIRouter:
         sharpened.save(buf, format="PNG")
         return {"image": base64.b64encode(buf.getvalue()).decode()}
 
-    # ---- POST /api/image/denoise ----
     # AI denoise via Real-ESRGAN with the realesr-general-x4v3 weights at
     # outscale=1 + denoise_strength. Falls back to a "package missing"
     # error so the client can prompt the user to install via Cookbook.
@@ -1817,7 +1510,6 @@ def setup_gallery_routes() -> APIRouter:
             logger.warning("Denoise failed", exc_info=True)
             return {"error": "Denoise failed"}
 
-    # ---- POST /api/image/upscale-local ----
     # Local Real-ESRGAN upscale (2× or 4×). Self-contained — no diffusion
     # server required. Used by the editor's AI Upscale button.
     @router.post("/api/image/upscale-local")
@@ -1865,7 +1557,6 @@ def setup_gallery_routes() -> APIRouter:
             logger.warning("AI upscale failed", exc_info=True)
             return {"error": "AI upscale failed"}
 
-    # ---- POST /api/image/remove-bg ----
     @router.post("/api/image/mask")
     async def smart_mask(request: Request):
         """Create a neutral segmentation mask from user-provided points or a box.
@@ -2086,7 +1777,6 @@ def setup_gallery_routes() -> APIRouter:
         result.save(buf, format="PNG")
         return {"image": base64.b64encode(buf.getvalue()).decode()}
 
-    # ---- POST /api/image/enhance-face ----
     @router.post("/api/image/enhance-face")
     async def enhance_face(request: Request):
         """Face/portrait enhancement. Uses GFPGAN if available, falls back to PIL."""
@@ -2153,122 +1843,81 @@ def setup_gallery_routes() -> APIRouter:
             logger.exception("enhance_face: failed")
             raise HTTPException(500, "Face enhancement failed")
 
-    # ---- Album management (path-param routes) ----
-
-    def _get_or_404_album(db, album_id: str, user):
-        album = db.query(GalleryAlbum).filter(GalleryAlbum.id == album_id).first()
-        if not album:
-            raise HTTPException(404, "Album not found")
-        if not user or album.owner != user:
-            raise HTTPException(404, "Album not found")
-        return album
-
-    def _get_or_404_image(db, image_id: str, user):
-        img = db.query(GalleryImage).filter(GalleryImage.id == image_id).first()
-        if not img:
-            raise HTTPException(404, "Image not found")
-        if not user or img.owner != user:
-            raise HTTPException(404, "Image not found")
-        return img
-
     @router.put("/api/gallery/albums/{album_id}")
-    async def update_album(request: Request, album_id: str):
+    async def update_album(request: Request, album_id: str, db: Session = Depends(get_db)):
         user = get_current_user(request)
         data = await request.json()
-        db = SessionLocal()
-        try:
-            album = _get_or_404_album(db, album_id, user)
-            if data.get("name") is not None:
-                album.name = data["name"]
-            if data.get("description") is not None:
-                album.description = data["description"]
-            if data.get("cover_id") is not None:
-                cover_id = data["cover_id"] or None
-                if cover_id:
-                    _get_or_404_image(db, cover_id, user)
-                album.cover_id = cover_id
-            db.commit()
-            return {"ok": True}
-        finally:
-            db.close()
+        album = _get_or_404_album(db, album_id, user)
+        if data.get("name") is not None:
+            album.name = data["name"]
+        if data.get("description") is not None:
+            album.description = data["description"]
+        if data.get("cover_id") is not None:
+            cover_id = data["cover_id"] or None
+            if cover_id:
+                _get_or_404_image(db, cover_id, user)
+            album.cover_id = cover_id
+        db.commit()
+        return {"ok": True}
 
     @router.delete("/api/gallery/albums/{album_id}")
-    async def delete_album(request: Request, album_id: str):
+    def delete_album(request: Request, album_id: str, db: Session = Depends(get_db)):
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            album = _get_or_404_album(db, album_id, user)
-            q = db.query(GalleryImage).filter(GalleryImage.album_id == album_id)
-            if user is not None:
-                q = q.filter(GalleryImage.owner == user)
-            q.update({"album_id": None}, synchronize_session=False)
-            db.delete(album)
-            db.commit()
-            return {"ok": True}
-        finally:
-            db.close()
+        album = _get_or_404_album(db, album_id, user)
+        q = db.query(GalleryImage).filter(GalleryImage.album_id == album_id)
+        if user is not None:
+            q = q.filter(GalleryImage.owner == user)
+        q.update({"album_id": None}, synchronize_session=False)
+        db.delete(album)
+        db.commit()
+        return {"ok": True}
 
     @router.post("/api/gallery/albums/{album_id}/add")
-    async def add_to_album(request: Request, album_id: str):
+    async def add_to_album(request: Request, album_id: str, db: Session = Depends(get_db)):
         user = get_current_user(request)
         data = await request.json()
         ids = data.get("image_ids", [])
-        db = SessionLocal()
-        try:
-            _get_or_404_album(db, album_id, user)
-            # Only move images the caller owns
-            q = db.query(GalleryImage).filter(GalleryImage.id.in_(ids))
-            if user:
-                q = q.filter(GalleryImage.owner == user)
-            q.update({"album_id": album_id}, synchronize_session=False)
-            db.commit()
-            return {"ok": True, "count": len(ids)}
-        finally:
-            db.close()
+        _get_or_404_album(db, album_id, user)
+        # Only move images the caller owns
+        q = db.query(GalleryImage).filter(GalleryImage.id.in_(ids))
+        if user:
+            q = q.filter(GalleryImage.owner == user)
+        q.update({"album_id": album_id}, synchronize_session=False)
+        db.commit()
+        return {"ok": True, "count": len(ids)}
 
     @router.post("/api/gallery/albums/{album_id}/remove")
-    async def remove_from_album(request: Request, album_id: str):
+    async def remove_from_album(request: Request, album_id: str, db: Session = Depends(get_db)):
         user = get_current_user(request)
         data = await request.json()
         ids = data.get("image_ids", [])
-        db = SessionLocal()
-        try:
-            _get_or_404_album(db, album_id, user)
-            q = db.query(GalleryImage).filter(
-                GalleryImage.id.in_(ids), GalleryImage.album_id == album_id
-            )
-            if user:
-                q = q.filter(GalleryImage.owner == user)
-            q.update({"album_id": None}, synchronize_session=False)
-            db.commit()
-            return {"ok": True}
-        finally:
-            db.close()
+        _get_or_404_album(db, album_id, user)
+        q = db.query(GalleryImage).filter(
+            GalleryImage.id.in_(ids), GalleryImage.album_id == album_id
+        )
+        if user:
+            q = q.filter(GalleryImage.owner == user)
+        q.update({"album_id": None}, synchronize_session=False)
+        db.commit()
+        return {"ok": True}
 
-    # ---- Favorite toggle ----
 
     @router.post("/api/gallery/{image_id}/favorite")
-    async def toggle_favorite(request: Request, image_id: str):
+    def toggle_favorite(request: Request, image_id: str, db: Session = Depends(get_db)):
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            img = _get_or_404_image(db, image_id, user)
-            img.favorite = not img.favorite
-            db.commit()
-            return {"ok": True, "favorite": img.favorite}
-        finally:
-            db.close()
+        img = _get_or_404_image(db, image_id, user)
+        img.favorite = not img.favorite
+        db.commit()
+        return {"ok": True, "favorite": img.favorite}
 
-    # ---- AI auto-tag ----
 
     @router.post("/api/gallery/{image_id}/ai-tag")
-    async def ai_tag_image(request: Request, image_id: str):
+    async def ai_tag_image(request: Request, image_id: str, db: Session = Depends(get_db)):
         """Send image to vision model for auto-tagging."""
         import base64, httpx
         from pathlib import Path
 
         user = get_current_user(request)
-        db = SessionLocal()
         try:
             img = _get_or_404_image(db, image_id, user)
 
@@ -2366,7 +2015,5 @@ def setup_gallery_routes() -> APIRouter:
         except Exception:
             logger.exception("AI tagging failed")
             return {"error": "Auto-tagging failed"}
-        finally:
-            db.close()
 
     return router

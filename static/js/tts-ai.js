@@ -512,11 +512,7 @@ export function addAITTSButton(messageElement, text) {
 }
 
 // Stop audio when navigating away
-window.addEventListener('beforeunload', () => {
-    if (window.aiTTSManager) {
-        window.aiTTSManager.stop();
-    }
-});
+window.addEventListener('beforeunload', () => window.aiTTSManager.stop());
 
 export { AITTSManager };
 

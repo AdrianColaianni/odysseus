@@ -1,9 +1,11 @@
+import sys
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from core.database import Base, GalleryImage, GalleryAlbum
-from routes.admin_wipe_routes import setup_admin_wipe_routes
+from routes.admin_wipe.admin_wipe_routes import setup_admin_wipe_routes
 from fastapi import Request
+from tests.helpers.route_call import with_db
 
 def test_wipe_gallery_clears_albums(monkeypatch):
     # 1. Create a clean in-memory database
@@ -26,11 +28,11 @@ def test_wipe_gallery_clears_albums(monkeypatch):
     db.close()
     
     # 4. Patch SessionLocal in routes/admin_wipe_routes.py to use our in-memory DB
-    import routes.admin_wipe_routes
-    monkeypatch.setattr(routes.admin_wipe_routes, "SessionLocal", TestSessionLocal)
-    
+    import routes.admin_wipe.admin_wipe_routes
+    monkeypatch.setattr(routes.admin_wipe.admin_wipe_routes, "SessionLocal", TestSessionLocal, raising=False)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", TestSessionLocal)
     # Mock require_admin to bypass auth check (using standard pytest monkeypatch)
-    monkeypatch.setattr(routes.admin_wipe_routes, "require_admin", lambda r: None)
+    monkeypatch.setattr(routes.admin_wipe.admin_wipe_routes, "require_admin", lambda r: None)
     
     # Construct a real FastAPI Request object
     request = Request(scope={"type": "http"})
@@ -38,7 +40,7 @@ def test_wipe_gallery_clears_albums(monkeypatch):
     # 5. Initialize the router and retrieve the handler
     router = setup_admin_wipe_routes(session_manager=None)
     wipe_route = next(r for r in router.routes if r.path == "/api/admin/wipe/{kind}")
-    wipe_handler = wipe_route.endpoint
+    wipe_handler = with_db(wipe_route.endpoint)
     
     # 6. Execute the wipe logic for gallery
     result = wipe_handler(kind="gallery", request=request)

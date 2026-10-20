@@ -7,7 +7,6 @@ import subprocess
 import sys
 import textwrap
 
-import pytest
 
 from src.agent_loop import (
     _calendar_listing_row,
@@ -56,8 +55,6 @@ from src.text_scanning import (
     replace_markdown_links_with_labels,
 )
 from src.turn_contract import (
-    _WARM_RECALL,
-    _WARM_RECALL_WITH_FOLLOWUP,
     _is_pure_action_prohibition,
     _mentions_under_budget,
     _mentions_workspace_artifact,
@@ -147,17 +144,17 @@ def test_session_link_matches_legacy_escape_and_greedy_semantics():
         assert _session_link_from_row(row) == (expected.group(0) if expected else ""), row
 
 
-@pytest.mark.parametrize("row,expected", [
-    ("- **[Chat](#session-id)** (id: `id`, model: qwen, 2 msgs, last active today)",
-     "- [Chat](#session-id) (last active today)"),
-    ("- [Chat](#session-id) (irrelevant) (model: qwen) (last active later)",
-     "- [Chat](#session-id)"),
-    ("- [Chat](#session-id) (outer (last active today))",
-     "- [Chat](#session-id) (last active today)"),
-    ("- plain row", "- plain row"),
-])
-def test_session_summary_preserves_link_and_metadata(row, expected):
-    assert _session_list_summary_from_tool_output("Chats:\n" + row) == "Chats:\n" + expected
+def test_session_summary_preserves_link_and_metadata():
+    for row, expected in [
+        ("- **[Chat](#session-id)** (id: `id`, model: qwen, 2 msgs, last active today)",
+         "- [Chat](#session-id) (last active today)"),
+        ("- [Chat](#session-id) (irrelevant) (model: qwen) (last active later)",
+         "- [Chat](#session-id)"),
+        ("- [Chat](#session-id) (outer (last active today))",
+         "- [Chat](#session-id) (last active today)"),
+        ("- plain row", "- plain row"),
+    ]:
+        assert _session_list_summary_from_tool_output("Chats:\n" + row) == "Chats:\n" + expected
 
 
 def test_gemma_delimiters_match_legacy_parse_and_strip():
@@ -179,19 +176,19 @@ def test_gemma_delimiters_match_legacy_parse_and_strip():
     assert strip_tool_blocks(raw) == ""
 
 
-@pytest.mark.parametrize("reference,opener,closer,tokens", [
-    (_QWEN_FUNCTION, _QWEN_FUNCTION_OPEN_RE, _QWEN_FUNCTION_CLOSE_RE,
-     ["<function=manage_notes>", "</function>", "a", "\n", "\t", " "]),
-    (_QWEN_PARAMETER, _QWEN_PARAMETER_OPEN_RE, _QWEN_PARAMETER_CLOSE_RE,
-     ["<parameter=query>", "</parameter>", "a", "\n", "\t", " "]),
-])
-def test_qwen_delimiters_preserve_names_and_stripped_values(reference, opener, closer, tokens):
-    rng = random.Random(6503)
-    for _ in range(1000):
-        text = "".join(rng.choices(tokens, k=16))
-        expected = [(name, body.strip()) for name, body in reference.findall(text)]
-        actual = [(name, body.strip()) for name, body in _iter_named_blocks(text, opener, closer)]
-        assert actual == expected
+def test_qwen_delimiters_preserve_names_and_stripped_values():
+    for reference, opener, closer, tokens in [
+        (_QWEN_FUNCTION, _QWEN_FUNCTION_OPEN_RE, _QWEN_FUNCTION_CLOSE_RE,
+         ["<function=manage_notes>", "</function>", "a", "\n", "\t", " "]),
+        (_QWEN_PARAMETER, _QWEN_PARAMETER_OPEN_RE, _QWEN_PARAMETER_CLOSE_RE,
+         ["<parameter=query>", "</parameter>", "a", "\n", "\t", " "]),
+    ]:
+        rng = random.Random(6503)
+        for _ in range(1000):
+            text = "".join(rng.choices(tokens, k=16))
+            expected = [(name, body.strip()) for name, body in reference.findall(text)]
+            actual = [(name, body.strip()) for name, body in _iter_named_blocks(text, opener, closer)]
+            assert actual == expected
 
 
 def test_qwen_python_arguments_preserve_permissive_legacy_grammar():
@@ -204,42 +201,41 @@ def test_qwen_python_arguments_preserve_permissive_legacy_grammar():
         assert list(_iter_qwen_python_args(text)) == _QWEN_ARGS.findall(text), text
 
 
-@pytest.mark.parametrize("text", [
-    "Done.", "Done.\nUpdated the document.\nDone.", "Done. undone.",
-    "Done.\nDONE.\t", "Done.\u2003Done.\u2003", "Done. no terminal marker   ",
-])
-def test_trailing_done_matches_legacy_cleanup(text):
-    pattern = re.compile(r"\s*Done\.\s*$", re.I)
-    expected = pattern.sub("", text).rstrip() if pattern.search(text) else text
-    assert _strip_trailing_done(text) == expected
+def test_trailing_done_matches_legacy_cleanup():
+    for text in [
+        "Done.", "Done.\nUpdated the document.\nDone.", "Done. undone.",
+        "Done.\nDONE.\t", "Done.\u2003Done.\u2003", "Done. no terminal marker   ",
+    ]:
+        pattern = re.compile(r"\s*Done\.\s*$", re.I)
+        expected = pattern.sub("", text).rstrip() if pattern.search(text) else text
+        assert _strip_trailing_done(text) == expected
 
 
-@pytest.mark.parametrize("allow_empty", [False, True])
-@pytest.mark.parametrize("replacement", ["", " "])
-def test_angle_tag_cleanup_matches_legacy_flat_grammar(allow_empty, replacement):
-    pattern = re.compile(r"<[^>]*>" if allow_empty else r"<[^>]+>")
+def test_angle_tag_cleanup_matches_legacy_flat_grammar():
     cases = ["before<b>bold</b>after", "<>", "<<>>", "a<x\ny>b", "<broken",
              "<a><b>one</b></a>", "a > b", "<x title='>'>tail"]
     cases += ["".join(parts) for n in range(6)
               for parts in itertools.product("a<>\n", repeat=n)]
-    for text in cases:
-        assert strip_angle_tags(text, replacement, allow_empty=allow_empty) == pattern.sub(replacement, text)
+    for allow_empty, replacement in itertools.product([False, True], ["", " "]):
+        pattern = re.compile(r"<[^>]*>" if allow_empty else r"<[^>]+>")
+        for text in cases:
+            assert strip_angle_tags(text, replacement, allow_empty=allow_empty) == pattern.sub(replacement, text)
 
 
-@pytest.mark.parametrize("ascii_only", [False, True])
-def test_email_scanner_preserves_legacy_address_sets(ascii_only):
-    pattern = re.compile(
-        r"[A-Za-z0-9.!#$%&\x27*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
-        if ascii_only else r"[\w.+-]+@[\w.-]+\.\w+"
-    )
-    cases = ["a@b.example", "a+b@b.example, c@d.example", "a@b@c.example",
-             "a@b.c+d@e.f", "你好@例子.中国", "a@b.-.com", "'a'@example.com",
-             "a@b.x", "a@.com", "a@b...", "a@b.c@d.example"]
-    rng = random.Random(6503)
-    tokens = ["a", "b", "é", "中", "@", ".", "-", "+", " ", "_", "'", "!", "/"]
-    cases += ["".join(rng.choices(tokens, k=30)) for _ in range(3000)]
-    for text in cases:
-        assert list(iter_email_addresses(text, ascii_only=ascii_only)) == pattern.findall(text), text
+def test_email_scanner_preserves_legacy_address_sets():
+    for ascii_only in [False, True]:
+        pattern = re.compile(
+            r"[A-Za-z0-9.!#$%&\x27*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+            if ascii_only else r"[\w.+-]+@[\w.-]+\.\w+"
+        )
+        cases = ["a@b.example", "a+b@b.example, c@d.example", "a@b@c.example",
+                 "a@b.c+d@e.f", "你好@例子.中国", "a@b.-.com", "'a'@example.com",
+                 "a@b.x", "a@.com", "a@b...", "a@b.c@d.example"]
+        rng = random.Random(6503)
+        tokens = ["a", "b", "é", "中", "@", ".", "-", "+", " ", "_", "'", "!", "/"]
+        cases += ["".join(rng.choices(tokens, k=30)) for _ in range(3000)]
+        for text in cases:
+            assert list(iter_email_addresses(text, ascii_only=ascii_only)) == pattern.findall(text), text
 
 
 def test_prefixed_workspace_and_url_detectors_match_legacy_searches():
@@ -370,34 +366,34 @@ def test_suffix_and_split_helpers_preserve_legacy_results():
         assert _read_only_shell_command(value) == bool(expected)
 
 
-@pytest.mark.parametrize("prefix,target_pattern", [
-    ("#session-", r"[^)]+"),
-    ("#note-", r"[^)]+"),
-    ("#event-", r"[0-9a-fA-F-]{8,64}"),
-    ("", r"[^)]+"),
-])
-def test_forward_markdown_and_angle_scanners_match_legacy(prefix, target_pattern):
-    reference = re.compile(r"\[([^\]]+)\]\(" + re.escape(prefix) + "(" + target_pattern + r")\)")
-    validator = None if target_pattern == r"[^)]+" else re.compile(target_pattern)
-    cases = ["[title](#session-id)", "[[title](#session-id)", "[](x)",
-             "[a](x)[b](y)", "[a](#event-12345678)", "[a](broken"]
-    rng = random.Random(6503)
-    tokens = ["[", "]", "(", ")", "#session-", "#note-", "#event-", "a", "1", "-", " "]
-    cases += ["".join(rng.choices(tokens, k=28)) for _ in range(3000)]
-    for text in cases:
-        expected = reference.findall(text)
-        actual = [(label, target) for _start, _end, label, target in iter_markdown_links(
-            text, target_prefix=prefix, target_re=validator
-        )]
-        assert actual == expected, text
+def test_forward_markdown_and_angle_scanners_match_legacy():
+    for prefix, target_pattern in [
+        ("#session-", r"[^)]+"),
+        ("#note-", r"[^)]+"),
+        ("#event-", r"[0-9a-fA-F-]{8,64}"),
+        ("", r"[^)]+"),
+    ]:
+        reference = re.compile(r"\[([^\]]+)\]\(" + re.escape(prefix) + "(" + target_pattern + r")\)")
+        validator = None if target_pattern == r"[^)]+" else re.compile(target_pattern)
+        cases = ["[title](#session-id)", "[[title](#session-id)", "[](x)",
+                 "[a](x)[b](y)", "[a](#event-12345678)", "[a](broken"]
+        rng = random.Random(6503)
+        tokens = ["[", "]", "(", ")", "#session-", "#note-", "#event-", "a", "1", "-", " "]
+        cases += ["".join(rng.choices(tokens, k=28)) for _ in range(3000)]
+        for text in cases:
+            expected = reference.findall(text)
+            actual = [(label, target) for _start, _end, label, target in iter_markdown_links(
+                text, target_prefix=prefix, target_re=validator
+            )]
+            assert actual == expected, text
 
-    generic = re.compile(r"\[([^\]]+)\]\([^)]+\)")
-    for text in cases:
-        assert replace_markdown_links_with_labels(text) == generic.sub(r"\1", text), text
+        generic = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+        for text in cases:
+            assert replace_markdown_links_with_labels(text) == generic.sub(r"\1", text), text
 
-    angle = re.compile(r"<([^>]+)>")
-    for text in cases + ["<x>", "<<x>", "<>", "<a><b>", "<<<"]:
-        assert [content for _start, _end, content in iter_angle_contents(text)] == angle.findall(text)
+        angle = re.compile(r"<([^>]+)>")
+        for text in cases + ["<x>", "<<x>", "<>", "<a><b>", "<<<"]:
+            assert [content for _start, _end, content in iter_angle_contents(text)] == angle.findall(text)
 
 
 def test_numbered_row_identifier_scan_matches_legacy_rows():
@@ -647,6 +643,22 @@ def test_turn_contract_scans_match_legacy_grammars():
         r"[^.;\n]*[.!?]*\s*$", re.I,
     )
     budget = re.compile(r"\bunder\s+[¥$€£]?\s*\d+(?:[.,]\d+)?(?:\s*yen)?\b", re.I)
+    warm_recall = re.compile(
+        r"^\s*(?:(?:ok(?:ay)?|and|then)\s+)?(?:back\s+to|return\s+to|"
+        r"what\s+about|check|show|open)?\s*(?:my|the)?\s*"
+        r"(?P<target>calendar|emails?|inbox|notes?|tasks?|skills?|memories|memory|"
+        r"documents?|docs?|web|browser|cookbook|files?|shell)\s*(?:again|now)?[.!?]*\s*$",
+        re.I,
+    )
+    warm_recall_with_followup = re.compile(
+        r"^\s*(?:(?:ok(?:ay)?|and|then)\s+)?(?:back\s+to|return\s+to|"
+        r"what\s+about|check|show|open)\s+(?:my|the)?\s*"
+        r"(?P<target>calendar|emails?|inbox|notes?|tasks?|skills?|memories|memory|"
+        r"documents?|docs?|web|browser|cookbook|files?|shell)\b"
+        r"(?:\s*(?:[-—,:;]|\b(?:and|then)\b)\s*|\s+)"
+        r"(?P<followup>(?:what(?:['’]?s|\s+is)?|which|who|where|when|how|show|open|read|list|find|search)\b[\s\S]{0,180})$",
+        re.I,
+    )
     terminal_specs = [
         r"[,.;?]\s*(?:(?:only|just)\s+)?(?:(?:list|show)\s+(?:me\s+)?)?a\s+few(?:\s+(?:task\s+)?(?:names?|items?|results?|entries?))?(?:\s+and\s+(?:whether|if)\s+[^.;\n]+)?",
         r"[.;]\s*read[- ]only(?:\s+(?:please|pls|plz))?\s*,?\s*(?:(?:and\s+)?(?:do\s+not|don['’]?t|dont)\s+(?:change|edit|modify)(?:\s+or\s+send)?\s+(?:anything|data))?",
@@ -667,193 +679,193 @@ def test_turn_contract_scans_match_legacy_grammars():
             legacy = re.search(core + r"[.!?]*\s*$", text, re.I)
             current = _terminal_clause_match(text, core)
             assert (current.start() if current else None) == (legacy.start() if legacy else None), (core, text)
-        match = _WARM_RECALL.fullmatch(text)
+        match = warm_recall.fullmatch(text)
         assert _warm_recall_parts(text) == ((match.group("target"), "") if match else None), text
-        match = _WARM_RECALL_WITH_FOLLOWUP.fullmatch(text)
+        match = warm_recall_with_followup.fullmatch(text)
         assert _warm_recall_parts(text, with_followup=True) == (
             (match.group("target"), match.group("followup")) if match else None
         ), text
 
 
-@pytest.mark.parametrize("program", [
-    r'''
-from src.agent_loop import _contextual_summary_fragment
-assert _contextual_summary_fragment("Summary: x\n" + "x\n" * 100_000) == "x"
-assert _contextual_summary_fragment("Summary:" + "\n" * 100_000) == "\n"
-''',
-    r'''
-from src.clean_agent_preview import _page_listing_request
-for text in ("top " + "stories " * 30_000 + "X",
-             "top " + "stories on " * 30_000 + "@"):
-    assert not _page_listing_request(text)
-''',
-    r'''
-from src.text_scanning import contains_search_engine_navigation
-assert not contains_search_engine_navigation("http://" * 100_000 + "X")
-assert contains_search_engine_navigation("http://" * 100_000 + "bing.com/search")
-''',
-    r'''
-from src.agent_loop import _is_terse_email_lookup_followup
-_is_terse_email_lookup_followup("and" + " " * 100_000 + "X")
-''',
-    r'''
-from src.turn_contract import (_is_pure_action_prohibition, _mentions_under_budget,
-    _strip_cancelled_request_lead, _terminal_clause_match, _warm_recall_parts)
-space = " " * 100_000
-_strip_cancelled_request_lead("never" + space + "mind" + space + "X")
-_terminal_clause_match(", a few and whether " + space + "X;", r"[,.;?]\s*a\s+few(?:\s+and\s+whether\s+[^.;\n]+)?")
-_is_pure_action_prohibition("do not add " + space + "X;")
-_mentions_under_budget("under" + space + "$" + space + "X")
-_warm_recall_parts("open" + space + "my" + space + "calendar" + space + "X")
-_warm_recall_parts("open" + space + "my" + space + "calendar" + space + "and" + space + "what " + "x" * 181, with_followup=True)
-''',
-    r'''
-from src.agent_loop import (_captures_after_first_prefix, _pipeline_request_parts,
-    _remaining_checklist_name, _session_find_query_capture)
-evil = ("delete all x " * 30_000) + "z"
-_captures_after_first_prefix(evil, r"\bdelete\b(?=\s)", r"\s+(?:all)?\s*(.+?)\s+emails?\b")
-_pipeline_request_parts(("pipeline using m to x " * 30_000) + "z")
-_session_find_query_capture(("find x " * 30_000) + "z")
-_remaining_checklist_name("what " + ("left on " * 30_000) + "z")
-''',
-    r'''
-from src.clean_agent_preview import (_page_listing_request, _prior_web_source_request,
-    _terminal_source_link_clause, _web_source_rows)
-_page_listing_request("top stories on " + " " * 100_000 + "\nX")
-_prior_web_source_request("give me link" + " " * 100_000 + "X")
-_terminal_source_link_clause("links" + " " * 100_000 + "X")
-_web_source_rows("[1] " + " " * 100_000)
-''',
-    r'''
-from src.agent_loop import (_calendar_listing_row, _contains_email_draft_headers,
-    _research_listing_row, _skill_listing_row)
-for text in (
-    "- [" + "](#research-" * 30_000,
-    "- **" + " **" * 30_000,
-    "- when: [" + "](#event-" * 30_000,
-    "To: x " + "Subject: x " * 30_000,
-):
-    _research_listing_row(text)
-    _skill_listing_row(text)
-    _calendar_listing_row(text)
-    _contains_email_draft_headers(text)
-''',
-    r'''
-from src.agent_loop import _session_link_from_row, _session_list_summary_from_tool_output, _strip_trailing_done
-evil = "Done. " + "\t" * 100_000 + "x"
-assert _strip_trailing_done(evil) == evil
-for row in ("[" + "\\" * 100_000, "[" * 100_000,
-            "[a" + "\\](#session-" * 20_000 + ")"):
-    _session_link_from_row(row)
-for row in ("[x](#session-id) (" + "msgs" * 100_000,
-            "[x](#session-id) (" + "(last active today)" * 20_000):
-    _session_list_summary_from_tool_output("Chats:\n- " + row)
-''',
-    r'''
-from src.tool_parsing import *
-from src.tool_parsing import (_iter_named_blocks, _strip_delimited,
-    _GEMMA_TOOL_CALL_OPEN_RE, _GEMMA_TOOL_CALL_CLOSE_RE)
-text = "}<|tool_call|>" + "<|tool_call|>call:web_search{" * 20_000
-assert list(_iter_named_blocks(text, _GEMMA_TOOL_CALL_OPEN_RE, _GEMMA_TOOL_CALL_CLOSE_RE)) == []
-assert _strip_delimited(text, _GEMMA_TOOL_CALL_OPEN_RE, _GEMMA_TOOL_CALL_CLOSE_RE) == text
-# Public entry points also stay responsive, including fallback parsers.
-text = "}<|tool_call|>" + "<|tool_call|>call:web_search{" * 3000
-assert parse_tool_blocks(text) == []
-strip_tool_blocks(text)
-''',
-    r'''
-from src.tool_parsing import (_iter_named_blocks, _iter_qwen_python_args,
-    _QWEN_FUNCTION_OPEN_RE, _QWEN_FUNCTION_CLOSE_RE,
-    _QWEN_PARAMETER_OPEN_RE, _QWEN_PARAMETER_CLOSE_RE, parse_tool_blocks)
-for opener, closer, text in (
-    (_QWEN_FUNCTION_OPEN_RE, _QWEN_FUNCTION_CLOSE_RE, "<function=manage_notes>" * 20_000),
-    (_QWEN_PARAMETER_OPEN_RE, _QWEN_PARAMETER_CLOSE_RE, "<parameter=action>" * 20_000),
-    (_QWEN_FUNCTION_OPEN_RE, _QWEN_FUNCTION_CLOSE_RE, "<function=manage_notes>a" + "\t" * 100_000 + "x"),
-):
-    assert list(_iter_named_blocks(text, opener, closer)) == []
-assert list(_iter_qwen_python_args("a" * 100_000)) == []
-assert parse_tool_blocks("<function=manage_notes>" * 3000) == []
-assert parse_tool_blocks("manage_notes(" + "a" * 100_000 + ")")
-''',
-    r'''
-from src.tool_parsing import strip_angle_tags
-for allow_empty in (False, True):
-    for replacement in ("", " "):
-        for text in ("<" * 200_000, ">" + "<" * 200_000):
-            assert strip_angle_tags(text, replacement, allow_empty=allow_empty) == text
-        assert strip_angle_tags("<" * 200_000 + ">tail", replacement,
-                                allow_empty=allow_empty) == replacement + "tail"
-''',
-    r'''
-from src.tool_parsing import iter_email_addresses
-for ascii_only in (False, True):
-    for text in ("+" * 100_000, "a@" + "a" * 100_000,
-                 "a@" + "." * 100_000, "a@" * 20_000):
-        assert list(iter_email_addresses(text, ascii_only=ascii_only)) == []
-''',
-    r'''
-from src.agent_loop import _mentions_pdf_url, _mentions_workspace_script
-from src.clean_agent_preview import declared_workspace_artifacts
-from src.text_scanning import contains_search_engine_navigation
-from src.turn_contract import _mentions_workspace_artifact, _mentions_workspace_output
-workspace = "/workspace/" * 30_000 + "x"
-assert not _mentions_workspace_script(workspace)
-assert not _mentions_workspace_artifact(workspace)
-assert not _mentions_workspace_output(workspace)
-assert declared_workspace_artifacts("create " + workspace) == ()
-assert not _mentions_pdf_url("http://" * 30_000 + "x")
-assert not contains_search_engine_navigation("http://google." + "..google." * 30_000 + "x")
-''',
-    r'''
-from src.agent_loop import _looks_like_agent_reasoning_preamble, _looks_like_ody_qwen_leaked_tool_text
-from src.text_scanning import contains_detailed_sequence_request
-for text in ("\n" * 100_000 + "x", ("when " * 20_000) + "x"):
-    _looks_like_agent_reasoning_preamble(text)
-    _looks_like_ody_qwen_leaked_tool_text(text)
-    contains_detailed_sequence_request(text)
-''',
-    r'''
-from src.agent_loop import (_email_account_label, _email_sender_name,
-    _parse_explicit_open_panel_request, _read_only_shell_command,
-    _split_before_assistant_prompt, _split_note_items,
-    _strip_horizontal_space_before_lf)
-space = " " * 100_000
-_parse_explicit_open_panel_request("open calendar" + space + "x")
-_split_note_items(space + "x")
-_email_sender_name("<" * 100_000 + "x")
-_email_account_label("<" * 100_000 + "x")
-_split_before_assistant_prompt("\n" * 100_000 + "x")
-_strip_horizontal_space_before_lf(" " * 100_000 + "x")
-_read_only_shell_command(space + "x")
-''',
-    r'''
-from src.agent_loop import _numbered_row_parenthesized_ids
-from src.text_scanning import iter_angle_contents, iter_markdown_links, replace_markdown_links_with_labels
-for text in ("<" * 100_000, "[" * 100_000,
-             ("[x](#session-" * 20_000) + "missing"):
-    list(iter_angle_contents(text))
-    list(iter_markdown_links(text, target_prefix="#session-"))
-    replace_markdown_links_with_labels(text)
-_numbered_row_parenthesized_ids("1. x " + "(" * 100_000 + "x")
-''',
-    r'''
-from src.agent_loop import (_contextual_summary_fragment, _is_terse_link_request,
-    _looks_like_destructive_request, _looks_like_youtube_tool_turn,
-    _private_browser_product_query)
-from src.text_scanning import first_tag_content
-for text in (("official " * 30_000) + "x", ("mark " * 30_000) + "x",
-             " " * 100_000 + "x", ("summary: x " * 20_000) + "x",
-             "find best " + "?" * 100_000 + "x", "<title" * 30_000):
-    _looks_like_youtube_tool_turn(text)
-    _looks_like_destructive_request(text)
-    _is_terse_link_request(text)
-    _contextual_summary_fragment(text)
-    _private_browser_product_query(text)
-    first_tag_content(text, "title", allow_attributes=True)
-''',
-])
-def test_hostile_parsers_complete_with_a_short_process_deadline(program):
-    # A regression cannot wedge pytest: the subprocess is killed at the limit.
-    # This includes import overhead; fixed scans themselves take milliseconds.
-    subprocess.run([sys.executable, "-c", textwrap.dedent(program)],
-                   check=True, timeout=8, capture_output=True, text=True)
+def test_hostile_parsers_complete_with_a_short_process_deadline():
+    for program in [
+            r'''
+        from src.agent_loop import _contextual_summary_fragment
+        assert _contextual_summary_fragment("Summary: x\n" + "x\n" * 100_000) == "x"
+        assert _contextual_summary_fragment("Summary:" + "\n" * 100_000) == "\n"
+        ''',
+            r'''
+        from src.clean_agent_preview import _page_listing_request
+        for text in ("top " + "stories " * 30_000 + "X",
+                     "top " + "stories on " * 30_000 + "@"):
+            assert not _page_listing_request(text)
+        ''',
+            r'''
+        from src.text_scanning import contains_search_engine_navigation
+        assert not contains_search_engine_navigation("http://" * 100_000 + "X")
+        assert contains_search_engine_navigation("http://" * 100_000 + "bing.com/search")
+        ''',
+            r'''
+        from src.agent_loop import _is_terse_email_lookup_followup
+        _is_terse_email_lookup_followup("and" + " " * 100_000 + "X")
+        ''',
+            r'''
+        from src.turn_contract import (_is_pure_action_prohibition, _mentions_under_budget,
+            _strip_cancelled_request_lead, _terminal_clause_match, _warm_recall_parts)
+        space = " " * 100_000
+        _strip_cancelled_request_lead("never" + space + "mind" + space + "X")
+        _terminal_clause_match(", a few and whether " + space + "X;", r"[,.;?]\s*a\s+few(?:\s+and\s+whether\s+[^.;\n]+)?")
+        _is_pure_action_prohibition("do not add " + space + "X;")
+        _mentions_under_budget("under" + space + "$" + space + "X")
+        _warm_recall_parts("open" + space + "my" + space + "calendar" + space + "X")
+        _warm_recall_parts("open" + space + "my" + space + "calendar" + space + "and" + space + "what " + "x" * 181, with_followup=True)
+        ''',
+            r'''
+        from src.agent_loop import (_captures_after_first_prefix, _pipeline_request_parts,
+            _remaining_checklist_name, _session_find_query_capture)
+        evil = ("delete all x " * 30_000) + "z"
+        _captures_after_first_prefix(evil, r"\bdelete\b(?=\s)", r"\s+(?:all)?\s*(.+?)\s+emails?\b")
+        _pipeline_request_parts(("pipeline using m to x " * 30_000) + "z")
+        _session_find_query_capture(("find x " * 30_000) + "z")
+        _remaining_checklist_name("what " + ("left on " * 30_000) + "z")
+        ''',
+            r'''
+        from src.clean_agent_preview import (_page_listing_request, _prior_web_source_request,
+            _terminal_source_link_clause, _web_source_rows)
+        _page_listing_request("top stories on " + " " * 100_000 + "\nX")
+        _prior_web_source_request("give me link" + " " * 100_000 + "X")
+        _terminal_source_link_clause("links" + " " * 100_000 + "X")
+        _web_source_rows("[1] " + " " * 100_000)
+        ''',
+            r'''
+        from src.agent_loop import (_calendar_listing_row, _contains_email_draft_headers,
+            _research_listing_row, _skill_listing_row)
+        for text in (
+            "- [" + "](#research-" * 30_000,
+            "- **" + " **" * 30_000,
+            "- when: [" + "](#event-" * 30_000,
+            "To: x " + "Subject: x " * 30_000,
+        ):
+            _research_listing_row(text)
+            _skill_listing_row(text)
+            _calendar_listing_row(text)
+            _contains_email_draft_headers(text)
+        ''',
+            r'''
+        from src.agent_loop import _session_link_from_row, _session_list_summary_from_tool_output, _strip_trailing_done
+        evil = "Done. " + "\t" * 100_000 + "x"
+        assert _strip_trailing_done(evil) == evil
+        for row in ("[" + "\\" * 100_000, "[" * 100_000,
+                    "[a" + "\\](#session-" * 20_000 + ")"):
+            _session_link_from_row(row)
+        for row in ("[x](#session-id) (" + "msgs" * 100_000,
+                    "[x](#session-id) (" + "(last active today)" * 20_000):
+            _session_list_summary_from_tool_output("Chats:\n- " + row)
+        ''',
+            r'''
+        from src.tool_parsing import *
+        from src.tool_parsing import (_iter_named_blocks, _strip_delimited,
+            _GEMMA_TOOL_CALL_OPEN_RE, _GEMMA_TOOL_CALL_CLOSE_RE)
+        text = "}<|tool_call|>" + "<|tool_call|>call:web_search{" * 20_000
+        assert list(_iter_named_blocks(text, _GEMMA_TOOL_CALL_OPEN_RE, _GEMMA_TOOL_CALL_CLOSE_RE)) == []
+        assert _strip_delimited(text, _GEMMA_TOOL_CALL_OPEN_RE, _GEMMA_TOOL_CALL_CLOSE_RE) == text
+        # Public entry points also stay responsive, including fallback parsers.
+        text = "}<|tool_call|>" + "<|tool_call|>call:web_search{" * 3000
+        assert parse_tool_blocks(text) == []
+        strip_tool_blocks(text)
+        ''',
+            r'''
+        from src.tool_parsing import (_iter_named_blocks, _iter_qwen_python_args,
+            _QWEN_FUNCTION_OPEN_RE, _QWEN_FUNCTION_CLOSE_RE,
+            _QWEN_PARAMETER_OPEN_RE, _QWEN_PARAMETER_CLOSE_RE, parse_tool_blocks)
+        for opener, closer, text in (
+            (_QWEN_FUNCTION_OPEN_RE, _QWEN_FUNCTION_CLOSE_RE, "<function=manage_notes>" * 20_000),
+            (_QWEN_PARAMETER_OPEN_RE, _QWEN_PARAMETER_CLOSE_RE, "<parameter=action>" * 20_000),
+            (_QWEN_FUNCTION_OPEN_RE, _QWEN_FUNCTION_CLOSE_RE, "<function=manage_notes>a" + "\t" * 100_000 + "x"),
+        ):
+            assert list(_iter_named_blocks(text, opener, closer)) == []
+        assert list(_iter_qwen_python_args("a" * 100_000)) == []
+        assert parse_tool_blocks("<function=manage_notes>" * 3000) == []
+        assert parse_tool_blocks("manage_notes(" + "a" * 100_000 + ")")
+        ''',
+            r'''
+        from src.tool_parsing import strip_angle_tags
+        for allow_empty in (False, True):
+            for replacement in ("", " "):
+                for text in ("<" * 200_000, ">" + "<" * 200_000):
+                    assert strip_angle_tags(text, replacement, allow_empty=allow_empty) == text
+                assert strip_angle_tags("<" * 200_000 + ">tail", replacement,
+                                        allow_empty=allow_empty) == replacement + "tail"
+        ''',
+            r'''
+        from src.tool_parsing import iter_email_addresses
+        for ascii_only in (False, True):
+            for text in ("+" * 100_000, "a@" + "a" * 100_000,
+                         "a@" + "." * 100_000, "a@" * 20_000):
+                assert list(iter_email_addresses(text, ascii_only=ascii_only)) == []
+        ''',
+            r'''
+        from src.agent_loop import _mentions_pdf_url, _mentions_workspace_script
+        from src.clean_agent_preview import declared_workspace_artifacts
+        from src.text_scanning import contains_search_engine_navigation
+        from src.turn_contract import _mentions_workspace_artifact, _mentions_workspace_output
+        workspace = "/workspace/" * 30_000 + "x"
+        assert not _mentions_workspace_script(workspace)
+        assert not _mentions_workspace_artifact(workspace)
+        assert not _mentions_workspace_output(workspace)
+        assert declared_workspace_artifacts("create " + workspace) == ()
+        assert not _mentions_pdf_url("http://" * 30_000 + "x")
+        assert not contains_search_engine_navigation("http://google." + "..google." * 30_000 + "x")
+        ''',
+            r'''
+        from src.agent_loop import _looks_like_agent_reasoning_preamble, _looks_like_ody_qwen_leaked_tool_text
+        from src.text_scanning import contains_detailed_sequence_request
+        for text in ("\n" * 100_000 + "x", ("when " * 20_000) + "x"):
+            _looks_like_agent_reasoning_preamble(text)
+            _looks_like_ody_qwen_leaked_tool_text(text)
+            contains_detailed_sequence_request(text)
+        ''',
+            r'''
+        from src.agent_loop import (_email_account_label, _email_sender_name,
+            _parse_explicit_open_panel_request, _read_only_shell_command,
+            _split_before_assistant_prompt, _split_note_items,
+            _strip_horizontal_space_before_lf)
+        space = " " * 100_000
+        _parse_explicit_open_panel_request("open calendar" + space + "x")
+        _split_note_items(space + "x")
+        _email_sender_name("<" * 100_000 + "x")
+        _email_account_label("<" * 100_000 + "x")
+        _split_before_assistant_prompt("\n" * 100_000 + "x")
+        _strip_horizontal_space_before_lf(" " * 100_000 + "x")
+        _read_only_shell_command(space + "x")
+        ''',
+            r'''
+        from src.agent_loop import _numbered_row_parenthesized_ids
+        from src.text_scanning import iter_angle_contents, iter_markdown_links, replace_markdown_links_with_labels
+        for text in ("<" * 100_000, "[" * 100_000,
+                     ("[x](#session-" * 20_000) + "missing"):
+            list(iter_angle_contents(text))
+            list(iter_markdown_links(text, target_prefix="#session-"))
+            replace_markdown_links_with_labels(text)
+        _numbered_row_parenthesized_ids("1. x " + "(" * 100_000 + "x")
+        ''',
+            r'''
+        from src.agent_loop import (_contextual_summary_fragment, _is_terse_link_request,
+            _looks_like_destructive_request, _looks_like_youtube_tool_turn,
+            _private_browser_product_query)
+        from src.text_scanning import first_tag_content
+        for text in (("official " * 30_000) + "x", ("mark " * 30_000) + "x",
+                     " " * 100_000 + "x", ("summary: x " * 20_000) + "x",
+                     "find best " + "?" * 100_000 + "x", "<title" * 30_000):
+            _looks_like_youtube_tool_turn(text)
+            _looks_like_destructive_request(text)
+            _is_terse_link_request(text)
+            _contextual_summary_fragment(text)
+            _private_browser_product_query(text)
+            first_tag_content(text, "title", allow_attributes=True)
+        ''',
+    ]:
+        # A regression cannot wedge pytest: the subprocess is killed at the limit.
+        # This includes import overhead; fixed scans themselves take milliseconds.
+        subprocess.run([sys.executable, "-c", textwrap.dedent(program)],
+                       check=True, timeout=8, capture_output=True, text=True)

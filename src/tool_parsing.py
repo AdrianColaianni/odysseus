@@ -19,9 +19,6 @@ from src.tool_security import BUILTIN_EMAIL_TOOLS
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Regex patterns
-# ---------------------------------------------------------------------------
 
 # Pattern 1: ```bash ... ``` fenced code blocks. The tag may be followed by a
 # newline (classic form) or by inline JSON args on the same line
@@ -240,7 +237,7 @@ _QWEN_ROLE_MARKER_RE = re.compile(r"</?\|(?:assistant|assistan|user|system|tool)
 # At least one pipe is required around `end`. Both pipes used to be optional
 # (`\|?end\|?`), which also matched a bare `end` on its own line and deleted it
 # from ordinary prose and from Ruby/Lua/shell snippets that close blocks with
-# one; see #5547. `|end`, `end|`, `|end|` and `/|end|` still strip as before.
+# one. `|end`, `end|`, `|end|` and `/|end|` still strip as before.
 _QWEN_BARE_MARKER_RE = re.compile(
     r"(?:^|[\t\r\n ])(?:/?\|end\||\|end|end\|)(?=[\t\r\n ]|$)|"
     r"(?:^|[\r\n])[ \t]*assistan(?:t)?[ \t]*(?=[\r\n]|$)",
@@ -595,10 +592,6 @@ def _strip_plain_ui_open_panel(text: str) -> str:
     return "".join(out)
 
 
-# ---------------------------------------------------------------------------
-# Parsing functions
-# ---------------------------------------------------------------------------
-
 def _parse_python_like_content(content: str):
     """Parse fallback syntax without leaking invalid-escape warnings to traces."""
 
@@ -691,7 +684,6 @@ def _parse_misfenced_web_lookup(content: str) -> Optional[ToolBlock]:
     if not url:
         return None
     return ToolBlock("web_fetch", url)
-
 
 
 def _parse_misfenced_read_file_lookup(content: str, *, allow_shell_style: bool = False) -> Optional[ToolBlock]:
@@ -1337,7 +1329,7 @@ def _parse_json_tool_call_body(body: str) -> Optional[ToolBlock]:
       {"name": "bash", "arguments": {"command": "mkdir -p agent-test"}}
       </tool_call>
 
-    Strict by design (issue #5187 / tracker #5333): the body must decode to an
+    Strict by design: the body must decode to an
     object with a string "name", and "arguments" — when present — must itself
     be an object. Anything else returns None rather than being coerced, so a
     malformed call is dropped instead of dispatching with mangled arguments.
@@ -1869,8 +1861,8 @@ def parse_tool_blocks(
     blocks) is not matched at all. Native function-calling models (GPT/Claude/
     Grok/Qwen3/DeepSeek-V, etc.) commonly write illustrative fenced examples in
     prose; for those models we trust the structured tool_calls channel for real
-    invocations and treat a bare fence as display text rather than an action
-    (issue #3222). Patterns 2-5 — explicit [TOOL_CALL]/<invoke>/<tool_code>/DSML
+    invocations and treat a bare fence as display text rather than an action.
+    Patterns 2-5 — explicit [TOOL_CALL]/<invoke>/<tool_code>/DSML
     markup that leaked into content as text — stay fully active regardless,
     since that markup is never an illustrative example and dropping it would
     silently lose real calls (e.g. DeepSeek-V falling back to DSML when it
@@ -2019,7 +2011,7 @@ def parse_tool_blocks(
         if blocks:
             return blocks
         # Try wrapped: <tool_call><invoke ...>...</invoke></tool_call>
-        # A wrapper body that is JSON (Qwen/Hermes text mode, issue #5187) is
+        # A wrapper body that is JSON (Qwen/Hermes text mode) is
         # parsed as JSON or dropped — never scanned by the XML iterators, so
         # XML-like text inside JSON argument values stays data instead of
         # selecting a different tool.
@@ -2153,7 +2145,7 @@ def strip_tool_blocks(
     same response: if a fence wasn't executed as a tool call (because it's an
     illustrative example from a native function-calling model), it shouldn't
     vanish from the persisted/displayed text either — otherwise the example
-    streams once and then disappears on reload (issue #3222 follow-up).
+    streams once and then disappears on reload.
     Patterns 2-5 + DSML markup are always stripped, since that markup should
     never reach the user regardless of whether it converted to a tool call.
     """

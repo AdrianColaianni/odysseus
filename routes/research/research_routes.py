@@ -27,14 +27,10 @@ def _validate_session_id(session_id: str) -> str:
     return session_id
 
 
-def _research_storage_root() -> Path:
-    return Path(DEEP_RESEARCH_DIR).resolve()
-
-
 def _find_research_path(session_id: str) -> Path | None:
     """Find a persisted research file without deriving its path from input."""
     expected_name = f"{_validate_session_id(session_id)}.json"
-    root = _research_storage_root()
+    root = Path(DEEP_RESEARCH_DIR).resolve()
     for stored_path in root.glob("*.json"):
         if stored_path.name != expected_name:
             continue
@@ -71,10 +67,7 @@ def _find_owned_research_path(session_id: str, user: str) -> Path | None:
 
 logger = logging.getLogger(__name__)
 
-# Model-name substrings that are NOT chat/generation models — research must
-# never pick these as its model. An OpenAI-style endpoint often lists
-# `text-embedding-ada-002` etc. first in its model list, which is why research
-# was failing with "Cannot reach model 'text-embedding-ada-002'".
+# Substrings of non-chat models, which endpoints often list before the chat ones.
 _NON_CHAT_MODEL = (
     "text-embedding", "embedding", "tts-", "whisper", "dall-e",
     "moderation", "rerank", "reranker", "clip", "stable-diffusion",
@@ -151,20 +144,9 @@ def _resolve_research_endpoint(sess, owner: Optional[str] = None) -> tuple:
 
 
 def _owned_enabled_endpoint(db, owner, endpoint_id=None):
-    """An enabled ModelEndpoint VISIBLE to `owner` (their own rows + legacy
-    null-owner "shared" rows), optionally narrowed to a specific endpoint_id;
-    None if nothing visible matches.
+    """An enabled endpoint visible to `owner` (own or shared rows), optionally by id.
 
-    Owner-scoped on purpose. ModelEndpoint is per-user (core/database.py: non-null
-    owner = private, "the model picker only shows the endpoint to that user") and
-    holds a decrypted `api_key`. /api/research/start feeds the resolved row's
-    api_key + base_url into research_handler.start_research(llm_endpoint=,
-    llm_headers=), so an UNSCOPED lookup — by the caller-supplied endpoint_id, or
-    via the bare first-enabled fallback — would let a research-privileged user
-    spend ANOTHER user's API key/quota and reach whatever internal base_url they
-    configured. Mirrors webhook_routes._first_enabled_endpoint and
-    session_routes._owned_endpoint. A null/empty owner is a no-op (single-user /
-    legacy mode).
+    Owner-scoped because research runs with the row's api_key.
     """
     from src.database import ModelEndpoint
     from src.auth_helpers import owner_filter
@@ -210,10 +192,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
     router = APIRouter(tags=["research"])
 
     def _require_user(request: Request) -> str:
-        """All research endpoints require an authenticated user. Research
-        data isn't owner-scoped in the on-disk JSON yet, so we at least
-        block anonymous access. Multi-tenant deploys should additionally
-        verify the session belongs to this user."""
+        """The caller, or "" in auth-disabled mode; anonymous callers get 401."""
         user = get_current_user(request)
         if not user:
             if _auth_disabled():
@@ -517,9 +496,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             deleted = True
         return {"deleted": deleted}
 
-    # ------------------------------------------------------------------
-    # Panel endpoints — launch research without a chat session
-    # ------------------------------------------------------------------
+    # Panel endpoints launch research without a chat session.
 
     class ResearchStartRequest(BaseModel):
         query: str
@@ -568,9 +545,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             from src.database import SessionLocal
             db = SessionLocal()
             try:
-                # Owner-scoped: never resolve another user's private endpoint
-                # (and its decrypted api_key / internal base_url). A scoped miss
-                # reads as 404 so the endpoint's existence isn't revealed.
+                # A scoped miss reads as 404 so another user's endpoint stays hidden.
                 ep = _owned_enabled_endpoint(db, user, body.endpoint_id)
                 if not ep:
                     raise HTTPException(404, "Endpoint not found or disabled")
@@ -584,10 +559,6 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             ep_url, ep_model, ep_headers = resolve_endpoint("research", owner=user)
             if not ep_url:
                 ep_url, ep_model, ep_headers = resolve_endpoint("utility", owner=user)
-            # When neither research nor utility is configured, use the user's
-            # configured DEFAULT model (default_endpoint_id/default_model) rather
-            # than arbitrarily grabbing the first enabled endpoint's first model
-            # (which surfaced gpt-3.5). "Default" should mean the default model.
             if not ep_url:
                 ep_url, ep_model, ep_headers = resolve_endpoint("default", owner=user)
             if not ep_url:
@@ -596,10 +567,6 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                 from src.database import SessionLocal
                 db = SessionLocal()
                 try:
-                    # Owner-scoped first-enabled fallback: the caller's own rows
-                    # + legacy null-owner shared rows only — never borrow another
-                    # user's private endpoint/api_key. Same fix as the
-                    # /api/v1/chat fallback (webhook_routes._first_enabled_endpoint).
                     ep = _owned_enabled_endpoint(db, user)
                     if ep:
                         resolved = _resolve_endpoint_runtime(ep, owner=user)

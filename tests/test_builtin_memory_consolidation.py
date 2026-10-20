@@ -28,7 +28,6 @@ def _read_memories(data_dir):
 
 @pytest.mark.asyncio
 async def test_consolidate_memory_empty_owner_treats_each_owner_separately(monkeypatch, tmp_path):
-    from src import constants
     from src import llm_core
     from src import task_endpoint
     action_consolidate_memory = _import_consolidate_action()
@@ -43,7 +42,7 @@ async def test_consolidate_memory_empty_owner_treats_each_owner_separately(monke
             {"id": "bob-drop", "owner": "bob", "text": "Bob secret deployment note duplicate.", "category": "project"},
         ],
     )
-    monkeypatch.setattr(constants, "DATA_DIR", str(data_dir))
+    monkeypatch.setattr("src.memory.MEMORY_FILE", str(data_dir / "memory.json"))
     monkeypatch.setattr(
         task_endpoint,
         "resolve_task_candidates",
@@ -90,7 +89,6 @@ async def test_consolidate_memory_empty_owner_treats_each_owner_separately(monke
 
 @pytest.mark.asyncio
 async def test_consolidate_memory_specific_owner_does_not_absorb_ownerless_rows(monkeypatch, tmp_path):
-    from src import constants
     from src import endpoint_resolver
     action_consolidate_memory = _import_consolidate_action()
 
@@ -103,7 +101,7 @@ async def test_consolidate_memory_specific_owner_does_not_absorb_ownerless_rows(
             {"id": "bob-1", "owner": "bob", "text": "Bob likes hosted models.", "category": "preference"},
         ],
     )
-    monkeypatch.setattr(constants, "DATA_DIR", str(data_dir))
+    monkeypatch.setattr("src.memory.MEMORY_FILE", str(data_dir / "memory.json"))
     monkeypatch.setattr(endpoint_resolver, "resolve_endpoint", lambda *args, **kwargs: ("", "", {}))
 
     message, ok = await action_consolidate_memory("alice")
@@ -118,7 +116,6 @@ async def test_consolidate_memory_specific_owner_does_not_absorb_ownerless_rows(
 
 @pytest.mark.asyncio
 async def test_consolidate_memory_removes_near_duplicates_before_ai(monkeypatch, tmp_path):
-    from src import constants
     from src import llm_core
     from src import task_endpoint
     action_consolidate_memory = _import_consolidate_action()
@@ -131,7 +128,7 @@ async def test_consolidate_memory_removes_near_duplicates_before_ai(monkeypatch,
             {"id": "c", "owner": "alice", "text": "User likes local models.", "category": "preference"},
         ],
     )
-    monkeypatch.setattr(constants, "DATA_DIR", str(data_dir))
+    monkeypatch.setattr("src.memory.MEMORY_FILE", str(data_dir / "memory.json"))
     monkeypatch.setattr(
         task_endpoint,
         "resolve_task_candidates",

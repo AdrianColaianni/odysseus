@@ -7,10 +7,10 @@ dedup must be scoped to the caller\'s own memories. The full multi-tenant
 store is still saved back.
 """
 import asyncio
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import routes.backup_routes as br
+from tests.helpers.routes import route_endpoint
 
 
 class _Req:
@@ -22,7 +22,6 @@ class _Req:
 
 
 def _setup(monkeypatch, store, user="alice"):
-    monkeypatch.setattr(br, "require_admin", lambda request: None)
     monkeypatch.setattr(br, "get_current_user", lambda request: user)
 
     mem = MagicMock()
@@ -36,11 +35,7 @@ def _setup(monkeypatch, store, user="alice"):
     skills = MagicMock()
     skills.load_all.return_value = []
     router = br.setup_backup_routes(mem, MagicMock(), skills)
-    endpoint = None
-    for r in router.routes:
-        if r.path == "/api/import" and "POST" in getattr(r, "methods", set()):
-            endpoint = r.endpoint
-    assert endpoint is not None
+    endpoint = route_endpoint(router, "/api/import", "POST")
     return endpoint, saved
 
 

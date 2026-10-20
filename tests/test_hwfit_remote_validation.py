@@ -3,50 +3,25 @@ from fastapi import HTTPException
 
 from core.platform_compat import _ssh_exec_argv
 from routes.hwfit_routes import setup_hwfit_routes
+from tests.helpers.routes import route_endpoint
 
 
 def _endpoint(path: str):
-    router = setup_hwfit_routes()
-    for route in router.routes:
-        if getattr(route, "path", "") == path:
-            return route.endpoint
-    raise AssertionError(f"{path} route not found")
+    return route_endpoint(setup_hwfit_routes(), path, "GET")
 
 
-@pytest.mark.parametrize(
-    "path,kwargs",
-    [
+def test_hwfit_routes_reject_option_shaped_ssh_host_and_port():
+    for path, kwargs in (
         ("/api/hwfit/system", {}),
         ("/api/hwfit/models", {"limit": 1}),
         ("/api/hwfit/profiles", {"model": "demo"}),
         ("/api/hwfit/image-models", {}),
-    ],
-)
-def test_hwfit_routes_reject_ssh_option_host(path, kwargs):
-    endpoint = _endpoint(path)
-
-    with pytest.raises(HTTPException) as exc:
-        endpoint(host="-oProxyCommand=sh", ssh_port="22", **kwargs)
-
-    assert exc.value.status_code == 400
-
-
-@pytest.mark.parametrize(
-    "path,kwargs",
-    [
-        ("/api/hwfit/system", {}),
-        ("/api/hwfit/models", {"limit": 1}),
-        ("/api/hwfit/profiles", {"model": "demo"}),
-        ("/api/hwfit/image-models", {}),
-    ],
-)
-def test_hwfit_routes_reject_invalid_ssh_port(path, kwargs):
-    endpoint = _endpoint(path)
-
-    with pytest.raises(HTTPException) as exc:
-        endpoint(host="alice@gpu-box", ssh_port="-oProxyCommand=sh", **kwargs)
-
-    assert exc.value.status_code == 400
+    ):
+        endpoint = _endpoint(path)
+        for host, port in (("-oProxyCommand=sh", "22"), ("alice@gpu-box", "-oProxyCommand=sh")):
+            with pytest.raises(HTTPException) as exc:
+                endpoint(host=host, ssh_port=port, **kwargs)
+            assert exc.value.status_code == 400, (path, host, port)
 
 
 def test_hwfit_routes_reject_port_without_host():
@@ -87,9 +62,6 @@ def test_detect_system_option_host_never_starts_ssh(monkeypatch):
         )
     finally:
         hardware._cache_by_host.clear()
-        hardware._remote_host = None
-        hardware._remote_port = None
-        hardware._remote_platform = None
 
     assert result == {
         "error": "Cannot connect to -oProxyCommand=sh",

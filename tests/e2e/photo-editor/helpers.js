@@ -362,7 +362,16 @@ async function compareExportPixels(page, bytes, size) {
   }, { base64: bytes.toString('base64'), targetSize: size });
 }
 
+async function addAdjustment(page, type) {
+  await page.locator('#ge-add-layer').click();
+  const menu = page.locator('.ge-add-layer-menu');
+  await expect(menu).toBeVisible();
+  await menu.locator(`[data-adjustment-type="${type}"]`).click();
+  await expect(page.locator('.ge-adj-popup')).toBeVisible();
+}
+
 module.exports = {
+  addAdjustment,
   compareExportPixels,
   dragOnCanvas,
   encodedImagePixelDigest,

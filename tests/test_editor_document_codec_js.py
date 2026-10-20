@@ -1,22 +1,11 @@
 import json
-import subprocess
 import textwrap
 from pathlib import Path
+from tests.helpers.node import run_node_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = (ROOT / "static/js/editor/document-codec.js").as_uri()
-
-
-def run_node(source: str):
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", source],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
 
 
 def test_document_codec_preserves_advanced_layer_state():
@@ -48,7 +37,7 @@ def test_document_codec_preserves_advanced_layer_state():
         console.log(JSON.stringify(serializeEditorDocument(state)));
         """
     )
-    doc = run_node(source)
+    doc = run_node_module(source)
     layer = doc["layers"][0]
 
     assert doc["v"] == 15
@@ -113,7 +102,7 @@ def test_document_codec_recovers_next_id_from_string_ids():
         console.log(JSON.stringify(value));
         """
     )
-    assert run_node(source) == 28
+    assert run_node_module(source) == 28
 
 
 def test_document_codec_sanitizes_precision_view_state():
@@ -128,7 +117,7 @@ def test_document_codec_sanitizes_precision_view_state():
         console.log(JSON.stringify(value));
         """
     )
-    assert run_node(source) == {
+    assert run_node_module(source) == {
         "rulersVisible": False,
         "gridVisible": True,
         "gridSize": 1000,
@@ -149,7 +138,7 @@ def test_legacy_document_migrates_to_current_version_without_losing_pixels():
         console.log(JSON.stringify(result));
         """
     )
-    result = run_node(source)
+    result = run_node_module(source)
     assert result["document"]["v"] == 15
     assert result["document"]["layers"][0]["dataUrl"] == "data:image/png;base64,AAAA"
     assert result["document"]["layers"][0]["kind"] == "raster"
@@ -180,7 +169,7 @@ def test_document_codec_round_trips_validated_saved_selections():
         console.log(JSON.stringify({{serialized,prepared,invalid}}));
         """
     )
-    result = run_node(source)
+    result = run_node_module(source)
     assert result["serialized"]["v"] == 15
     assert result["serialized"]["savedSelections"] == [{
         "id": "selection-1", "name": "Subject", "canvasW": 20, "canvasH": 10,
@@ -210,7 +199,7 @@ def test_document_codec_round_trips_placed_source_and_recovers_bad_source_as_ras
         console.log(JSON.stringify({{serialized,prepared,broken}}));
         """
     )
-    result = run_node(source)
+    result = run_node_module(source)
     placed = result["prepared"]["document"]["layers"][1]
     assert placed["kind"] == "placed"
     assert placed["opacity"] == 0.6
@@ -250,7 +239,7 @@ def test_document_codec_preserves_nested_groups_and_breaks_cycles():
         console.log(JSON.stringify({{nested,cyclic}}));
         """
     )
-    result = run_node(source)
+    result = run_node_module(source)
     assert result["nested"]["document"]["groups"] == [
         {"id": "outer", "name": "Outer", "layerIds": [], "parentId": None,
          "visible": True, "opacity": 1, "blendMode": "source-over", "locked": False, "collapsed": False,
@@ -277,7 +266,7 @@ def test_document_codec_round_trips_group_mask_pixels_and_active_state():
         console.log(JSON.stringify({{serialized,prepared}}));
         """
     )
-    result = run_node(source)
+    result = run_node_module(source)
     saved = result["serialized"]["groups"][0]
     assert saved["activeMaskId"] == "mask-11"
     assert saved["masks"][0]["dataUrl"] == "data:image/png;base64,AAAA"
@@ -300,7 +289,7 @@ def test_document_releases_clipping_without_a_base_in_the_same_scope():
         console.log(JSON.stringify(result));
         """
     )
-    result = run_node(source)
+    result = run_node_module(source)
     layers = result["document"]["layers"]
     assert [layer["clipped"] for layer in layers] == [False, False, True]
     assert any("group-base had no clipping base" in warning for warning in result["warnings"])
@@ -323,7 +312,7 @@ def test_document_recovery_skips_corrupt_layers_and_masks_with_warnings():
         console.log(JSON.stringify(result));
         """
     )
-    result = run_node(source)
+    result = run_node_module(source)
     doc = result["document"]
     assert len(doc["layers"]) == 1
     assert doc["layers"][0]["name"] == "Good"
@@ -348,16 +337,8 @@ def test_document_validation_rejects_future_oversized_and_empty_projects():
         }}));
         """
     )
-    result = run_node(source)
+    result = run_node_module(source)
     assert result["future"]["code"] == "future-version"
     assert result["pixels"]["code"] == "pixel-budget"
     assert result["empty"]["code"] == "no-layers"
     assert result["surfaces"]["code"] == "surface-budget"
-
-
-def test_gallery_loader_uses_validated_document_boundary_and_file_cap():
-    editor = (ROOT / "static/js/galleryEditor.js").read_text(encoding="utf-8")
-    assert "_prepareEditorDocument(rawData)" in editor
-    assert "file.size > _EDITOR_PROJECT_MAX_BYTES" in editor
-    assert "No recoverable layers could be decoded" in editor
-    assert "_showDocumentRestoreReport(report)" in editor

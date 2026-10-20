@@ -6,14 +6,12 @@ import pytest
 from fastapi import HTTPException
 
 from routes import personal_routes
+from tests.helpers.routes import route_endpoint
 
 
 def _upload_endpoint():
     router = personal_routes.setup_personal_routes(_FakePersonalDocs(), None, True)
-    for route in router.routes:
-        if getattr(route, "path", "") == "/api/personal/upload" and "POST" in getattr(route, "methods", set()):
-            return route.endpoint
-    raise AssertionError("upload endpoint not found")
+    return route_endpoint(router, "/api/personal/upload", "POST")
 
 
 def _request(privileges):
@@ -78,7 +76,7 @@ def test_personal_upload_requires_document_privilege(monkeypatch):
 
 def test_personal_upload_indexes_with_privileged_owner(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTH_ENABLED", "true")
-    monkeypatch.setattr(personal_routes, "UPLOADS_DIR", str(tmp_path))
+    monkeypatch.setattr(personal_routes, "PERSONAL_UPLOADS_DIR", str(tmp_path))
     rag = _FakeRAG()
     monkeypatch.setattr(personal_routes, "get_rag_manager", lambda: rag)
 

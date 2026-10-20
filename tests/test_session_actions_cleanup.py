@@ -43,6 +43,8 @@ def _install_session_factory(monkeypatch, session_factory):
     if core_pkg is not None:
         monkeypatch.setattr(core_pkg, "database", cdb, raising=False)
     monkeypatch.setattr(cdb, "SessionLocal", session_factory)
+    # An earlier test may have imported session_actions while core.database was stubbed.
+    monkeypatch.setattr(session_actions, "utcnow_naive", cdb.utcnow_naive)
 
 
 def _add_message(db, sid, role, content, timestamp):

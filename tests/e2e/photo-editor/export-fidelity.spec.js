@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const { test, expect } = require('@playwright/test');
 const {
+  addAdjustment,
   compareExportPixels,
   encodedImagePixelDigest,
   editorState,
@@ -36,13 +37,6 @@ async function downloadFormat(page, format, filename) {
     name: download.suggestedFilename(),
     bytes: fs.readFileSync(await download.path()),
   };
-}
-
-async function addAdjustment(page, type) {
-  await page.locator('#ge-add-layer').click();
-  await expect(page.locator('.ge-add-layer-menu')).toBeVisible();
-  await page.locator(`.ge-add-layer-menu [data-adjustment-type="${type}"]`).click();
-  await expect(page.locator('.ge-adj-popup')).toBeVisible();
 }
 
 async function exportCurrentPng(page) {

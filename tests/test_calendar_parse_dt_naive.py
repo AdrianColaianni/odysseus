@@ -11,8 +11,6 @@ bounds and raises "can't compare offset-naive and offset-aware datetimes".
 
 The fallback now normalizes to UTC and strips tz, exactly like the ISO path.
 """
-import pytest
-
 from tests.helpers.calendar_routes import import_calendar_routes
 
 # Inputs datetime.fromisoformat() rejects (so they hit the dateutil fallback)
@@ -23,20 +21,20 @@ _OFFSET_NONISO = [
 ]
 
 
-@pytest.mark.parametrize("s", _OFFSET_NONISO)
-def test_parse_dt_dateutil_fallback_returns_naive(s):
+def test_parse_dt_dateutil_fallback_returns_naive():
     cal = import_calendar_routes()
-    d = cal._parse_dt(s)
-    assert d.tzinfo is None, f"{s!r} leaked tz-aware: {d!r}"
-    # +0900 14:00 -> 05:00 UTC, naive.
-    assert (d.hour, d.minute) == (5, 0)
+    for s in _OFFSET_NONISO:
+        d = cal._parse_dt(s)
+        assert d.tzinfo is None, f"{s!r} leaked tz-aware: {d!r}"
+        # +0900 14:00 -> 05:00 UTC, naive.
+        assert (d.hour, d.minute) == (5, 0)
 
 
-@pytest.mark.parametrize("s", _OFFSET_NONISO)
-def test_parse_dt_pair_fallback_returns_naive(s):
+def test_parse_dt_pair_fallback_returns_naive():
     cal = import_calendar_routes()
-    dt, _is_utc = cal._parse_dt_pair(s)
-    assert dt.tzinfo is None, f"{s!r} leaked tz-aware via _parse_dt_pair: {dt!r}"
+    for s in _OFFSET_NONISO:
+        dt, _is_utc = cal._parse_dt_pair(s)
+        assert dt.tzinfo is None, f"{s!r} leaked tz-aware via _parse_dt_pair: {dt!r}"
 
 
 def test_parse_dt_naive_input_unchanged():

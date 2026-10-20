@@ -1,4 +1,3 @@
-# routes/mcp_routes.py
 """MCP (Model Context Protocol) server management routes."""
 import json
 import os
@@ -6,14 +5,15 @@ import uuid
 import urllib.parse
 import html
 from pathlib import Path
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, Form, HTTPException, Request, Depends
+from sqlalchemy.orm import Session
 from fastapi.responses import RedirectResponse, HTMLResponse
 import logging
 import httpx
 
-from core.database import McpServer, SessionLocal
+from core.database import McpServer, SessionLocal, get_db
 from core.middleware import require_admin
-from src.constants import DATA_DIR, MCP_OAUTH_DIR
+from src.constants import MCP_OAUTH_DIR
 from src.mcp_manager import McpManager
 
 logger = logging.getLogger(__name__)
@@ -21,18 +21,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 
 
-def _mcp_oauth_base_dir() -> Path:
-    """Directory that may contain OAuth files managed by Odysseus."""
-    return Path(MCP_OAUTH_DIR).resolve(strict=False)
-
-
 def _resolve_mcp_oauth_path(raw_path, field_name: str) -> str:
-    """Resolve an MCP OAuth path and keep it under DATA_DIR/mcp_oauth."""
+    """Resolve an MCP OAuth path and keep it under MCP_OAUTH_DIR."""
     raw = str(raw_path or "").strip()
     if not raw:
         return ""
 
-    base = _mcp_oauth_base_dir()
+    base = Path(MCP_OAUTH_DIR).resolve(strict=False)
     path = Path(os.path.expanduser(raw))
     if not path.is_absolute():
         path = base / path
@@ -90,24 +85,6 @@ def _apply_mcp_oauth_env(env: dict, oauth_cfg) -> None:
         env["GMAIL_CREDENTIALS_PATH"] = token_file
 
 
-def _load_disabled_map():
-    """Load per-server disabled tool sets from DB."""
-    db = SessionLocal()
-    try:
-        disabled_map = {}
-        for srv in db.query(McpServer).all():
-            if srv.disabled_tools:
-                try:
-                    names = json.loads(srv.disabled_tools)
-                    if names:
-                        disabled_map[srv.id] = set(names)
-                except (json.JSONDecodeError, TypeError):
-                    pass
-        return disabled_map
-    finally:
-        db.close()
-
-
 def _mcp_oauth_redirect_uri() -> str:
     """Shared callback URL for legacy Google and generic MCP OAuth flows."""
     from src.mcp_oauth import REDIRECT_URI
@@ -130,42 +107,38 @@ def setup_mcp_routes(mcp_manager: McpManager):
     """Setup MCP routes with the provided manager."""
 
     @router.get("/servers")
-    def list_servers(request: Request):
+    def list_servers(request: Request, db: Session = Depends(get_db)):
         """List all configured MCP servers with connection status."""
         require_admin(request)
-        db = SessionLocal()
-        try:
-            servers = db.query(McpServer).all()
-            result = []
-            for srv in servers:
-                status = mcp_manager.get_server_status(srv.id)
-                oauth_cfg = json.loads(srv.oauth_config) if srv.oauth_config else None
-                needs_oauth = False
-                if oauth_cfg:
-                    needs_oauth = _mcp_oauth_token_missing(oauth_cfg, strict=False)
-                disabled_list = json.loads(srv.disabled_tools) if srv.disabled_tools else []
-                total_tools = status.get("tool_count", 0)
-                result.append({
-                    "id": srv.id,
-                    "name": srv.name,
-                    "transport": srv.transport,
-                    "command": srv.command,
-                    "args": json.loads(srv.args) if srv.args else [],
-                    "env": json.loads(srv.env) if srv.env else {},
-                    "url": srv.url,
-                    "is_enabled": srv.is_enabled,
-                    "status": status.get("status", "disconnected"),
-                    "tool_count": total_tools,
-                    "disabled_tool_count": len(disabled_list),
-                    "enabled_tool_count": max(0, total_tools - len(disabled_list)),
-                    "error": status.get("error"),
-                    "auth_url": status.get("auth_url"),
-                    "has_oauth": oauth_cfg is not None,
-                    "needs_oauth": needs_oauth,
-                })
-            return result
-        finally:
-            db.close()
+        servers = db.query(McpServer).all()
+        result = []
+        for srv in servers:
+            status = mcp_manager.get_server_status(srv.id)
+            oauth_cfg = json.loads(srv.oauth_config) if srv.oauth_config else None
+            needs_oauth = False
+            if oauth_cfg:
+                needs_oauth = _mcp_oauth_token_missing(oauth_cfg, strict=False)
+            disabled_list = json.loads(srv.disabled_tools) if srv.disabled_tools else []
+            total_tools = status.get("tool_count", 0)
+            result.append({
+                "id": srv.id,
+                "name": srv.name,
+                "transport": srv.transport,
+                "command": srv.command,
+                "args": json.loads(srv.args) if srv.args else [],
+                "env": json.loads(srv.env) if srv.env else {},
+                "url": srv.url,
+                "is_enabled": srv.is_enabled,
+                "status": status.get("status", "disconnected"),
+                "tool_count": total_tools,
+                "disabled_tool_count": len(disabled_list),
+                "enabled_tool_count": max(0, total_tools - len(disabled_list)),
+                "error": status.get("error"),
+                "auth_url": status.get("auth_url"),
+                "has_oauth": oauth_cfg is not None,
+                "needs_oauth": needs_oauth,
+            })
+        return result
 
     @router.post("/servers")
     async def add_server(
@@ -178,6 +151,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
         url: str = Form(None),
         oauth_file: str = Form(None),
         oauth_config: str = Form(None),
+        db: Session = Depends(get_db),
     ):
         """Add a new MCP server config and attempt connection. Admin-only:
         registering a stdio server is equivalent to executing arbitrary
@@ -254,23 +228,19 @@ def setup_mcp_routes(mcp_manager: McpManager):
                 logger.warning(f"Failed to write OAuth file: {e}")
 
         # Save to DB
-        db = SessionLocal()
-        try:
-            srv = McpServer(
-                id=server_id,
-                name=name,
-                transport=transport,
-                command=command,
-                args=json.dumps(parsed_args),
-                env=json.dumps(parsed_env),
-                url=url,
-                is_enabled=True,
-                oauth_config=json.dumps(parsed_oauth_config) if parsed_oauth_config else None,
-            )
-            db.add(srv)
-            db.commit()
-        finally:
-            db.close()
+        srv = McpServer(
+            id=server_id,
+            name=name,
+            transport=transport,
+            command=command,
+            args=json.dumps(parsed_args),
+            env=json.dumps(parsed_env),
+            url=url,
+            is_enabled=True,
+            oauth_config=json.dumps(parsed_oauth_config) if parsed_oauth_config else None,
+        )
+        db.add(srv)
+        db.commit()
 
         # Check if OAuth token already exists — skip connection attempt if not
         needs_oauth = False
@@ -304,20 +274,53 @@ def setup_mcp_routes(mcp_manager: McpManager):
         }
 
     @router.post("/servers/{server_id}/reconnect")
-    async def reconnect_server(server_id: str, request: Request):
+    async def reconnect_server(server_id: str, request: Request, db: Session = Depends(get_db)):
         """Reconnect to an MCP server."""
         require_admin(request)
-        db = SessionLocal()
-        try:
-            srv = db.query(McpServer).filter(McpServer.id == server_id).first()
-            if not srv:
-                raise HTTPException(404, "Server not found")
+        srv = db.query(McpServer).filter(McpServer.id == server_id).first()
+        if not srv:
+            raise HTTPException(404, "Server not found")
 
-            await mcp_manager.disconnect_server(server_id)
+        await mcp_manager.disconnect_server(server_id)
 
+        args = json.loads(srv.args) if srv.args else []
+        env = json.loads(srv.env) if srv.env else {}
+        connected = await mcp_manager.connect_server(
+            server_id=server_id,
+            name=srv.name,
+            transport=srv.transport,
+            command=srv.command,
+            args=args,
+            env=env,
+            url=srv.url,
+        )
+
+        status = mcp_manager.get_server_status(server_id)
+        return {
+            "connected": connected,
+            "status": status.get("status", "disconnected"),
+            "tool_count": status.get("tool_count", 0),
+            "error": status.get("error"),
+            "auth_url": status.get("auth_url"),
+            "needs_auth": status.get("status") == "needs_auth",
+        }
+
+    @router.patch("/servers/{server_id}")
+    async def toggle_server(server_id: str, request: Request, is_enabled: str = Form(...), db: Session = Depends(get_db)):
+        """Enable or disable an MCP server."""
+        require_admin(request)
+        srv = db.query(McpServer).filter(McpServer.id == server_id).first()
+        if not srv:
+            raise HTTPException(404, "Server not found")
+
+        enabled = str(is_enabled).lower() == "true"
+        srv.is_enabled = enabled
+        db.commit()
+
+        if enabled:
             args = json.loads(srv.args) if srv.args else []
             env = json.loads(srv.env) if srv.env else {}
-            connected = await mcp_manager.connect_server(
+            await mcp_manager.connect_server(
                 server_id=server_id,
                 name=srv.name,
                 transport=srv.transport,
@@ -326,90 +329,34 @@ def setup_mcp_routes(mcp_manager: McpManager):
                 env=env,
                 url=srv.url,
             )
-
-            status = mcp_manager.get_server_status(server_id)
-            return {
-                "connected": connected,
-                "status": status.get("status", "disconnected"),
-                "tool_count": status.get("tool_count", 0),
-                "error": status.get("error"),
-                "auth_url": status.get("auth_url"),
-                "needs_auth": status.get("status") == "needs_auth",
-            }
-        finally:
-            db.close()
-
-    @router.patch("/servers/{server_id}")
-    async def toggle_server(server_id: str, request: Request, is_enabled: str = Form(...)):
-        """Enable or disable an MCP server."""
-        require_admin(request)
-        db = SessionLocal()
-        try:
-            srv = db.query(McpServer).filter(McpServer.id == server_id).first()
-            if not srv:
-                raise HTTPException(404, "Server not found")
-
-            enabled = str(is_enabled).lower() == "true"
-            srv.is_enabled = enabled
-            db.commit()
-
-            if enabled:
-                args = json.loads(srv.args) if srv.args else []
-                env = json.loads(srv.env) if srv.env else {}
-                await mcp_manager.connect_server(
-                    server_id=server_id,
-                    name=srv.name,
-                    transport=srv.transport,
-                    command=srv.command,
-                    args=args,
-                    env=env,
-                    url=srv.url,
-                )
-            else:
-                await mcp_manager.disconnect_server(server_id)
-
-            return {"id": server_id, "is_enabled": enabled}
-        finally:
-            db.close()
-
-    @router.delete("/servers/{server_id}")
-    async def delete_server(server_id: str, request: Request):
-        """Remove an MCP server."""
-        require_admin(request)
-        db = SessionLocal()
-        try:
-            srv = db.query(McpServer).filter(McpServer.id == server_id).first()
-            if not srv:
-                raise HTTPException(404, "Server not found")
-
+        else:
             await mcp_manager.disconnect_server(server_id)
 
-            db.delete(srv)
-            db.commit()
-            return {"status": "deleted"}
-        finally:
-            db.close()
+        return {"id": server_id, "is_enabled": enabled}
 
-    @router.get("/tools")
-    def list_tools(request: Request):
-        """List all discovered MCP tools across all connected servers."""
+    @router.delete("/servers/{server_id}")
+    async def delete_server(server_id: str, request: Request, db: Session = Depends(get_db)):
+        """Remove an MCP server."""
         require_admin(request)
-        disabled_map = _load_disabled_map()
-        return mcp_manager.get_all_tools(disabled_map)
+        srv = db.query(McpServer).filter(McpServer.id == server_id).first()
+        if not srv:
+            raise HTTPException(404, "Server not found")
+
+        await mcp_manager.disconnect_server(server_id)
+
+        db.delete(srv)
+        db.commit()
+        return {"status": "deleted"}
 
     @router.get("/servers/{server_id}/tools")
-    def list_server_tools(server_id: str, request: Request):
+    def list_server_tools(server_id: str, request: Request, db: Session = Depends(get_db)):
         """List all tools for a specific MCP server with enabled/disabled state."""
         require_admin(request)
-        db = SessionLocal()
-        try:
-            srv = db.query(McpServer).filter(McpServer.id == server_id).first()
-            if not srv:
-                raise HTTPException(404, "Server not found")
-            disabled_list = json.loads(srv.disabled_tools) if srv.disabled_tools else []
-            disabled_set = set(disabled_list)
-        finally:
-            db.close()
+        srv = db.query(McpServer).filter(McpServer.id == server_id).first()
+        if not srv:
+            raise HTTPException(404, "Server not found")
+        disabled_list = json.loads(srv.disabled_tools) if srv.disabled_tools else []
+        disabled_set = set(disabled_list)
 
         all_tools = mcp_manager.get_all_tools()
         server_tools = [t for t in all_tools if t["server_id"] == server_id]
@@ -418,85 +365,75 @@ def setup_mcp_routes(mcp_manager: McpManager):
         return server_tools
 
     @router.patch("/servers/{server_id}/tools")
-    async def update_disabled_tools(server_id: str, request: Request):
+    async def update_disabled_tools(server_id: str, request: Request, db: Session = Depends(get_db)):
         """Bulk update disabled tools list for a server.
 
         Expects JSON body: {"disabled": ["tool_name_1", "tool_name_2"]}
         """
         require_admin(request)
-        db = SessionLocal()
-        try:
-            srv = db.query(McpServer).filter(McpServer.id == server_id).first()
-            if not srv:
-                raise HTTPException(404, "Server not found")
+        srv = db.query(McpServer).filter(McpServer.id == server_id).first()
+        if not srv:
+            raise HTTPException(404, "Server not found")
 
-            body = await request.json()
-            disabled = body.get("disabled", [])
-            if not isinstance(disabled, list):
-                raise HTTPException(400, "disabled must be a list of tool names")
+        body = await request.json()
+        disabled = body.get("disabled", [])
+        if not isinstance(disabled, list):
+            raise HTTPException(400, "disabled must be a list of tool names")
 
-            srv.disabled_tools = json.dumps(disabled) if disabled else None
-            db.commit()
+        srv.disabled_tools = json.dumps(disabled) if disabled else None
+        db.commit()
 
-            return {"id": server_id, "disabled_count": len(disabled)}
-        finally:
-            db.close()
-
-    # ── OAuth flow for Google MCP servers ──────────────────────────
+        return {"id": server_id, "disabled_count": len(disabled)}
 
     @router.get("/oauth/authorize/{server_id}")
-    def oauth_authorize(server_id: str, request: Request):
+    def oauth_authorize(server_id: str, request: Request, db: Session = Depends(get_db)):
         """Show OAuth authorization page with Google sign-in link."""
         require_admin(request)
-        db = SessionLocal()
-        try:
-            srv = db.query(McpServer).filter(McpServer.id == server_id).first()
-            if not srv:
-                raise HTTPException(404, "Server not found")
-            if not srv.oauth_config:
-                raise HTTPException(400, "Server has no OAuth config")
+        srv = db.query(McpServer).filter(McpServer.id == server_id).first()
+        if not srv:
+            raise HTTPException(404, "Server not found")
+        if not srv.oauth_config:
+            raise HTTPException(400, "Server has no OAuth config")
 
-            oauth_cfg = _sanitize_mcp_oauth_config(json.loads(srv.oauth_config))
-            keys_file = oauth_cfg.get("keys_file", "")
-            if not keys_file or not os.path.exists(keys_file):
-                raise HTTPException(400, "OAuth keys file not found")
+        oauth_cfg = _sanitize_mcp_oauth_config(json.loads(srv.oauth_config))
+        keys_file = oauth_cfg.get("keys_file", "")
+        if not keys_file or not os.path.exists(keys_file):
+            raise HTTPException(400, "OAuth keys file not found")
 
-            with open(keys_file, encoding="utf-8") as f:
-                keys_data = json.load(f)
-            keys = keys_data.get("installed") or keys_data.get("web")
-            if not keys:
-                raise HTTPException(400, "Invalid OAuth keys file format")
+        with open(keys_file, encoding="utf-8") as f:
+            keys_data = json.load(f)
+        keys = keys_data.get("installed") or keys_data.get("web")
+        if not keys:
+            raise HTTPException(400, "Invalid OAuth keys file format")
 
-            client_id = keys["client_id"]
-            scopes = oauth_cfg.get("scopes", [])
+        client_id = keys["client_id"]
+        scopes = oauth_cfg.get("scopes", [])
 
-            # For Desktop App creds, default to localhost — the user will
-            # paste the resulting URL back if they're on a different device.
-            redirect_uri = _mcp_oauth_redirect_uri()
+        # For Desktop App creds, default to localhost — the user will
+        # paste the resulting URL back if they're on a different device.
+        redirect_uri = _mcp_oauth_redirect_uri()
 
-            params = {
-                "client_id": client_id,
-                "redirect_uri": redirect_uri,
-                "response_type": "code",
-                "scope": " ".join(scopes),
-                "access_type": "offline",
-                "prompt": "consent",
-                "state": server_id,
-            }
-            auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params)
+        params = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": " ".join(scopes),
+            "access_type": "offline",
+            "prompt": "consent",
+            "state": server_id,
+        }
+        auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params)
 
-            # Determine if user is accessing from the same machine
-            host = request.headers.get("host", "")
-            is_local = host.startswith("localhost") or host.startswith("127.0.0.1")
+        # Determine if user is accessing from the same machine
+        host = request.headers.get("host", "")
+        is_local = host.startswith("localhost") or host.startswith("127.0.0.1")
 
-            if is_local:
-                # Same machine — just redirect, callback will work directly
-                return RedirectResponse(auth_url)
-            else:
-                # Remote device — show paste-back page
-                return HTMLResponse(_oauth_authorize_page(auth_url, server_id, redirect_uri))
-        finally:
-            db.close()
+        if is_local:
+            # Same machine — just redirect, callback will work directly
+            return RedirectResponse(auth_url)
+        else:
+            # Remote device — show paste-back page
+            return HTMLResponse(_oauth_authorize_page(auth_url, server_id, redirect_uri))
 
     @router.get("/oauth/callback")
     async def oauth_callback(code: str = "", state: str = "", request: Request = None):

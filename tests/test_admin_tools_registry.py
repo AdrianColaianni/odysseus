@@ -10,8 +10,6 @@ import asyncio
 from src.agent_tools import TOOL_HANDLERS
 from src.agent_tools.admin_tools import (
     ADMIN_TOOL_HANDLERS, _owner_adapter,
-    do_manage_endpoints, do_manage_mcp, do_manage_webhooks,
-    do_manage_tokens, do_manage_settings,
 )
 
 _NAMES = ["manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "manage_settings"]
@@ -21,15 +19,6 @@ def test_all_registered_in_tool_handlers():
     for n in _NAMES:
         assert n in TOOL_HANDLERS, f"{n} missing from TOOL_HANDLERS"
         assert n in ADMIN_TOOL_HANDLERS
-
-
-def test_re_exported_from_agent_tools():
-    # Back-compat: importers that used `from src.agent_tools import do_manage_*`
-    # keep working after the move.
-    from src.agent_tools import (  # noqa: F401
-        do_manage_endpoints, do_manage_mcp, do_manage_webhooks,
-        do_manage_tokens, do_manage_settings,
-    )
 
 
 def test_owner_adapter_threads_owner_from_ctx():
@@ -62,10 +51,9 @@ def test_parse_tool_args_lives_in_tool_utils_single_source():
     # from there rather than carrying its own copy. After the tool_implementations
     # split, _common and the facade must also re-export the same object.
     from src.tool_utils import _parse_tool_args
-    from src.agent_tools import admin_tools, document_tools
+    from src.agent_tools import document_tools
     from src.tools import _common
     import src.tool_implementations as ti
-    assert admin_tools._parse_tool_args is _parse_tool_args
     assert document_tools._parse_tool_args is _parse_tool_args
     assert _common._parse_tool_args is _parse_tool_args
     assert ti._parse_tool_args is _parse_tool_args
@@ -77,3 +65,9 @@ def test_parse_tool_args_lives_in_tool_utils_single_source():
     assert _parse_tool_args('[1, 2]') == {}
     assert _parse_tool_args('42') == {}
     assert _parse_tool_args('"hello"') == {}
+
+
+def test_tool_given_bad_json_answers_invalid_arguments_without_running():
+    from src.agent_tools.admin_tools import do_manage_tokens
+    result = asyncio.run(do_manage_tokens("{not json", owner="alice"))
+    assert result == {"error": "Invalid JSON arguments", "exit_code": 1}

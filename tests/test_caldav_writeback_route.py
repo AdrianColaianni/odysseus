@@ -23,6 +23,7 @@ import routes.calendar_routes as croutes
 import src.caldav_sync as csync
 from core.database import CalendarCal
 from routes.calendar_routes import EventCreate
+from tests.helpers.route_call import with_db
 
 _TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _ENGINE = create_engine(
@@ -37,6 +38,7 @@ croutes.SessionLocal = _TS
 
 @pytest.fixture
 def calls(monkeypatch):
+    monkeypatch.setattr(cdb, "SessionLocal", _TS)
     recorded = []
 
     async def _fake_create(owner, uid):
@@ -60,7 +62,7 @@ def _endpoint(method, suffix):
     router = croutes.setup_calendar_routes()
     for r in router.routes:
         if getattr(r, "path", "").endswith(suffix) and method in getattr(r, "methods", set()):
-            return r.endpoint
+            return with_db(r.endpoint)
     raise RuntimeError(f"{method} *{suffix} not found")
 
 

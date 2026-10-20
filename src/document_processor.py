@@ -1,4 +1,3 @@
-# src/document_processor.py
 """Document processing: PDF/OCR extraction, text file handling, image VL analysis, user content building."""
 
 import os

@@ -12,6 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.helpers.routes import route_endpoint
+
 
 # -- py/reflective-xss: GET /search/web?q= ----------------------------------
 
@@ -26,8 +28,8 @@ _XSS_QUERIES = [
 def _search_page(q):
     from routes.search.search_routes import setup_search_routes
 
-    router = setup_search_routes(SimpleNamespace())
-    endpoint = next(r.endpoint for r in router.routes if r.path == "/search/web")
+    router = setup_search_routes()
+    endpoint = route_endpoint(router, "/search/web", "GET")
     request = SimpleNamespace(state=SimpleNamespace(csp_nonce="n0nce"))
     return asyncio.run(endpoint(request=request, q=q)).body.decode("utf-8")
 
@@ -57,9 +59,7 @@ def _context_info(monkeypatch, *, admin, cwd):
     monkeypatch.setattr(routes, "router", APIRouter(prefix="/api"))
     session = SimpleNamespace(endpoint_url="", model="", cwd="")
     router = routes.setup_session_routes(SimpleNamespace(get_session=lambda sid: session), {})
-    endpoint = next(
-        r.endpoint for r in router.routes if r.path == "/api/session/{session_id}/context_info"
-    )
+    endpoint = route_endpoint(router, "/api/session/{session_id}/context_info", "GET")
     request = SimpleNamespace(state=SimpleNamespace(
         api_token=False, api_token_owner=None, api_token_scopes=[], current_user="someone",
     ))
@@ -141,7 +141,7 @@ def _parse_task(monkeypatch, exc):
     monkeypatch.setattr(resolver, "resolve_endpoint", lambda *a, **k: ("http://llm", "m", {}))
     monkeypatch.setattr(llm_core, "llm_call_async", _boom)
     router = task_routes.setup_task_routes(MagicMock())
-    endpoint = next(r.endpoint for r in router.routes if r.path == "/api/tasks/parse")
+    endpoint = route_endpoint(router, "/api/tasks/parse", "POST")
 
     class _Request:
         state = SimpleNamespace(current_user="alice")

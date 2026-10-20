@@ -86,9 +86,6 @@ class ResetUserPasswordRequest(BaseModel):
     new_password: str
 
 
-class SetOpenRegistrationRequest(BaseModel):
-    enabled: bool
-
 SESSION_COOKIE = "odysseus_session"
 
 
@@ -259,9 +256,6 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         await asyncio.to_thread(auth_manager.revoke_user_sessions, user, current_token)
         return {"ok": True}
 
-    # ------------------------------------------------------------------
-    # Two-factor authentication
-    # ------------------------------------------------------------------
 
     @router.post("/2fa/setup")
     async def totp_setup(request: Request):
@@ -368,7 +362,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         return {"ok": True, "privileges": auth_manager.get_privileges(username)}
 
     @router.put("/users/{username}/rename")
-    async def rename_user(username: str, body: RenameUserRequest, request: Request):
+    def rename_user(username: str, body: RenameUserRequest, request: Request):
         user = _get_current_user(request)
         if not user or not auth_manager.is_admin(user):
             raise HTTPException(403, "Admin only")
@@ -667,30 +661,14 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             "self": target == (user or "").strip().lower(),
         }
 
-    @router.post("/signup-toggle", deprecated=True)
+    @router.post("/signup-toggle")
     async def toggle_signup(request: Request):
-        """
-        Toggle open registration on/off. Admin only.
-
-        DEPRECATED: This endpoint uses toggle semantics which can lead to unsafe state changes.
-        Use PUT /open-signup instead.
-
-        This endpoint is kept for backward compatibility and may be removed in future versions.
-        """
+        """Toggle open registration on/off. Admin only."""
         user = _get_current_user(request)
         if not user or not auth_manager.is_admin(user):
             raise HTTPException(403, "Admin only")
         auth_manager.signup_enabled = not auth_manager.signup_enabled
         return {"ok": True, "signup_enabled": auth_manager.signup_enabled}
-
-    @router.put("/open-signup")
-    async def set_signup_enabled(body: SetOpenRegistrationRequest, request: Request):
-        """Set open signup enabled state. Admin only."""
-        user = _get_current_user(request)
-        if not user or not auth_manager.is_admin(user):
-            raise HTTPException(403, "Admin only")
-        auth_manager.signup_enabled = body.enabled
-        return {"ok": True,"signup_enabled": auth_manager.signup_enabled}
 
     @router.delete("/users")
     async def admin_delete_user(body: DeleteUserRequest, request: Request):
@@ -724,7 +702,6 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         _invalidate_api_token_cache()
         return {"ok": True}
 
-    # ---- Feature visibility (admin-managed) ----
 
     @router.get("/features")
     async def get_features():
@@ -743,7 +720,6 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         _save_features(current)
         return current
 
-    # ---- App settings (admin-managed) ----
 
     @router.get("/settings")
     async def get_settings(request: Request):
@@ -863,7 +839,6 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 except OSError:
                     pass
 
-    # ---- Integrations CRUD ----
 
     # Run migration on startup
     migrate_from_settings()

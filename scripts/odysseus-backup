@@ -18,13 +18,12 @@ Restore is destructive: it overwrites `data/` in place. Always pass
 """
 
 from __future__ import annotations
-import sys
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
 from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
 quiet_logs()
 
-import argparse, json, logging, os, shutil, sqlite3, subprocess, sys, tarfile, tempfile
+import argparse, json, logging, shutil, sqlite3, subprocess, tarfile, tempfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 

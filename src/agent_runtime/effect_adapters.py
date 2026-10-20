@@ -361,8 +361,6 @@ def settle_effect(journal: Any, action: Any, capture: DispatchCapture | None, *,
         _settle_background(log, capture, result)
 
 
-# -- observations ------------------------------------------------------------
-
 @dataclass(frozen=True)
 class _WholeFileRead:
     data: bytes | None = None

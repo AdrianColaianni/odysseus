@@ -1,39 +1,10 @@
-"""Extended TLS trust store for private-CA LLM providers.
+"""Extended TLS trust for private-CA LLM providers (GigaChat, corporate gateways).
 
-Some upstream LLM providers serve their API over TLS certificates that are
-signed by a private root CA which is not part of the standard system bundle:
-
-  - GigaChat (Sber) uses the Russian Trusted Root CA, not bundled with
-    OpenSSL / certifi / system trust on most non-Russian installs. The
-    chain looks self-signed to Python and the endpoint is marked offline
-    with `CERTIFICATE_VERIFY_FAILED: self-signed certificate in
-    certificate chain` (see issue #722).
-  - On-premise enterprise LLM gateways often present a corporate CA that
-    has not been imported into the runtime's trust store.
-
-Operators point `LLM_CA_BUNDLE` at a PEM file containing the extra CA
-cert(s). The default system / certifi trust store is loaded first, then
-the operator's PEM is layered on top, so verification still happens —
-the trust set just gets larger. We deliberately do not provide a
-"verify=off" knob: weakening verification globally (or per-host) would
-expose those endpoints to MITM, and the operator-supplied bundle is the
-correct fix for legitimate private-CA providers.
-
-Example (GigaChat):
-    # Sber publishes the chain at
-    # https://www.gosuslugi.ru/crt/rootca_ssl_rsa2022.cer
-    # Convert to PEM and point the env var at it.
-    LLM_CA_BUNDLE=/etc/odysseus/ca/russian-trusted-root.pem
-
-Scope:
-    `llm_verify()` is intentionally consumed by only two call sites — the
-    shared async client in `src/llm_core.py` and the endpoint probes in
-    `routes/model_routes.py`. Both reach LLM provider URLs. The override
-    is NOT threaded into web_fetch, search providers, gallery downloads,
-    embeddings, webhook delivery, or anything else that hits arbitrary
-    URLs, and it does NOT affect the app's own browser-facing TLS. That
-    boundary is pinned by `tests/test_tls_overrides_scope.py` — extending
-    it requires updating the allowlist there with a written justification.
+`LLM_CA_BUNDLE` names a PEM layered on top of the default trust store; there
+is no verify=off knob. Only the shared client in src/llm_core.py and the
+endpoint probes in routes/model_routes.py use `llm_verify()`; arbitrary-URL
+fetches keep the httpx default. tests/test_tls_overrides_scope.py pins that
+allowlist.
 """
 
 import logging

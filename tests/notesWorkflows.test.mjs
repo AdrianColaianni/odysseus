@@ -1,14 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createNotesState } from '../frontend/src/features/notes/application/state.js';
-import { createCardOperations } from '../frontend/src/features/notes/application/cardOperations.js';
-import { createChecklistOperations } from '../frontend/src/features/notes/application/checklistOperations.js';
-import { createNotesSubmission } from '../frontend/src/features/notes/application/submission.js';
-import { createSelectionOperations } from '../frontend/src/features/notes/application/selection.js';
-import { createNotesPersistence } from '../frontend/src/features/notes/infrastructure/storage.js';
-import { createNotesLifecycle } from '../frontend/src/features/notes/ui/lifecycle.js';
-import { createText } from '../frontend/src/features/notes/ui/text.js';
-import { createDeletion } from '../frontend/src/features/notes/application/deletion.js';
+import { createNotesState } from '../static/js/features/notes/application/state.js';
+import { createCardOperations } from '../static/js/features/notes/application/cardOperations.js';
+import { createChecklistOperations } from '../static/js/features/notes/application/checklistOperations.js';
+import { createNotesSubmission } from '../static/js/features/notes/application/submission.js';
+import { createSelectionOperations } from '../static/js/features/notes/application/selection.js';
+import { createNotesPersistence } from '../static/js/features/notes/infrastructure/storage.js';
+import { createNotesLifecycle } from '../static/js/features/notes/ui/lifecycle.js';
+import { createText } from '../static/js/features/notes/ui/text.js';
+import { createDeletion } from '../static/js/features/notes/application/deletion.js';
 
 const drain = () => new Promise(setImmediate);
 function owner(notes) { const app = createNotesState(); app.replaceNotes(notes); return app; }

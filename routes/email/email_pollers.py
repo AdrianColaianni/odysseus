@@ -18,11 +18,11 @@ Pure helpers live in `email_helpers.py`. Routes themselves live in
 
 import email as email_mod
 import email.utils  # the `email` binding is referenced as email.utils.parseaddr inside the pass
-import smtplib
 import json
 import re
 import html
 import logging
+import functools
 import inspect
 from datetime import datetime
 
@@ -32,15 +32,15 @@ from email.mime.multipart import MIMEMultipart
 from src.task_endpoint import resolve_task_candidates, task_llm_call_async
 
 from .email_helpers import (
-    _strip_think, _extract_reply, _apply_email_style_mechanics, _load_settings, _save_settings, _get_email_config,
+    _strip_think, _extract_reply, _apply_email_style_mechanics, _load_settings, _get_email_config,
     _send_smtp_message,
     _imap_connect, _imap, _decode_header,
     _detect_sent_folder, _detect_spam_folder, _imap_move,
     _extract_attachment_text, _extract_text,
-    _pre_retrieve_context,
     _attach_compose_uploads, _cleanup_compose_uploads, _q,
-    SCHEDULED_DB, _EMAIL_REPLY_SYS_PROMPT_BASE, _email_cache_owner_clause,
+    SCHEDULED_DB, _scheduled_db, _EMAIL_REPLY_SYS_PROMPT_BASE, _email_cache_owner_clause,
     _generate_scheduled_email_summary, _email_summary_failure_log_detail,
+    _get_auto_reply_settings_for_account,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,9 +48,7 @@ logger = logging.getLogger(__name__)
 # Recovers a `[{"action": ...}, ...]` JSON array from raw LLM output when the
 # fenced-block strip leaves nothing usable. Runs on model output influenced by
 # untrusted email bodies, so it must not backtrack: the object content class is
-# `[^{}]` (brace-delimited, greedy) rather than the old `[^[\]]*?` lazy runs,
-# which exploded exponentially on inputs like `[{"action"},{` + `}},{{` * N
-# (CodeQL py/redos #198).
+# `[^{}]` (brace-delimited, greedy), never lazy runs (CodeQL py/redos #198).
 _CAL_ACTION_ARRAY_RE = re.compile(
     r'\[\s*\{[^{}]*"action"[^{}]*\}\s*(?:,\s*\{[^{}]*\}\s*)*\]',
     re.DOTALL,
@@ -194,38 +192,6 @@ def _email_date_only(value: str | None):
         return None
 
 
-_AUTO_REPLY_KEYS = {
-    "email_auto_reply",
-    "email_auto_reply_start",
-    "email_auto_reply_end",
-    "email_auto_reply_subject",
-    "email_auto_reply_message",
-    "email_auto_reply_cooldown",
-    "email_auto_reply_scope",
-    "email_auto_reply_account_id",
-    "email_auto_reply_exclude_automated",
-    "email_auto_reply_pause_notifications",
-    "email_auto_reply_enabled_at",
-}
-
-
-def _effective_settings_for_email_account(settings: dict, account_id: str | None) -> dict:
-    """Overlay per-account auto-reply settings onto global settings.
-
-    Other automation toggles remain global. This lets each mailbox have its own
-    away reply while preserving existing installs that only have global keys.
-    """
-    effective = dict(settings or {})
-    key = str(account_id or "").strip()
-    by_account = effective.get("email_auto_reply_by_account") or {}
-    account_cfg = by_account.get(key) if key and isinstance(by_account, dict) else None
-    if isinstance(account_cfg, dict):
-        for k in _AUTO_REPLY_KEYS:
-            if k in account_cfg:
-                effective[k] = account_cfg[k]
-    return effective
-
-
 def _away_reply_active(settings: dict, account_id: str | None) -> bool:
     if not settings.get("email_auto_reply", False):
         return False
@@ -288,9 +254,7 @@ def _away_reply_cooldown_seconds(settings: dict) -> int | None:
 
 
 def _ensure_away_reply_table():
-    import sqlite3 as _sql3
-    conn = _sql3.connect(SCHEDULED_DB)
-    try:
+    with _scheduled_db() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS email_away_replies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -306,8 +270,6 @@ def _ensure_away_reply_table():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_email_away_msg ON email_away_replies(owner, account_id, message_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_email_away_sender ON email_away_replies(owner, account_id, sender_addr, sent_at)")
         conn.commit()
-    finally:
-        conn.close()
 
 
 def _sender_is_automated(msg, sender_addr: str) -> bool:
@@ -332,9 +294,7 @@ def _sender_is_automated(msg, sender_addr: str) -> bool:
 
 def _remove_urgent_tag_from_cache(message_id: str, owner: str, account_id: str) -> None:
     """Remove stale urgent tags from messages identified as automated."""
-    import sqlite3 as _sql3
-    conn = _sql3.connect(SCHEDULED_DB)
-    try:
+    with _scheduled_db() as conn:
         owner_clause, owner_params = _email_cache_owner_clause(owner)
         rows = conn.execute(
             f"SELECT rowid, tags FROM email_tags WHERE message_id=? AND {owner_clause} "
@@ -351,19 +311,15 @@ def _remove_urgent_tag_from_cache(message_id: str, owner: str, account_id: str) 
             cleaned = [tag for tag in tags if str(tag).strip().lower() != "urgent"]
             conn.execute("UPDATE email_tags SET tags=? WHERE rowid=?", (json.dumps(cleaned), rowid))
         conn.commit()
-    finally:
-        conn.close()
 
 
 def _away_reply_already_sent(settings: dict, account_owner: str, account_id: str | None,
                              message_id: str, sender_addr: str) -> bool:
-    import sqlite3 as _sql3
     _ensure_away_reply_table()
     owner = account_owner or ""
     aid = account_id or ""
     sender = (sender_addr or "").strip().lower()
-    conn = _sql3.connect(SCHEDULED_DB)
-    try:
+    with _scheduled_db() as conn:
         row = conn.execute(
             "SELECT 1 FROM email_away_replies WHERE owner=? AND account_id=? AND message_id=? LIMIT 1",
             (owner, aid, message_id),
@@ -392,16 +348,12 @@ def _away_reply_already_sent(settings: dict, account_owner: str, account_id: str
             except Exception:
                 continue
         return False
-    finally:
-        conn.close()
 
 
 def _record_away_reply(settings: dict, account_owner: str, account_id: str | None,
                        message_id: str, sender_addr: str, subject: str):
-    import sqlite3 as _sql3
     _ensure_away_reply_table()
-    conn = _sql3.connect(SCHEDULED_DB)
-    try:
+    with _scheduled_db() as conn:
         conn.execute(
             """
             INSERT INTO email_away_replies
@@ -419,8 +371,6 @@ def _record_away_reply(settings: dict, account_owner: str, account_id: str | Non
             ),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def _send_away_reply(settings: dict, account_owner: str, account_id: str | None,
@@ -499,37 +449,24 @@ async def _run_auto_summarize_once(do_summary: bool = True, do_reply: bool = Tru
                                    max_process: int | None = None,
                                    progress_cb=None, override_url=None,
                                    override_model=None, override_headers=None) -> str:
-    """One iteration of the email scan. Temporarily flips settings flags
-    so the existing background-loop logic runs exactly once for the requested ops."""
-    settings = _load_settings()
-    prev = {k: settings.get(k, False) for k in
-            ("email_auto_summarize", "email_auto_reply", "email_auto_tag",
-             "email_auto_spam", "email_auto_calendar", "_email_auto_reply_draft_only")}
-    settings["email_auto_summarize"] = bool(do_summary)
-    settings["email_auto_reply"] = bool(do_reply)
-    settings["_email_auto_reply_draft_only"] = bool(do_reply)
-    settings["email_auto_tag"] = bool(do_tag)
-    settings["email_auto_spam"] = bool(do_spam)
-    settings["email_auto_calendar"] = bool(do_calendar)
-    _save_settings(settings)
-    try:
-        return await _auto_summarize_pass(
-            days_back=days_back,
-            account_id=account_id,
-            max_process=max_process,
-            progress_cb=progress_cb,
-            override_url=override_url,
-            override_model=override_model,
-            override_headers=override_headers,
-        )
-    finally:
-        s2 = _load_settings()
-        for k, v in prev.items():
-            if v is None and k.startswith("_"):
-                s2.pop(k, None)
-            else:
-                s2[k] = v
-        _save_settings(s2)
+    """One iteration of the email scan, running only the requested ops."""
+    return await _auto_summarize_pass(
+        days_back=days_back,
+        account_id=account_id,
+        max_process=max_process,
+        progress_cb=progress_cb,
+        override_url=override_url,
+        override_model=override_model,
+        override_headers=override_headers,
+        flags={
+            "email_auto_summarize": bool(do_summary),
+            "email_auto_reply": bool(do_reply),
+            "_email_auto_reply_draft_only": bool(do_reply),
+            "email_auto_tag": bool(do_tag),
+            "email_auto_spam": bool(do_spam),
+            "email_auto_calendar": bool(do_calendar),
+        },
+    )
 
 
 def _latest_inbox_fallback_uids(conn, reconnect):
@@ -562,13 +499,24 @@ def _latest_inbox_fallback_uids(conn, reconnect):
         return [], reconnect()
 
 
-async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, progress_cb=None, away_only: bool = False, override_url=None, override_model=None, override_headers=None) -> str:
+async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, progress_cb=None, away_only: bool = False, override_url=None, override_model=None, override_headers=None, flags: dict | None = None) -> str:
     """Single pass of the auto-summarize/reply scan.
 
     When account_id is None, iterates over every enabled account in
     email_accounts and runs one pass per account, concatenating the results.
+    `flags` overrides the saved automation toggles for this pass only.
     """
-    # Multi-account fan-out: if the caller didn't pick an account, hit them all.
+    run_single = functools.partial(
+        _auto_summarize_pass_single,
+        days_back=days_back,
+        max_process=max_process,
+        progress_cb=progress_cb,
+        away_only=away_only,
+        override_url=override_url,
+        override_model=override_model,
+        override_headers=override_headers,
+        flags=flags,
+    )
     if account_id is None:
         try:
             from core.database import SessionLocal as _SL, EmailAccount as _EA
@@ -584,60 +532,35 @@ async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None
                 names = {r.id: r.name for r in rows}
             finally:
                 db.close()
-        except Exception:
+        except Exception as e:
+            logger.warning(f"auto-summarize could not list email accounts: {e}")
             ids = []
             names = {}
-        if len(ids) <= 1:
-            # Single-account (or zero rows — fallback to legacy settings.json lookup)
-            return await _auto_summarize_pass_single(
-                days_back=days_back,
-                account_id=(ids[0] if ids else None),
-                max_process=max_process,
-                progress_cb=progress_cb,
-                away_only=away_only,
-                override_url=override_url,
-                override_model=override_model,
-                override_headers=override_headers,
-            )
-        outs = []
-        for idx, aid in enumerate(ids, start=1):
-            try:
-                await _emit_progress(progress_cb, f"{names.get(aid, aid[:8])}: starting ({idx}/{len(ids)})")
-                result = await _auto_summarize_pass_single(
-                    days_back=days_back,
-                    account_id=aid,
-                    max_process=max_process,
-                    progress_cb=progress_cb,
-                    away_only=away_only,
-                    override_url=override_url,
-                    override_model=override_model,
-                    override_headers=override_headers,
-                )
-                outs.append(f"[{names.get(aid, aid[:8])}] {result}")
-            except Exception as e:
-                logger.warning(f"auto-summarize pass failed for account {aid}: {e}")
-                outs.append(f"[{names.get(aid, aid[:8])}] error: {e}")
-        return "\n".join(outs)
-    return await _auto_summarize_pass_single(
-        days_back=days_back,
-        account_id=account_id,
-        max_process=max_process,
-        progress_cb=progress_cb,
-        away_only=away_only,
-        override_url=override_url,
-        override_model=override_model,
-        override_headers=override_headers,
-    )
+        if len(ids) > 1:
+            outs = []
+            for idx, aid in enumerate(ids, start=1):
+                try:
+                    await _emit_progress(progress_cb, f"{names.get(aid, aid[:8])}: starting ({idx}/{len(ids)})")
+                    result = await run_single(account_id=aid)
+                    outs.append(f"[{names.get(aid, aid[:8])}] {result}")
+                except Exception as e:
+                    logger.warning(f"auto-summarize pass failed for account {aid}: {e}")
+                    outs.append(f"[{names.get(aid, aid[:8])}] error: {e}")
+            return "\n".join(outs)
+        # Zero rows falls back to the legacy settings.json account.
+        account_id = ids[0] if ids else None
+    return await run_single(account_id=account_id)
 
 
-async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, progress_cb=None, away_only: bool = False, override_url=None, override_model=None, override_headers=None) -> str:
+async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, progress_cb=None, away_only: bool = False, override_url=None, override_model=None, override_headers=None, flags: dict | None = None) -> str:
     """Single pass of the auto-summarize/reply scan for ONE account.
-    Reads current settings flags."""
+    Reads current settings flags, with `flags` overriding them."""
     import asyncio
     import sqlite3 as _sql3
     from src.llm_core import _uses_max_completion_tokens
 
-    settings = _effective_settings_for_email_account(_load_settings(), account_id)
+    settings = {**_load_settings(), **(flags or {})}
+    settings = {**settings, **_get_auto_reply_settings_for_account(settings, account_id)}
     auto_sum = settings.get("email_auto_summarize", False)
     auto_reply = settings.get("email_auto_reply", False)
     auto_reply_draft = bool(auto_reply and settings.get("_email_auto_reply_draft_only", False))
@@ -651,11 +574,8 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
         auto_tag = False
         auto_spam = False
         auto_cal = False
-    # Calendar files are deterministic input and should be imported even when
-    # the optional AI calendar-extraction toggle is off.
-    calendar_attachment_scan = True
-    if not auto_sum and not auto_reply_draft and not auto_reply_away and not auto_tag and not auto_spam and not auto_cal and not calendar_attachment_scan:
-        return "Nothing to do"
+    # Calendar files are deterministic input, so a pass always runs to import
+    # them even when every optional toggle is off.
 
     # Owner of the account being processed. All calendar + mailbox reads/writes
     # below are scoped to this user: the multi-account fan-out runs every user's
@@ -807,14 +727,9 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
             _max_process = max(1, int(max_process)) if max_process is not None else _default_max_process
         except Exception:
             _max_process = _default_max_process
-        for _entry in uid_list:
+        for _folder, uid in uid_list:
             if processed >= _max_process:
                 break
-            # entry can be either a bare UID (legacy callers) or (folder, uid) tuple (new code)
-            if isinstance(_entry, tuple):
-                _folder, uid = _entry
-            else:
-                _folder, uid = "INBOX", _entry
             try:
                 if _folder != _current_folder:
                     conn.select(_q(_folder), readonly=True)
@@ -937,15 +852,14 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                         )
                         _events_created += _attachment_created
                         _cal_existing.add(message_id)
-                        _cc = _sql3.connect(SCHEDULED_DB)
-                        _cc.execute(
-                            "INSERT OR REPLACE INTO email_calendar_extractions "
-                            "(message_id, owner, uid, event_uids, events_created, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                            (message_id, account_owner or "", uid.decode() if isinstance(uid, bytes) else str(uid),
-                             json.dumps(_attachment_uids), _attachment_created, datetime.utcnow().isoformat()),
-                        )
-                        _cc.commit()
-                        _cc.close()
+                        with _scheduled_db() as _cc:
+                            _cc.execute(
+                                "INSERT OR REPLACE INTO email_calendar_extractions "
+                                "(message_id, owner, uid, event_uids, events_created, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                                (message_id, account_owner or "", uid.decode() if isinstance(uid, bytes) else str(uid),
+                                 json.dumps(_attachment_uids), _attachment_created, datetime.utcnow().isoformat()),
+                            )
+                            _cc.commit()
                         need_cal = False
                         _uid_text = uid.decode() if isinstance(uid, bytes) else str(uid)
                         _detail_lines.append(
@@ -982,14 +896,13 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                             timeout=240,
                         )
                         if summary:
-                            _c = _sql3.connect(SCHEDULED_DB)
-                            _c.execute("""
-                                INSERT OR REPLACE INTO email_summaries
-                                (message_id, owner, uid, folder, subject, sender, summary, model_used, created_at)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """, (message_id, account_owner or "", uid.decode() if isinstance(uid, bytes) else str(uid), _folder, subject, sender, summary, model, datetime.utcnow().isoformat()))
-                            _c.commit()
-                            _c.close()
+                            with _scheduled_db() as _c:
+                                _c.execute("""
+                                    INSERT OR REPLACE INTO email_summaries
+                                    (message_id, owner, uid, folder, subject, sender, summary, model_used, created_at)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """, (message_id, account_owner or "", uid.decode() if isinstance(uid, bytes) else str(uid), _folder, subject, sender, summary, model, datetime.utcnow().isoformat()))
+                                _c.commit()
                             _sum_existing.add(message_id)
                             _summaries_created += 1
                             _uid_text = uid.decode() if isinstance(uid, bytes) else str(uid)
@@ -1035,14 +948,13 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                         )
                         reply = _apply_email_style_mechanics(_extract_reply(reply or ""))
                         if reply:
-                            _c = _sql3.connect(SCHEDULED_DB)
-                            _c.execute("""
-                                INSERT OR REPLACE INTO email_ai_replies
-                                (message_id, owner, uid, folder, reply, model_used, created_at)
-                                VALUES (?, ?, ?, ?, ?, ?, ?)
-                            """, (message_id, account_owner or "", uid.decode() if isinstance(uid, bytes) else str(uid), _folder, reply, model, datetime.utcnow().isoformat()))
-                            _c.commit()
-                            _c.close()
+                            with _scheduled_db() as _c:
+                                _c.execute("""
+                                    INSERT OR REPLACE INTO email_ai_replies
+                                    (message_id, owner, uid, folder, reply, model_used, created_at)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                """, (message_id, account_owner or "", uid.decode() if isinstance(uid, bytes) else str(uid), _folder, reply, model, datetime.utcnow().isoformat()))
+                                _c.commit()
                             _reply_existing.add(message_id)
                             _replies_drafted += 1
                             _uid_text = uid.decode() if isinstance(uid, bytes) else str(uid)
@@ -1279,21 +1191,20 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                         # the next poll run.
                         try:
                             if _cal_parse_ok:
-                                _cc = _sql3.connect(SCHEDULED_DB)
-                                _cc.execute(
-                                    "INSERT OR REPLACE INTO email_calendar_extractions "
-                                    "(message_id, owner, uid, event_uids, events_created, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                                    (
-                                        message_id,
-                                        account_owner or "",
-                                        uid.decode() if isinstance(uid, bytes) else str(uid),
-                                        json.dumps(_cal_event_uids),
-                                        _cal_run_count,
-                                        datetime.utcnow().isoformat(),
-                                    ),
-                                )
-                                _cc.commit()
-                                _cc.close()
+                                with _scheduled_db() as _cc:
+                                    _cc.execute(
+                                        "INSERT OR REPLACE INTO email_calendar_extractions "
+                                        "(message_id, owner, uid, event_uids, events_created, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                                        (
+                                            message_id,
+                                            account_owner or "",
+                                            uid.decode() if isinstance(uid, bytes) else str(uid),
+                                            json.dumps(_cal_event_uids),
+                                            _cal_run_count,
+                                            datetime.utcnow().isoformat(),
+                                        ),
+                                    )
+                                    _cc.commit()
                                 _cal_existing.add(message_id)
                         except Exception as ce:
                             logger.debug(f"Could not cache calendar extraction: {ce}")
@@ -1345,18 +1256,17 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
 
                             # Record immediately so we don't re-alert
                             try:
-                                _uc = _sql3.connect(SCHEDULED_DB)
-                                _uc.execute(
-                                    "INSERT OR REPLACE INTO email_urgency_alerts "
-                                    "(message_id, owner, uid, folder, subject, sender, urgency, reason, alerted, created_at) "
-                                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                    (message_id, account_owner or "", uid.decode() if isinstance(uid, bytes) else str(uid),
-                                     _folder, subject, sender, urgency, reason,
-                                     1 if urgency in ("critical", "high") else 0,
-                                     datetime.utcnow().isoformat())
-                                )
-                                _uc.commit()
-                                _uc.close()
+                                with _scheduled_db() as _uc:
+                                    _uc.execute(
+                                        "INSERT OR REPLACE INTO email_urgency_alerts "
+                                        "(message_id, owner, uid, folder, subject, sender, urgency, reason, alerted, created_at) "
+                                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                        (message_id, account_owner or "", uid.decode() if isinstance(uid, bytes) else str(uid),
+                                         _folder, subject, sender, urgency, reason,
+                                         1 if urgency in ("critical", "high") else 0,
+                                         datetime.utcnow().isoformat())
+                                    )
+                                    _uc.commit()
                                 _urgent_existing.add(message_id)
                             except Exception as ue:
                                 logger.debug(f"Could not cache urgency: {ue}")
@@ -1495,17 +1405,16 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                                     moved_to = spam_folder
                                     logger.info(f"Auto-spam moved uid={uid.decode() if isinstance(uid, bytes) else str(uid)} to {spam_folder}: {spam_reason}")
 
-                            _c = _sql3.connect(SCHEDULED_DB)
-                            _c.execute("""
-                                INSERT OR REPLACE INTO email_tags
-                                (message_id, owner, account_id, uid, folder, subject, sender, tags, spam_verdict,
-                                 spam_reason, moved_to, model_used, created_at)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """, (message_id, account_owner or "", account_id or "", uid.decode() if isinstance(uid, bytes) else str(uid), _folder, subject, sender,
-                                  json.dumps(tags), 1 if is_spam else 0,
-                                  spam_reason, moved_to, model, datetime.utcnow().isoformat()))
-                            _c.commit()
-                            _c.close()
+                            with _scheduled_db() as _c:
+                                _c.execute("""
+                                    INSERT OR REPLACE INTO email_tags
+                                    (message_id, owner, account_id, uid, folder, subject, sender, tags, spam_verdict,
+                                     spam_reason, moved_to, model_used, created_at)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """, (message_id, account_owner or "", account_id or "", uid.decode() if isinstance(uid, bytes) else str(uid), _folder, subject, sender,
+                                      json.dumps(tags), 1 if is_spam else 0,
+                                      spam_reason, moved_to, model, datetime.utcnow().isoformat()))
+                                _c.commit()
                             _tag_existing.add(message_id)
                     except Exception as e:
                         logger.warning(f"Auto-classify {uid} failed: {e}")
@@ -1586,21 +1495,19 @@ def _scheduled_poll_once() -> dict:
     Returns a small summary dict — useful for the CLI wrapper. Safe to
     invoke from a cron job (single-shot) or the long-running poller.
     """
-    import sqlite3
     sent = []
     failed = []
     try:
         now_iso = datetime.utcnow().isoformat()
-        conn = sqlite3.connect(SCHEDULED_DB)
-        cols = [row[1] for row in conn.execute("PRAGMA table_info(scheduled_emails)").fetchall()]
-        kind_expr = "odysseus_kind" if "odysseus_kind" in cols else "'scheduled' AS odysseus_kind"
-        owner_expr = "owner" if "owner" in cols else "'' AS owner"
-        rows = conn.execute(f"""
-            SELECT id, to_addr, cc, bcc, subject, body, in_reply_to, references_hdr, attachments, account_id, {kind_expr}, {owner_expr}
-            FROM scheduled_emails
-            WHERE status = 'pending' AND send_at <= ?
-        """, (now_iso,)).fetchall()
-        conn.close()
+        with _scheduled_db() as conn:
+            cols = [row[1] for row in conn.execute("PRAGMA table_info(scheduled_emails)").fetchall()]
+            kind_expr = "odysseus_kind" if "odysseus_kind" in cols else "'scheduled' AS odysseus_kind"
+            owner_expr = "owner" if "owner" in cols else "'' AS owner"
+            rows = conn.execute(f"""
+                SELECT id, to_addr, cc, bcc, subject, body, in_reply_to, references_hdr, attachments, account_id, {kind_expr}, {owner_expr}
+                FROM scheduled_emails
+                WHERE status = 'pending' AND send_at <= ?
+            """, (now_iso,)).fetchall()
 
         for r in rows:
             sid = r[0]
@@ -1616,14 +1523,13 @@ def _scheduled_poll_once() -> dict:
                 # actually changes a row (rowcount == 1) proceeds to send;
                 # a loser sees rowcount == 0 and skips it instead of sending
                 # a duplicate.
-                claim_conn = sqlite3.connect(SCHEDULED_DB)
-                claim_cur = claim_conn.execute(
-                    "UPDATE scheduled_emails SET status='sending' WHERE id=? AND status='pending'",
-                    (sid,),
-                )
-                claim_conn.commit()
-                claimed = claim_cur.rowcount == 1
-                claim_conn.close()
+                with _scheduled_db() as claim_conn:
+                    claim_cur = claim_conn.execute(
+                        "UPDATE scheduled_emails SET status='sending' WHERE id=? AND status='pending'",
+                        (sid,),
+                    )
+                    claim_conn.commit()
+                    claimed = claim_cur.rowcount == 1
                 if not claimed:
                     continue
 
@@ -1676,18 +1582,16 @@ def _scheduled_poll_once() -> dict:
 
                 _cleanup_compose_uploads(attachments)
 
-                conn2 = sqlite3.connect(SCHEDULED_DB)
-                conn2.execute("UPDATE scheduled_emails SET status='sent' WHERE id=?", (sid,))
-                conn2.commit()
-                conn2.close()
+                with _scheduled_db() as conn2:
+                    conn2.execute("UPDATE scheduled_emails SET status='sent' WHERE id=?", (sid,))
+                    conn2.commit()
                 logger.info(f"Sent scheduled email {sid}")
                 sent.append(sid)
             except Exception as e:
                 logger.error(f"Failed to send scheduled {sid}: {e}")
-                conn2 = sqlite3.connect(SCHEDULED_DB)
-                conn2.execute("UPDATE scheduled_emails SET status='failed', error=? WHERE id=?", (str(e), sid))
-                conn2.commit()
-                conn2.close()
+                with _scheduled_db() as conn2:
+                    conn2.execute("UPDATE scheduled_emails SET status='failed', error=? WHERE id=?", (str(e), sid))
+                    conn2.commit()
                 failed.append({"id": sid, "error": str(e)})
     except Exception as e:
         logger.error(f"Scheduled poller error: {e}")

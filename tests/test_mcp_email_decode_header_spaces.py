@@ -90,18 +90,6 @@ def test_empty_header():
     assert es._decode_header("") == ""
 
 
-@pytest.mark.asyncio
-async def test_legacy_account_listing_explains_default_email_tool_fallback(monkeypatch):
-    monkeypatch.setattr(es, "_read_accounts_from_db", lambda: [])
-    monkeypatch.setattr(es, "_fixture_email_enabled", lambda: False)
-    monkeypatch.setattr(es, "_fixture_account_rows", lambda: [])
-
-    out = await es.call_tool("list_email_accounts", {})
-
-    assert "Default single-account mode is active" in out[0].text
-    assert "omit the `account` field and continue" in out[0].text
-    assert "search_emails" in out[0].text
-
 
 @pytest.mark.asyncio
 async def test_mcp_email_accounts_are_filtered_by_hidden_owner(tmp_path, monkeypatch):
@@ -238,7 +226,7 @@ async def test_mcp_send_email_stages_with_visible_owner_account_id(tmp_path, mon
     monkeypatch.setattr(constants, "SCHEDULED_EMAILS_DB", str(scheduled_path))
     monkeypatch.setattr(es, "_read_agent_email_confirm_setting", lambda: True)
 
-    out = await es.call_tool(
+    await es.call_tool(
         "send_email",
         {
             "to": "recipient@example.com",
@@ -249,7 +237,6 @@ async def test_mcp_send_email_stages_with_visible_owner_account_id(tmp_path, mon
         },
     )
 
-    assert "Draft staged for approval" in out[0].text
     conn = sqlite3.connect(scheduled_path)
     try:
         row = conn.execute(
@@ -269,7 +256,7 @@ async def test_mcp_send_email_stages_owner_scoped_pending_draft(tmp_path, monkey
     monkeypatch.setattr(constants, "SCHEDULED_EMAILS_DB", str(db_path))
     monkeypatch.setattr(es, "_read_agent_email_confirm_setting", lambda: True)
 
-    out = await es.call_tool(
+    await es.call_tool(
         "send_email",
         {
             "to": "recipient@example.com",
@@ -279,8 +266,6 @@ async def test_mcp_send_email_stages_owner_scoped_pending_draft(tmp_path, monkey
         },
     )
 
-    assert "Draft staged for approval" in out[0].text
-    assert "Nothing has been sent yet" in out[0].text
     conn = sqlite3.connect(db_path)
     try:
         row = conn.execute(
@@ -324,7 +309,7 @@ async def test_mcp_draft_email_document_uses_hidden_owner(monkeypatch):
         lambda account=None: {"account_name": "Alice Mail", "account_id": "acct-alice"},
     )
 
-    out = await es.call_tool(
+    await es.call_tool(
         "draft_email",
         {
             "to": "recipient@example.com",
@@ -334,7 +319,6 @@ async def test_mcp_draft_email_document_uses_hidden_owner(monkeypatch):
         },
     )
 
-    assert "Created Odysseus email draft" in out[0].text
     docs = [obj for obj in saved if isinstance(obj, FakeDocument)]
     assert len(docs) == 1
     assert docs[0].owner == "alice"

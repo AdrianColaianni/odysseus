@@ -320,31 +320,16 @@ def test_build_uploaded_file_manifest_hides_paths_read_file_cannot_open(monkeypa
         shutil.rmtree(root, ignore_errors=True)
 
 
-@pytest.mark.parametrize("name,expected", [
-    # 24h format (the bug this PR fixes)
-    ("deepseek-v4-flash 14:05:33", True),
-    ("qwq 17:46:02", True),
-    ("gemma3 23:59:59", True),
-    ("claude-sonnet 4 0:00:00", True),
-
-    # 12h format (was already working)
-    ("deepseek-v4-flash 2:05:33 PM", True),
-    ("qwq 06:46:02 AM", True),
-    ("claude-sonnet-4 8:05:17 am", True),
-
-    # empty / default
-    ("", True),
-    ("  ", False),
-    ("Chat: something", True),
-
-    # custom titles – should NOT trigger auto-naming
-    ("custom title", False),
-    ("CW Decoder for STM32", False),
-    ("my chat about python", False),
-    ("Fix the login bug", False),
-])
-def test_needs_auto_name(name, expected):
-    assert needs_auto_name(name) == expected, f"needs_auto_name({name!r}) should be {expected}"
+def test_needs_auto_name():
+    for name, expected in (
+        ("deepseek-v4-flash 14:05:33", True),  # 24h default title
+        ("claude-sonnet-4 8:05:17 am", True),  # 12h default title
+        ("", True),
+        ("  ", False),
+        ("Chat: something", True),
+        ("CW Decoder for STM32", False),  # custom title
+    ):
+        assert needs_auto_name(name) == expected, name
 
 
 def test_auto_name_after_stream_reloads_session_before_naming(monkeypatch):

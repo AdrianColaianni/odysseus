@@ -1,19 +1,5 @@
-# Container security: Dockerfile lint
-#
-# Purpose: the Docker image is how most people run Odysseus, so it is part of
-# the attack surface. hadolint lints the Dockerfile for mistakes and insecure
-# patterns (running as root longer than needed, unpinned base image, bad apt
-# usage). Blocking.
-#
-# The image vulnerability scan (Trivy, advisory) lives in its own file,
-# container-trivy.yml. Keeping it separate lets that advisory scan be
-# path-filtered and held to a read-only token on pull requests without
-# weakening this blocking gate, which must always report so a required check
-# never hangs.
-#
-# Note: a separate open PR (#120) proposes a local `scripts/scan_image.py`.
-# This job is complementary -- it is a CI gate, not a script a contributor has
-# to remember to run.
+# hadolint lints the Dockerfile. Blocking, and on the broad trigger so the
+# required check always reports; the advisory Trivy scan is container-trivy.yml.
 
 name: Container scan
 

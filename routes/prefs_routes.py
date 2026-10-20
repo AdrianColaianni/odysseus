@@ -6,7 +6,6 @@ from core.atomic_io import atomic_write_json
 from src.auth_helpers import get_current_user
 from src.constants import USER_PREFS_FILE
 
-PREFS_FILE = USER_PREFS_FILE
 _FOREGROUND_POLICY_KEYS = (
     "foreground_fallback_enabled",
     "foreground_model_fallbacks",
@@ -16,7 +15,7 @@ _FOREGROUND_POLICY_KEYS = (
 def _load():
     """Load the raw prefs file (internal use only)."""
     try:
-        with open(PREFS_FILE, "r", encoding="utf-8") as f:
+        with open(USER_PREFS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             return data if isinstance(data, dict) else {}
     except (FileNotFoundError, json.JSONDecodeError):
@@ -24,7 +23,7 @@ def _load():
 
 
 def _save(prefs):
-    atomic_write_json(PREFS_FILE, prefs, indent=2)
+    atomic_write_json(USER_PREFS_FILE, prefs, indent=2)
 
 
 def _load_for_user(user: Optional[str] = None) -> dict:

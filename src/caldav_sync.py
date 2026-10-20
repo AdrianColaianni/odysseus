@@ -1,37 +1,19 @@
-"""CalDAV → local SQLite sync.
+"""CalDAV to local SQLite sync: a one-way pull on calendar open and from a scheduler loop.
 
-The Settings UI lets users save CalDAV credentials, but the original
-sync path was removed when calendar storage was migrated to SQLite.
-This module re-wires that gap as a one-way pull (remote → local),
-called on calendar open and from a periodic scheduler loop.
-
-Design notes:
-- We use the `caldav` lib so PROPFIND discovery + REPORT XML work
-  across Radicale / Nextcloud / Apple / Fastmail without us
-  reinventing the protocol. It's pure Python.
-- The lib is synchronous; we run it in a threadpool via
-  `asyncio.to_thread` so the FastAPI event loop stays free.
-- Each remote calendar maps to one local `CalendarCal` row with
-  `source="caldav"` and `id` = a stable hash of the remote URL so
-  re-syncs idempotently target the same row.
-- Events upsert by VEVENT UID (kept as the local `uid`). Local
-  CalDAV-sourced events not seen in the latest pull are deleted so
-  remote deletions propagate.
-- Datetimes are converted to UTC and the row is flagged `is_utc=True`
-  so the serializer adds the Z suffix and the frontend renders in the
-  user's local TZ correctly.
+Each remote calendar maps to one `CalendarCal` row whose id is a stable hash
+of the remote URL; caldav_writeback.find_remote_calendar matches that hash.
 """
 
 import asyncio
 import hashlib
-import ipaddress
 import json
 import logging
 import os
-import socket
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlparse, urlunparse
+
+from src.url_safety import OutboundAddressBlocked, classify_address, resolve_outbound_url
 
 logger = logging.getLogger(__name__)
 
@@ -50,57 +32,6 @@ _BLOCKED_HOSTS = {
 
 def _private_caldav_allowed() -> bool:
     return os.environ.get("ODYSSEUS_ALLOW_PRIVATE_CALDAV", "0").lower() in {"1", "true", "yes"}
-
-
-def _validate_caldav_address(addr: ipaddress._BaseAddress) -> None:
-    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
-        addr = addr.ipv4_mapped
-    if (
-        addr.is_loopback
-        or addr.is_link_local
-        or addr.is_multicast
-        or addr.is_unspecified
-        or addr.is_reserved
-    ):
-        raise ValueError("CalDAV URL host is not allowed")
-    if addr.is_private and not _private_caldav_allowed():
-        raise ValueError("Private CalDAV IPs require ODYSSEUS_ALLOW_PRIVATE_CALDAV=1")
-
-
-def _validate_caldav_ip(host: str) -> None:
-    try:
-        ip = ipaddress.ip_address(host.strip("[]"))
-    except ValueError:
-        return
-    _validate_caldav_address(ip)
-
-
-def _resolve_caldav_host_ips(host: str) -> list[ipaddress._BaseAddress]:
-    addrs: list[ipaddress._BaseAddress] = []
-    for family, _, _, _, sockaddr in socket.getaddrinfo(host, None):
-        if family not in (socket.AF_INET, socket.AF_INET6):
-            continue
-        try:
-            addrs.append(ipaddress.ip_address(sockaddr[0].split("%", 1)[0]))
-        except ValueError:
-            continue
-    return addrs
-
-
-def _validate_caldav_hostname(host: str) -> None:
-    try:
-        ipaddress.ip_address(host.strip("[]"))
-        return
-    except ValueError:
-        pass
-    try:
-        addrs = _resolve_caldav_host_ips(host)
-    except OSError:
-        raise ValueError("CalDAV URL host does not resolve")
-    if not addrs:
-        raise ValueError("CalDAV URL host does not resolve")
-    for addr in addrs:
-        _validate_caldav_address(addr)
 
 
 def validate_caldav_url(raw_url: str) -> str:
@@ -124,8 +55,18 @@ def validate_caldav_url(raw_url: str) -> str:
     host = (parsed.hostname or "").lower()
     if host in _BLOCKED_HOSTS or host.endswith(".localhost"):
         raise ValueError("CalDAV URL host is not allowed")
-    _validate_caldav_ip(host)
-    _validate_caldav_hostname(host)
+    try:
+        addrs = resolve_outbound_url(url)
+    except OutboundAddressBlocked as e:
+        raise ValueError(f"CalDAV URL host is not allowed: {e}") from e
+    # Stricter than url_safety's local-first default: loopback stays blocked
+    # even when private CalDAV servers are allowed.
+    if any((getattr(addr, "ipv4_mapped", None) or addr).is_loopback for addr in addrs):
+        raise ValueError("CalDAV URL host is not allowed")
+    if not _private_caldav_allowed() and any(
+        classify_address(addr, block_private=True) for addr in addrs
+    ):
+        raise ValueError("Private CalDAV IPs require ODYSSEUS_ALLOW_PRIVATE_CALDAV=1")
     return urlunparse(parsed._replace(fragment="")).rstrip("/")
 
 

@@ -101,7 +101,7 @@ def test_detect_amd_reports_family(monkeypatch):
     the GPU's gfx target. Drive it through the remote-read path (no real sysfs)."""
     rocminfo_out = "  Name:  AMD Ryzen 7 3700X\n  Name:  gfx1200\n  Marketing Name: AMD Radeon RX 9060 XT\n"
 
-    def fake_run(cmd):
+    def fake_run(cmd, remote=None):
         if not cmd:
             return None
         if "rocminfo" in cmd[0]:
@@ -119,11 +119,10 @@ def test_detect_amd_reports_family(monkeypatch):
             return None
         return None
 
-    # _remote_host truthy routes _read/_list_drm_cards through _run (no real sysfs).
-    monkeypatch.setattr(hardware, "_remote_host", "fake-host")
+    # A remote target routes _read/_list_drm_cards through _run (no real sysfs).
     monkeypatch.setattr(hardware, "_run", fake_run)
 
-    info = hardware._detect_amd()
+    info = hardware._detect_amd(("fake-host", None))
     assert info is not None
     assert info["backend"] == "rocm"
     assert info["gpu_family"] == "rdna"

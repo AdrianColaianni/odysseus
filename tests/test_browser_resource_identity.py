@@ -117,9 +117,6 @@ async def test_dispatch_boundary_preserves_only_native_browser_page_failure(prod
 
     async def unsupported_operation(*args, **kwargs):
         attempts.append(1)
-        if reason == browser.PAGE_FAILURE:
-            # The legacy server page helper raises the reserved identity error.
-            await PrivateBrowserTool()._capture_post_click_state()
         raise ResourceIdentityError(reason)
 
     monkeypatch.setattr(tool_execution, "_execute_tool_block_impl", unsupported_operation)
@@ -207,7 +204,6 @@ async def test_binary_hash_gate_does_not_search_path_or_npx(producer):
     (browser.PRODUCER_ROOT / "agent-browser-linux-x64").write_bytes(b"replacement")
     with pytest.raises(ValueError): await browser.trusted_producer()
     assert producer.raw_calls == []
-    assert PrivateBrowserTool._local_agent_browser_binary() is None
 
 
 @pytest.mark.parametrize("raw", ['{}', '{"success":true}', '{"success":1,"data":{}}',

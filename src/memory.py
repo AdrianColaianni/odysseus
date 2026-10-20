@@ -8,6 +8,8 @@ import re
 from typing import List, Dict, Tuple
 from datetime import datetime
 
+from src.constants import MEMORY_FILE
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,8 +47,8 @@ def get_text_similarity(text1: str, text2: str) -> float:
     return len(intersection) / len(union)
 
 class MemoryManager:
-    def __init__(self, data_dir: str):
-        self.memory_file = os.path.join(data_dir, "memory.json")
+    def __init__(self, memory_file: str | None = None):
+        self.memory_file = memory_file or MEMORY_FILE
         self.ensure_file_exists()
         
     def extract_memory_from_chat(self, chat_history: List[Dict], session_id: str = None) -> List[Dict]:
@@ -322,42 +324,6 @@ class MemoryManager:
         text_lower = text.strip().lower()
         return [entry for entry in entries if entry["text"].lower() == text_lower]
             
-    def categorize_memory_by_relevance(self, message: str, memories: list):
-        """Categorize memories by type and relevance"""
-        categories = {
-            "contacts": [],
-            "preferences": [],
-            "facts": [],
-            "tasks": []
-        }
-        
-        msg_lower = message.lower()
-        
-        for mem in memories:
-            text_lower = mem["text"].lower()
-            
-            # Contact info
-            if any(word in text_lower for word in ["phone", "email", "address", "lives", "works"]):
-                if any(word in msg_lower for word in ["contact", "phone", "address", "email"]):
-                    categories["contacts"].append(mem)
-            
-            # Personal preferences
-            elif any(word in text_lower for word in ["likes", "dislikes", "prefers", "favorite"]):
-                if any(word in msg_lower for word in ["like", "prefer", "favorite", "want"]):
-                    categories["preferences"].append(mem)
-            
-            # Tasks and todos
-            elif any(word in text_lower for word in ["todo", "task", "remind", "meeting"]):
-                if any(word in msg_lower for word in ["todo", "task", "schedule", "remind"]):
-                    categories["tasks"].append(mem)
-            
-            # General facts - only if very relevant
-            else:
-                if get_text_similarity(message, mem["text"]) > 0.4:
-                    categories["facts"].append(mem)
-        
-        return categories
-
     def get_relevant_memories(self, query: str, memories: list, threshold: float = 0.05, max_items: int = 8):
         """Get memories that are relevant to the query based on text similarity and semantic keyword matching."""
         if not memories or not query.strip():

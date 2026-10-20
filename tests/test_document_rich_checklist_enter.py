@@ -1,25 +1,7 @@
 """Browser coverage for Enter behavior inside Rich Text checklists."""
 
-import json
-import subprocess
-from pathlib import Path
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source
-
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-
-
-def test_checklist_enter_uses_native_edit_commands_and_resets_state():
-    section = DOC_JS.split("function _handleRichChecklistEnter", 1)[1].split(
-        "let _richInlineCodeTypingArmed", 1
-    )[0]
-    assert "document.execCommand('insertParagraph')" in section
-    assert "nextItem.dataset.checked = 'false'" in section
-    assert "document.execCommand('outdent')" in section
-    assert "document.execCommand('removeFormat')" in section
-    assert "document.execCommand('formatBlock', false, 'p')" in section
+from tests.helpers.node import run_node_module
 
 
 def test_enter_creates_unchecked_task_and_empty_enter_exits_cleanly():
@@ -81,15 +63,7 @@ def test_enter_creates_unchecked_task_and_empty_enter_exits_cleanly():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
     assert data["afterFirstEnter"] == [
         {"text": "Finished item", "checked": "true"},
         {"text": "", "checked": "false"},

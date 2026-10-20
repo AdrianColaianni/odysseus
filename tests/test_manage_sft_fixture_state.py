@@ -1,16 +1,10 @@
-import importlib.util
 import json
 import sqlite3
-import sys
 from pathlib import Path
 
+from tests.helpers.cli_loader import load_script
 
-PATH = Path(__file__).resolve().parents[1] / "scripts" / "manage_sft_fixture_state.py"
-SPEC = importlib.util.spec_from_file_location("manage_sft_fixture_state", PATH)
-MODULE = importlib.util.module_from_spec(SPEC)
-assert SPEC and SPEC.loader
-sys.modules[SPEC.name] = MODULE
-SPEC.loader.exec_module(MODULE)
+MODULE = load_script("manage_sft_fixture_state.py")
 
 
 def make_db(path: Path) -> None:

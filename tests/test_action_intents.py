@@ -1,59 +1,59 @@
-from src.action_intents import classify_tool_intent, message_needs_tools
+from src.action_intents import classify_tool_intent
 
 
 def test_calendar_entry_request_promotes_to_agent():
-    assert message_needs_tools("Can you add an entry to my calendar?")
+    assert classify_tool_intent("Can you add an entry to my calendar?").needs_tools
     intent = classify_tool_intent("Can you add an entry to my calendar?")
     assert intent.needs_tools
     assert intent.category == "calendar"
 
 
 def test_calendar_imperative_variants_promote_to_agent():
-    assert message_needs_tools("add lunch with Sam to my calendar tomorrow at noon")
-    assert message_needs_tools("schedule a call with Mina next Friday")
-    assert message_needs_tools("put dentist appointment on my calendar")
-    assert message_needs_tools("Alright. Recreate that same appointment")
-    assert message_needs_tools("delete that actually")
-    assert message_needs_tools("Okay delete that doctor appointment from the calendar")
-    assert message_needs_tools("have another go at adding a test entry to the calendar")
-    assert message_needs_tools(
+    assert classify_tool_intent("add lunch with Sam to my calendar tomorrow at noon").needs_tools
+    assert classify_tool_intent("schedule a call with Mina next Friday").needs_tools
+    assert classify_tool_intent("put dentist appointment on my calendar").needs_tools
+    assert classify_tool_intent("Alright. Recreate that same appointment").needs_tools
+    assert classify_tool_intent("delete that actually").needs_tools
+    assert classify_tool_intent("Okay delete that doctor appointment from the calendar").needs_tools
+    assert classify_tool_intent("have another go at adding a test entry to the calendar").needs_tools
+    assert classify_tool_intent(
         "Okay so you should be able to create that calendar event for tomorrow at 1:30 p.m. right for me to go to the hardware store"
-    )
-    assert message_needs_tools(
+    ).needs_tools
+    assert classify_tool_intent(
         "make it an appointment at 12pm for me to visit the doctor it's tomorrow the 2nd of June 2026"
-    )
+    ).needs_tools
 
 
 def test_calendar_read_requests_promote_to_agent():
-    assert message_needs_tools("What upcoming events do I have?")
-    assert message_needs_tools("Can you show my next appointments?")
-    assert message_needs_tools("Do I have upcoming Taekwondo classes this week?")
-    assert message_needs_tools("What's on my calendar tomorrow?")
-    assert message_needs_tools("When is my next meeting?")
+    assert classify_tool_intent("What upcoming events do I have?").needs_tools
+    assert classify_tool_intent("Can you show my next appointments?").needs_tools
+    assert classify_tool_intent("Do I have upcoming Taekwondo classes this week?").needs_tools
+    assert classify_tool_intent("What's on my calendar tomorrow?").needs_tools
+    assert classify_tool_intent("When is my next meeting?").needs_tools
 
 
 def test_note_todo_and_reminder_actions_promote_to_agent():
-    assert message_needs_tools("add milk to my todo list")
-    assert message_needs_tools("take a note that the server needs checking")
-    assert message_needs_tools("set a reminder to call Pat at 4pm")
+    assert classify_tool_intent("add milk to my todo list").needs_tools
+    assert classify_tool_intent("take a note that the server needs checking").needs_tools
+    assert classify_tool_intent("set a reminder to call Pat at 4pm").needs_tools
 
 
 def test_email_and_ui_actions_promote_to_agent():
-    assert message_needs_tools("reply to that email")
-    assert message_needs_tools("mark those emails as read")
-    assert message_needs_tools("open my calendar")
-    assert message_needs_tools("turn off web search")
+    assert classify_tool_intent("reply to that email").needs_tools
+    assert classify_tool_intent("mark those emails as read").needs_tools
+    assert classify_tool_intent("open my calendar").needs_tools
+    assert classify_tool_intent("turn off web search").needs_tools
 
 
 def test_research_action_promotes_to_agent():
-    assert message_needs_tools("research cost effective local models")
-    assert message_needs_tools("can you look into GPU hosting options")
+    assert classify_tool_intent("research cost effective local models").needs_tools
+    assert classify_tool_intent("can you look into GPU hosting options").needs_tools
 
 
 def test_explicit_web_search_promotes_to_agent():
-    assert message_needs_tools("use web search and find a recipe for chocolate chip cookies")
-    assert message_needs_tools("do a web search for the best chocolate chip cookies")
-    assert message_needs_tools("search the web for current RTX 3090 prices")
+    assert classify_tool_intent("use web search and find a recipe for chocolate chip cookies").needs_tools
+    assert classify_tool_intent("do a web search for the best chocolate chip cookies").needs_tools
+    assert classify_tool_intent("search the web for current RTX 3090 prices").needs_tools
     assert classify_tool_intent("use web search and find a recipe").category == "web"
 
 
@@ -115,8 +115,8 @@ def test_direct_code_requests_promote_to_workspace_agent():
 
 
 def test_code_explanations_stay_plain_chat():
-    assert not message_needs_tools("How do I write a Python function?")
-    assert not message_needs_tools("Can you explain how a React component works?")
+    assert not classify_tool_intent("How do I write a Python function?").needs_tools
+    assert not classify_tool_intent("Can you explain how a React component works?").needs_tools
 
 
 def test_shell_diagnostic_commands_promote_to_agent():
@@ -135,14 +135,14 @@ def test_shell_diagnostic_commands_promote_to_agent():
 
 
 def test_shell_command_explanations_stay_plain_chat():
-    assert not message_needs_tools("How do I use lsblk?")
-    assert not message_needs_tools("Can you explain docker ps?")
+    assert not classify_tool_intent("How do I use lsblk?").needs_tools
+    assert not classify_tool_intent("Can you explain docker ps?").needs_tools
 
 
 def test_explanatory_calendar_questions_stay_plain_chat():
-    assert not message_needs_tools("How do I add an entry to my calendar?")
-    assert not message_needs_tools("What about the built-in Odysseus calendar, is that linked to email?")
-    assert not message_needs_tools("Can you explain how calendar reminders work?")
+    assert not classify_tool_intent("How do I add an entry to my calendar?").needs_tools
+    assert not classify_tool_intent("What about the built-in Odysseus calendar, is that linked to email?").needs_tools
+    assert not classify_tool_intent("Can you explain how calendar reminders work?").needs_tools
     intent = classify_tool_intent("How do I add an entry to my calendar?")
     assert not intent.needs_tools
     assert intent.reason == "explanatory feature question"

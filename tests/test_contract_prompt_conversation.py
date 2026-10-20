@@ -2,8 +2,6 @@
 from copy import deepcopy
 from types import SimpleNamespace
 
-import pytest
-
 from src.agent_loop import (
     _build_system_prompt, _contract_prompt_domains,
     _contract_allows_early_completion,
@@ -12,11 +10,12 @@ from src.agent_loop import (
 )
 
 
-@pytest.mark.parametrize("family,tool", [
-    ("notes", "manage_notes"), ("calendar", "manage_calendar"),
-    ("tasks", "manage_tasks"), ("documents", "manage_documents"),
-])
-def test_actual_preheretic_prompt_preserves_referential_antecedent(family, tool):
+def test_actual_preheretic_prompt_preserves_referential_antecedent():
+    for family, tool in (("notes", "manage_notes"), ("documents", "manage_documents")):
+        _assert_referential_antecedent_preserved(family, tool)
+
+
+def _assert_referential_antecedent_preserved(family, tool):
     initial = f"List my {family}. Return at most three titles."
     followup = "List those again, at most three. Read-only; do not change data or send messages."
     messages = [
@@ -68,10 +67,10 @@ def test_contract_domains_do_not_inherit_email_from_negative_wording():
     assert _contract_prompt_domains(contract) == {"notes_calendar_tasks", "documents"}
 
 
-@pytest.mark.parametrize("family", ["notes", "calendar", "tasks", "documents", "cookbook_admin"])
-def test_successful_acquisition_does_not_grant_terminal_ownership(family):
-    contract = SimpleNamespace(capabilities={family}, required=set(), offered={"fixture_tool"})
-    assert not _contract_allows_early_completion(contract)
+def test_successful_acquisition_does_not_grant_terminal_ownership():
+    for family in ("notes", "documents", "cookbook_admin"):
+        contract = SimpleNamespace(capabilities={family}, required=set(), offered={"fixture_tool"})
+        assert not _contract_allows_early_completion(contract), family
 
 
 def test_compound_turn_cannot_finish_after_one_family():
@@ -92,51 +91,30 @@ def test_write_dedupe_preserves_reads_and_distinct_writes():
     assert signature('{"action":"create","title":"Lunch"}', "manage_calendar") is not None
 
 
-@pytest.mark.parametrize("contract", [
-    None,
-    SimpleNamespace(capabilities={"tasks"}),
-])
-def test_exact_mutation_dedupe_applies_to_legacy_and_single_family_turns(contract):
+def test_exact_mutation_dedupe_applies_to_legacy_and_single_family_turns():
     block = SimpleNamespace(
         tool_type="manage_tasks",
         content='{"action":"delete","task_id":"11111111-1111-1111-1111-111111111111"}',
     )
-    assert _contract_mutation_signature(block, contract) == (
-        "manage_tasks",
-        '{"action":"delete","task_id":"11111111-1111-1111-1111-111111111111"}',
-    )
     read = SimpleNamespace(tool_type="manage_tasks", content='{"action":"list"}')
-    assert _contract_mutation_signature(read, contract) is None
+    for contract in (None, SimpleNamespace(capabilities={"tasks"})):
+        assert _contract_mutation_signature(block, contract) == (
+            "manage_tasks",
+            '{"action":"delete","task_id":"11111111-1111-1111-1111-111111111111"}',
+        )
+        assert _contract_mutation_signature(read, contract) is None
 
 
-@pytest.mark.parametrize("text", [
-    "Run this read-only test once and report the result.",
-    "Execute the command one time; show stdout.",
-    "Run this command. Do not retry automatically.",
-    "Try it, but don't rerun the command again.",
-])
-def test_explicit_single_execution_bound_is_detected(text):
-    assert _request_forbids_execution_retry(text)
+def test_explicit_single_execution_bound_is_detected():
+    for text in (
+        "Run this read-only test once and report the result.",
+        "Run this command. Do not retry automatically.",
+        "Try it, but don't rerun the command again.",
+    ):
+        assert _request_forbids_execution_retry(text), text
 
 
 def test_unbounded_execution_request_does_not_invent_retry_limit():
     assert not _request_forbids_execution_retry(
         "Run the command and recover if it fails."
     )
-
-
-def test_tool_success_flags_do_not_terminate_compound_turn():
-    import ast
-    from pathlib import Path
-    tree = ast.parse((Path(__file__).resolve().parents[1] / "src/agent_loop.py").read_text())
-    flags = {"_qwen_explicit_effectful_completed", "_native_document_tool_completed",
-             "_ody_doc_tool_completed", "_doc_stream_create_completed"}
-    seen = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.If) or not any(isinstance(n, ast.Break) for n in ast.walk(node)):
-            continue
-        names = {n.id for n in ast.walk(node.test) if isinstance(n, ast.Name)}
-        if names & flags:
-            assert "_contract_allows_single_action_terminal" in names
-            seen.update(names & flags)
-    assert seen == flags

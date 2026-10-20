@@ -1,4 +1,3 @@
-import asyncio
 import base64
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -7,6 +6,7 @@ import pytest
 from fastapi import HTTPException
 
 from routes import signature_routes
+from tests.helpers.routes import route_endpoint
 
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\nsignature-bytes"
@@ -37,11 +37,7 @@ def _request(user="alice"):
 
 
 def _route_endpoint(path, method):
-    router = signature_routes.setup_signature_routes()
-    for route in router.routes:
-        if route.path == path and method in route.methods:
-            return route.endpoint
-    raise AssertionError(f"route not found: {method} {path}")
+    return route_endpoint(signature_routes.setup_signature_routes(), path, method)
 
 
 def test_signature_png_normalization_accepts_data_url_and_raw_base64():
@@ -51,38 +47,34 @@ def test_signature_png_normalization_accepts_data_url_and_raw_base64():
     assert signature_routes._normalize_signature_png(_PNG_B64) == _PNG_B64
 
 
-@pytest.mark.parametrize(
-    "raw",
-    [
+def test_signature_png_normalization_rejects_invalid_inputs():
+    for raw in (
         "",
         "not base64!!!",
         base64.b64encode(b"not a png").decode("ascii"),
         "data:image/jpeg;base64," + base64.b64encode(b"\xff\xd8jpeg").decode("ascii"),
         "A" * (signature_routes._MAX_SIGNATURE_B64 + 4),
-    ],
-)
-def test_signature_png_normalization_rejects_invalid_inputs(raw):
-    with pytest.raises(HTTPException) as exc:
-        signature_routes._normalize_signature_png(raw)
+    ):
+        with pytest.raises(HTTPException) as exc:
+            signature_routes._normalize_signature_png(raw)
 
-    assert exc.value.status_code == 400
+        assert exc.value.status_code == 400
 
 
-@pytest.mark.parametrize("value", [0, -1, signature_routes._MAX_SIGNATURE_DIMENSION + 1, "20"])
-def test_signature_dimensions_are_bounded(value):
-    with pytest.raises(HTTPException) as exc:
-        signature_routes._signature_dimension(value)
+def test_signature_dimensions_are_bounded():
+    for value in (0, -1, signature_routes._MAX_SIGNATURE_DIMENSION + 1, "20"):
+        with pytest.raises(HTTPException) as exc:
+            signature_routes._signature_dimension(value)
 
-    assert exc.value.status_code == 400
+        assert exc.value.status_code == 400
 
 
 def test_create_signature_stores_normalized_png_and_drops_svg(monkeypatch):
     db = _FakeDb()
-    monkeypatch.setattr(signature_routes, "SessionLocal", lambda: db)
     monkeypatch.setattr(signature_routes, "Signature", _SignatureRecord)
     create_signature = _route_endpoint("/api/signatures", "POST")
 
-    response = asyncio.run(create_signature(
+    response = create_signature(
         _request(),
         signature_routes.SignatureCreate(
             name=" Full signature ",
@@ -91,7 +83,8 @@ def test_create_signature_stores_normalized_png_and_drops_svg(monkeypatch):
             height=80,
             svg='<svg onload="alert(1)"></svg>',
         ),
-    ))
+        db=db,
+    )
 
     assert db.added.owner == "alice"
     assert db.added.name == "Full signature"
@@ -101,4 +94,3 @@ def test_create_signature_stores_normalized_png_and_drops_svg(monkeypatch):
     assert db.added.svg is None
     assert response["data_url"] == f"data:image/png;base64,{_PNG_B64}"
     db.commit.assert_called_once()
-    db.close.assert_called_once()

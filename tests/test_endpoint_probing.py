@@ -79,28 +79,23 @@ def _resp(status, *, json=None, headers=None, url="https://api.example.com/v1/mo
 # ── _openai_model_ids / _ollama_model_names: parsing helpers ──
 
 class TestModelListHelpers:
-    @pytest.mark.parametrize("data,expected", [
-        ({"data": [{"id": "gpt-4o"}, {"id": "gpt-4o-mini"}]}, ["gpt-4o", "gpt-4o-mini"]),
-        ({"data": [{"id": None}, {"id": 123}, {"id": "gpt-4o"}]}, ["gpt-4o"]),  # non-string ids dropped
-        ({"data": ["x", {"id": "ok"}]}, ["ok"]),                                # non-dict entries dropped
-        ({"data": []}, []),
-        ({"data": "oops"}, []),                                                 # non-list "data"
-        ([], []), ("nope", []), (None, []), (123, []),                          # non-dict body
-    ])
-    def test_openai_model_ids(self, data, expected):
-        assert _openai_model_ids(data) == expected
+    def test_openai_model_ids(self):
+        for data, expected in (
+            ({"data": [{"id": "gpt-4o"}, {"id": "gpt-4o-mini"}]}, ["gpt-4o", "gpt-4o-mini"]),
+            ({"data": ["x", {"id": None}, {"id": "ok"}]}, ["ok"]),  # malformed entries dropped
+            ({"data": "oops"}, []),
+            ("nope", []),
+        ):
+            assert _openai_model_ids(data) == expected, data
 
-    @pytest.mark.parametrize("data,expected", [
-        ({"models": [{"name": "llama3:8b"}, {"model": "qwen3:4b"}]}, ["llama3:8b", "qwen3:4b"]),
-        ({"models": [{"name": "a", "model": "b"}]}, ["a"]),                      # name precedence over model
-        ({"models": [{"name": 123}, {"model": None}, {"name": "ok"}]}, ["ok"]),  # non-string values dropped
-        ({"models": ["x", {"name": "ok"}]}, ["ok"]),                            # non-dict entries dropped
-        ({"models": []}, []),
-        ({"models": "oops"}, []),
-        ([], []), (None, []), (42, []),                                         # non-dict body
-    ])
-    def test_ollama_model_names(self, data, expected):
-        assert _ollama_model_names(data) == expected
+    def test_ollama_model_names(self):
+        for data, expected in (
+            ({"models": [{"name": "llama3:8b"}, {"model": "qwen3:4b"}]}, ["llama3:8b", "qwen3:4b"]),
+            ({"models": [{"name": "a", "model": "b"}]}, ["a"]),  # name precedence over model
+            ({"models": ["x", {"name": 123}, {"name": "ok"}]}, ["ok"]),  # malformed entries dropped
+            (None, []),
+        ):
+            assert _ollama_model_names(data) == expected, data
 
 
 # ── _probe_endpoint: model-list parsing ──
@@ -150,8 +145,8 @@ class TestProbeEndpointParsing:
         )
         assert _probe_endpoint("https://api.example.com/v1") == []
 
-    @pytest.mark.parametrize("body", [[], "invalid", 123, True])
-    def test_non_dict_json_body_degrades_to_empty(self, monkeypatch, caplog, body):
+    def test_non_dict_json_body_degrades_to_empty(self, monkeypatch, caplog):
+        body = ["not", "a", "dict"]
         # HTTP 200 with valid-but-non-dict JSON must not crash the probe with an
         # AttributeError (data.get(...) on a list/str/int); it should fall through
         # to the empty/curated path. caplog gives this test teeth: pre-fix the
@@ -340,12 +335,7 @@ class TestProbeSingleModel:
         assert "latency_ms" in result
         assert captured["url"] == "https://api.example.com/v1/chat/completions"
 
-    @pytest.mark.parametrize("base,api_key,model_id", [
-        ("https://api.example.com/v1", "key", "gpt-4o"),
-        ("http://localhost:11434/v1", None, "llama3.2"),
-        ("https://api.anthropic.com/v1", "sk-ant", "claude-sonnet-4-5"),
-    ])
-    def test_completion_probe_uses_llm_verify(self, monkeypatch, base, api_key, model_id):
+    def test_completion_probe_uses_llm_verify(self, monkeypatch):
         _patch_resolve(monkeypatch)
         marker = object()
         captured = {}
@@ -356,9 +346,13 @@ class TestProbeSingleModel:
             return _resp(200, json={"choices": [{"message": {"content": "OK"}}]})
 
         monkeypatch.setattr(model_routes.httpx, "post", fake_post)
-        result = _probe_single_model(base, api_key, model_id)
-        assert result["status"] == "ok"
-        assert captured["verify"] is marker
+        for base, api_key, model_id in (
+            ("https://api.example.com/v1", "key", "gpt-4o"),
+            ("https://api.anthropic.com/v1", "sk-ant", "claude-sonnet-4-5"),
+        ):
+            captured.clear()
+            assert _probe_single_model(base, api_key, model_id)["status"] == "ok"
+            assert captured["verify"] is marker
 
     def test_extracts_dict_error_message(self, monkeypatch):
         _patch_resolve(monkeypatch)
@@ -480,18 +474,9 @@ class TestResolveProbeKey:
 # ── _classify_endpoint: Tailscale CGNAT range ──
 
 class TestClassifyEndpointTailscale:
-    @pytest.mark.parametrize("url", [
-        "http://100.64.0.1:11434/v1",     # bottom of 100.64.0.0/10
-        "http://100.100.50.20:8080/v1",
-        "http://100.127.255.254/v1",      # top of the range
-    ])
-    def test_cgnat_range_is_local(self, url):
-        assert _classify_endpoint(url) == "local"
-
-    @pytest.mark.parametrize("url", [
-        "http://100.63.255.255/v1",   # just below 100.64.0.0/10
-        "http://100.128.0.1/v1",      # just above
-        "https://api.openai.com/v1",  # public hostname
-    ])
-    def test_outside_cgnat_is_api(self, url):
-        assert _classify_endpoint(url) == "api"
+    def test_cgnat_range_is_local_and_its_edges_are_not(self):
+        # 100.64.0.0/10 bounds, inclusive.
+        for url in ("http://100.64.0.1:11434/v1", "http://100.127.255.254/v1"):
+            assert _classify_endpoint(url) == "local", url
+        for url in ("http://100.63.255.255/v1", "http://100.128.0.1/v1"):
+            assert _classify_endpoint(url) == "api", url

@@ -63,20 +63,10 @@ PROVIDER_CASES = [
 ]
 
 
-@pytest.mark.parametrize(
-    "base,expected", [(c[1], c[2]) for c in PROVIDER_CASES],
-    ids=[c[0] for c in PROVIDER_CASES],
-)
-def test_build_chat_url(no_dns, base, expected):
-    assert er.build_chat_url(base) == expected
-
-
-@pytest.mark.parametrize(
-    "base,expected", [(c[1], c[3]) for c in PROVIDER_CASES],
-    ids=[c[0] for c in PROVIDER_CASES],
-)
-def test_build_models_url(no_dns, base, expected):
-    assert er.build_models_url(base) == expected
+def test_build_chat_and_models_urls(no_dns):
+    for case, base, chat_url, models_url in PROVIDER_CASES:
+        assert er.build_chat_url(base) == chat_url, case
+        assert er.build_models_url(base) == models_url, case
 
 
 def test_chat_url_never_double_prefixes_anthropic(no_dns):

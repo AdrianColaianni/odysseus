@@ -1,15 +1,10 @@
-"""Notes-domain tool implementations.
-
-Extracted from tool_implementations.py as part of slice 1 (#4082/#4071).
-Holds the manage_notes tool (notes + checklists CRUD).
-``src.tool_implementations`` re-exports these for backward compatibility.
-"""
+"""The manage_notes agent tool (notes + checklists CRUD)."""
 import json
 import logging
 import re
 from typing import Dict, Optional
 
-from src.tools._common import _parse_tool_args
+from src.tools._common import parsed_tool_args
 from src.tool_utils import get_upload_handler
 from src.upload_handler import reserve_upload_references
 
@@ -30,16 +25,12 @@ def _search_tokens(value: str) -> list[str]:
     return tokens
 
 
-async def do_manage_notes(content: str, owner: Optional[str] = None) -> Dict:
+@parsed_tool_args
+async def do_manage_notes(args: dict, owner: Optional[str] = None) -> Dict:
     """Handle manage_notes tool calls: CRUD on notes and checklists."""
     import uuid as _uuid
     from core.database import SessionLocal, Note
     from sqlalchemy.orm.attributes import flag_modified
-
-    try:
-        args = _parse_tool_args(content)
-    except ValueError:
-        return {"error": "Invalid JSON arguments", "exit_code": 1}
 
     # Action aliases — match what models actually emit. `create` is the most
     # common alternative to `add`. Hyphenated forms also accepted.
@@ -521,10 +512,6 @@ async def do_manage_notes(content: str, owner: Optional[str] = None) -> Dict:
             if not _note_visible_to_owner(note, owner):
                 return {"error": "Note not found", "exit_code": 1}
             title = note.title
-            from src.tool_routing_experiment import note_fixture_scope
-            fixture_scope = note_fixture_scope.get()
-            if fixture_scope is not None and note.id not in fixture_scope:
-                return {"error": "Target is outside the disposable test fixtures; no change made.", "exit_code": 1}
             db.delete(note)
             db.commit()
             return {"response": f"Deleted note: \"{title or '(untitled)'}\"", "exit_code": 0}

@@ -4,7 +4,7 @@ The api_call agent tool lets the LLM drive HTTP requests against a
 user-configured integration base_url. Before this guard, a base_url (or a
 hostname resolving) to the cloud metadata range was requested server-side
 with the integration's auth headers attached. execute_api_call now validates
-the joined URL with src.url_safety.check_outbound_url before connecting:
+the joined URL with src.url_safety.resolve_outbound_url before connecting:
 link-local/metadata is always rejected; RFC-1918/loopback only when
 INTEGRATION_API_BLOCK_PRIVATE_IPS=true (LAN integrations are the primary
 use case, so private stays allowed by default).
@@ -18,7 +18,7 @@ import httpcore
 import httpx
 import pytest
 
-from src import integrations
+from src import integrations, url_safety
 
 
 def _integration(base_url):
@@ -147,14 +147,14 @@ async def test_connection_is_pinned_to_the_validated_ip(monkeypatch):
 
     assert result.get("exit_code") == 0
     client.request.assert_called_once()
-    assert isinstance(transport, integrations._PinnedAsyncTransport)
+    assert isinstance(transport, url_safety.PinnedAsyncTransport)
     assert [str(ip) for ip in transport._pinned_ips] == ["93.184.216.34"]
 
 
 @pytest.mark.asyncio
 async def test_pin_carries_the_whole_validated_ip_set(monkeypatch):
     """When a host resolves to several records the transport keeps all of them
-    (check_outbound_url validated every one), in resolver order, so it can fall
+    (resolve_outbound_url validated every one), in resolver order, so it can fall
     back past a dead first address instead of failing the whole call."""
     monkeypatch.setattr("src.url_safety._default_resolver",
                         lambda host: ["93.184.216.34", "198.51.100.7"])
@@ -185,8 +185,8 @@ class _RecordingBackend:
 
 
 def _pinned_backend(ips, dead):
-    """A _PinnedAsyncBackend whose underlying connect is the recording fake."""
-    backend = integrations._PinnedAsyncBackend(ips)
+    """A PinnedAsyncBackend whose underlying connect is the recording fake."""
+    backend = url_safety.PinnedAsyncBackend(ips)
     backend._real = _RecordingBackend(dead)
     return backend
 
@@ -233,7 +233,7 @@ async def test_pinned_transport_reuses_httpx_ca_trust(monkeypatch):
         return sentinel
 
     monkeypatch.setattr(httpx, "create_ssl_context", _fake_create)
-    transport = integrations._PinnedAsyncTransport([ipaddress.ip_address("93.184.216.34")])
+    transport = url_safety.PinnedAsyncTransport([ipaddress.ip_address("93.184.216.34")])
     try:
         assert calls, "transport did not build its context via httpx.create_ssl_context"
         assert transport._pool._ssl_context is sentinel
@@ -262,7 +262,7 @@ async def test_real_socket_falls_back_from_dead_first_to_live_second():
     port = server.sockets[0].getsockname()[1]
     async with server:
         await server.start_serving()
-        transport = integrations._PinnedAsyncTransport(
+        transport = url_safety.PinnedAsyncTransport(
             [ipaddress.ip_address("127.0.0.2"), ipaddress.ip_address("127.0.0.1")]
         )
         try:
@@ -281,16 +281,15 @@ async def test_ip_literal_base_url_still_pins_and_is_not_rejected():
     """A base_url that is already an IP has nothing to rebind, but it must not
     trip the "did not resolve" guard either.
 
-    check_outbound_url resolves even a literal (getaddrinfo returns the address
-    itself), so the captured list is populated and the pin is a no-op rather
-    than a rejection. Uses the real resolver on purpose — no monkeypatch — so
-    this would catch the fail-closed branch firing on a literal.
+    resolve_outbound_url takes a literal host as its own address. Uses the real
+    resolver on purpose, with no monkeypatch, so this would catch the
+    fail-closed branch firing on a literal.
     """
     result, transport, client = await _call_capturing_transport(
         "http://93.184.216.34")
 
     assert result.get("exit_code") == 0
-    assert isinstance(transport, integrations._PinnedAsyncTransport)
+    assert isinstance(transport, url_safety.PinnedAsyncTransport)
     assert [str(ip) for ip in transport._pinned_ips] == ["93.184.216.34"]
 
 
@@ -306,34 +305,29 @@ async def test_ipv6_base_url_pins_every_validated_address(monkeypatch):
     result, transport, client = await _call_capturing_transport("http://v6.example")
 
     assert result.get("exit_code") == 0
-    assert isinstance(transport, integrations._PinnedAsyncTransport)
+    assert isinstance(transport, url_safety.PinnedAsyncTransport)
     assert [str(ip) for ip in transport._pinned_ips] == [v6]
 
 
-def test_validated_ips_strips_zone_id_and_drops_junk():
-    """getaddrinfo can hand back a scoped v6 address like 'fe80::1%eth0'."""
-    got = integrations._validated_ips(
-        ["93.184.216.34", "fe80::1%eth0", "not-an-ip", None, "2001:db8::5"]
+def test_resolved_ips_strip_zone_id_and_drop_junk():
+    """getaddrinfo can hand back a scoped v6 address like '2606:...%eth0'."""
+    v6 = "2606:2800:220:1:248:1893:25c8:1946"
+    got = url_safety.resolve_outbound_url(
+        "http://multi.example",
+        resolver=lambda host: ["93.184.216.34", f"{v6}%eth0", "not-an-ip", None, "2001:db8::5"],
     )
-    assert [str(ip) for ip in got] == ["93.184.216.34", "fe80::1", "2001:db8::5"]
+    assert [str(ip) for ip in got] == ["93.184.216.34", v6, "2001:db8::5"]
 
 
-def test_validated_ips_deduplicates_repeated_addresses():
+def test_resolved_ips_deduplicate_repeated_addresses():
     """The resolver is getaddrinfo(host, None) with no socktype filter, so glibc
     returns one record per socktype and a single-homed host arrives three times
     over. Duplicates must collapse (first-seen order kept) or the connect
     fallback wastes its shared deadline retrying one dead address."""
-    got = integrations._validated_ips(
-        ["93.184.216.34", "93.184.216.34", "93.184.216.34"]
-    )
-    assert [str(ip) for ip in got] == ["93.184.216.34"]
+    def resolved(answers):
+        return [str(ip) for ip in url_safety.resolve_outbound_url(
+            "http://multi.example", resolver=lambda host: answers)]
 
-    # Order is first-seen, and distinct addresses all survive.
-    got = integrations._validated_ips(
-        ["198.51.100.7", "93.184.216.34", "198.51.100.7", "2001:db8::5"]
-    )
-    assert [str(ip) for ip in got] == ["198.51.100.7", "93.184.216.34", "2001:db8::5"]
-
-    # A zone-id variant is the same address once stripped, so it collapses too.
-    got = integrations._validated_ips(["fe80::1%eth0", "fe80::1%eth1", "fe80::1"])
-    assert [str(ip) for ip in got] == ["fe80::1"]
+    assert resolved(["93.184.216.34", "93.184.216.34", "93.184.216.34"]) == ["93.184.216.34"]
+    assert resolved(["198.51.100.7", "93.184.216.34", "198.51.100.7", "2001:db8::5"]) == [
+        "198.51.100.7", "93.184.216.34", "2001:db8::5"]

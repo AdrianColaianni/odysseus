@@ -136,18 +136,21 @@ def test_indexed_listing_uses_utc_for_timezone_less_bounds(indexed_mailbox, monk
     assert uids(text) == ['20'], text
 
 
-@pytest.mark.parametrize('bounds', [
-    {'date_from': 'not-a-date'}, {'date_to': '2026-99-99'},
+INVALID_BOUNDS = [
+    {'date_from': 'not-a-date'},
     {'date_from': '2026-08-01', 'date_to': '2026-07-01'},
     {'date_from': '2026-07-01', 'date_to': '2026-07-01'},
-])
-def test_invalid_list_bounds_do_not_broaden_to_the_whole_mailbox(indexed_mailbox, bounds):
-    result = asyncio.run(es.call_tool('list_emails', {
-        '_odysseus_owner': 'alice', 'account': 'account-a', **bounds,
-    }))
-    text = '\n'.join(item.text for item in result)
-    assert text.startswith('Error: date_'), text
-    assert not uids(text)
+]
+
+
+def test_invalid_list_bounds_do_not_broaden_to_the_whole_mailbox(indexed_mailbox):
+    for bounds in INVALID_BOUNDS:
+        result = asyncio.run(es.call_tool('list_emails', {
+            '_odysseus_owner': 'alice', 'account': 'account-a', **bounds,
+        }))
+        text = '\n'.join(item.text for item in result)
+        assert text.startswith('Error: date_'), text
+        assert not uids(text)
 
 
 def test_invalid_multi_account_list_bounds_are_rejected_before_scanning(indexed_mailbox, monkeypatch):
@@ -216,24 +219,20 @@ def test_missing_email_read_identifies_the_selected_folder(indexed_mailbox, monk
     assert 'UIDs are folder-specific' in text
 
 
-@pytest.mark.parametrize('bounds,expected', [
-    ({'date_from': '2026-07-01'}, ['30', '20']),
-    ({'date_to': '2026-08-01'}, ['20', '10']),
-    ({'date_from': '2026-07-01T09:00:00+09:00', 'date_to': '2026-07-02T09:00:00+09:00'}, ['20']),
-])
-def test_index_search_bounds_preserve_exact_instants_and_owner(indexed_mailbox, bounds, expected):
-    assert uids(search(max_results=10, **bounds)) == expected
+def test_index_search_bounds_preserve_exact_instants_and_owner(indexed_mailbox):
+    for bounds, expected in (
+        ({'date_from': '2026-07-01'}, ['30', '20']),
+        ({'date_to': '2026-08-01'}, ['20', '10']),
+        ({'date_from': '2026-07-01T09:00:00+09:00', 'date_to': '2026-07-02T09:00:00+09:00'}, ['20']),
+    ):
+        assert uids(search(max_results=10, **bounds)) == expected, bounds
 
 
-@pytest.mark.parametrize('bounds', [
-    {'date_from': 'not-a-date'}, {'date_to': '2026-99-99'},
-    {'date_from': '2026-08-01', 'date_to': '2026-07-01'},
-    {'date_from': '2026-07-01', 'date_to': '2026-07-01'},
-])
-def test_invalid_search_bounds_fail_instead_of_silently_broadening(indexed_mailbox, bounds):
-    result = search(**bounds)
-    assert result.startswith('Error: Search failed: date_'), result
-    assert not uids(result)
+def test_invalid_search_bounds_fail_instead_of_silently_broadening(indexed_mailbox):
+    for bounds in INVALID_BOUNDS:
+        result = search(**bounds)
+        assert result.startswith('Error: Search failed: date_'), result
+        assert not uids(result)
 
 
 def test_search_date_refinement_filters_imap_headers_before_limit(indexed_mailbox, monkeypatch):

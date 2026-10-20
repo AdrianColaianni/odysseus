@@ -1,5 +1,6 @@
 """Display pagination must stay separate from full model-context hydration."""
 
+import sys
 import json
 from datetime import datetime, timedelta
 
@@ -18,6 +19,7 @@ from routes import chat_routes
 from routes.history import history_routes
 from routes import session_routes
 from src.request_models import ChatRequest
+from tests.helpers.routes import route_endpoint
 
 
 def _database():
@@ -99,7 +101,7 @@ def test_paginated_history_reads_only_count_and_requested_page(monkeypatch):
         def get_session(self, _session_id):
             raise AssertionError("paginated display history must not hydrate model context")
 
-    monkeypatch.setattr(history_routes, "SessionLocal", db_factory)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", db_factory)
     monkeypatch.setattr(history_routes, "_verify_session_owner", lambda *_args: None)
 
     app = FastAPI()
@@ -155,7 +157,7 @@ def test_production_router_order_reaches_bounded_canonical_history(monkeypatch):
         "router",
         APIRouter(prefix="/api", tags=["sessions"]),
     )
-    monkeypatch.setattr(history_routes, "SessionLocal", db_factory)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", db_factory)
     monkeypatch.setattr(history_routes, "_verify_session_owner", lambda *_args: None)
 
     app = FastAPI()
@@ -363,7 +365,7 @@ def test_fork_after_restart_copies_the_real_transcript(monkeypatch):
     manager = _manager(db_factory, monkeypatch)
     manager.load_sessions()
 
-    monkeypatch.setattr(history_routes, "SessionLocal", db_factory)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", db_factory)
     monkeypatch.setattr(history_routes, "_verify_session_owner", lambda *_args: None)
     monkeypatch.setattr("core.models._SESSION_MANAGER_INSTANCE", manager)
 
@@ -431,10 +433,6 @@ def _json_request(path, payload):
         "server": ("testserver", 80),
     }
     return Request(scope, receive)
-
-
-def _route_endpoint(router, path):
-    return next(route.endpoint for route in router.routes if route.path == path)
 
 
 @pytest.mark.asyncio
@@ -518,7 +516,7 @@ async def test_model_send_routes_hydrate_before_context_build(monkeypatch, path)
         object(),
         object(),
     )
-    endpoint = _route_endpoint(router, path)
+    endpoint = route_endpoint(router, path, "POST")
 
     async def send():
         if path == "/api/chat":

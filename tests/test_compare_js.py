@@ -10,45 +10,14 @@ constants in icons.js. The bigger state-coupled pieces are best
 covered via Playwright/Bombadil specs against a running app.
 """
 
-import json
-import shutil
-import subprocess
 import textwrap
-from pathlib import Path
 
-import pytest
-
-_REPO = Path(__file__).resolve().parent.parent
-_HAS_NODE = shutil.which("node") is not None
-
-
-@pytest.fixture(scope="module")
-def node_available():
-    if not _HAS_NODE:
-        pytest.skip("node binary not on PATH")
-
-
-def _run_node(script: str) -> dict:
-    """Run a JS snippet under node --input-type=module. Returns parsed
-    JSON from the last `console.log` line."""
-    res = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=_REPO,
-        capture_output=True,
-        timeout=15,
-        text=True,
-    )
-    if res.returncode != 0:
-        raise AssertionError(f"node failed:\n{res.stderr}")
-    out_lines = [ln for ln in res.stdout.splitlines() if ln.strip()]
-    if not out_lines:
-        raise AssertionError("node produced no stdout")
-    return json.loads(out_lines[-1])
+from tests.helpers.node import run_node_module
 
 
 # ── state.js ───────────────────────────────────────────────────────
 
-def test_state_reset_preserves_config(node_available):
+def test_state_reset_preserves_config():
     """`state.reset()` clears transient flags but leaves config
     sticky (API_BASE, _parallel, _blindMode, etc.). A reset must abort
     any pending fetches and zero the metrics array — anything that
@@ -82,7 +51,7 @@ def test_state_reset_preserves_config(node_available):
           controllers_cleared: state._abortControllers.length,
         }));
     """)
-    out = _run_node(script)
+    out = run_node_module(script)
     assert out == {
         "api_base_sticky": "http://x",
         "blind_sticky": True,
@@ -98,7 +67,7 @@ def test_state_reset_preserves_config(node_available):
     }
 
 
-def test_state_reset_resets_probed_set(node_available):
+def test_state_reset_resets_probed_set():
     """`_probed` tracks which model IDs have passed the probe — must
     be cleared on reset so a stale endpoint can't silently use cached
     'ok' state from a previous session."""
@@ -111,13 +80,13 @@ def test_state_reset_resets_probed_set(node_available):
           is_set: state._probed instanceof Set,
         }));
     """)
-    out = _run_node(script)
+    out = run_node_module(script)
     assert out == {"size": 0, "is_set": True}
 
 
 # ── icons.js ───────────────────────────────────────────────────────
 
-def test_svg_icon_exports_are_valid_svg(node_available):
+def test_svg_icon_exports_are_valid_svg():
     """Every name matching the icon-export naming pattern (`*_ICON`,
     `ICON_*`, `*_SVG`, `EYE_*`, `SAVE_*`, `CHAT_*`, `SEND_*`) must be
     a non-empty string starting with `<svg`. A `null`/`undefined`
@@ -140,12 +109,12 @@ def test_svg_icon_exports_are_valid_svg(node_available):
         }
         console.log(JSON.stringify({ checked, bad }));
     """)
-    out = _run_node(script)
+    out = run_node_module(script)
     assert out["checked"] >= 10, f"too few icons matched the naming pattern: {out}"
     assert out["bad"] == [], f"non-svg icon export(s): {out['bad']}"
 
 
-def test_wave_frames_is_valid_animation_strip(node_available):
+def test_wave_frames_is_valid_animation_strip():
     """`WAVE_FRAMES` powers the streaming-pane "thinking" animation.
     Pin: array of equal-length non-empty strings — frames of different
     lengths would visibly jitter the layout."""
@@ -158,13 +127,13 @@ def test_wave_frames_is_valid_animation_strip(node_available):
           all_strings: WAVE_FRAMES.every(f => typeof f === 'string' && f.length > 0),
         }));
     """)
-    out = _run_node(script)
+    out = run_node_module(script)
     assert out["count"] > 0
     assert out["unique_lengths"] == 1, "WAVE_FRAMES must be equal-length frames"
     assert out["all_strings"] is True
 
 
-def test_storage_keys_are_namespaced(node_available):
+def test_storage_keys_are_namespaced():
     """The compare module stores votes + an exclusion pool in
     localStorage. Pin that the keys start with `odysseus-` so they
     can't collide with other apps on the same origin or with a
@@ -176,6 +145,6 @@ def test_storage_keys_are_namespaced(node_available):
           pool: m.POOL_STORAGE_KEY,
         }));
     """)
-    out = _run_node(script)
+    out = run_node_module(script)
     assert out["votes"].startswith("odysseus-")
     assert out["pool"].startswith("odysseus-")

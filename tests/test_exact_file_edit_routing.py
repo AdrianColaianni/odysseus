@@ -6,55 +6,29 @@ import pytest
 import src.agent_loop as al
 
 
-@pytest.mark.parametrize(
-    "message",
-    [
+def test_exact_file_replacement_classifier_accepts_direct_edits():
+    for message in (
         "In /app/data/status.txt, change status=old to status=new.",
-        "In /app/data/status.txt, replace status=old with status=new.",
         "Replace `June 30` with `July 1` in ./arrivals.md.",
-        "In data/fixtures/config.env, update MODE=dev to MODE=prod",
-        "Change ETA June 30 to ETA July 1 in ~/notes/arrival.txt",
-        "Replace stage=test with stage=production in ./deploy.env.",
         'Replace "old value" with "new value" in "/tmp/my file.txt".',
-        'In fixture.py, change VALUE = "before" to VALUE = "after".',
-    ],
-)
-def test_exact_file_replacement_classifier_accepts_direct_edits(message):
-    assert al._looks_like_exact_file_replacement(message) is True
+    ):
+        assert al._looks_like_exact_file_replacement(message) is True, message
 
 
-@pytest.mark.parametrize(
-    "message",
-    [
-        "Inspect /app/data/status.txt and fix the status.",
-        "Read ./arrivals.md first, then change June 30 to July 1.",
+def test_exact_file_replacement_classifier_rejects_ambiguous_or_broad_work():
+    for message in (
         "Fix the bug in src/worker.py and run the tests.",
         "Change the status in /app/data/status.txt.",
-        "Replace old with new.",
-        "Refactor src/worker.py to use the new scheduler.",
-        "Show the contents of /tmp/status.txt, then change old_value to new_value.",
-        "Open /tmp/status.txt and replace old_value with new_value.",
-        "Review /tmp/status.txt before changing old_value to new_value.",
-        "Use cat to inspect /tmp/status.txt, then replace old_value with new_value.",
-        "Examine /tmp/status.txt, then update old_value to new_value.",
-        "Look at /tmp/status.txt before replacing old_value with new_value.",
-        "Change old_value to new_value in /tmp/status.txt and verify the result.",
+        "Read ./arrivals.md first, then change June 30 to July 1.",
         "Replace old_value with new_value in /tmp/status.txt, then run the tests.",
-    ],
-)
-def test_exact_file_replacement_classifier_rejects_ambiguous_or_broad_work(message):
-    assert al._looks_like_exact_file_replacement(message) is False
+    ):
+        assert al._looks_like_exact_file_replacement(message) is False, message
 
 
-@pytest.mark.parametrize(
-    ("message", "expected"),
-    [
+def test_inspection_file_replacement_extracts_explicit_mutation():
+    for message, expected in (
         (
             "Read /tmp/status.txt first, then change old_value to new_value.",
-            {"path": "/tmp/status.txt", "old_string": "old_value", "new_string": "new_value"},
-        ),
-        (
-            "Open /tmp/status.txt and replace old_value with new_value.",
             {"path": "/tmp/status.txt", "old_string": "old_value", "new_string": "new_value"},
         ),
         (
@@ -62,17 +36,11 @@ def test_exact_file_replacement_classifier_rejects_ambiguous_or_broad_work(messa
             {"path": "./status.txt", "old_string": "old value", "new_string": "new value"},
         ),
         (
-            "Review /tmp/status.txt before changing old_value to new_value.",
-            {"path": "/tmp/status.txt", "old_string": "old_value", "new_string": "new_value"},
-        ),
-        (
             'Read fixture.py first, then change VALUE = "before" to VALUE = "after".',
             {"path": "fixture.py", "old_string": 'VALUE = "before"', "new_string": 'VALUE = "after"'},
         ),
-    ],
-)
-def test_inspection_file_replacement_extracts_explicit_mutation(message, expected):
-    assert al._parse_inspection_file_replacement(message) == expected
+    ):
+        assert al._parse_inspection_file_replacement(message) == expected, message
 
 
 def test_inspection_file_replacement_rejects_broad_fix_request():

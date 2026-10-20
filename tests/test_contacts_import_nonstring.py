@@ -6,20 +6,13 @@ handler now coerces with str() and degrades to a structured "no data" response.
 """
 import asyncio
 
-from routes.contacts_routes import setup_contacts_routes
-
-
-def _import_handler():
-    router = setup_contacts_routes()
-    for route in router.routes:
-        if getattr(route, "path", "").endswith("/import") and "POST" in getattr(route, "methods", set()):
-            return route.endpoint
-    raise AssertionError("import route not found")
+from routes.contacts.contacts_routes import setup_contacts_routes
+from tests.helpers.routes import route_endpoint
 
 
 def _call(data):
-    handler = _import_handler()
-    return asyncio.run(handler(data=data, _admin="admin"))
+    handler = route_endpoint(setup_contacts_routes(), "/api/contacts/import", "POST")
+    return asyncio.run(handler(data=data))
 
 
 def test_non_string_vcf_degrades_cleanly():

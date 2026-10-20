@@ -100,9 +100,6 @@ def is_local_endpoint(url: str) -> bool:
     except Exception:
         return False
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 DEFAULT_CONTEXT = 128000
 REQUEST_TIMEOUT = 5
 
@@ -237,9 +234,6 @@ KNOWN_CONTEXT_WINDOWS = {
     'solar': 32768,
 }
 
-# ---------------------------------------------------------------------------
-# Cache
-# ---------------------------------------------------------------------------
 _context_cache: Dict[Tuple[str, str], Tuple[int, bool]] = {}
 
 
@@ -251,7 +245,7 @@ def _get_context_length_cached(endpoint_url: str, model: str) -> Tuple[int, bool
     # Key on (endpoint_url, model): the same model id can be served by two
     # different remote endpoints with different real context windows (e.g. a
     # capped proxy vs. the full provider), so caching by model id alone would
-    # serve one endpoint's window for the other (issue #2603).
+    # serve one endpoint's window for the other.
     cache_key = (endpoint_url, model)
     if not is_local and cache_key in _context_cache:
         return _context_cache[cache_key]
@@ -280,8 +274,7 @@ def get_context_length_known(endpoint_url: str, model: str) -> Tuple[int, bool]:
     """Like ``get_context_length`` but also returns whether the window was actually
     discovered (endpoint-reported or in the known-models table) rather than the bare
     DEFAULT_CONTEXT fallback. Callers that *scale* a budget off the window must not
-    trust an unknown value — a fallback 128K isn't proof the model holds 128K
-    (review on #4122)."""
+    trust an unknown value — a fallback 128K isn't proof the model holds 128K."""
     return _get_context_length_cached(endpoint_url, model)
 
 
@@ -293,7 +286,7 @@ def budget_context_for_model(endpoint_url: str, model: str, *, fallback: int = 0
     Crucially this binds the ``known`` flag to the value it proves — callers must
     not pair this flag with a context length from a *different* lookup (a stale
     local re-query, or a caller that didn't pass one), which would budget off an
-    unproven number (review on #4122). On probe error, returns ``fallback`` (the
+    unproven number. On probe error, returns ``fallback`` (the
     caller's best-known value) to preserve prior behaviour."""
     try:
         ctx, known = get_context_length_known(endpoint_url, model)
@@ -415,7 +408,7 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
         # Not in the known table: read the real window from the catalog (cached
         # once per endpoint) instead of capping every unknown model at the
         # default — that under-reported large windows on aggregators like
-        # OpenRouter (issue #4886).
+        # OpenRouter.
         api_ctx = _proxy_catalog_context(endpoint_url, model)
         if api_ctx:
             logger.info(f"Proxy catalog reports context window for {model}: {api_ctx}")

@@ -1,10 +1,8 @@
 """Regression guards for AI document updates while Markdown Preview is visible (#2182)."""
 
 import re
-from pathlib import Path
+
 from tests.helpers.document_source import document_source
-
-
 
 
 def _function_body(name: str) -> str:
@@ -25,16 +23,6 @@ def _function_body(name: str) -> str:
     return text[start : i - 1]
 
 
-def test_markdown_preview_refresh_rerenders_visible_preview():
-    body = _function_body("_refreshMarkdownPreviewIfVisible")
-
-    assert "_isMarkdownPreviewVisible()" in body
-    assert "lang !== 'markdown'" in body
-    assert "textarea.value = content;" in body
-    assert "syncHighlighting();" in body
-    assert "_setMarkdownPreviewActive(true, { remember: false });" in body
-
-
 def test_doc_update_refreshes_preview_instead_of_hidden_editor_animation():
     body = _function_body("handleDocUpdate")
 
@@ -51,12 +39,3 @@ def test_doc_update_refreshes_preview_instead_of_hidden_editor_animation():
     assert saved_content in body
     assert "_animateDocEdit(textarea, newContent);" not in body
     assert "_refreshMarkdownPreviewIfVisible(docId, newContent);" in body
-
-
-def test_doc_update_shows_saved_rich_text_without_a_transient_diff():
-    body = _function_body("handleDocUpdate")
-
-    assert "const isRichTextUpdate = _isRichTextLang(docLang);" in body
-    assert "if (isRichTextUpdate && updatedDocForRichText)" in body
-    assert "_showRichTextEditor(updatedDocForRichText);" in body
-    assert "_animateRichTextEdit" not in body

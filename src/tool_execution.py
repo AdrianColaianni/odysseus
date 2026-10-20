@@ -21,8 +21,9 @@ import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from typing import Any, Awaitable, Callable, Dict, Iterator, Optional, Tuple
+from typing import Annotated, Any, Awaitable, Callable, Dict, Iterator, Optional, Tuple
 
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 
 from src.tool_security import (
@@ -371,6 +372,108 @@ def _text_write_to_binary_artifact_result(content: str) -> tuple[str, Dict] | No
     }
 
 
+def _single_line(value: str) -> str:
+    if "\n" in value or "\r" in value:
+        raise ValueError("must be a single line")
+    return value
+
+
+def _required_line(value: str) -> str:
+    value = _single_line(value).strip()
+    if not value:
+        raise ValueError("is required")
+    return value
+
+
+_Line = Annotated[str, AfterValidator(_single_line)]
+_RequiredLine = Annotated[str, AfterValidator(_required_line)]
+_NonNegative = Annotated[int, Field(ge=0)]
+
+
+class _BridgeArgs(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+
+class _GrepArgs(_BridgeArgs):
+    pattern: Annotated[str, Field(min_length=1), AfterValidator(_single_line)]
+    path: _Line = "."
+    glob: Optional[Annotated[str, Field(min_length=1)]] = None
+    ignore_case: bool = False
+    max_results: Annotated[int, Field(ge=1, le=1000)] = 200
+
+
+class _ListArgs(_BridgeArgs):
+    path: _Line = "."
+    offset: _NonNegative = 0
+    limit: _NonNegative = 0
+
+
+class _FindArgs(_BridgeArgs):
+    pattern: _RequiredLine
+    path: _Line = "."
+
+
+class _ReadArgs(_BridgeArgs):
+    path: _RequiredLine
+    offset: _NonNegative = 0
+    limit: _NonNegative = 0
+
+
+class _EditArgs(_BridgeArgs):
+    path: _RequiredLine
+    old_string: Annotated[str, Field(min_length=1)]
+    new_string: str
+    replace_all: bool = False
+
+    @model_validator(mode="after")
+    def _changes_something(self):
+        if self.old_string == self.new_string:
+            raise ValueError("old_string and new_string are identical")
+        return self
+
+
+class _WriteArgs(_BridgeArgs):
+    path: str
+    content: str
+
+
+def _bridge_invalid(tool: str, reason: str) -> tuple[str, Dict]:
+    return f"{tool}: invalid arguments", {"error": f"{tool}: {reason}", "exit_code": 1}
+
+
+def _bridge_args(tool: str, model: type[_BridgeArgs], content: str, plain: Optional[Dict] = None):
+    """Validate bridge tool arguments: (args, None) or (None, (desc, error result)).
+
+    ``plain`` is the argument dict for non-JSON content; None means JSON is required.
+    """
+    stripped = content.strip()
+    if plain is not None and not stripped.startswith("{"):
+        raw = plain
+    else:
+        try:
+            raw = json.loads(stripped)
+        except (TypeError, ValueError):
+            raw = None
+        if not isinstance(raw, dict):
+            return None, _bridge_invalid(tool, "expected a JSON object")
+    try:
+        return model.model_validate(raw), None
+    except ValidationError as error:
+        first = error.errors()[0]
+        reason = str((first.get("ctx") or {}).get("error") or first["msg"])
+        field = ".".join(str(part) for part in first["loc"])
+        return None, _bridge_invalid(tool, f"{field} {reason}" if field else reason)
+
+
+def _stamp_bridge_containment(result, boundary: Dict) -> None:
+    if isinstance(result, dict):
+        exit_code = result.get("exit_code")
+        result["containment"] = {
+            **boundary,
+            "executed": exit_code == 0 or (isinstance(exit_code, int) and not result.get("error")),
+        }
+
+
 async def _route_tool_via_bridge(tool: str, content: str, session_id: Optional[str], client_runtime_context: Optional[Dict]):
     import base64
     from urllib.parse import urlparse
@@ -441,10 +544,7 @@ async def _route_tool_via_bridge(tool: str, content: str, session_id: Optional[s
                     "output": "host job still running; poll the returned job_id",
                     "exit_code": 0,
                 }
-        if isinstance(result, dict):
-            b = dict(boundary)
-            b["executed"] = (result.get("exit_code") == 0 or (isinstance(result.get("exit_code"), int) and not result.get("error")))
-            result["containment"] = b
+        _stamp_bridge_containment(result, boundary)
         return desc, result
     if tool == "python":
         py_res = await _bridge_post(
@@ -458,140 +558,47 @@ async def _route_tool_via_bridge(tool: str, content: str, session_id: Optional[s
             timeout_s=_BRIDGE_TOOL_TIMEOUT_S,
             err_prefix="python",
         )
-        if isinstance(py_res, dict):
-            b = dict(boundary)
-            b["executed"] = (py_res.get("exit_code") == 0 or (isinstance(py_res.get("exit_code"), int) and not py_res.get("error")))
-            py_res["containment"] = b
+        _stamp_bridge_containment(py_res, boundary)
         return "python: (client)", py_res
     if tool == "grep":
-        stripped = content.strip()
-        try:
-            args = json.loads(stripped) if stripped.startswith("{") else {"pattern": stripped}
-        except (TypeError, ValueError):
-            args = None
-        if not isinstance(args, dict):
-            return "grep: invalid arguments", {
-                "error": "grep: expected a JSON object", "exit_code": 1,
-            }
-        pattern = args.get("pattern")
-        path = args.get("path", ".")
-        glob = args.get("glob")
-        ignore_case = args.get("ignore_case", False)
-        max_results = args.get("max_results", 200)
-        if (
-            not isinstance(pattern, str) or not pattern or "\n" in pattern or "\r" in pattern
-            or not isinstance(path, str) or "\n" in path or "\r" in path
-            or (glob is not None and (not isinstance(glob, str) or not glob))
-            or not isinstance(ignore_case, bool)
-            or isinstance(max_results, bool) or not isinstance(max_results, int)
-            or max_results < 1 or max_results > 1000
-        ):
-            return "grep: invalid arguments", {
-                "error": "grep: invalid pattern, path, glob, ignore_case, or max_results",
-                "exit_code": 1,
-            }
+        args, invalid = _bridge_args(tool, _GrepArgs, content, {"pattern": content.strip()})
+        if invalid:
+            return invalid
         payload = {
-            "pattern": pattern,
-            "path": path.strip() or ".",
-            "ignore_case": ignore_case,
-            "max_results": max_results,
+            "pattern": args.pattern,
+            "path": args.path.strip() or ".",
+            "ignore_case": args.ignore_case,
+            "max_results": args.max_results,
         }
-        if glob is not None:
-            payload["glob"] = glob
-        return f"grep: {pattern[:80]}", await _bridge_post(
+        if args.glob is not None:
+            payload["glob"] = args.glob
+        return f"grep: {args.pattern[:80]}", await _bridge_post(
             bridge, "/grep", payload, timeout_s=60.0, err_prefix="grep",
         )
     if tool in {"ls", "list_dir"}:
-        stripped = content.strip()
-        if stripped.startswith("{"):
-            try:
-                args = json.loads(stripped)
-            except (TypeError, ValueError):
-                return f"{tool}: invalid arguments", {
-                    "error": f"{tool}: expected JSON with an optional path",
-                    "exit_code": 1,
-                }
-            if not isinstance(args, dict):
-                return f"{tool}: invalid arguments", {
-                    "error": f"{tool}: expected a JSON object",
-                    "exit_code": 1,
-                }
-            path_value = args.get("path", ".")
-            offset = args.get("offset", 0)
-            limit = args.get("limit", 0)
-        else:
-            path_value = stripped or "."
-            offset = 0
-            limit = 0
-        if (
-            not isinstance(path_value, str)
-            or "\n" in path_value
-            or "\r" in path_value
-            or isinstance(offset, bool)
-            or not isinstance(offset, int)
-            or offset < 0
-            or isinstance(limit, bool)
-            or not isinstance(limit, int)
-            or limit < 0
-        ):
-            return f"{tool}: invalid arguments", {
-                "error": f"{tool}: path must be a string and ranges non-negative integers",
-                "exit_code": 1,
-            }
-        path = path_value.strip() or "."
+        args, invalid = _bridge_args(tool, _ListArgs, content, {"path": content.strip() or "."})
+        if invalid:
+            return invalid
+        path = args.path.strip() or "."
         return f"{tool}: {path[:80]}", await _bridge_post(
             bridge,
             "/list",
             {
                 "path": path,
-                "offset": offset,
-                "limit": limit,
+                "offset": args.offset,
+                "limit": args.limit,
                 "recursive": tool == "list_dir",
             },
             timeout_s=60.0,
             err_prefix=tool,
         )
     if tool in {"glob", "find_files"}:
-        stripped = content.strip()
-        if stripped.startswith("{"):
-            try:
-                args = json.loads(stripped)
-            except (TypeError, ValueError):
-                return f"{tool}: invalid arguments", {
-                    "error": f"{tool}: expected JSON with pattern and optional path",
-                    "exit_code": 1,
-                }
-            if not isinstance(args, dict):
-                return f"{tool}: invalid arguments", {
-                    "error": f"{tool}: expected a JSON object",
-                    "exit_code": 1,
-                }
-            pattern_value = args.get("pattern")
-            path_value = args.get("path", ".")
-        else:
-            pattern_value = stripped
-            path_value = "."
-        if (
-            not isinstance(pattern_value, str)
-            or not pattern_value.strip()
-            or "\n" in pattern_value
-            or "\r" in pattern_value
-            or not isinstance(path_value, str)
-            or "\n" in path_value
-            or "\r" in path_value
-        ):
-            return f"{tool}: invalid arguments", {
-                "error": f"{tool}: pattern and path must be single-line strings",
-                "exit_code": 1,
-            }
-        pattern = pattern_value.strip()
-        path = path_value.strip() or "."
-        find_payload = {"path": path}
-        if tool == "glob":
-            find_payload["glob"] = pattern
-        else:
-            find_payload["pattern"] = pattern
-        return f"{tool}: {pattern[:80]}", await _bridge_post(
+        args, invalid = _bridge_args(tool, _FindArgs, content, {"pattern": content.strip()})
+        if invalid:
+            return invalid
+        find_payload = {"path": args.path.strip() or "."}
+        find_payload["glob" if tool == "glob" else "pattern"] = args.pattern
+        return f"{tool}: {args.pattern[:80]}", await _bridge_post(
             bridge,
             "/find",
             find_payload,
@@ -599,58 +606,13 @@ async def _route_tool_via_bridge(tool: str, content: str, session_id: Optional[s
             err_prefix=tool,
         )
     if tool == "read_file":
-        payload = {"path": content.split("\n", 1)[0].strip()}
-        stripped = content.strip()
-        if stripped.startswith("{"):
-            try:
-                args = json.loads(stripped)
-            except (TypeError, ValueError):
-                return "read_file: invalid arguments", {
-                    "error": "read_file: expected JSON with a path",
-                    "exit_code": 1,
-                }
-            if not isinstance(args, dict):
-                return "read_file: invalid arguments", {
-                    "error": "read_file: expected a JSON object",
-                    "exit_code": 1,
-                }
-            offset = args.get("offset", 0)
-            limit = args.get("limit", 0)
-            if (
-                isinstance(offset, bool)
-                or not isinstance(offset, int)
-                or offset < 0
-                or isinstance(limit, bool)
-                or not isinstance(limit, int)
-                or limit < 0
-            ):
-                return "read_file: invalid arguments", {
-                    "error": "read_file: offset and limit must be non-negative integers",
-                    "exit_code": 1,
-                }
-            path_value = args.get("path")
-            if (
-                not isinstance(path_value, str)
-                or not path_value.strip()
-                or "\n" in path_value
-                or "\r" in path_value
-            ):
-                return "read_file: invalid arguments", {
-                    "error": "read_file: path must be a non-empty single-line string",
-                    "exit_code": 1,
-                }
-            payload = {
-                "path": path_value.strip(),
-                "offset": offset,
-                "limit": limit,
-            }
-        path = str(payload.get("path") or "")
-        if not path:
-            return "read_file: invalid arguments", {
-                "error": "read_file: path is required",
-                "exit_code": 1,
-            }
-        return f"read_file: {path[:80]}", await _bridge_post(
+        args, invalid = _bridge_args(tool, _ReadArgs, content, {"path": content.split("\n", 1)[0]})
+        if invalid:
+            return invalid
+        payload = {"path": args.path}
+        if content.strip().startswith("{"):
+            payload.update(offset=args.offset, limit=args.limit)
+        return f"read_file: {args.path[:80]}", await _bridge_post(
             bridge,
             "/read",
             payload,
@@ -658,88 +620,30 @@ async def _route_tool_via_bridge(tool: str, content: str, session_id: Optional[s
             err_prefix="read_file",
         )
     if tool == "edit_file":
-        try:
-            args = json.loads(content.strip())
-        except (TypeError, ValueError):
-            return "edit_file: invalid arguments", {
-                "error": "edit_file: expected JSON with path, old_string, and new_string",
-                "exit_code": 1,
-            }
-        if not isinstance(args, dict):
-            return "edit_file: invalid arguments", {
-                "error": "edit_file: expected a JSON object",
-                "exit_code": 1,
-            }
-        path_value = args.get("path")
-        path = path_value.strip() if isinstance(path_value, str) else ""
-        if "\n" in path or "\r" in path:
-            path = ""
-        old_string = args.get("old_string")
-        new_string = args.get("new_string")
-        replace_all = args.get("replace_all", False)
-        if not path:
-            return "edit_file: invalid arguments", {
-                "error": "edit_file: path is required",
-                "exit_code": 1,
-            }
-        if not isinstance(old_string, str) or not old_string:
-            return "edit_file: invalid arguments", {
-                "error": "edit_file: old_string is required",
-                "exit_code": 1,
-            }
-        if not isinstance(new_string, str):
-            return "edit_file: invalid arguments", {
-                "error": "edit_file: new_string is required",
-                "exit_code": 1,
-            }
-        if old_string == new_string:
-            return "edit_file: invalid arguments", {
-                "error": "edit_file: old_string and new_string are identical",
-                "exit_code": 1,
-            }
-        if not isinstance(replace_all, bool):
-            return "edit_file: invalid arguments", {
-                "error": "edit_file: replace_all must be a boolean",
-                "exit_code": 1,
-            }
-        return f"edit_file: {str(args.get('path') or '')[:80]}", await _bridge_post(
+        args, invalid = _bridge_args(tool, _EditArgs, content)
+        if invalid:
+            return invalid
+        return f"edit_file: {args.path[:80]}", await _bridge_post(
             bridge,
             "/edit",
             {
-                "path": path,
-                "old_string": old_string,
-                "new_string": new_string,
-                "replace_all": replace_all,
+                "path": args.path,
+                "old_string": args.old_string,
+                "new_string": args.new_string,
+                "replace_all": args.replace_all,
                 "request_id": secrets.token_urlsafe(18),
             },
             timeout_s=60.0,
             err_prefix="edit_file",
         )
-    stripped = content.strip()
-    if stripped.startswith("{"):
-        try:
-            args = json.loads(stripped)
-        except (TypeError, ValueError):
-            return "write_file: invalid arguments", {
-                "error": "write_file: expected JSON with path and content",
-                "exit_code": 1,
-            }
-        if not isinstance(args, dict):
-            return "write_file: invalid arguments", {
-                "error": "write_file: expected a JSON object",
-                "exit_code": 1,
-            }
-        path_value = args.get("path")
-        path = path_value.strip() if isinstance(path_value, str) else ""
+    if content.strip().startswith("{"):
+        args, invalid = _bridge_args("write_file", _WriteArgs, content)
+        if invalid:
+            return invalid
+        path = args.path.strip()
         if "\n" in path or "\r" in path:
             path = ""
-        body_value = args.get("content")
-        if not isinstance(body_value, str):
-            return "write_file: invalid arguments", {
-                "error": "write_file: content must be a string",
-                "exit_code": 1,
-            }
-        body = body_value
+        body = args.content
     else:
         path, _, body = content.partition("\n")
         path = path.strip()
@@ -775,10 +679,6 @@ async def _route_tool_via_bridge(tool: str, content: str, session_id: Optional[s
     )
 
 
-
-# ---------------------------------------------------------------------------
-# Path confinement for read_file / write_file
-# ---------------------------------------------------------------------------
 # read_file + write_file are admin-only tools, but the path the agent
 # supplies is model-controlled. Prompt-injection in an admin's chat can
 # weaponise "read /etc/shadow" or "write ~/.ssh/authorized_keys" without
@@ -797,7 +697,6 @@ async def _route_tool_via_bridge(tool: str, content: str, session_id: Optional[s
 #   4. Opt-in extra roots - admin can add broader roots via the
 #      "tool_path_extra_roots" setting. These cannot re-open DATA_DIR;
 #      rule 2 is independent of which root a path arrived through.
-# ---------------------------------------------------------------------------
 
 # Compatibility exports: the same deny predicate protects tool access and
 # artifact observations, so hashing cannot become a sensitive-file side channel.
@@ -1136,10 +1035,6 @@ def _resolve_tool_path_in_workspace(workspace: str, raw_path: str) -> str:
     return resolved
 
 
-
-# ---------------------------------------------------------------------------
-# Active workspace (per-turn, context-local)
-# ---------------------------------------------------------------------------
 # Set ONCE in execute_tool_block from the request's `workspace`. The path
 # resolvers (_resolve_tool_path / _resolve_search_root) and the subprocess cwd
 # helper (agent_cwd) read it from here, so confinement is enforced in a single
@@ -1232,8 +1127,6 @@ def get_mcp_manager():
     return agent_tools.get_mcp_manager()
 
 
-
-
 def _resolve_search_root(raw_path: str) -> str:
     """Resolve + confine a code-nav path (grep/glob/ls).
 
@@ -1285,9 +1178,6 @@ def _owner_is_admin(owner: Optional[str]) -> bool:
     """Mirror route-level admin behavior for agent tool execution."""
     return owner_is_admin_or_single_user(owner)
 
-# ---------------------------------------------------------------------------
-# MCP-backed tool helpers
-# ---------------------------------------------------------------------------
 
 # Map legacy tool names -> (MCP server_id, MCP tool_name)
 _MCP_TOOL_MAP = {
@@ -1602,10 +1492,6 @@ async def _document_tool_dispatch(
         return await TOOL_HANDLERS[tool](content, ctx)
     return None
 
-
-# ---------------------------------------------------------------------------
-# Dispatcher
-# ---------------------------------------------------------------------------
 
 from src.agent_runtime.journal import dispatched, mark_authorized, mark_dispatch, record_action
 from src.agent_runtime.authority import (
@@ -1955,21 +1841,8 @@ async def _execute_tool_block_impl(
         do_app_api,
     )
 
-    # HACK:
-    # This is a temporary workaround for a circular dependency between
-    # tool_execution.py and agent_tools.__init__.py.
-    #
-    # See issue #4277:
-    # refactor(tools): Move the registry from __init__.py into a
-    # dedicated registry.py module.
-    #
-    # Do not copy this pattern elsewhere. This import should be removed
-    # once the registry refactor is completed.
-    try:
-        agent_tools_mod = __import__("src.agent_tools", fromlist=["TOOL_HANDLERS"])
-        dynamic_handlers = getattr(agent_tools_mod, "TOOL_HANDLERS", {})
-    except ImportError:
-        dynamic_handlers = {}
+    # Lazy: src.agent_tools imports this module (#4277).
+    from src.agent_tools import TOOL_HANDLERS as dynamic_handlers
 
     tool = block.tool_type
     content = block.content
@@ -2249,7 +2122,7 @@ async def _execute_tool_block_impl(
         desc = f"search_chats: {query[:80]}"
         result = await dispatched(do_search_chats(query, owner=owner))
     elif tool in ("chat_with_model", "ask_teacher", "list_models"):
-        # Migrated to the agent_tools registry (#3629): dispatched through
+        # Migrated to the agent_tools registry: dispatched through
         # TOOL_HANDLERS with the owner/session ctx these tools need, instead
         # of the legacy dispatch_ai_tool elif. The impls live in
         # src/agent_tools/model_interaction_tools.py.
@@ -2258,7 +2131,7 @@ async def _execute_tool_block_impl(
         result = await dispatched(_document_tool_dispatch(tool, content, session_id, owner)) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool in ("create_session", "list_sessions", "send_to_session", "manage_session"):
-        # Migrated to the agent_tools registry (#3629): dispatched through
+        # Migrated to the agent_tools registry: dispatched through
         # TOOL_HANDLERS with the owner/session ctx these tools need. The impls
         # live in src/agent_tools/session_tools.py.
         first_line = content.split(chr(10))[0].strip()[:60]
@@ -2374,7 +2247,7 @@ async def _execute_tool_block_impl(
                 # and every email tool takes a JSON object. Anything that
                 # isn't one is a correctable error — NOT a silent empty-args
                 # call, which would read the DEFAULT mailbox/folder instead of
-                # the one the model meant (#3966 class). Only an EMPTY body
+                # the one the model meant. Only an EMPTY body
                 # keeps the no-arg path (e.g. ```list_email_accounts```).
                 try:
                     parsed = json.loads(_raw)
@@ -2464,10 +2337,6 @@ async def _execute_tool_block_impl(
     logger.info(f"Tool executed: {desc} -> exit_code={result.get('exit_code', 'n/a')}")
     return desc, result
 
-
-# ---------------------------------------------------------------------------
-# Result formatting
-# ---------------------------------------------------------------------------
 
 # Keys handled by the dedicated branches below — never echo them as raw JSON.
 _FORMATTER_HANDLED_KEYS = {

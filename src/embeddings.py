@@ -1,15 +1,7 @@
-"""
-embeddings.py
+"""Embedding clients for RAG and memory vector search.
 
-Embedding clients for RAG and memory vector search.
-
-Priority order:
-  1. HTTP API (Ollama / vLLM / llama.cpp) — set EMBEDDING_URL in .env
-  2. Local fastembed (ONNX, ~50MB) — zero config fallback
-
-Set EMBEDDING_URL in .env, e.g.:
-  EMBEDDING_URL=http://localhost:11434/v1/embeddings   (ollama)
-  EMBEDDING_URL=http://localhost:8000/v1/embeddings    (vllm / llama.cpp)
+Uses the HTTP API at EMBEDDING_URL (Ollama, vLLM, llama.cpp) when set, else
+local fastembed.
 """
 
 import os

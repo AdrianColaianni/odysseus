@@ -1,10 +1,6 @@
-/**
- * Lasso-tool pixel & path helpers.
- *
- * All functions take the lasso polygon `points` as an explicit
- * argument so they can be tested in isolation. The legacy gallery
- * editor calls them with its module-level `_lassoPoints` array.
- */
+/** Lasso-tool pixel helpers; each takes the lasso polygon `points` explicitly. */
+
+import { makeCanvas } from '../placed-layer.js';
 
 /**
  * Shift each polygon vertex along the outward normal by `grow` pixels.
@@ -46,21 +42,6 @@ export function lassoOffsetPoints(points, grow) {
 
 
 /**
- * Trace the lasso polygon on the given context (move-to + line-to,
- * closed). Caller is responsible for `stroke()` / `fill()` choice.
- */
-export function getLassoPath(ctx, points) {
-  if (!points || points.length < 1) return;
-  ctx.beginPath();
-  ctx.moveTo(points[0].x, points[0].y);
-  for (let i = 1; i < points.length; i++) {
-    ctx.lineTo(points[i].x, points[i].y);
-  }
-  ctx.closePath();
-}
-
-
-/**
  * Build a (optionally feathered, optionally grown) selection mask
  * from a lasso polygon.
  *
@@ -73,8 +54,7 @@ export function getLassoPath(ctx, points) {
  */
 export function buildLassoMask(points, w, h, offX, offY, feather, grow) {
   // Step 1: draw hard mask
-  const hard = document.createElement('canvas');
-  hard.width = w; hard.height = h;
+  const hard = makeCanvas(w, h);
   const hCtx = hard.getContext('2d');
   hCtx.beginPath();
   hCtx.moveTo(points[0].x - offX, points[0].y - offY);
@@ -89,8 +69,7 @@ export function buildLassoMask(points, w, h, offX, offY, feather, grow) {
   // grow and high for shrink. Same technique as the bg-remove edge
   // tuner. RGB is left alone, alpha is replaced.
   if (grow && grow !== 0) {
-    const blurC = document.createElement('canvas');
-    blurC.width = w; blurC.height = h;
+    const blurC = makeCanvas(w, h);
     const bctx = blurC.getContext('2d');
     bctx.filter = `blur(${Math.abs(grow)}px)`;
     bctx.drawImage(hard, 0, 0);
@@ -152,8 +131,7 @@ export function buildLassoMask(points, w, h, offX, offY, feather, grow) {
   }
 
   // Pixels near the edge get reduced alpha.
-  const result = document.createElement('canvas');
-  result.width = w; result.height = h;
+  const result = makeCanvas(w, h);
   const rCtx = result.getContext('2d');
   const rData = rCtx.createImageData(w, h);
 

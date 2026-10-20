@@ -17,6 +17,3 @@ def test_runtime_build_version_uses_canonical_harness_version() -> None:
     version = (ROOT / "HARNESS_VERSION").read_text(encoding="utf-8").strip()
     assert APP_BUILD_VERSION == version
 
-
-def test_original_harness_does_not_ship_benchmark_adapter() -> None:
-    assert not (ROOT / "odysseus_native_harbor_agent.py").exists()

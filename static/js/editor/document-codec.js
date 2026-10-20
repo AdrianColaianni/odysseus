@@ -1,9 +1,8 @@
 /**
  * Lossless, versioned editor document serialization.
  *
- * Draft autosave and downloaded project files must use this same boundary.
- * Keeping a second hand-written layer shape is how masks and adjustments were
- * previously dropped when a document was reopened.
+ * Draft autosave and downloaded project files must use this same boundary, so
+ * no second hand-written layer shape can drift from it.
  */
 import { normalizeAdjustmentData } from './adjustment-layer.js';
 import { normalizeEffect } from './effects.js';

@@ -26,10 +26,10 @@ def test_app_db_created_with_0600(tmp_path):
     db_file = tmp_path / "app.db"
     env = {**os.environ, "DATABASE_URL": f"sqlite:///{db_file}"}
     repo_root = Path(__file__).resolve().parents[1]
-    # Importing core.database runs init_db() against the temp file-backed DB.
+    # init_db() runs against the temp file-backed DB.
     # cwd=repo_root so `import core` resolves (the `-c` sys.path[0] is the CWD).
     subprocess.run(
-        [sys.executable, "-c", "import core.database"],
+        [sys.executable, "-c", "import core.database; core.database.init_db()"],
         env=env,
         cwd=repo_root,
         check=True,
@@ -43,7 +43,7 @@ def test_app_db_created_with_0600(tmp_path):
     # having created the file), so this is the common path for existing installs.
     db_file.chmod(0o644)
     subprocess.run(
-        [sys.executable, "-c", "import core.database"],
+        [sys.executable, "-c", "import core.database; core.database.init_db()"],
         env=env,
         cwd=repo_root,
         check=True,
@@ -108,7 +108,7 @@ def test_app_db_sidecars_relocked(tmp_path):
     env = {**os.environ, "DATABASE_URL": f"sqlite:///{db_file}"}
     repo_root = Path(__file__).resolve().parents[1]
     subprocess.run(
-        [sys.executable, "-c", "import core.database"],
+        [sys.executable, "-c", "import core.database; core.database.init_db()"],
         env=env,
         cwd=repo_root,
         check=True,
@@ -181,7 +181,7 @@ def test_app_db_file_uri_created_with_0600(tmp_path):
     repo_root = Path(__file__).resolve().parents[1]
 
     subprocess.run(
-        [sys.executable, "-c", "import core.database"],
+        [sys.executable, "-c", "import core.database; core.database.init_db()"],
         env=env,
         cwd=repo_root,
         check=True,
@@ -208,7 +208,7 @@ def test_app_db_localhost_file_uri_created_with_0600(tmp_path):
     repo_root = Path(__file__).resolve().parents[1]
 
     subprocess.run(
-        [sys.executable, "-c", "import core.database"],
+        [sys.executable, "-c", "import core.database; core.database.init_db()"],
         env=env,
         cwd=repo_root,
         check=True,
@@ -233,7 +233,7 @@ def test_app_db_non_uri_mode_query_created_with_0600(tmp_path):
     repo_root = Path(__file__).resolve().parents[1]
 
     subprocess.run(
-        [sys.executable, "-c", "import core.database"],
+        [sys.executable, "-c", "import core.database; core.database.init_db()"],
         env=env,
         cwd=repo_root,
         check=True,
@@ -257,7 +257,7 @@ def test_app_db_plain_file_uri_created_with_0600(tmp_path):
     repo_root = Path(__file__).resolve().parents[1]
 
     subprocess.run(
-        [sys.executable, "-c", "import core.database"],
+        [sys.executable, "-c", "import core.database; core.database.init_db()"],
         env=env,
         cwd=repo_root,
         check=True,

@@ -34,16 +34,6 @@ export function setLayerPosition(editorState, layer, x, y) {
   return next;
 }
 
-export function nudgeLayerPosition(editorState, layer, dx, dy) {
-  const current = editorState.layerOffsets.get(layer.id) || { x: 0, y: 0 };
-  return setLayerPosition(
-    editorState,
-    layer,
-    current.x + normalizeLayerCoordinate(dx),
-    current.y + normalizeLayerCoordinate(dy),
-  );
-}
-
 function moveLayerBy(editorState, layer, dx, dy) {
   if (!layer || isLayerPositionLocked(editorState, layer)) return false;
   const offset = editorState.layerOffsets.get(layer.id) || { x: 0, y: 0 };

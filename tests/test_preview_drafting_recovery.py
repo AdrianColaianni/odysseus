@@ -31,19 +31,19 @@ def test_fetch_requires_a_page_in_full_and_compact_contracts():
         jsonschema.validate({'urls': ['https://example.com']}, params)
 
 
-@pytest.mark.parametrize('reply', ['you suck', 'thanks', 'a complaint', 'friendly'])
-def test_clarification_history_keeps_task_recipient_and_question(reply):
-    history = SimpleNamespace(history=[
-        {'role': 'user', 'content': 'write email'},
-        {'role': 'assistant', 'content': 'Who is it for?'},
-        {'role': 'user', 'content': 'Jordan'},
-        {'role': 'assistant', 'content': 'What do you want to say to Jordan?'},
-    ])
-    result = conversation(history, [{'role': 'user', 'content': reply}])
-    assert [m['content'] for m in result] == [
-        'write email', 'Who is it for?', 'Jordan',
-        'What do you want to say to Jordan?', reply,
-    ]
+def test_clarification_history_keeps_task_recipient_and_question():
+    for reply in ['you suck', 'thanks', 'a complaint', 'friendly']:
+        history = SimpleNamespace(history=[
+            {'role': 'user', 'content': 'write email'},
+            {'role': 'assistant', 'content': 'Who is it for?'},
+            {'role': 'user', 'content': 'Jordan'},
+            {'role': 'assistant', 'content': 'What do you want to say to Jordan?'},
+        ])
+        result = conversation(history, [{'role': 'user', 'content': reply}])
+        assert [m['content'] for m in result] == [
+            'write email', 'Who is it for?', 'Jordan',
+            'What do you want to say to Jordan?', reply,
+        ]
 
 
 @pytest.mark.asyncio
@@ -147,44 +147,44 @@ async def test_ajax_complete_draft_has_no_lookup_or_delivery_tools(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('failure', ['timeout', 'invalid_json'])
-async def test_ajax_scope_failure_finishes_protocol_without_execution(monkeypatch, failure):
+async def test_ajax_scope_failure_finishes_protocol_without_execution(monkeypatch):
     import httpx
     import src.clean_agent_preview as module
     import src.email_task_intent as intent_module
 
-    async def classify(*args, **kwargs):
-        if failure == 'timeout':
-            raise httpx.ReadTimeout('fixture')
-        kwargs['accounting'].update(input_tokens=101, output_tokens=12, usage_source='real')
-        raise ValueError('Malformed classifier output')
+    for failure in ['timeout', 'invalid_json']:
+        async def classify(*args, **kwargs):
+            if failure == 'timeout':
+                raise httpx.ReadTimeout('fixture')
+            kwargs['accounting'].update(input_tokens=101, output_tokens=12, usage_source='real')
+            raise ValueError('Malformed classifier output')
 
-    class Client:
-        def __init__(self, **kwargs): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *args): pass
-        def stream(self, *args, **kwargs):
-            pytest.fail('Unknown scope must not generate with broad tools')
+        class Client:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            def stream(self, *args, **kwargs):
+                pytest.fail('Unknown scope must not generate with broad tools')
 
-    async def execute(*args, **kwargs):
-        pytest.fail('Unknown scope must not execute')
+        async def execute(*args, **kwargs):
+            pytest.fail('Unknown scope must not execute')
 
-    monkeypatch.setattr(intent_module, 'classify_email_task', classify)
-    monkeypatch.setattr(module.httpx, 'AsyncClient', Client)
-    monkeypatch.setattr(module, 'execute_tool_block', execute)
-    policy = ToolPolicy()
-    schemas = [s for s in FUNCTION_TOOL_SCHEMAS if s['function']['name'] in {'web_fetch', 'read_email'}]
-    contract = resolve_full_inventory_contract(schemas=schemas, policy=policy)
-    chunks = [c async for c in stream_preview(
-        endpoint_url='http://test', model='Ajax', headers={}, turn_contract=contract,
-        messages=[{'role': 'user', 'content': 'Draft an email thanking Jon for lunch'}],
-        session_id='test', owner='test', disabled_tools=set(), tool_policy=policy)]
-    events = [json.loads(c[6:]) for c in chunks if c.startswith('data: ') and '[DONE]' not in c]
-    metrics = next(e['data'] for e in events if e.get('type') == 'metrics')
-    assert metrics['email_task_scope']['failed'] is True
-    assert metrics['agent_rounds'] == metrics['tool_calls'] == 0
-    assert metrics['total_tokens'] == (113 if failure == 'invalid_json' else 0)
-    assert 'No action was taken' in metrics['clean_v3_turn'][-1]['content']
-    assert any(e.get('type') == 'final_response' for e in events)
-    assert not any(e.get('delta') for e in events)
-    assert chunks[-1] == 'data: [DONE]\n\n'
+        monkeypatch.setattr(intent_module, 'classify_email_task', classify)
+        monkeypatch.setattr(module.httpx, 'AsyncClient', Client)
+        monkeypatch.setattr(module, 'execute_tool_block', execute)
+        policy = ToolPolicy()
+        schemas = [s for s in FUNCTION_TOOL_SCHEMAS if s['function']['name'] in {'web_fetch', 'read_email'}]
+        contract = resolve_full_inventory_contract(schemas=schemas, policy=policy)
+        chunks = [c async for c in stream_preview(
+            endpoint_url='http://test', model='Ajax', headers={}, turn_contract=contract,
+            messages=[{'role': 'user', 'content': 'Draft an email thanking Jon for lunch'}],
+            session_id='test', owner='test', disabled_tools=set(), tool_policy=policy)]
+        events = [json.loads(c[6:]) for c in chunks if c.startswith('data: ') and '[DONE]' not in c]
+        metrics = next(e['data'] for e in events if e.get('type') == 'metrics')
+        assert metrics['email_task_scope']['failed'] is True
+        assert metrics['agent_rounds'] == metrics['tool_calls'] == 0
+        assert metrics['total_tokens'] == (113 if failure == 'invalid_json' else 0)
+        assert 'No action was taken' in metrics['clean_v3_turn'][-1]['content']
+        assert any(e.get('type') == 'final_response' for e in events)
+        assert not any(e.get('delta') for e in events)
+        assert chunks[-1] == 'data: [DONE]\n\n'

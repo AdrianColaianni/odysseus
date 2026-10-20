@@ -19,6 +19,7 @@ from fastapi import HTTPException
 from core.models import ChatMessage, Session
 from src.tool_approval_scopes import CHAT_SESSION_APPROVAL_CONTEXT_MARKER
 from src.tool_capabilities import ToolRunSecurityContext
+from tests.helpers.routes import route_endpoint
 
 
 async def _dispatch_workspace_tool(tmp_path, tool, content, context, **kwargs):
@@ -152,7 +153,7 @@ async def test_delegated_http_fetch_retains_existing_policy(tmp_path, monkeypatc
         seen.append(source)
         return {"content": "public fixture content", "title": "Public"}
 
-    monkeypatch.setattr("src.search.content.fetch_webpage_content", fetch)
+    monkeypatch.setattr("services.search.content.fetch_webpage_content", fetch)
     content = url if shape == "raw" else json.dumps({"url": url} if shape == "json" else {"urls": [url]})
     context = ToolRunSecurityContext(delegated_credential=True, external_untrusted_context_seen=tainted)
     _, result = await _dispatch_workspace_tool(tmp_path, "web_fetch", content, context)
@@ -196,19 +197,19 @@ async def test_delegated_private_browser_local_page_stays_unavailable(tmp_path, 
     assert result["failure_kind"] == "browser_page_authority_unavailable"
 
 
-@pytest.mark.parametrize("content", [
-    "/workspace/secret.pdf\nfixture",
-    "file:///workspace/secret.pdf\nfixture",
-    {"url": "file://localhost/workspace/secret.pdf", "query": "fixture"},
-    {"path": "/workspace/secret.pdf", "query": "fixture"},
-    {"path": "/tmp/secret.pdf", "query": "fixture"},
-])
-def test_delegated_pdf_local_selectors_use_workspace_authority(monkeypatch, content):
+def test_delegated_pdf_local_selectors_use_workspace_authority(monkeypatch):
     monkeypatch.setattr("src.tool_capabilities.TOOL_APPROVAL_GATE_ENABLED", False)
     context = ToolRunSecurityContext(delegated_credential=True, approval_gate_bypassed=True)
-    assert not context.decision_for("pdf_extract", content).allowed
-    if isinstance(content, dict):
-        assert not context.decision_for("pdf_extract", json.dumps(content)).allowed
+    for content in [
+        "/workspace/secret.pdf\nfixture",
+        "file:///workspace/secret.pdf\nfixture",
+        {"url": "file://localhost/workspace/secret.pdf", "query": "fixture"},
+        {"path": "/workspace/secret.pdf", "query": "fixture"},
+        {"path": "/tmp/secret.pdf", "query": "fixture"},
+    ]:
+        assert not context.decision_for("pdf_extract", content).allowed, content
+        if isinstance(content, dict):
+            assert not context.decision_for("pdf_extract", json.dumps(content)).allowed, content
 
 
 def test_delegated_owned_attachment_and_remote_pdf_keep_existing_policy():
@@ -217,15 +218,15 @@ def test_delegated_owned_attachment_and_remote_pdf_keep_existing_policy():
     assert context.decision_for("pdf_extract", {"url": "https://example.com/public.pdf", "query": "fixture"}).allowed
 
 
-@pytest.mark.parametrize("tool", ["bash", "python", "write_file", "host_shell", "send_email", "mcp__private__read", "list_dir", "find_files", " write_file "])
-@pytest.mark.parametrize("bypass", [False, True])
-def test_delegated_hard_denial_with_optional_gate_disabled(monkeypatch, tool, bypass):
+def test_delegated_hard_denial_with_optional_gate_disabled(monkeypatch):
     monkeypatch.setattr("src.tool_capabilities.TOOL_APPROVAL_GATE_ENABLED", False)
-    context = ToolRunSecurityContext(
-        delegated_credential=True, approval_gate_bypassed=bypass,
-        unattended_tools=frozenset({tool}), external_untrusted_context_seen=True,
-    )
-    assert not context.decision_for(tool, "{}").allowed
+    for tool in ["bash", "python", "write_file", "host_shell", "send_email", "mcp__private__read", "list_dir", "find_files", " write_file "]:
+        for bypass in [False, True]:
+            context = ToolRunSecurityContext(
+                delegated_credential=True, approval_gate_bypassed=bypass,
+                unattended_tools=frozenset({tool}), external_untrusted_context_seen=True,
+            )
+            assert not context.decision_for(tool, "{}").allowed, (tool, bypass)
 
 
 def test_delegated_run_ignores_grant_but_collects_explicit_source_taint():
@@ -474,15 +475,20 @@ def test_a_signed_grant_does_not_transfer_to_another_chat():
     assert context.approval_gate_bypassed is False
 
 
-@pytest.mark.parametrize("signature", [
-    None, 17, [], {}, b"a" * 64, "", "a" * 63, "a" * 65,
-    "g" * 64, "A" * 64, "\u00e9" * 64, "\ud800" * 64,
-])
-def test_malformed_grant_is_rejected_without_breaking_chat_context(monkeypatch, signature):
-    import json
+def test_malformed_grant_is_rejected_without_breaking_chat_context(monkeypatch):
     from src import tool_approval_scopes as scopes
 
     monkeypatch.setattr(scopes, "_grant_key", lambda: b"test-only-grant-key")
+    for signature in [
+        None, 17, [], {}, b"a" * 64, "", "a" * 63, "a" * 65,
+        "g" * 64, "A" * 64, "\u00e9" * 64, "\ud800" * 64,
+    ]:
+        _assert_malformed_grant_rejected(scopes, signature)
+
+
+def _assert_malformed_grant_rejected(scopes, signature):
+    import json
+
     assert scopes.verify_chat_session_grant(
         signature, "session-1", "attacker-chosen-id", "approve"
     ) is False
@@ -568,11 +574,7 @@ async def test_todos_read_token_is_denied_before_inline_memory_persistence():
         research_handler=SimpleNamespace(),
         upload_handler=SimpleNamespace(),
     )
-    endpoint = next(
-        route.endpoint
-        for route in router.routes
-        if route.path == "/api/chat" and "POST" in route.methods
-    )
+    endpoint = route_endpoint(router, "/api/chat", "POST")
 
     with pytest.raises(HTTPException) as raised:
         await endpoint(

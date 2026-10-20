@@ -1,9 +1,9 @@
-"""Tests for extract_quotes (src/search/content.py)."""
+"""Tests for extract_quotes (services/search/content.py)."""
 import pytest
 
 pytest.importorskip("bs4")  # content.py imports BeautifulSoup at module load
 
-from src.search.content import extract_quotes
+from services.search.content import extract_quotes
 
 
 def test_matched_double_quotes():

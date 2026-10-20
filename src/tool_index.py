@@ -100,7 +100,6 @@ ASSISTANT_ALWAYS_AVAILABLE = frozenset({
 
 COLLECTION_NAME = "odysseus_tool_index"
 
-# ── Tool description registry ──
 # Each tool gets a searchable description that helps retrieval.
 # These are richer than the system prompt one-liners — they're for embedding.
 BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
@@ -411,7 +410,7 @@ class ToolIndex:
         # NOTE: "tell" was removed from this set. It fired on any "tell me ..."
         # request (e.g. "visit <url> and tell me the title"), force-including the
         # whole email toolset and crowding out the relevant tools — the model then
-        # believed it had only email tools and refused web/other tasks (#1707).
+        # believed it had only email tools and refused web/other tasks.
         frozenset({"email", "emails", "mail", "mails", "gmail", "googlemail", "message", "messages", "send", "reply", "replies", "inbox", "unread"}):
             {"list_email_accounts", "list_emails", "search_emails", "read_email", "download_attachment", "scan_email_unsubscribes", "scan_spam", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "block_sender", "manage_email_state", "delete_email", "archive_email", "mark_email_read", "resolve_contact", "ui_control"},
         frozenset({"calendar", "event", "meeting", "schedule", "appointment"}):
@@ -694,8 +693,6 @@ class ToolIndex:
             base.discard("manage_memory")
         return base
 
-
-# ── Singleton ──
 
 _tool_index: Optional[ToolIndex] = None
 _last_attempt = 0.0

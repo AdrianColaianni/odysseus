@@ -51,8 +51,7 @@ def test_validated_public_ips_returns_public_literal():
 
 def test_validated_public_ips_rejects_hostname_resolving_private(monkeypatch):
     # Rebinding shape: a hostname that (now) resolves into loopback space.
-    monkeypatch.setattr(wm, "_resolve_hostname_ips",
-                        lambda h: [ipaddress.ip_address("127.0.0.1")])
+    monkeypatch.setattr("src.url_safety._default_resolver", lambda h: ["127.0.0.1"])
     with pytest.raises(ValueError):
         wm._validated_public_ips("http://evil.rebind.example/")
 
@@ -88,7 +87,7 @@ def test_pinned_transport_connects_to_pinned_ip():
     srv, port = _serve(_Handler)
     try:
         ip = ipaddress.ip_address("127.0.0.1")
-        transport = wm._PinnedAsyncTransport(ip)
+        transport = wm.PinnedAsyncTransport([ip])
 
         async def go():
             async with __import__("httpx").AsyncClient(
@@ -139,10 +138,8 @@ def test_deliver_pins_to_validated_ip_end_to_end(monkeypatch):
     # loopback as allowed for this test (production blocks it — here we only
     # want to prove the pin routes to the validated IP).
     monkeypatch.setattr(wm, "SessionLocal", lambda: _Db())
-    monkeypatch.setattr(wm, "_is_private_url", lambda url: False)
-    monkeypatch.setattr(wm, "_resolve_hostname_ips",
-                        lambda h: [ipaddress.ip_address("127.0.0.1")])
-    monkeypatch.setattr(wm, "_ip_is_private", lambda a: False)
+    monkeypatch.setattr(wm, "resolve_outbound_url",
+                        lambda url, **kw: [ipaddress.ip_address("127.0.0.1")])
 
     manager = wm.WebhookManager()
     try:

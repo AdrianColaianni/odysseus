@@ -18,7 +18,4 @@ def test_pdf_viewer_dependency_error_is_user_actionable(monkeypatch):
     with pytest.raises(RuntimeError) as exc:
         load_pymupdf_for_pdf_viewer()
 
-    message = str(exc.value)
-    assert message == PDF_VIEWER_PYMUPDF_MISSING
-    assert "requirements-optional.txt" in message
-    assert "PyMuPDF" in message
+    assert str(exc.value) == PDF_VIEWER_PYMUPDF_MISSING

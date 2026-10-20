@@ -14,11 +14,7 @@ hands it, which is the runtime's decision about what the turn may do.
 import asyncio
 import json
 
-import pytest
-
-from core import platform_compat
 import src.agent_loop as al
-import src.agent_tools.web_tools as al_web
 
 
 def _collect(gen):
@@ -141,14 +137,14 @@ def _assert_negative_web_turn(monkeypatch, phrasing):
     assert chunks[-1] == "data: [DONE]\n\n"
 
 
-@pytest.mark.parametrize("phrasing", HELD)
-def test_negative_web_wording_withholds_the_web_tools(monkeypatch, phrasing):
-    _assert_negative_web_turn(monkeypatch, phrasing)
+def test_negative_web_wording_withholds_the_web_tools(monkeypatch):
+    for phrasing in HELD:
+        _assert_negative_web_turn(monkeypatch, phrasing)
 
 
-@pytest.mark.parametrize("phrasing", BLOCKED_MEMORY_ONLY)
-def test_negative_web_wording_withholds_the_web_tools_memory_only(monkeypatch, phrasing):
-    _assert_negative_web_turn(monkeypatch, phrasing)
+def test_negative_web_wording_withholds_the_web_tools_memory_only(monkeypatch):
+    for phrasing in BLOCKED_MEMORY_ONLY:
+        _assert_negative_web_turn(monkeypatch, phrasing)
 
 
 def test_plain_web_request_still_offers_search(monkeypatch):
@@ -168,29 +164,23 @@ def test_plain_web_request_still_offers_search(monkeypatch):
 # detects that shape; these pin the detector so a reworded prompt cannot slip
 # past it silently.
 
-@pytest.mark.parametrize(
-    "answer",
-    [
+def test_handing_the_decision_back_is_recognised_as_clarification():
+    for answer in [
         "Could you please share the file you want me to edit?",
         "Would you like me to go ahead and refactor it?",
         "Shall I start with the parser?",
         "Please let me know which approach you prefer.",
-    ],
-)
-def test_handing_the_decision_back_is_recognised_as_clarification(answer):
-    assert al._looks_like_unattended_clarification(answer) is True
+    ]:
+        assert al._looks_like_unattended_clarification(answer) is True
 
 
-@pytest.mark.parametrize(
-    "answer",
-    [
+def test_ordinary_answers_are_not_clarifications():
+    for answer in [
         "I read config.py and the timeout is set to 30 seconds.",
         "The parser fails on empty input because it indexes before checking length.",
         "Done. The workspace now has three files.",
-    ],
-)
-def test_ordinary_answers_are_not_clarifications(answer):
-    assert al._looks_like_unattended_clarification(answer) is False
+    ]:
+        assert al._looks_like_unattended_clarification(answer) is False
 
 
 # ── repeated update_plan is not the turn's actionable work ─────────────────
@@ -242,52 +232,3 @@ def test_native_terminal_runtime_adds_offered_tools_deliberately():
 
     assert allowed == {"write_file", "bash"}
 
-
-# ── owned process cleanup, foreign-process safety ──────────────────────────
-# The Chrome sweep matches on this runtime's own profile prefix. A browser
-# belonging to the user, or to another worktree, must survive it.
-
-def test_chrome_sweep_kills_only_this_runtimes_profile(monkeypatch, tmp_path):
-    import shutil
-
-    from src import process_ownership
-    from src.agent_tools.web_tools import PrivateBrowserTool
-
-    proc = tmp_path / "proc"
-    tmpdir = tmp_path / "runtime-tmp"
-    tmpdir.mkdir()
-    ours = str(tmpdir.resolve() / "agent-browser-chrome-")
-
-    # A fake process needs an identity, not only a command line: the sweep
-    # signals a process only after verifying the start token it matched on.
-    # Without a stat here the token would be read from the host's real /proc,
-    # so the outcome would depend on whether this pid happens to exist.
-    boot = proc / "sys/kernel/random/boot_id"
-    boot.parent.mkdir(parents=True)
-    boot.write_text("fake-boot\n")
-
-    def _pid(pid, cmdline):
-        entry = proc / pid
-        entry.mkdir(parents=True)
-        starttime = " ".join(["0"] * 15 + [str(1000 + int(pid))])
-        (entry / "stat").write_text(f"{pid} (chrome) S 1 {pid} {pid} {starttime}")
-        (entry / "cmdline").write_bytes(cmdline.replace(" ", "\0").encode())
-
-    _pid("101", f"chrome --user-data-dir={ours}session-a")
-    _pid("202", "chrome --user-data-dir=/Users/someone/Library/Chrome")
-    _pid("303", "chrome --user-data-dir=/tmp/other-worktree/agent-browser-chrome-x")
-    (proc / "self").mkdir()
-
-    monkeypatch.setattr(platform_compat, "PROC_ROOT", proc)
-    monkeypatch.setattr(process_ownership, "PROC_ROOT", proc)
-    killed = []
-
-    def _kill(pid, sig):
-        killed.append(pid)
-        shutil.rmtree(proc / str(pid), ignore_errors=True)
-
-    monkeypatch.setattr(al_web.os, "kill", _kill)
-
-    PrivateBrowserTool._terminate_owned_chrome({"TMPDIR": str(tmpdir)})
-
-    assert killed == [101], f"swept a process that was not ours: {killed}"

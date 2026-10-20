@@ -1,22 +1,7 @@
 """Browser coverage for structure-safe find and replace in Rich Text documents."""
 
-import json
-import subprocess
-from pathlib import Path
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source, function_body
-
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-
-
-def test_find_index_inserts_boundaries_without_flattening_inline_spans():
-    section = function_body("_buildRichFindRanges")
-    assert "const blockSelector = 'p,div,h1,h2,h3,h4,h5,h6,li,blockquote,pre,td,th'" in section
-    assert "block !== previousBlock" in section
-    assert "between.cloneContents().querySelector?.('br')" in section
-    assert "if (startsNewSegment) fullText += '\\n';" in section
+from tests.helpers.node import run_node_module
 
 
 def test_find_rejects_cross_block_matches_but_supports_inline_matches_and_replacement():
@@ -74,15 +59,7 @@ def test_find_rejects_cross_block_matches_but_supports_inline_matches_and_replac
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
     assert data == {
         "crossParagraph": "0 results",
         "crossBreak": "0 results",

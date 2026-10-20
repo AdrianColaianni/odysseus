@@ -1,19 +1,3 @@
-/* 16-calendar - part of the former static/style.css.
- *
- * The stylesheet is split by area, but the split is mechanical: rules were
- * moved verbatim and NOT regrouped. The numeric prefix is the load order, and
- * that order is what preserves the cascade. A rule sits in the file its
- * original position fell into, so an area's rules are not all in its file and
- * a file is not only that area's rules.
- *
- * Do not reorder the <link> tags in static/index.html, and do not move a rule
- * between files: with 1,151 redeclarations and 1,886 !important in this
- * cascade, either can change which declaration wins.
- *
- * static/index.html and the PRECACHE list in static/sw.js must agree on this
- * order. tests/test_static_stylesheet_manifest.py and
- * tests/test_css_computed_style_snapshot.py fail if that drifts.
- */
 @media (max-width: 768px) {
   #email-lib-modal .email-lib-sync-status {
     min-height: 13px;
@@ -21,11 +5,9 @@
     font-size: 10px;
   }
 }
-/* Nudge the subject + sender/date meta line 4px right inside each
-   email card so they don't sit flush against the read/unread/done
-   markers on the left. Includes #email-lib-modal selector to
-   override the expanded card's `padding: 4px 0 6px` shorthand
-   which was zeroing out the title's padding-left. */
+/* Nudge the subject and sender/date meta line 4px right, clear of the
+   read/unread/done markers. The #email-lib-modal selector beats the
+   expanded card's `padding: 4px 0 6px` shorthand. */
 #email-lib-grid .email-card-titlerow,
 #email-lib-grid .memory-item-meta,
 #email-lib-modal .doclib-card-expanded .email-card-titlerow {
@@ -36,9 +18,9 @@
   opacity: 0.6;
 }
 
-/* Refresh button now lives top-right in the modal header next to the close X.
-   Borderless (matches the close X), and a fixed square box so the spin and the
-   refresh→checkmark icon swap never change its size or nudge neighbours. */
+/* Refresh button top-right in the modal header next to the close X.
+   Borderless like the close X, in a fixed square box so the spin and
+   the refresh→checkmark swap never change its size. */
 .email-lib-header-actions #email-lib-refresh-btn {
   display: inline-flex;
   align-items: center;
@@ -75,7 +57,7 @@
 .cal-view-btn:hover { opacity: 0.75; }
 .cal-view-btn.active {
   background: color-mix(in srgb, var(--fg) 12%, transparent);
-  color: var(--accent, var(--red));
+  color: var(--red);
   opacity: 1;
   font-weight: 600;
 }
@@ -130,10 +112,10 @@
   position: relative;
   top: 0;
   margin-right: 3px;
-  color: var(--accent, var(--red));
+  color: var(--red);
 }
 .cal-filter-dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
-/* The grid is now a flex column: one row of weekday headers + six
+/* The grid is a flex column: one row of weekday headers + six
    .cal-week-row rows. Each row holds the 7 day cells in its own
    internal grid plus the absolute-positioned multi-day overlays.
    --bars on a week-row is the number of multi-day events overlapping
@@ -156,21 +138,17 @@
 }
 .cal-day:hover { background:color-mix(in srgb, var(--fg) 5%, var(--bg)); }
 .cal-day.cal-today {
-  box-shadow: inset 0 0 0 2px var(--accent, var(--red));
+  box-shadow: inset 0 0 0 2px var(--red);
   background: var(--bg);
   border-radius: 8px;
 }
 .cal-day.cal-selected:not(.cal-today) .cal-day-num {
-  color: var(--accent, var(--fg));
+  color: var(--fg);
   opacity: 1;
   font-weight: 700;
 }
 .cal-day.cal-drag-over { background:color-mix(in srgb, var(--accent) 18%, var(--bg)); }
-.cal-day.cal-range-select { background:color-mix(in srgb, var(--accent, var(--red)) 25%, var(--bg)); box-shadow:inset 0 0 0 1px var(--accent, var(--red)); }
 .cal-day-num { font-size:10px; font-weight:600; display:block; margin-bottom:1px; opacity:0.7; line-height:1.2; }
-.cal-dots { display:flex; flex-direction:row; align-items:center; gap:2px; flex-wrap:nowrap; margin-bottom:1px; height:6px; }
-.cal-dot { width:5px; height:5px; border-radius:50%; display:inline-block; cursor:grab; flex-shrink:0; }
-.cal-dot-more { font-size:7px; opacity:0.4; }
 .cal-event-row {
   display:flex;
   align-items:center;
@@ -316,7 +294,7 @@
 }
 .cal-splitter:hover .cal-splitter-grip,
 .cal-splitter-dragging .cal-splitter-grip {
-  background: var(--accent, var(--red));
+  background: var(--red);
 }
 .cal-day-detail {
   margin-top: 4px;
@@ -371,7 +349,7 @@
   position: absolute;
   height: 2px;
   border-radius: 2px 2px 0 0;
-  background: var(--accent, var(--red));
+  background: var(--red);
   pointer-events: none;
   z-index: 38;
 }
@@ -389,10 +367,10 @@
     transition: transform 0.14s cubic-bezier(0.2, 0.75, 0.25, 1);
   }
   .cal-wk-wrap.cal-wk-pull-top {
-    border-top-color: color-mix(in srgb, var(--accent, var(--red)) 65%, var(--border));
+    border-top-color: color-mix(in srgb, var(--red) 65%, var(--border));
   }
   .cal-wk-wrap.cal-wk-pull-bottom {
-    border-bottom-color: color-mix(in srgb, var(--accent, var(--red)) 65%, var(--border));
+    border-bottom-color: color-mix(in srgb, var(--red) 65%, var(--border));
   }
 }
 .cal-wk-rail {
@@ -454,7 +432,7 @@
 .cal-wk-zoom:hover {
   opacity: 1;
   background: color-mix(in srgb, var(--fg) 8%, var(--bg));
-  border-color: color-mix(in srgb, var(--accent, var(--fg)) 50%, var(--border));
+  border-color: color-mix(in srgb, var(--fg) 50%, var(--border));
 }
 .cal-wk-rail-cell {
   font-size: 11px;
@@ -495,9 +473,9 @@
   z-index: 40;
 }
 /* Today on a Sunday still wins the accent treatment. */
-.cal-wk-col.cal-wk-today.cal-wk-sun .cal-wk-col-head { background: color-mix(in srgb, var(--accent, var(--fg)) 12%, var(--bg)); }
+.cal-wk-col.cal-wk-today.cal-wk-sun .cal-wk-col-head { background: color-mix(in srgb, var(--fg) 12%, var(--bg)); }
 .cal-wk-col.cal-wk-today.cal-wk-sun .cal-wk-dn,
-.cal-wk-col.cal-wk-today.cal-wk-sun .cal-wk-dt { color: var(--accent, var(--fg)); }
+.cal-wk-col.cal-wk-today.cal-wk-sun .cal-wk-dt { color: var(--fg); }
 .cal-wk-dn { font-weight: 600; opacity: 0.6; }
 .cal-wk-allday {
   height: 24px;
@@ -552,10 +530,10 @@
   position: absolute;
   left: 0; right: 0;
   height: 0;
-  border-top: 2px solid color-mix(in srgb, var(--accent, var(--red, #f87171)) 90%, transparent);
+  border-top: 2px solid color-mix(in srgb, var(--red, #f87171) 90%, transparent);
   pointer-events: none;
   z-index: 7;
-  filter: drop-shadow(0 1px 3px color-mix(in srgb, var(--accent, var(--red)) 35%, transparent));
+  filter: drop-shadow(0 1px 3px color-mix(in srgb, var(--red) 35%, transparent));
 }
 /* Event blocks */
 .cal-wk-block {
@@ -568,7 +546,6 @@
   padding: 5px 7px 7px;
   font-size: 12px;
   line-height: 1.3;
-  cursor: pointer;
   /* `clip` preserves the rounded-card boundary without creating an overflow
      container, allowing the label inside to stick to the week scroller. */
   overflow: clip;
@@ -695,8 +672,8 @@
   position: absolute;
   left: 2px;
   right: 2px;
-  background: color-mix(in srgb, var(--accent, var(--fg)) 28%, transparent);
-  border: 1px dashed color-mix(in srgb, var(--accent, var(--fg)) 70%, transparent);
+  background: color-mix(in srgb, var(--fg) 28%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--fg) 70%, transparent);
   border-radius: 4px;
   pointer-events: none;
   z-index: 3;
@@ -705,14 +682,14 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--accent, var(--fg));
+  color: var(--fg);
   font-variant-numeric: tabular-nums;
 }
 .cal-wk-slot-selected {
-  background: color-mix(in srgb, var(--accent, var(--fg)) 20%, var(--bg));
+  background: color-mix(in srgb, var(--fg) 20%, var(--bg));
   border-style: solid;
-  border-color: var(--accent, var(--fg));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent, var(--fg)) 20%, transparent);
+  border-color: var(--fg);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 20%, transparent);
   overflow: visible;
   pointer-events: auto;
   cursor: pointer;
@@ -735,10 +712,10 @@
 .cal-year-grid { display:grid; grid-template-columns:repeat(7, 1fr); gap:1px; }
 .cal-year-wd { font-size:7px; text-align:center; opacity:0.3; padding:1px 0; }
 .cal-year-cell { font-size:8px; text-align:center; padding:2px 0; min-height:14px; border-radius:2px; transition:transform 0.12s, background 0.12s; }
-.cal-year-day:hover { background:var(--accent, var(--red)); color:#fff; opacity:1; transform:scale(1.15); font-weight:700; z-index:2; position:relative; }
-.cal-year-today { color:var(--accent, var(--red)); font-weight:700; opacity:1; }
+.cal-year-day:hover { background:var(--red); color:#fff; opacity:1; transform:scale(1.15); font-weight:700; z-index:2; position:relative; }
+.cal-year-today { color:var(--red); font-weight:700; opacity:1; }
 .cal-year-has { opacity:1; background:color-mix(in srgb, var(--accent) 15%, transparent); }
-.cal-year-has.cal-year-today { background:color-mix(in srgb, var(--accent, var(--red)) 25%, transparent); }
+.cal-year-has.cal-year-today { background:color-mix(in srgb, var(--red) 25%, transparent); }
 .cal-loading { display:flex; justify-content:center; padding:40px 0; }
 .cal-badge { background:var(--accent); border-radius:50%; width:6px; height:6px; margin-left:auto; display:inline-block; flex-shrink:0; }
 /* Search input — in-panel variant lives inside the day-detail panel and
@@ -760,11 +737,9 @@
   top: 50%;
   transform: translateY(-50%);
   pointer-events: none;
-  color: var(--accent, var(--red));
+  color: var(--red);
 }
 .cal-day-search-meta { font-size:10px; opacity:0.5; margin:0 2px 6px; }
-.cal-search-results { display:flex; flex-direction:column; gap:4px; }
-.cal-search-count { font-size:10px; opacity:0.5; padding:4px 2px 8px; }
 /* Agenda view */
 .cal-agenda { display:flex; flex-direction:column; gap:12px; flex:1 1 auto; min-height:0; overflow-y:auto; overscroll-behavior:contain; padding-left:4px; }
 .cal-agenda-day { display:flex; flex-direction:column; gap:5px; position:relative; padding-left:14px; }
@@ -778,8 +753,8 @@
   text-transform: uppercase;
   padding: 1px 6px;
   border-radius: 8px;
-  background: color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
-  color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+  color: var(--red);
   vertical-align: 1px;
 }
 .cal-agenda-empty { font-size:11px; opacity:0.4; padding:8px; font-style:italic; }
@@ -806,9 +781,6 @@
 .cal-event-item { position:relative; }
 
 /* ── Personal Assistant ── */
-.sidebar-assistant-entry { gap: 6px; min-height: 29px; box-sizing: border-box; align-items: center; }
-.sidebar-assistant-entry .sidebar-action-icon { position: relative; left: -2px; }
-#sidebar-assistant-gear:hover { opacity: 0.8 !important; }
 .assistant-settings-form { display: flex; flex-direction: column; gap: 12px; padding: 4px 2px 2px; }
 .assistant-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: color-mix(in srgb, var(--fg) 70%, transparent); }
 .assistant-field > span { font-size: 11px; opacity: 0.6; }
@@ -828,10 +800,9 @@
 .assistant-field textarea { resize: vertical; min-height: 60px; }
 .assistant-field input:focus,
 .assistant-field select:focus,
-.assistant-field textarea:focus { outline: none; border-color: var(--accent, var(--red)); }
+.assistant-field textarea:focus { outline: none; border-color: var(--red); }
 .assistant-field-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
 .assistant-field-row > .assistant-field { flex: 1 1 180px; }
-.assistant-field-check { flex-direction: row !important; align-items: center; gap: 6px; padding-bottom: 7px; }
 .assistant-checkins { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
 .assistant-checkins h5 { margin: 0 0 2px; font-size: 12px; font-weight: 600; opacity: 0.8; }
 .assistant-checkin-row {
@@ -880,7 +851,7 @@
   resize: vertical;
   min-height: 48px;
 }
-.assistant-checkin-prompt:focus { outline: none; border-color: var(--accent, var(--red)); }
+.assistant-checkin-prompt:focus { outline: none; border-color: var(--red); }
 .assistant-checkin-meta { font-size: 10px; opacity: 0.45; }
 .assistant-settings-actions {
   display: flex;
@@ -951,7 +922,6 @@
 .cal-allday-ctrl { display:flex; flex-direction:column; align-items:center; gap:3px; flex-shrink:0; }
 .cal-allday-label { font-size:10px; opacity:0.5; white-space:nowrap; line-height:1; }
 .cal-form { display:flex; flex-direction:column; gap:8px; }
-.cal-form-title { font-size:13px; font-weight:600; margin-bottom:2px; }
 .cal-title-wrap { position: relative; }
 /* Calendar-picker select sits 2px higher; its border-left/background tint is
    set in JS to the chosen calendar's colour. */
@@ -987,17 +957,10 @@
   border-color: var(--ev-color);
 }
 .cal-form-bespoke.cal-form-bg-image .cal-btn-primary {
-  background: var(--accent, var(--red));
-  border-color: var(--accent, var(--red));
+  background: var(--red);
+  border-color: var(--red);
   color: var(--bg);
 }
-.cal-form-close {
-  position: absolute; top: 10px; right: 12px;
-  background: none; border: none; color: var(--fg);
-  opacity: 0.35; cursor: pointer; font-size: 20px; line-height: 1;
-  padding: 4px 8px; border-radius: 6px;
-}
-.cal-form-close:hover { opacity: 0.9; background: color-mix(in srgb, var(--fg) 8%, transparent); }
 .cal-form-mobile-cancel { display: none; }
 
 /* "Today is …" header pinned at the top of the form. Keeps you oriented
@@ -1025,7 +988,6 @@
   letter-spacing: 0.02em;
   font-weight: 200;
   color: var(--fg);
-  line-height: 1;
   /* Behaves like a button — strip native chrome but keep it tappable. */
   background: none;
   border: none;
@@ -1133,12 +1095,12 @@
   flex-shrink: 0;
   border: 1px solid var(--border);
   border-radius: 5px;
-  color: var(--accent, var(--red));
+  color: var(--red);
   background: color-mix(in srgb, var(--fg) 5%, var(--bg));
   text-decoration: none;
   transition: background 0.15s, border-color 0.15s, opacity 0.15s;
 }
-.cal-loc-map:hover { background: color-mix(in srgb, var(--accent, var(--red)) 14%, var(--bg)); border-color: var(--accent, var(--red)); }
+.cal-loc-map:hover { background: color-mix(in srgb, var(--red) 14%, var(--bg)); border-color: var(--red); }
 
 @media (max-width: 520px) {
   .cal-hero-time { font-size: 44px; }
@@ -1164,8 +1126,8 @@
   }
   .cal-form-mobile-cancel:active {
     opacity: 1;
-    background: color-mix(in srgb, var(--accent, var(--red)) 14%, var(--bg));
-    border-color: color-mix(in srgb, var(--accent, var(--red)) 55%, var(--border));
+    background: color-mix(in srgb, var(--red) 14%, var(--bg));
+    border-color: color-mix(in srgb, var(--red) 55%, var(--border));
   }
 }
 .cal-input { background:color-mix(in srgb, var(--fg) 5%, var(--bg)); border:1px solid var(--border); border-radius:5px; padding:7px 10px; color:var(--fg); font-size:12px; width:100%; box-sizing:border-box; }

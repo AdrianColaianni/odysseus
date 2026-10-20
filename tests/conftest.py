@@ -24,7 +24,8 @@ _runtime_environment = bootstrap_runtime()
 try:
     import sqlalchemy  # noqa: F401
     import sqlalchemy.orm  # noqa: F401
-    import core.database  # noqa: F401
+    import core.database
+    core.database.init_db()
     import src.database
 except ImportError:
     pass  # not installed - the stubs below will handle it

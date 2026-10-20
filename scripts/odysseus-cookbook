@@ -20,7 +20,6 @@ non-zero exit on failure.
 
 
 from __future__ import annotations
-import sys
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
 from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
@@ -30,10 +29,8 @@ quiet_logs()
 import argparse
 import json
 import logging
-import os
 import re
 import subprocess
-import sys
 import urllib.request
 import urllib.parse
 import uuid

@@ -1,14 +1,11 @@
 import asyncio
 
 from routes import emoji_routes
+from tests.helpers.routes import route_endpoint
 
 
 def _emoji_endpoint():
-    router = emoji_routes.setup_emoji_routes()
-    for route in router.routes:
-        if route.path == "/api/emoji/{code}.svg" and "GET" in route.methods:
-            return route.endpoint
-    raise AssertionError("emoji route not found")
+    return route_endpoint(emoji_routes.setup_emoji_routes(), "/api/emoji/{code}.svg", "GET")
 
 
 def test_svg_safety_rejects_active_or_external_svg_content():

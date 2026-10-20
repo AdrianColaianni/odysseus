@@ -72,7 +72,7 @@ async def test_detached_stream_identity_is_distinct_from_nested_journal_lineage(
         assert len(journal_ids) == 2
         assert run.run_id not in journal_ids
         assert seen['child'].parent_run_id == seen['parent'].run_id
-        assert agent_runs.get_run_id(session_id) == run.run_id
+        assert agent_runs._RUNS[session_id].run_id == run.run_id
         for invocation_id in journal_ids:
             assert not agent_runs.stop(session_id, invocation_id)
             assert not agent_runs.request_finish(session_id, invocation_id)
@@ -84,7 +84,7 @@ async def test_detached_stream_identity_is_distinct_from_nested_journal_lineage(
         assert replay == chunks
         assert metadata(chunks)['run_id'] == seen['parent'].run_id
         assert metadata(seen['child_chunks'])['parent_run_id'] == seen['parent'].run_id
-        assert agent_runs.get_run_id(session_id) == run.run_id
+        assert agent_runs._RUNS[session_id].run_id == run.run_id
         assert chunks.count(DONE) == 1
         assert current_journal() is None
     finally:

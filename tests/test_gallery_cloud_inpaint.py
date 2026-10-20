@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import httpx
 from PIL import Image
 
-import routes.gallery_routes as gallery
+import routes.gallery.gallery_routes as gallery
+from tests.helpers.routes import route_endpoint
 
 
 def png(image):
@@ -48,8 +49,8 @@ def test_openrouter_inpaint_keeps_unmasked_pixels(monkeypatch):
             return {'_endpoint': endpoint.base_url, '_model': 'openai/gpt-5-image',
                     'image': png(Image.new('RGB', (2, 1), 'red')), 'mask': png(mask), 'prompt': 'Make blue'}
 
-    route = next(r for r in gallery.setup_gallery_routes().routes if r.path == '/api/image/inpaint')
-    result = asyncio.run(route.endpoint(Request()))
+    inpaint = route_endpoint(gallery.setup_gallery_routes(), '/api/image/inpaint', 'POST')
+    result = asyncio.run(inpaint(Request()))
     output = Image.open(io.BytesIO(base64.b64decode(result['image'])))
     assert output.getpixel((0, 0)) == (255, 0, 0, 255)
     assert output.getpixel((1, 0)) == (0, 0, 255, 255)

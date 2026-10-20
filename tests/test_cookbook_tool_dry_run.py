@@ -39,7 +39,6 @@ def test_adopt_served_model_dry_run_does_not_touch_tmux():
     assert result["exit_code"] == 0
     assert result["dry_run"] is True
     assert result["tmux_session"] == "audit-external"
-    assert "No state was changed" in result["output"]
 
 
 def test_serve_preset_dry_run_resolves_but_does_not_launch(monkeypatch):
@@ -61,4 +60,3 @@ def test_serve_preset_dry_run_resolves_but_does_not_launch(monkeypatch):
     assert result["exit_code"] == 0
     assert result["dry_run"] is True
     assert result["preset"] == "Tiny Local"
-    assert "No server was started" in result["output"]

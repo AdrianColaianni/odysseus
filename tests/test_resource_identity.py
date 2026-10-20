@@ -50,25 +50,27 @@ def native_admin(monkeypatch):
     monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda owner: True)
 
 
-@pytest.mark.parametrize("selector", ["a.txt", "/workspace/a.txt", "host", "link"])
-def test_aliases_resolve_to_one_observed_resource(tmp_path, selector):
-    target = tmp_path / "a.txt"
-    target.write_text("same object")
-    (tmp_path / "link").symlink_to(target)
-    grant = authority(tmp_path, "read_file")
-    value = str(target) if selector == "host" else selector
-    bound = resolve(grant, "read_file", value)
-    assert bound.bindings[0].resource.path == str(target)
-    assert bound.bindings[0].resource.identity == FileObjectIdentity.observe(target)
-    assert json.loads(bound.execution_input)["path"] == str(target)
-    assert bound.operation.input == value
+def test_aliases_resolve_to_one_observed_resource(tmp_path_factory):
+    for selector in ["a.txt", "/workspace/a.txt", "host", "link"]:
+        tmp_path = tmp_path_factory.mktemp("case")
+        target = tmp_path / "a.txt"
+        target.write_text("same object")
+        (tmp_path / "link").symlink_to(target)
+        grant = authority(tmp_path, "read_file")
+        value = str(target) if selector == "host" else selector
+        bound = resolve(grant, "read_file", value)
+        assert bound.bindings[0].resource.path == str(target)
+        assert bound.bindings[0].resource.identity == FileObjectIdentity.observe(target)
+        assert json.loads(bound.execution_input)["path"] == str(target)
+        assert bound.operation.input == value
 
 
-@pytest.mark.parametrize("path", ["../sibling/secret", "/etc/passwd", ".SSH/key", "ID_RSA", "bad\0path", "bad\npath"])
-def test_escapes_sensitive_and_malformed_paths_fail_closed(tmp_path, path):
-    grant = authority(tmp_path, "write_file")
-    with pytest.raises(ValueError):
-        resolve(grant, "write_file", json.dumps({"path": path, "content": "x"}))
+def test_escapes_sensitive_and_malformed_paths_fail_closed(tmp_path_factory):
+    for path in ["../sibling/secret", "/etc/passwd", ".SSH/key", "ID_RSA", "bad\0path", "bad\npath"]:
+        tmp_path = tmp_path_factory.mktemp("case")
+        grant = authority(tmp_path, "write_file")
+        with pytest.raises(ValueError):
+            resolve(grant, "write_file", json.dumps({"path": path, "content": "x"}))
 
 
 def test_symlink_escape_is_not_a_resource(tmp_path):
@@ -121,31 +123,32 @@ def test_destination_binds_absence_and_existing_ancestors(tmp_path):
         bound.validate()
 
 
-@pytest.mark.parametrize("replacement", ["root", "file", "parent", "new-target"])
-def test_replacement_invalidates_observed_identity(tmp_path, replacement):
-    root = tmp_path / "root"
-    root.mkdir()
-    parent = root / "sub"
-    parent.mkdir()
-    target = parent / "a.txt"
-    target.write_text("old")
-    content = "sub/new.txt\nx" if replacement == "new-target" else "sub/a.txt"
-    tool = "write_file" if replacement == "new-target" else "read_file"
-    bound = resolve(authority(root, tool), tool, content)
-    if replacement == "file":
-        target.rename(parent / "old.txt")
-        target.write_text("new")
-    elif replacement == "parent":
-        parent.rename(root / "old-sub")
-        parent.mkdir()
-        target.write_text("new")
-    elif replacement == "root":
-        root.rename(tmp_path / "old-root")
+def test_replacement_invalidates_observed_identity(tmp_path_factory):
+    for replacement in ["root", "file", "parent", "new-target"]:
+        tmp_path = tmp_path_factory.mktemp("case")
+        root = tmp_path / "root"
         root.mkdir()
-    else:
-        (parent / "new.txt").write_text("unapproved target")
-    with pytest.raises((ValueError, OSError)):
-        bound.validate()
+        parent = root / "sub"
+        parent.mkdir()
+        target = parent / "a.txt"
+        target.write_text("old")
+        content = "sub/new.txt\nx" if replacement == "new-target" else "sub/a.txt"
+        tool = "write_file" if replacement == "new-target" else "read_file"
+        bound = resolve(authority(root, tool), tool, content)
+        if replacement == "file":
+            target.rename(parent / "old.txt")
+            target.write_text("new")
+        elif replacement == "parent":
+            parent.rename(root / "old-sub")
+            parent.mkdir()
+            target.write_text("new")
+        elif replacement == "root":
+            root.rename(tmp_path / "old-root")
+            root.mkdir()
+        else:
+            (parent / "new.txt").write_text("unapproved target")
+        with pytest.raises((ValueError, OSError)):
+            bound.validate()
 
 
 def test_content_is_not_an_object_incarnation_or_effect_claim(tmp_path):
@@ -156,16 +159,17 @@ def test_content_is_not_an_object_incarnation_or_effect_claim(tmp_path):
     bound.validate()
 
 
-@pytest.mark.parametrize("state", ["authority", "jobs", "containment"])
-async def test_user_filesystem_scope_cannot_write_server_execution_state(tmp_path, monkeypatch, state):
+async def test_user_filesystem_scope_cannot_write_server_execution_state(tmp_path_factory, monkeypatch):
     import src.constants
-    monkeypatch.setattr(src.constants, "BG_JOBS_DIR", str(tmp_path / "jobs"))
-    monkeypatch.setattr(src.constants, "BG_JOBS_FILE", str(tmp_path / "jobs.json"))
-    monkeypatch.setattr(src.constants, "CONTAINMENT_STATE_FILE", str(tmp_path / "receipts.json"))
-    target = {"authority": "jobs/job.authority.json", "jobs": "jobs.json", "containment": "receipts.json"}[state]
-    _, result = await dispatch(authority(tmp_path, "write_file"), "write_file", target + "\nforged")
-    assert result["failure_kind"] == "resource_identity_denied"
-    assert not (tmp_path / target).exists()
+    for state in ["authority", "jobs", "containment"]:
+        tmp_path = tmp_path_factory.mktemp("case")
+        monkeypatch.setattr(src.constants, "BG_JOBS_DIR", str(tmp_path / "jobs"))
+        monkeypatch.setattr(src.constants, "BG_JOBS_FILE", str(tmp_path / "jobs.json"))
+        monkeypatch.setattr(src.constants, "CONTAINMENT_STATE_FILE", str(tmp_path / "receipts.json"))
+        target = {"authority": "jobs/job.authority.json", "jobs": "jobs.json", "containment": "receipts.json"}[state]
+        _, result = await dispatch(authority(tmp_path, "write_file"), "write_file", target + "\nforged")
+        assert result["failure_kind"] == "resource_identity_denied"
+        assert not (tmp_path / target).exists()
 
 
 @pytest.mark.parametrize("state", ["authority", "jobs", "containment", "result", "exit", "database", "vault", "uploads"])
@@ -215,15 +219,16 @@ async def test_directory_grep_does_not_scan_control_state_or_hardlinks(tmp_path,
     assert "No matches" in result["output"]
 
 
-@pytest.mark.parametrize("tool,content", [("glob", '{"pattern":"*.json","path":"."}'), ("ls", ".")])
-async def test_directory_enumeration_does_not_address_control_files(tmp_path, monkeypatch, tool, content):
+async def test_directory_enumeration_does_not_address_control_files(tmp_path_factory, monkeypatch):
     import src.constants as constants
-    control = tmp_path / "jobs.json"
-    control.write_text("control")
-    monkeypatch.setattr(constants, "BG_JOBS_FILE", str(control))
-    _, result = await dispatch(authority(tmp_path, tool), tool, content)
-    assert result["exit_code"] == 0
-    assert "jobs.json" not in result["output"]
+    for tool, content in [("glob", '{"pattern":"*.json","path":"."}'), ("ls", ".")]:
+        tmp_path = tmp_path_factory.mktemp("case")
+        control = tmp_path / "jobs.json"
+        control.write_text("control")
+        monkeypatch.setattr(constants, "BG_JOBS_FILE", str(control))
+        _, result = await dispatch(authority(tmp_path, tool), tool, content)
+        assert result["exit_code"] == 0
+        assert "jobs.json" not in result["output"]
 
 
 @pytest.mark.parametrize("producer", ["database", "containment", "jobs", "uploads"])
@@ -255,18 +260,19 @@ async def test_configured_control_producer_paths_are_protected(tmp_path, monkeyp
     assert result["failure_kind"] == "resource_identity_denied"
 
 
-@pytest.mark.parametrize("roots", [(), None])
-async def test_nonworkspace_allowlist_and_operation_do_not_grant_resources(tmp_path, monkeypatch, roots):
+async def test_nonworkspace_allowlist_and_operation_do_not_grant_resources(tmp_path_factory, monkeypatch):
     from src import tool_execution as execution
-    target = tmp_path / "a"
-    target.write_text("private")
-    monkeypatch.setattr(execution, "_tool_path_roots", lambda: [str(tmp_path)])
-    implementation = AsyncMock()
-    monkeypatch.setattr(execution, "_execute_tool_block_impl", implementation)
-    grant = authority(None, "read_file", roots=roots)
-    _, result = await dispatch(grant, "read_file", str(target))
-    assert result["failure_kind"] == "resource_identity_denied"
-    implementation.assert_not_awaited()
+    for roots in [(), None]:
+        tmp_path = tmp_path_factory.mktemp("case")
+        target = tmp_path / "a"
+        target.write_text("private")
+        monkeypatch.setattr(execution, "_tool_path_roots", lambda: [str(tmp_path)])
+        implementation = AsyncMock()
+        monkeypatch.setattr(execution, "_execute_tool_block_impl", implementation)
+        grant = authority(None, "read_file", roots=roots)
+        _, result = await dispatch(grant, "read_file", str(target))
+        assert result["failure_kind"] == "resource_identity_denied"
+        implementation.assert_not_awaited()
 
 
 async def test_explicit_private_root_requires_owner_and_operation(tmp_path):
@@ -282,14 +288,15 @@ async def test_explicit_private_root_requires_owner_and_operation(tmp_path):
     assert not (tmp_path / "b").exists()
 
 
-@pytest.mark.parametrize("content", ['{"path":null}', '{"path":42}', '{"path":[]}', '{"path":{}}', '{"path":"a","path":"b"}'])
-async def test_model_cannot_supply_or_reconstruct_a_resource(tmp_path, monkeypatch, content):
+async def test_model_cannot_supply_or_reconstruct_a_resource(tmp_path_factory, monkeypatch):
     from src import tool_execution as execution
-    implementation = AsyncMock()
-    monkeypatch.setattr(execution, "_execute_tool_block_impl", implementation)
-    _, result = await dispatch(authority(tmp_path, "read_file"), "read_file", content)
-    assert result["blocked"] is True
-    implementation.assert_not_awaited()
+    for content in ['{"path":null}', '{"path":42}', '{"path":[]}', '{"path":{}}', '{"path":"a","path":"b"}']:
+        tmp_path = tmp_path_factory.mktemp("case")
+        implementation = AsyncMock()
+        monkeypatch.setattr(execution, "_execute_tool_block_impl", implementation)
+        _, result = await dispatch(authority(tmp_path, "read_file"), "read_file", content)
+        assert result["blocked"] is True
+        implementation.assert_not_awaited()
 
 
 async def test_model_root_field_is_not_authority(tmp_path, monkeypatch):
@@ -366,31 +373,33 @@ def test_equal_stale_roots_are_revalidated(tmp_path):
     assert parent.intersect(parent).resource_roots == ()
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-async def test_snapshot_preserves_incarnation_and_never_reconstructs_legacy(tmp_path, legacy):
-    root = tmp_path / "root"
-    root.mkdir()
-    (root / "a").write_text("original")
-    grant = authority(root, "read_file")
-    snapshot = grant.to_dict()
-    if legacy:
-        snapshot["version"] = 1
-        snapshot.pop("resource_roots")
-    restored = RequestAuthority.from_dict(json.loads(json.dumps(snapshot)))
-    assert restored.resource_roots == (() if legacy else grant.resource_roots)
-    root.rename(tmp_path / "old")
-    root.mkdir()
-    (root / "a").write_text("replacement")
-    _, result = await dispatch(restored, "read_file", "a")
-    assert result["failure_kind"] == "resource_identity_denied"
+async def test_snapshot_preserves_incarnation_and_never_reconstructs_legacy(tmp_path_factory):
+    for legacy in [False, True]:
+        tmp_path = tmp_path_factory.mktemp("case")
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "a").write_text("original")
+        grant = authority(root, "read_file")
+        snapshot = grant.to_dict()
+        if legacy:
+            snapshot["version"] = 1
+            snapshot.pop("resource_roots")
+        restored = RequestAuthority.from_dict(json.loads(json.dumps(snapshot)))
+        assert restored.resource_roots == (() if legacy else grant.resource_roots)
+        root.rename(tmp_path / "old")
+        root.mkdir()
+        (root / "a").write_text("replacement")
+        _, result = await dispatch(restored, "read_file", "a")
+        assert result["failure_kind"] == "resource_identity_denied"
 
 
-@pytest.mark.parametrize("mutation", [None, "root", [{}], [{"path": "/", "scope": "workspace", "identity": {"device": 1, "inode": 2, "kind": "directory"}, "owner": "alice"}]])
-def test_malformed_resource_snapshots_are_rejected(tmp_path, mutation):
-    snapshot = authority(tmp_path, "read_file").to_dict()
-    snapshot["resource_roots"] = mutation
-    with pytest.raises((TypeError, ValueError, KeyError)):
-        RequestAuthority.from_dict(snapshot)
+def test_malformed_resource_snapshots_are_rejected(tmp_path_factory):
+    for mutation in [None, "root", [{}], [{"path": "/", "scope": "workspace", "identity": {"device": 1, "inode": 2, "kind": "directory"}, "owner": "alice"}]]:
+        tmp_path = tmp_path_factory.mktemp("case")
+        snapshot = authority(tmp_path, "read_file").to_dict()
+        snapshot["resource_roots"] = mutation
+        with pytest.raises((TypeError, ValueError, KeyError)):
+            RequestAuthority.from_dict(snapshot)
 
 
 def test_task_and_background_continuations_keep_original_roots(tmp_path, monkeypatch):
@@ -487,46 +496,48 @@ async def test_last_dispatch_validation_refuses_replacement_and_resets_context(t
     assert execution.get_active_workspace() is None
 
 
-@pytest.mark.parametrize("error_type", [None, RuntimeError, asyncio.CancelledError])
-async def test_nested_resource_context_restores_on_failure_or_cancellation(tmp_path, monkeypatch, error_type):
+async def test_nested_resource_context_restores_on_failure_or_cancellation(tmp_path_factory, monkeypatch):
     from src import tool_execution as execution
-    for name in ("parent", "child"):
-        (tmp_path / name).write_text(name)
-    grant = authority(tmp_path, "read_file")
-    parent = resolve(grant, "read_file", "parent")
-    async def implementation(block, **kwargs):
-        assert active_resource_operation().bindings[0].resource.path == str(tmp_path / "child")
-        if error_type:
-            raise error_type("stop")
-        return "read", {"exit_code": 0}
-    monkeypatch.setattr(execution, "_execute_tool_block_impl", implementation)
-    with bind_resource_operation(parent):
-        if error_type:
-            with pytest.raises(error_type):
+    for error_type in [None, RuntimeError, asyncio.CancelledError]:
+        tmp_path = tmp_path_factory.mktemp("case")
+        for name in ("parent", "child"):
+            (tmp_path / name).write_text(name)
+        grant = authority(tmp_path, "read_file")
+        parent = resolve(grant, "read_file", "parent")
+        async def implementation(block, **kwargs):
+            assert active_resource_operation().bindings[0].resource.path == str(tmp_path / "child")
+            if error_type:
+                raise error_type("stop")
+            return "read", {"exit_code": 0}
+        monkeypatch.setattr(execution, "_execute_tool_block_impl", implementation)
+        with bind_resource_operation(parent):
+            if error_type:
+                with pytest.raises(error_type):
+                    await dispatch(grant, "read_file", "child")
+            else:
                 await dispatch(grant, "read_file", "child")
-        else:
-            await dispatch(grant, "read_file", "child")
-        assert active_resource_operation() is parent
-    assert active_resource_operation() is None
-    assert execution.get_active_workspace() is None
+            assert active_resource_operation() is parent
+        assert active_resource_operation() is None
+        assert execution.get_active_workspace() is None
 
 
-@pytest.mark.parametrize("kind", ["collision", "hardlink", "escape", "move"])
-async def test_patch_validates_all_targets_before_any_write(tmp_path, kind):
-    (tmp_path / "a").write_text("old\n")
-    (tmp_path / "alias").symlink_to(tmp_path / "a")
-    os.link(tmp_path / "a", tmp_path / "hardlink")
-    suffix = {
-        "collision": "*** Update File: alias\n@@\n-old\n+second",
-        "hardlink": "*** Update File: hardlink\n@@\n-old\n+second",
-        "escape": "*** Add File: ../escape.txt\n+escaped",
-        "move": "*** Update File: alias\n*** Move to: moved\n@@\n-old\n+moved",
-    }[kind]
-    patch = f"*** Begin Patch\n*** Update File: a\n@@\n-old\n+new\n{suffix}\n*** End Patch"
-    _, result = await dispatch(authority(tmp_path, "apply_patch"), "apply_patch", patch)
-    assert result["failure_kind"] == "resource_identity_denied"
-    assert (tmp_path / "a").read_text() == "old\n"
-    assert not (tmp_path / "moved").exists()
+async def test_patch_validates_all_targets_before_any_write(tmp_path_factory):
+    for kind in ["collision", "hardlink", "escape", "move"]:
+        tmp_path = tmp_path_factory.mktemp("case")
+        (tmp_path / "a").write_text("old\n")
+        (tmp_path / "alias").symlink_to(tmp_path / "a")
+        os.link(tmp_path / "a", tmp_path / "hardlink")
+        suffix = {
+            "collision": "*** Update File: alias\n@@\n-old\n+second",
+            "hardlink": "*** Update File: hardlink\n@@\n-old\n+second",
+            "escape": "*** Add File: ../escape.txt\n+escaped",
+            "move": "*** Update File: alias\n*** Move to: moved\n@@\n-old\n+moved",
+        }[kind]
+        patch = f"*** Begin Patch\n*** Update File: a\n@@\n-old\n+new\n{suffix}\n*** End Patch"
+        _, result = await dispatch(authority(tmp_path, "apply_patch"), "apply_patch", patch)
+        assert result["failure_kind"] == "resource_identity_denied"
+        assert (tmp_path / "a").read_text() == "old\n"
+        assert not (tmp_path / "moved").exists()
 
 
 def test_move_contract_binds_both_distinct_resources(tmp_path):
@@ -552,31 +563,32 @@ def approval(grant, tool, content):
     return exact, security
 
 
-@pytest.mark.parametrize("change", ["alias", "file", "parent"])
-async def test_approval_resource_retargeting_refuses_without_claiming(tmp_path, change):
-    parent = tmp_path / "sub"
-    parent.mkdir()
-    (parent / "a").write_text("a")
-    (parent / "b").write_text("b")
-    alias = parent / "alias"
-    alias.symlink_to(parent / "a")
-    grant = authority(tmp_path, "read_file")
-    exact, security = approval(grant, "read_file", "sub/alias")
-    assert exact.pending.resource_operation is not None
-    if change == "alias":
-        alias.unlink()
-        alias.symlink_to(parent / "b")
-    elif change == "file":
-        (parent / "a").rename(parent / "old-a")
-        (parent / "a").write_text("replacement")
-    else:
-        parent.rename(tmp_path / "old-sub")
+async def test_approval_resource_retargeting_refuses_without_claiming(tmp_path_factory):
+    for change in ["alias", "file", "parent"]:
+        tmp_path = tmp_path_factory.mktemp("case")
+        parent = tmp_path / "sub"
         parent.mkdir()
-        (parent / "a").write_text("replacement")
+        (parent / "a").write_text("a")
+        (parent / "b").write_text("b")
+        alias = parent / "alias"
         alias.symlink_to(parent / "a")
-    _, result = await dispatch(grant, "read_file", "sub/alias", exact_approval=exact, security_context=security)
-    assert result["failure_kind"] == "resource_identity_denied"
-    assert exact.matches(owner="alice", session_id="s", workspace=str(tmp_path), tool_name="read_file", content="sub/alias")
+        grant = authority(tmp_path, "read_file")
+        exact, security = approval(grant, "read_file", "sub/alias")
+        assert exact.pending.resource_operation is not None
+        if change == "alias":
+            alias.unlink()
+            alias.symlink_to(parent / "b")
+        elif change == "file":
+            (parent / "a").rename(parent / "old-a")
+            (parent / "a").write_text("replacement")
+        else:
+            parent.rename(tmp_path / "old-sub")
+            parent.mkdir()
+            (parent / "a").write_text("replacement")
+            alias.symlink_to(parent / "a")
+        _, result = await dispatch(grant, "read_file", "sub/alias", exact_approval=exact, security_context=security)
+        assert result["failure_kind"] == "resource_identity_denied"
+        assert exact.matches(owner="alice", session_id="s", workspace=str(tmp_path), tool_name="read_file", content="sub/alias")
 
 
 async def test_approval_is_exact_and_one_use_with_immutable_resource_snapshot(tmp_path):
@@ -650,47 +662,49 @@ async def test_exact_user_approval_binds_only_one_missing_destination(tmp_path):
     assert not (tmp_path / "other.txt").exists()
 
 
-@pytest.mark.parametrize("version", [1, 2])
-async def test_restored_empty_roots_approval_is_exact_and_never_restores_generic_scope(tmp_path, version):
-    (tmp_path / "approved").write_text("approved content")
-    (tmp_path / "sibling").write_text("private sibling")
-    snapshot = authority(tmp_path, "read_file", "write_file", "ls").to_dict()
-    snapshot["version"] = version
-    snapshot["resource_roots"] = []
-    restored = RequestAuthority.from_dict(snapshot)
-    exact, security = approval(restored, "read_file", "approved")
-    assert exact.pending.resource_operation is not None
-    for tool, content in (("read_file", "sibling"), ("ls", "."), ("write_file", "sibling\nx")):
-        _, blocked = await dispatch(restored, tool, content, exact_approval=exact, security_context=security)
-        assert blocked["exit_code"] == 1
-        _, unapproved = await dispatch(restored, tool, content)
-        assert unapproved["failure_kind"] == "resource_identity_denied"
-    _, allowed = await dispatch(restored, "read_file", "approved", exact_approval=exact, security_context=security)
-    assert allowed["output"] == "approved content"
-    _, replay = await dispatch(restored, "read_file", "approved", exact_approval=exact, security_context=security)
-    assert replay["exit_code"] == 1
-    assert restored.resource_roots == () and restored.backend_resources == ()
-    assert (tmp_path / "sibling").read_text() == "private sibling"
+async def test_restored_empty_roots_approval_is_exact_and_never_restores_generic_scope(tmp_path_factory):
+    for version in [1, 2]:
+        tmp_path = tmp_path_factory.mktemp("case")
+        (tmp_path / "approved").write_text("approved content")
+        (tmp_path / "sibling").write_text("private sibling")
+        snapshot = authority(tmp_path, "read_file", "write_file", "ls").to_dict()
+        snapshot["version"] = version
+        snapshot["resource_roots"] = []
+        restored = RequestAuthority.from_dict(snapshot)
+        exact, security = approval(restored, "read_file", "approved")
+        assert exact.pending.resource_operation is not None
+        for tool, content in (("read_file", "sibling"), ("ls", "."), ("write_file", "sibling\nx")):
+            _, blocked = await dispatch(restored, tool, content, exact_approval=exact, security_context=security)
+            assert blocked["exit_code"] == 1
+            _, unapproved = await dispatch(restored, tool, content)
+            assert unapproved["failure_kind"] == "resource_identity_denied"
+        _, allowed = await dispatch(restored, "read_file", "approved", exact_approval=exact, security_context=security)
+        assert allowed["output"] == "approved content"
+        _, replay = await dispatch(restored, "read_file", "approved", exact_approval=exact, security_context=security)
+        assert replay["exit_code"] == 1
+        assert restored.resource_roots == () and restored.backend_resources == ()
+        assert (tmp_path / "sibling").read_text() == "private sibling"
 
 
-@pytest.mark.parametrize("change", ["alias", "request", "session", "owner"])
-async def test_restored_exact_filesystem_binding_rejects_retarget_and_rebinding(tmp_path, change):
-    (tmp_path / "a").write_text("a")
-    (tmp_path / "b").write_text("b")
-    (tmp_path / "alias").symlink_to(tmp_path / "a")
-    snapshot = authority(tmp_path, "read_file").to_dict()
-    snapshot["version"] = 1
-    restored = RequestAuthority.from_dict(snapshot)
-    exact, security = approval(restored, "read_file", "alias")
-    if change == "alias":
-        (tmp_path / "alias").unlink()
-        (tmp_path / "alias").symlink_to(tmp_path / "b")
-    else:
-        restored = replace(restored, **{"request": {"request_id": "other"},
-            "session": {"session_id": "other"}, "owner": {"owner": "bob"}}[change])
-    _, result = await dispatch(restored, "read_file", "alias", exact_approval=exact, security_context=security)
-    assert result["exit_code"] == 1
-    assert exact.matches(owner="alice", session_id="s", workspace=str(tmp_path), tool_name="read_file", content="alias")
+async def test_restored_exact_filesystem_binding_rejects_retarget_and_rebinding(tmp_path_factory):
+    for change in ["alias", "request", "session", "owner"]:
+        tmp_path = tmp_path_factory.mktemp("case")
+        (tmp_path / "a").write_text("a")
+        (tmp_path / "b").write_text("b")
+        (tmp_path / "alias").symlink_to(tmp_path / "a")
+        snapshot = authority(tmp_path, "read_file").to_dict()
+        snapshot["version"] = 1
+        restored = RequestAuthority.from_dict(snapshot)
+        exact, security = approval(restored, "read_file", "alias")
+        if change == "alias":
+            (tmp_path / "alias").unlink()
+            (tmp_path / "alias").symlink_to(tmp_path / "b")
+        else:
+            restored = replace(restored, **{"request": {"request_id": "other"},
+                "session": {"session_id": "other"}, "owner": {"owner": "bob"}}[change])
+        _, result = await dispatch(restored, "read_file", "alias", exact_approval=exact, security_context=security)
+        assert result["exit_code"] == 1
+        assert exact.matches(owner="alice", session_id="s", workspace=str(tmp_path), tool_name="read_file", content="alias")
 
 
 async def test_resumed_child_approval_cannot_renew_replaced_parent_root(tmp_path):
@@ -707,16 +721,17 @@ async def test_resumed_child_approval_cannot_renew_replaced_parent_root(tmp_path
     assert result["failure_kind"] == "resource_identity_denied" and not exact._claimed
 
 
-@pytest.mark.parametrize("request_text,denied", [
-    ("Transcribe /workspace/audio.wav", "read_file"),
-    ("OCR extract exact text from /workspace/image.png", "write_file"),
-    ("List my tasks", "read_file"),
-])
-async def test_resource_identity_never_expands_narrow_request_classes(tmp_path, request_text, denied):
-    (tmp_path / "a").write_text("a")
-    grant = create_request_authority(request_text, owner="alice", session_id="s", workspace=str(tmp_path))
-    _, result = await dispatch(grant, denied, "a" if denied == "read_file" else "a\nx")
-    assert result["failure_kind"] == "request_authority_denied"
+async def test_resource_identity_never_expands_narrow_request_classes(tmp_path_factory):
+    for request_text, denied in [
+        ("Transcribe /workspace/audio.wav", "read_file"),
+        ("OCR extract exact text from /workspace/image.png", "write_file"),
+        ("List my tasks", "read_file"),
+    ]:
+        tmp_path = tmp_path_factory.mktemp("case")
+        (tmp_path / "a").write_text("a")
+        grant = create_request_authority(request_text, owner="alice", session_id="s", workspace=str(tmp_path))
+        _, result = await dispatch(grant, denied, "a" if denied == "read_file" else "a\nx")
+        assert result["failure_kind"] == "request_authority_denied"
 
 
 def test_nonfilesystem_identities_are_inert_and_distinguish_producers_from_pages():

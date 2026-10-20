@@ -631,6 +631,7 @@ def test_remaining_durable_writers_reserve_before_commit(monkeypatch):
     import core.database as database
     import core.session_manager as session_manager_module
     import src.database as legacy_database
+    from core.exceptions import InvalidFileUploadError
     from core.models import ChatMessage
     from core.session_manager import SessionManager
     from src import tool_utils
@@ -680,14 +681,15 @@ def test_remaining_durable_writers_reserve_before_commit(monkeypatch):
 
         manager = SessionManager()
         manager.upload_handler = handler
-        manager._persist_message(
-            "writer-session",
-            ChatMessage(
-                "user",
-                "attachment",
-                metadata={"attachments": [{"id": upload_id}]},
-            ),
-        )
+        with pytest.raises(InvalidFileUploadError):
+            manager._persist_message(
+                "writer-session",
+                ChatMessage(
+                    "user",
+                    "attachment",
+                    metadata={"attachments": [{"id": upload_id}]},
+                ),
+            )
 
         document_result = asyncio.run(EditDocumentTool().execute(
             "<<<FIND>>>\n\n<<<REPLACE>>>\n"
@@ -741,9 +743,9 @@ def test_remaining_durable_writers_reserve_before_commit(monkeypatch):
 
 def test_note_calendar_and_document_routes_reserve_before_database_writes(monkeypatch):
     from routes.calendar_routes import EventCreate, setup_calendar_routes
-    from routes import document_routes
-    from routes.document_helpers import DocumentCreate
-    from routes.note_routes import NoteCreate, setup_note_routes
+    from routes.document import document_routes
+    from routes.document.document_helpers import DocumentCreate
+    from routes.note.note_routes import NoteCreate, setup_note_routes
     from src import auth_helpers
 
     upload_id = "d" * 32 + ".png"

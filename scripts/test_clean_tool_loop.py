@@ -29,8 +29,8 @@ if (CONTRACT_SOURCE / 'eval_alltools_unseen_compare.py').is_file():
         if str(CONTRACT_SOURCE) in sys.path:
             sys.path.remove(str(CONTRACT_SOURCE))
 else:
-    from src.clean_agent_preview import contract_builder
-    tools_for_mode = contract_builder()
+    def tools_for_mode(tools, mode):
+        return copy.deepcopy(tools)
 
 FAMILIES = tuple(FAMILY_TOOLS)[:10]
 TRAINED_NAMES = set().union(*(FAMILY_TOOLS[f] for f in FAMILIES))

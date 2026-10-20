@@ -1,35 +1,7 @@
 """Toolbar controls follow a predictable writing workflow."""
 
-import json
-import subprocess
-from pathlib import Path
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source
-
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-
-
-def test_toolbar_groups_define_writing_actions_before_view_controls():
-    ordering = DOC_JS.split("const _DOCUMENT_TOOLBAR_GROUPS", 1)[1].split(
-        "function _orderDocumentToolbar", 1
-    )[0]
-
-    assert ordering.index("name: 'type'") < ordering.index("name: 'inline-basic'")
-    assert ordering.index("name: 'inline-basic'") < ordering.index("name: 'inline-color'")
-    assert ordering.index("name: 'inline-color'") < ordering.index("name: 'alignment'")
-    assert ordering.index("name: 'alignment'") < ordering.index("name: 'spacing'")
-    assert ordering.index("'[data-md=\"link\"]'") < ordering.index("name: 'alignment'")
-    assert ordering.index("name: 'spacing'") < ordering.index("name: 'paragraph'")
-    assert ordering.index("name: 'paragraph'") < ordering.index("name: 'insert'")
-    assert ordering.index("name: 'insert'") < ordering.index("name: 'document'")
-    assert ordering.index("name: 'document'") < ordering.index("name: 'view'")
-    assert ordering.index("'[data-dd=\"heading\"]'") < ordering.index("'[data-md=\"bold\"]'")
-    assert ordering.index("'#doc-fontsize-btn'") < ordering.index("'[data-dd=\"heading\"]'")
-    assert ordering.index("'#doc-fontsize-btn'") < ordering.index("'#doc-find-toolbar-btn'")
-    assert "_orderDocumentToolbar(itemsWrap);" in DOC_JS
-    assert 'title="Editor display size" aria-label="Editor display size"' in DOC_JS
+from tests.helpers.node import run_node_module
 
 
 def test_rich_toolbar_rendered_order_is_stable_on_desktop_and_mobile():
@@ -82,15 +54,7 @@ def test_rich_toolbar_rendered_order_is_stable_on_desktop_and_mobile():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
 
     expected_groups = [
         "display-size", "type", "inline-basic", "inline-color", "alignment", "spacing",

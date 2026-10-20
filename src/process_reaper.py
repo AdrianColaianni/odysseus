@@ -1,33 +1,9 @@
 """Startup reconciliation for processes a previous run left behind.
 
-Two stores in this tree outlive the process that wrote them, on purpose:
-``data/containment_grants.json`` so a restart can reap rather than orphan, and
-``data/bg_jobs.json`` so a restart never loses a detached job or its result.
-Until now nothing read either of them at startup. A crashed or restarted server
-therefore left every grant permanently "active" and every background job
-permanently "running", and the first thing to touch one of those records was a
-teardown aimed at a pid that had been reassigned in the meantime.
-
-This module runs once, during startup, before anything of this run exists. That
-timing is what makes its rules safe: every record it sees was written by an
-earlier run, so "I cannot identify this process" is information about a previous
-run's child and not about one of ours.
-
-The two stores get **opposite** treatment, which is the whole reason this is a
-module and not a loop:
-
-* A **containment grant** is tied to a tool call that no longer has a caller.
-  A live process under an abandoned grant is by definition an orphan, so it is
-  torn down.
-* A **background job** is detached deliberately and is documented to survive a
-  uvicorn restart. Killing one here would break the feature, so its record is
-  only corrected, never reaped. What gets fixed is identity: a job whose pid now
-  belongs to someone else is retired so that nothing later signals the stranger.
-
-Fail closed in both: a signal requires a positive identity from
-:mod:`src.process_ownership`, and every other verdict is recorded rather than
-acted on. Containment that cannot identify its target is not containment, and
-the honest failure is a visible orphan rather than a dead bystander.
+Runs once at startup, so every record it sees belongs to an earlier run.
+Containment grants are torn down (their tool call has no caller left);
+background jobs survive restarts by design, so only their records are
+corrected. A signal requires a positive identity from src.process_ownership.
 """
 
 from __future__ import annotations

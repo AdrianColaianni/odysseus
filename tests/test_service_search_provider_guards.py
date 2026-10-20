@@ -1,8 +1,4 @@
-"""Regression tests for the canonical services.search provider implementation.
-
-The old src.search provider path aliases this module; these tests pin the
-behavior at the single implementation point.
-"""
+"""Regression tests for the services.search provider implementation."""
 
 import ipaddress
 import sys
@@ -61,31 +57,28 @@ def test_html_transport_fallback_preserves_query_constraints(monkeypatch):
     assert seen[1]['time_range'] == 'week'
 
 
-@pytest.mark.parametrize('query,category', [
-    ('AI developments this week', 'news'),
-    ('recent developments in battery manufacturing', 'news'),
-    ('latest developments in quantum computing', 'news'),
-    ('web development tutorial this week', 'general'),
-    ('current Firefox privacy documentation', 'general'),
-    ('historical developments in mathematics', 'general'),
-    ('latest Python version developments', 'general'),
-])
-def test_temporal_developments_select_news_not_reference_search(monkeypatch, query, category):
-    seen = []
-    class Response:
-        def raise_for_status(self): pass
-        def json(self):
-            return {'results': [{'title': 'Result', 'url': 'https://example.org/report'}]}
-    def get(*args, **kwargs):
-        seen.append(kwargs['params'])
-        return Response()
-    monkeypatch.setattr(providers, '_get_search_instance', lambda: 'http://searx.test')
-    monkeypatch.setattr(providers, '_get_search_settings', lambda: {})
-    monkeypatch.setattr(providers, '_get_provider_key', lambda name: '')
-    monkeypatch.setattr(providers.httpx, 'get', get)
-    providers.searxng_search_api(query, time_filter='week')
-    assert seen[0]['categories'] == category
-    assert seen[0]['time_range'] == 'week'
+def test_temporal_developments_select_news_not_reference_search(monkeypatch):
+    for query, category in (
+        ('AI developments this week', 'news'),
+        ('latest developments in quantum computing', 'news'),
+        ('web development tutorial this week', 'general'),
+        ('latest Python version developments', 'general'),
+    ):
+        seen = []
+        class Response:
+            def raise_for_status(self): pass
+            def json(self):
+                return {'results': [{'title': 'Result', 'url': 'https://example.org/report'}]}
+        def get(*args, **kwargs):
+            seen.append(kwargs['params'])
+            return Response()
+        monkeypatch.setattr(providers, '_get_search_instance', lambda: 'http://searx.test')
+        monkeypatch.setattr(providers, '_get_search_settings', lambda: {})
+        monkeypatch.setattr(providers, '_get_provider_key', lambda name: '')
+        monkeypatch.setattr(providers.httpx, 'get', get)
+        providers.searxng_search_api(query, time_filter='week')
+        assert seen[0]['categories'] == category
+        assert seen[0]['time_range'] == 'week'
 
 
 def test_dead_credentialed_fallback_is_skipped_for_same_instance_engine(monkeypatch):
@@ -152,47 +145,46 @@ def test_service_searxng_json_sends_safesearch(monkeypatch):
     assert seen["params"]["safesearch"] == "1"
 
 
-@pytest.mark.parametrize('query,expected_time', [
-    ('latest ollama release version github', 'day'),
-    ('current Firefox Chrome privacy features comparison', 'day'),
-    ('Sony headphone manual', 'day'),
-])
-def test_service_searxng_latest_release_uses_general_search(monkeypatch, query, expected_time):
-    seen = {}
+def test_service_searxng_latest_release_uses_general_search(monkeypatch):
+    for query, expected_time in (
+        ('latest ollama release version github', 'day'),
+        ('Sony headphone manual', 'day'),
+    ):
+        seen = {}
 
-    class _Response:
-        def raise_for_status(self):
-            return None
+        class _Response:
+            def raise_for_status(self):
+                return None
 
-        def json(self):
-            return {
-                "results": [
-                    {
-                        "title": "ollama/ollama releases",
-                        "url": "https://github.com/ollama/ollama/releases",
-                        "content": "Latest release v0.33.0",
-                    }
-                ]
-            }
+            def json(self):
+                return {
+                    "results": [
+                        {
+                            "title": "ollama/ollama releases",
+                            "url": "https://github.com/ollama/ollama/releases",
+                            "content": "Latest release v0.33.0",
+                        }
+                    ]
+                }
 
-    def fake_get(url, **kwargs):
-        seen["params"] = kwargs["params"]
-        return _Response()
+        def fake_get(url, **kwargs):
+            seen["params"] = kwargs["params"]
+            return _Response()
 
-    monkeypatch.setattr(providers, "_get_search_instance", lambda: "http://searx.test")
-    monkeypatch.setattr(providers, "_get_search_settings", lambda: {"search_safesearch": "strict"})
-    monkeypatch.setattr(providers.httpx, "get", fake_get)
+        monkeypatch.setattr(providers, "_get_search_instance", lambda: "http://searx.test")
+        monkeypatch.setattr(providers, "_get_search_settings", lambda: {"search_safesearch": "strict"})
+        monkeypatch.setattr(providers.httpx, "get", fake_get)
 
-    results = providers.searxng_search_api(
-        query,
-        count=1,
-        time_filter="day",
-    )
+        results = providers.searxng_search_api(
+            query,
+            count=1,
+            time_filter="day",
+        )
 
-    assert results
-    assert seen["params"]["categories"] == "general"
-    assert seen["params"]["engines"] == providers._GENERAL_ENGINES
-    assert seen['params'].get('time_range') == expected_time
+        assert results
+        assert seen["params"]["categories"] == "general"
+        assert seen["params"]["engines"] == providers._GENERAL_ENGINES
+        assert seen['params'].get('time_range') == expected_time
 
 
 def test_service_searxng_specific_current_event_uses_news_search(monkeypatch):

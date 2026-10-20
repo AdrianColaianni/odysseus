@@ -11,10 +11,10 @@ import logging
 import uuid
 from typing import Any, Dict, Optional
 
-from fastapi import HTTPException, Request, Response
+from fastapi import HTTPException, Request, Response, Depends
+from sqlalchemy.orm import Session
 
-from core.database import ModelEndpoint, ProviderAuthSession, SessionLocal, utcnow_naive
-from core.middleware import require_admin
+from core.database import ModelEndpoint, ProviderAuthSession, SessionLocal, utcnow_naive, get_db
 from routes.device_flow import (
     DeviceFlowPoll,
     DeviceFlowStart,
@@ -364,7 +364,6 @@ def _poll_device_flow(request: Request, pending: Dict) -> DeviceFlowPoll:
     return DeviceFlowPoll.pending("unknown")
 
 
-# ── Account listing / usage ─────────────────────────────────────────────────
 
 def _account_summary(auth, endpoints) -> Dict[str, Any]:
     ep = endpoints[0] if endpoints else None
@@ -391,8 +390,7 @@ def usage_error_payload(exc: chatgpt_subscription.ChatGPTUsageUnavailable) -> Di
 
 
 def _load_owned_account(request: Request, auth_id: str):
-    """Admin gate + owner scope for account-level operations."""
-    require_admin(request)
+    """Owner scope for account-level operations."""
     owner = effective_user(request) or get_current_user(request) or None
     db = SessionLocal()
     try:
@@ -415,17 +413,12 @@ def setup_chatgpt_subscription_routes():
     )
 
     @router.get("/accounts")
-    def list_accounts(request: Request):
-        require_admin(request)
+    def list_accounts(request: Request, db: Session = Depends(get_db)):
         owner = effective_user(request) or get_current_user(request) or None
-        db = SessionLocal()
-        try:
-            return [
-                _account_summary(auth, _endpoints_for_auth(db, auth.id))
-                for auth in _owner_chatgpt_auths(db, owner)
-            ]
-        finally:
-            db.close()
+        return [
+            _account_summary(auth, _endpoints_for_auth(db, auth.id))
+            for auth in _owner_chatgpt_auths(db, owner)
+        ]
 
     @router.get("/accounts/{auth_id}/usage")
     def account_usage(auth_id: str, request: Request, refresh: bool = False, response: Response = None):

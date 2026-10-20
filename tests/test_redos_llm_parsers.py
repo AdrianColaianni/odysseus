@@ -18,7 +18,6 @@ the margin is ~100x.
 
 import time
 
-import pytest
 
 import src.agent_tools  # noqa: F401  (break agent_tools<->tool_parsing import cycle)
 from src.text_helpers import normalize_thinking_markup, strip_think

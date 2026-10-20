@@ -1,11 +1,7 @@
-"""Helpers for the optional markitdown document-extraction dependency.
+"""Helpers for the optional markitdown dependency (Office/EPUB to Markdown).
 
-markitdown (MIT, Microsoft) converts Office/EPUB documents to Markdown, which is
-more token-efficient and model-legible than a raw text dump. It is **optional**:
-install with `pip install -r requirements-optional.txt`. When absent, callers
-degrade gracefully (chat shows a hint; the RAG indexer skips the file) — the MIT
-core never hard-depends on it. Mirrors the optional-dependency pattern in
-`src/pdf_runtime.py`.
+Installed from requirements-optional.txt; when absent, callers degrade
+(chat shows a hint, the RAG indexer skips the file).
 """
 
 import logging

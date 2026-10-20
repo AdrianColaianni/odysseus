@@ -1,4 +1,3 @@
-# routes/personal_routes.py
 """Routes for personal documents management."""
 import asyncio
 import os
@@ -17,14 +16,12 @@ from src.path_confinement import confine
 from src.upload_handler import secure_filename
 from src.upload_limits import PERSONAL_UPLOAD_MAX_BYTES
 
-UPLOADS_DIR = PERSONAL_UPLOADS_DIR
-
 logger = logging.getLogger(__name__)
 
 def _personal_upload_dir_for_owner(owner: str | None, *, create: bool = True) -> str:
     """Return the per-owner upload directory used for direct RAG uploads."""
     owner_segment = secure_filename((owner or "local").strip())[:80] or "local"
-    upload_dir = confine(UPLOADS_DIR, owner_segment, allow_root=False)
+    upload_dir = confine(PERSONAL_UPLOADS_DIR, owner_segment, allow_root=False)
     if create:
         os.makedirs(upload_dir, exist_ok=True)
     return upload_dir

@@ -15,38 +15,13 @@ progress. Pure function → executed under node here (cookbookRunning.js pulls i
 browser-only modules and can't load).
 """
 
-import json
-import shutil
-import subprocess
 import textwrap
-from pathlib import Path
 
-import pytest
-
-_REPO = Path(__file__).resolve().parent.parent
-_HAS_NODE = shutil.which("node") is not None
+from tests.helpers.node import run_node_module
 
 
-@pytest.fixture(scope="module")
-def node_available():
-    if not _HAS_NODE:
-        pytest.skip("node binary not on PATH")
 
-
-def _run_node(script: str) -> dict:
-    res = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=_REPO, capture_output=True, timeout=15, text=True,
-    )
-    if res.returncode != 0:
-        raise AssertionError(f"node failed:\n{res.stderr}")
-    out = [ln for ln in res.stdout.splitlines() if ln.strip()]
-    if not out:
-        raise AssertionError("node produced no stdout")
-    return json.loads(out[-1])
-
-
-def test_download_phase_uses_byte_counter_and_ignores_animated_tail(node_available):
+def test_download_phase_uses_byte_counter_and_ignores_animated_tail():
     """During a download the byte counter is the signal; a stuck download whose
     only the ETA/spinner keeps animating must yield the SAME signal (so a real
     download stall is still detected)."""
@@ -59,13 +34,13 @@ def test_download_phase_uses_byte_counter_and_ignores_animated_tail(node_availab
         const c = computeProgressSignal('2.10G', null, '84', 'Downloading 84%| 2.10G/2.49G');
         console.log(JSON.stringify({ a, b, stuck_same: a === b, climbed_diff: a !== c }));
     """)
-    out = _run_node(script)
+    out = run_node_module(script)
     assert out["a"] == "1.81G"
     assert out["stuck_same"] is True, "a stuck download (only ETA animating) must stay the same signal"
     assert out["climbed_diff"] is True, "climbing bytes must change the signal"
 
 
-def test_build_phase_progresses_on_new_output(node_available):
+def test_build_phase_progresses_on_new_output():
     """The #1568 case: no byte counter (pip resolve / CUDA build). New build
     output must change the signal so it isn't falsely declared stale — whereas a
     byte-only signal would read '0' for both and trip the stall timer."""
@@ -80,6 +55,6 @@ def test_build_phase_progresses_on_new_output(node_available):
           true_hang_stays: hung1 === hung2,
         }));
     """)
-    out = _run_node(script)
+    out = run_node_module(script)
     assert out["build_progresses"] is True, "new build output must count as progress (#1568)"
     assert out["true_hang_stays"] is True, "a genuinely frozen tail must still read as stalled"

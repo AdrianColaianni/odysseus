@@ -11,36 +11,27 @@
 
 // ── Submodule imports ──
 import state from './state.js';
-import { EVAL_PROMPTS, WAVE_FRAMES,
-  ICON_DICE, ICON_EXPAND, ICON_COLLAPSE, ICON_CLOSE,
-  ICON_REROLL, ICON_COPY, ICON_PLAY, ICON_CODE,
-  ICON_PARALLEL, ICON_SEQUENTIAL,
-  EYE_OPEN, EYE_CLOSED, SAVE_ICON, CHAT_ICON,
-  SEND_SVG, VOTES_STORAGE_KEY,
-} from './icons.js?v=20260908compareprompts1';
+import { EVAL_PROMPTS, ICON_DICE, ICON_EXPAND, ICON_REROLL, ICON_COPY, ICON_PLAY, SEND_SVG } from './icons.js?v=20260908compareprompts1';
 import { fetchModels, _persistSelections, _modelDisplayNames, getExcludedModels, setExcludedModels } from './models.js';
-import { showModelSelector, disableToolToggles, restoreToolToggles, _syncToolbarIndicator } from './selector.js?v=20260903compareprobe4';
-import { _checkUnprobed, _clearProbeWaves } from './probe.js';
-import { streamToPane, _renderSearchResults, _runSynthForPane, _formatMs, registerStreamActions } from './stream.js?v=20260908panestatspopup2';
+import { showModelSelector, disableToolToggles, _syncToolbarIndicator } from './selector.js?v=20260903compareprobe4';
+import { _checkUnprobed } from './probe.js';
+import { streamToPane, _renderSearchResults, _runSynthForPane, registerStreamActions } from './stream.js?v=20260908panestatspopup2';
 import {
   stopAll, stopPane, rerollPane, shufflePanePositions, resetCompare,
   _addPane, _removePane, toggleExpandPane, togglePanePreview, copyPaneResponse,
-  _showModelSwapDropdown, _createAndAppendPane, _autoPreviewHtml,
+  _showModelSwapDropdown, _autoPreviewHtml,
   mountMobilePaneTabs, syncShuffleButtonPlacement,
   paneSettingsButtonHtml, togglePaneSettings,
   registerPaneActions,
 } from './panes.js?v=20260908compareheader1';
-import { handleVote, buildVoteBar, addFinishBadge, spawnConfetti, _saveVote, registerCompareActions } from './vote.js?v=20260828resendcaldrag1';
+import { handleVote, buildVoteBar, registerCompareActions } from './vote.js?v=20260828resendcaldrag1';
 import { showScoreboard } from './scoreboard.js?v=20260909voteconfirmalign1';
 
 // ── External dependency imports ──
 import Storage from '../storage.js';
 import uiModule from '../ui.js?v=20260916largetoolscroll1';
-import sessionModule from '../sessions.js';
 import spinnerModule from '../spinner.js';
 import themeModule from '../theme.js?v=20260911organsrain1';
-import presetsModule from '../presets.js?v=20260908personaname1';
-import markdownModule from '../markdown.js';
 import { bindMenuDismiss } from '../escMenuStack.js';
 
 var escapeHtml = uiModule.esc;
@@ -1260,13 +1251,12 @@ function _exportPrint() {
   const w = window.open('', '_blank');
   if (!w) return;
   try { w.opener = null; } catch (_) {}
-  const escape = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const html = '<!doctype html><meta charset="utf-8"><title>Compare export</title>' +
     '<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:780px;margin:32px auto;padding:0 24px;line-height:1.55;color:#222}' +
     'pre{background:#f5f5f5;border-radius:6px;padding:10px;white-space:pre-wrap}' +
     'h1{margin-top:0}h2{border-bottom:1px solid #ddd;padding-bottom:4px;margin-top:32px}' +
     'hr{border:none;border-top:1px solid #ccc;margin:24px 0}' +
-    '</style><body><pre style="background:none;padding:0">' + escape(md) + '</pre>' +
+    '</style><body><pre style="background:none;padding:0">' + escapeHtml(md) + '</pre>' +
     '<script>window.onload=()=>setTimeout(()=>window.print(),100)<\/script>';
   w.document.write(html);
   w.document.close();

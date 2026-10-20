@@ -1,32 +1,15 @@
-/* Document library and editor, image gallery, image editor.
- *
- * This is an eagerly loaded tail segment of the app stylesheet cascade. The
- * former static/style.css now lives in the numbered 00-17 fragments; these
- * three pre-existing panel files follow those fragments without changing
- * their relative order. Nothing here is lazy-loaded.
- *
- * LOAD ORDER IS PART OF THE CONTRACT. static/index.html and the PRECACHE list
- * in static/sw.js must agree:
- *   1. static/css/00-tokens.css through static/css/17-research.css,
- *      in numeric order
- *   2. static/css/documents-gallery-editor.css
- *   3. static/css/email-calendar-notes-tasks.css
- *   4. static/css/cookbook-research-memory-settings.css
- *
- * Rules in this file retain their existing cascade position. Shared rules
- * formerly kept in static/style.css now live in the numbered fragments.
- */
+/* Document library and editor, image gallery, image editor. */
 
 /* Document library search-term highlight — clear, high-contrast. */
 mark.doclib-search-hl {
-      background: var(--accent, #e8a830);
+      background: #e8a830;
       color: var(--bg, #1a1a1a);
       border-radius: 2px;
       padding: 0 2px;
       font-weight: 600;
     }
-/* Research bulk bar — right-align the action buttons (keep All + count on
-   the left). Cancel now lives on the Select toggle, so Archive anchors. */
+/* Research bulk bar: right-align the action buttons, All + count on the
+   left. Cancel lives on the Select toggle, so Archive anchors. */
 #doclib-research-bulk #doclib-research-bulk-archive {
   margin-left: auto;
 }
@@ -41,20 +24,6 @@ mark.doclib-search-hl {
   pointer-events: none;
 }
 .doc-divider:hover .doc-divider-collapse { opacity: 0.92; }
-/* Smooth entrance — slide in from the left + fade up so it doesn't snap into
-   place when fullscreen activates. The chevron's vertical centering uses
-   translateY(-50%), so the animation has to keep that part. */
-@keyframes doc-fs-chevron-in {
-  from { opacity: 0; transform: translateY(-50%) translateX(-18px); }
-  to   { opacity: 0.85; transform: translateY(-50%) translateX(0); }
-}
-.doc-editor-pane.doc-pane-leaving {
-  pointer-events: none;
-}
-@keyframes doc-pane-leave {
-  from { transform: translateX(0);    opacity: 1; }
-  to   { transform: translateX(24px); opacity: 0; }
-}
 .doc-tab-scroll.is-at-left {
   -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 18px), transparent 100%);
           mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 18px), transparent 100%);
@@ -77,9 +46,8 @@ mark.doclib-search-hl {
    italic so it reads as a placeholder, and non-interactive so clicking it
    can't hit the tab handlers (it has no data-doc-id). */
 .doc-tab.doc-tab-ghost {
-  /* New, not-yet-saved doc tab. It already carries .active, so it shows the
-     accent underline like any active tab — that's all we want. The old dashed
-     border + italic/dim "pending" styling looked weird, so they're gone. */
+  /* New, not-yet-saved doc tab: it carries .active, so the accent
+     underline is its only marker. */
   pointer-events: none;
 }
 .doc-tab.active::after {
@@ -150,7 +118,7 @@ mark.doclib-search-hl {
   animation: doc-outline-target-flash 1.05s ease-out;
 }
 @keyframes doc-outline-target-flash {
-  0%, 28% { background-color: color-mix(in srgb, var(--accent, var(--red)) 24%, transparent); }
+  0%, 28% { background-color: color-mix(in srgb, var(--red) 24%, transparent); }
   100% { background-color: transparent; }
 }
 .doc-rich-slash-count {
@@ -216,7 +184,6 @@ mark.doc-find-mark {
   0%, 100% { opacity: 0.3; transform: scale(0.8); }
   50% { opacity: 1; transform: scale(1.2); }
 }
-.doc-diff-content { }
 @media (hover: none) {
   .doc-preview-hover-edit {
     opacity: 1;
@@ -372,7 +339,7 @@ mark.doc-find-mark {
   margin-top: 0;
 }
 .gallery-editor-draft-card.selected {
-  outline: 2px solid var(--accent, var(--red));
+  outline: 2px solid var(--red);
   outline-offset: -2px;
 }
 .gallery-editor-draft-card.select-mode { cursor: pointer; }
@@ -396,7 +363,7 @@ mark.doc-find-mark {
 }
 .gallery-editor-drafts-grid.list-view .gallery-editor-draft-delete-x { display: none; }
 .gallery-editor-draft-card:focus-visible {
-  outline: 2px solid var(--accent, var(--red));
+  outline: 2px solid var(--red);
   outline-offset: 2px;
 }
 .gallery-editor-draft-card:hover .gallery-editor-draft-delete { opacity: 1; }
@@ -480,10 +447,7 @@ mark.doc-find-mark {
   border: 2px solid color-mix(in srgb, #fff 42%, transparent);
   border-top-color: #fff;
   border-radius: 50%;
-  animation: ge-ai-command-spin 0.7s linear infinite;
-}
-@keyframes ge-ai-command-spin {
-  to { transform: rotate(360deg); }
+  animation: spin 0.7s linear infinite;
 }
 .ge-ai-command-suggestions[hidden] {
   display: none;
@@ -517,11 +481,11 @@ mark.doc-find-mark {
   font-size: 10px;
   font-weight: 600;
   padding: 2px 6px;
-  border: 1px solid color-mix(in srgb, var(--accent, #cc6a3a) 55%, transparent);
+  border: 1px solid color-mix(in srgb, #cc6a3a 55%, transparent);
   border-bottom-width: 2px;
   border-radius: 4px;
-  background: color-mix(in srgb, var(--accent, #cc6a3a) 14%, transparent);
-  color: var(--accent, #cc6a3a);
+  background: color-mix(in srgb, #cc6a3a 14%, transparent);
+  color: #cc6a3a;
   min-width: 18px;
   line-height: 1.4;
 }
@@ -638,7 +602,6 @@ mark.doc-find-mark {
 .ge-adj-popup .ge-adj-head:active { cursor: grabbing; }
 .ge-fx-dock-label { overflow: hidden; text-overflow: ellipsis; }
 .ge-history-head:active { cursor: grabbing; }
-@keyframes ge-canvas-spin { to { transform: rotate(360deg); } }
 .ge-inline-swatch::-webkit-color-swatch-wrapper { padding: 0; }
 .ge-inline-swatch::-webkit-color-swatch { border: none; border-radius: 2px; }
 .ge-inline-swatch::-moz-color-swatch { border: none; border-radius: 2px; }
@@ -909,9 +872,8 @@ body.doc-find-active mark.doc-find-mark.current {
 .doc-save-button[data-save-state="saved"] .doc-save-state-saved,
 .doc-save-button[data-save-state="error"] .doc-save-state-error { display: block; }
 .doc-save-button[data-save-state="saving"] .doc-save-state-saving {
-  animation: doc-save-spin 800ms linear infinite;
+  animation: spin 800ms linear infinite;
 }
-@keyframes doc-save-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   .doc-save-button[data-save-state="saving"] .doc-save-state-saving { animation: none; }
 }
@@ -956,13 +918,12 @@ body.doc-find-active mark.doc-find-mark.current {
   text-align: center;
   overflow-wrap: anywhere;
 }
-.doc-email-richbody a { color: var(--accent, #4af); }
+.doc-email-richbody a { color: #4af; }
 .doc-email-richbody blockquote {
   margin: 6px 0; padding-left: 10px;
   border-left: 3px solid var(--border); opacity: 0.8;
 }
 .doc-email-richbody p { margin: 0.5em 0; }
-#doc-email-more-btn svg { opacity: 0.8; }
 @media (min-width: 769px) {
   #doc-email-header #doc-email-collapse-btn.doc-email-collapse-btn {
     display: none !important;
@@ -975,6 +936,6 @@ body.doc-find-active mark.doc-find-mark.current {
   width: 14px;
   height: 14px;
   margin-right: 6px;
-  color: var(--accent, var(--red));
+  color: var(--red);
   vertical-align: -2px;
 }

@@ -68,7 +68,10 @@ class FakeSkillsManager:
 
 def _make_client(skills_mgr, monkeypatch):
     # Bypass the admin gate and read the importer straight off request.state.
-    monkeypatch.setattr(backup_routes, "require_admin", lambda *a, **k: None)
+    def _allow(request: Request):
+        return None
+
+    monkeypatch.setattr(backup_routes, "require_admin", _allow)
     monkeypatch.setattr(backup_routes, "get_current_user",
                         lambda req: getattr(req.state, "user", None))
     app = FastAPI()

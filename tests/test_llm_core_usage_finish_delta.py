@@ -9,7 +9,6 @@ stream_llm only captured usage when the delta was exactly None / {} /
 import asyncio
 import json
 
-import pytest
 
 from src import llm_core
 
@@ -154,26 +153,16 @@ def test_explicit_zero_token_usage_is_preserved(monkeypatch):
     assert usage == [{"input_tokens": 0, "output_tokens": 0}]
 
 
-@pytest.mark.parametrize(
-    "usage_payload",
-    [
-        {"prompt_tokens": None, "completion_tokens": 1},
-        {"prompt_tokens": "bad", "completion_tokens": 1},
-        {"prompt_tokens": -1, "completion_tokens": 1},
-        {"prompt_tokens": True, "completion_tokens": 1},
-        {"prompt_tokens": 1.5, "completion_tokens": 1},
-        {"prompt_tokens": float("inf"), "completion_tokens": 1},
-    ],
-)
-def test_malformed_token_values_do_not_emit_usage(monkeypatch, usage_payload):
-    lines = [
-        'data: ' + json.dumps({"choices": [{"delta": {"content": "Hi"}}]}),
-        'data: ' + json.dumps({"choices": [], "usage": usage_payload}),
-        'data: [DONE]',
-    ]
-    result = _drive(monkeypatch, lines)
-    assert "Hi" in result
-    assert _usage_events(result) == []
+def test_malformed_token_values_do_not_emit_usage(monkeypatch):
+    for prompt_tokens in (None, "bad", -1, True, float("inf")):
+        lines = [
+            'data: ' + json.dumps({"choices": [{"delta": {"content": "Hi"}}]}),
+            'data: ' + json.dumps({"choices": [], "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": 1}}),
+            'data: [DONE]',
+        ]
+        result = _drive(monkeypatch, lines)
+        assert "Hi" in result
+        assert _usage_events(result) == [], prompt_tokens
 
 
 def test_missing_usage_counterpart_defaults_to_zero(monkeypatch):

@@ -3,43 +3,16 @@ from src.tool_parsing import parse_tool_blocks, strip_tool_blocks
 
 
 def test_plain_ui_control_open_panel_is_rescued_even_when_fences_skipped():
-    blocks = parse_tool_blocks("ui_control open_panel notes", skip_fenced=True)
+    for text, content in [
+        ("ui_control open_panel notes", "open_panel notes"),
+        ("``ui_control open_panel cookbook```", "open_panel cookbook"),
+        ("ui_control open_panel calendar month view", "open_panel calendar month view"),
+    ]:
+        blocks = parse_tool_blocks(text, skip_fenced=True)
 
-    assert len(blocks) == 1
-    assert blocks[0].tool_type == "ui_control"
-    assert blocks[0].content == "open_panel notes"
-
-
-def test_plain_ui_control_open_panel_rescues_backticked_line():
-    blocks = parse_tool_blocks("``ui_control open_panel cookbook```", skip_fenced=True)
-
-    assert len(blocks) == 1
-    assert blocks[0].tool_type == "ui_control"
-    assert blocks[0].content == "open_panel cookbook"
-
-
-def test_plain_ui_control_open_panel_rescues_calendar():
-    blocks = parse_tool_blocks("ui_control open_panel calendar", skip_fenced=True)
-
-    assert len(blocks) == 1
-    assert blocks[0].tool_type == "ui_control"
-    assert blocks[0].content == "open_panel calendar"
-
-
-def test_plain_ui_control_open_panel_preserves_calendar_month_view():
-    blocks = parse_tool_blocks("ui_control open_panel calendar month view", skip_fenced=True)
-
-    assert len(blocks) == 1
-    assert blocks[0].tool_type == "ui_control"
-    assert blocks[0].content == "open_panel calendar month view"
-
-
-def test_plain_ui_control_open_panel_rescues_theme_alias():
-    blocks = parse_tool_blocks("ui_control open_panel theme", skip_fenced=True)
-
-    assert len(blocks) == 1
-    assert blocks[0].tool_type == "ui_control"
-    assert blocks[0].content == "open_panel theme"
+        assert len(blocks) == 1, text
+        assert blocks[0].tool_type == "ui_control"
+        assert blocks[0].content == content
 
 
 def test_plain_ui_control_open_panel_strips_executed_line_only():

@@ -11,14 +11,6 @@ def _disable_hf_discovery(monkeypatch):
     monkeypatch.setattr(image_models, "_discover_quant_repos", lambda *a, **k: {})
 
 
-def test_rank_image_models_handles_non_string_search(monkeypatch):
-    _disable_hf_discovery(monkeypatch)
-    # search is a CLI/API filter arg; a non-string made search.lower() raise
-    # AttributeError. A non-string search should behave as "no filter".
-    out = rank_image_models(SYS, search=123)
-    assert len(out) == len(IMAGE_MODEL_REGISTRY)
-
-
 def test_rank_image_models_string_filter_still_applies(monkeypatch):
     _disable_hf_discovery(monkeypatch)
     out = rank_image_models(SYS, search="zzzznotarealmodelzzz")

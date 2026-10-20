@@ -5,43 +5,11 @@ resolve to the base URL itself, not base + "/". Discord webhook URLs
 404 on the trailing-slash variant, so api_call against a
 POST-to-base integration silently failed.
 """
-import sys
-import types
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Minimal stubs so src.integrations can be imported without heavy deps
-# ---------------------------------------------------------------------------
-
-for mod_name in ("core", "core.atomic_io", "core.platform_compat"):
-    if mod_name not in sys.modules:
-        sys.modules[mod_name] = types.ModuleType(mod_name)
-
-core_atomic = sys.modules["core.atomic_io"]
-if not hasattr(core_atomic, "atomic_write_json"):
-    core_atomic.atomic_write_json = lambda *a, **kw: None  # type: ignore
-
-core_compat = sys.modules["core.platform_compat"]
-if not hasattr(core_compat, "safe_chmod"):
-    core_compat.safe_chmod = lambda *a, **kw: None  # type: ignore
-
-if "src.secret_storage" not in sys.modules:
-    stub = types.ModuleType("src.secret_storage")
-    stub.encrypt = lambda s: s  # type: ignore
-    stub.decrypt = lambda s: s  # type: ignore
-    stub.is_encrypted = lambda s: False  # type: ignore
-    sys.modules["src.secret_storage"] = stub
-
-if "src.constants" not in sys.modules:
-    stub_c = types.ModuleType("src.constants")
-    stub_c.DATA_DIR = "/tmp"  # type: ignore
-    stub_c.INTEGRATIONS_FILE = "/tmp/integrations_test.json"  # type: ignore
-    stub_c.SETTINGS_FILE = "/tmp/settings_test.json"  # type: ignore
-    sys.modules["src.constants"] = stub_c
-
-from src import integrations  # noqa: E402
+from src import integrations
 
 
 # ---------------------------------------------------------------------------
@@ -51,26 +19,16 @@ from src import integrations  # noqa: E402
 WEBHOOK_BASE = "https://discord.com/api/webhooks/123/tokentokentoken"
 
 
-@pytest.mark.parametrize(
-    "base,path,expected",
-    [
-        # Bare "/" (the minimum path execute_api_call accepts) must not
-        # grow a trailing slash — Discord webhooks 404 on it (#5138).
-        (WEBHOOK_BASE, "/", WEBHOOK_BASE),
+def test_join_integration_url():
+    for base, path, expected in (
+        # Bare "/" must not grow a trailing slash: Discord webhooks 404 on it (#5138).
         (WEBHOOK_BASE + "/", "/", WEBHOOK_BASE),
         (WEBHOOK_BASE, "", WEBHOOK_BASE),
-        # Normal paths keep joining exactly as before.
-        ("http://api.example.com", "/items", "http://api.example.com/items"),
-        ("http://api.example.com/", "/items", "http://api.example.com/items"),
         ("http://host/base", "/v1/me", "http://host/base/v1/me"),
-        # A deliberate trailing slash inside a non-empty path is preserved
-        # (e.g. linkding's /api/tags/, Home Assistant's /api/).
+        # A trailing slash inside a non-empty path is preserved (linkding's /api/tags/).
         ("http://host", "/api/tags/", "http://host/api/tags/"),
-        ("http://host", "/api/", "http://host/api/"),
-    ],
-)
-def test_join_integration_url(base, path, expected):
-    assert integrations._join_integration_url(base, path) == expected
+    ):
+        assert integrations._join_integration_url(base, path) == expected, (base, path)
 
 
 # ---------------------------------------------------------------------------

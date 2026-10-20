@@ -1,8 +1,7 @@
 import json
-import re
-import subprocess
 import textwrap
 from pathlib import Path
+from tests.helpers.node import run_node_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,14 +58,7 @@ def run_node(body: str):
         {body}
         """
     )
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
+    return run_node_module(script)
 
 
 def test_marquee_geometry_and_shapes_are_document_bounded():
@@ -231,21 +223,3 @@ def test_selection_transform_is_affine_and_keeps_source_immutable():
     assert ["rotate", 3.141592653589793 / 2] in result["calls"]
     assert ["scale", -1, 1] in result["calls"]
     assert ["drawImage", "source-over", "mask", 10, 20, 30, 24, -22.5, -18, 45, 36] in result["calls"]
-
-
-def test_marquee_is_wired_through_editor_and_offline_graph():
-    editor = (ROOT / "static/js/galleryEditor.js").read_text(encoding="utf-8")
-    toolbar = (ROOT / "static/js/editor/build/toolbar.js").read_text(encoding="utf-8")
-    controls = (ROOT / "static/js/editor/build/controls.js").read_text(encoding="utf-8")
-    service_worker = (ROOT / "static/sw.js").read_text(encoding="utf-8")
-
-    assert "{ id: 'marquee', label: 'Marquee'" in toolbar
-    assert 'id="ge-marquee-section"' in controls
-    assert "if (state.tool === 'marquee') return _marqueeTool.begin(e);" in editor
-    assert "if (state.marqueeActive || state.selectionMoving) return _marqueeTool.drag(e);" in editor
-    assert "if (state.marqueeActive || state.selectionMoving) return _marqueeTool.end(e);" in editor
-    assert "space: state.wandMaskSpace || 'layer'" in editor
-    assert "/static/js/editor/selection-mask.js" in service_worker
-    assert "/static/js/editor/tools/marquee.js" in service_worker
-    assert 'data-selection-action="transform"' in (ROOT / "static/js/editor/build/topbar.js").read_text(encoding="utf-8")
-    assert re.search(r"const CACHE_NAME = 'odysseus-v\d+-[A-Za-z0-9_-]+';", service_worker)

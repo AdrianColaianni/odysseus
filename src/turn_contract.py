@@ -10,12 +10,13 @@ import re
 from contextlib import aclosing, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from functools import wraps
+from functools import cached_property, lru_cache, wraps
 from inspect import signature
 from types import MappingProxyType
 from typing import Iterable, Mapping
 
 from src.action_intents import classify_tool_intent
+from src.tool_capabilities import iter_history_tool_events
 from src.tool_policy import ToolPolicy
 from src.text_scanning import has_prefixed_token_match
 
@@ -42,9 +43,7 @@ FAMILY_TOOLS = {
     "ocr": frozenset({"extract_text"}),
 }
 
-# Retrieval is selection, not authorization. A normal agent turn must retain
-# this small recovery surface when no family was recognized; explicit family
-# selections and policy denials remain narrower.
+# Kept when no family is recognized; selection here never grants permission.
 CONTRACT_CORE_TOOLS = frozenset({
     "bash", "python", "read_file", "web_search", "web_fetch", "ask_user",
 })
@@ -81,6 +80,7 @@ def _mentions_workspace_output(text: str) -> bool:
 
 
 def _mentions_under_budget(text: str) -> bool:
+    # A hand walk, not a regex, so no input can backtrack (tests/test_redos_core_parsers.py).
     value = str(text or "")
     for under in re.finditer(r"\bunder", value, re.I):
         cursor = under.end()
@@ -254,14 +254,6 @@ _ORDINAL_SKILL_FOLLOWUP = re.compile(
       r")[.!?]*",
     re.I,
 )
-_PURE_ACTION_PROHIBITION = re.compile(
-    r"^\s*(?:read[- ]only(?:\s+and)?\s+)?(?:do\s+not|don['’]?t|never)\s+"
-    r"(?:add|create|make|write|draft|edit|change|update|delete|remove|send|reply|"
-    r"run|execute|download|serve|open|save|schedule|transcribe|inspect)\b"
-    r"[^.;\n]*[.!?]*\s*$",
-    re.I,
-)
-
 
 def _is_pure_action_prohibition(text: str) -> bool:
     value = str(text or "").strip()
@@ -373,9 +365,7 @@ _PERSONAL_STORE_LOOKUP = re.compile(
     r"[\s\S]{0,180}\b(?:mention|contain|match|have|include)\b",
     re.I,
 )
-# Treat "schedule" as a calendar noun only when the wording makes that
-# meaning explicit.  Keeping it out of _FAMILY_WORDS avoids conflating
-# calendar lookups with task phrases such as "scheduled tasks/jobs".
+# Not in _FAMILY_WORDS, so "scheduled tasks/jobs" stays a task phrase.
 _PERSONAL_CALENDAR_SCHEDULE = re.compile(
     r"\b(?:(?:my|our|the)\s+schedule|schedule\s+(?:for\s+)?"
     r"(?:today|tomorrow|this\s+(?:week|month)|next\s+(?:week|month)))\b",
@@ -512,23 +502,6 @@ _NON_EDITOR_WRITE_TARGET = re.compile(
     r"functions?|images?|pictures?)\b",
     re.I,
 )
-_WARM_RECALL = re.compile(
-    r"^\s*(?:(?:ok(?:ay)?|and|then)\s+)?(?:back\s+to|return\s+to|"
-    r"what\s+about|check|show|open)?\s*(?:my|the)?\s*"
-    r"(?P<target>calendar|emails?|inbox|notes?|tasks?|skills?|memories|memory|"
-    r"documents?|docs?|web|browser|cookbook|files?|shell)\s*(?:again|now)?[.!?]*\s*$",
-    re.I,
-)
-_WARM_RECALL_WITH_FOLLOWUP = re.compile(
-    r"^\s*(?:(?:ok(?:ay)?|and|then)\s+)?(?:back\s+to|return\s+to|"
-    r"what\s+about|check|show|open)\s+(?:my|the)?\s*"
-    r"(?P<target>calendar|emails?|inbox|notes?|tasks?|skills?|memories|memory|"
-    r"documents?|docs?|web|browser|cookbook|files?|shell)\b"
-    r"(?:\s*(?:[-—,:;]|\b(?:and|then)\b)\s*|\s+)"
-    r"(?P<followup>(?:what(?:['’]?s|\s+is)?|which|who|where|when|how|show|open|read|list|find|search)\b[\s\S]{0,180})$",
-    re.I,
-)
-
 _WARM_TARGET_RE = re.compile(
     r"calendar|emails?|inbox|notes?|tasks?|skills?|memories|memory|"
     r"documents?|docs?|web|browser|cookbook|files?|shell",
@@ -636,9 +609,7 @@ _REQUIRED_TOOLS = {
     "transcription": "transcribe_media", "media_inspection": "inspect_media", "ocr": "extract_text",
 }
 
-# These capabilities have no action_intents category. Match explicit actions
-# and supported media targets, not incidental image/audio words in prose.
-# Prompt edits of prior generated images are resolved separately from history.
+# No action_intents category covers these; match explicit actions on supported media targets.
 _MEDIA_REQUESTS = tuple(
     (family, re.compile(r"^\s*" + _REQUEST_PREFIX + pattern, re.I))
     for family, pattern in (
@@ -748,9 +719,7 @@ def _has_action_signal(text: str) -> bool:
     if (not tokens or len(tokens[0]) < 3
             or tokens[0] in {"how", "what", "when", "where", "which", "who", "why"}):
         return False
-    # A missing letter in a four-letter verb is common ("lst", "shw"), but
-    # accepting every nearby verb would turn ordinary prose into authority.
-    # Require the first token to have one unique action-verb interpretation.
+    # Accept a typoed verb ("lst", "shw") only when it has one action-verb reading.
     matches = {
         verb for verb in _ACTION_VERBS
         if _damerau_distance(tokens[0], verb) == 1
@@ -977,9 +946,7 @@ def image_creation_tools(message: str) -> frozenset[str] | None:
         r'(?:(?:youtube|video|blog|custom)\s+)?'
         r'(?:images?|pictures?|illustrations?|thumbnails?|logos?|posters?)\b', text, re.I)
     if not match:
-        # Chat users commonly give a visual brief without an imperative verb.
-        # Anchor at the start so search, description, and document requests
-        # mentioning an image retain their own operation.
+        # Anchored, so search or document requests that mention an image keep their own route.
         match = re.match(
             r'^\s*(?:please\s+)?(?:an?\s+)?'
             r'(?:image|picture|illustration|portrait|drawing|photo)\s+of\s+\S+',
@@ -1010,6 +977,7 @@ def _routing_email_scope(message: str) -> str:
     )
 
 
+@lru_cache(maxsize=128)
 def selected_tools_for_request(message: str) -> frozenset[str] | None:
     """Narrow only a complete, explicit operation; None retains family scope.
 
@@ -1026,10 +994,7 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
         raw_text,
         re.I,
     ):
-        # A trusted user can prescribe the first native evidence operation.
-        # Keep the remainder of an explicit media-to-artifact workflow
-        # available without letting content nouns (for example musical
-        # "notes") route to an unrelated personal-data product.
+        # The user prescribed the first evidence operation; media nouns such as "notes" are content.
         tools = {"inspect_media"}
         if (
             re.search(r"\b(?:create|write|save|build|produce)\b", raw_text, re.I)
@@ -1094,10 +1059,7 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
                 re.I,
             )
         ):
-            # Explicit native Web names seal selection to the named tools.
-            # Compound autonomous jobs also require a bounded local
-            # read/write/verify surface; without it, requiring shell_files
-            # makes the whole contract fail closed and drops the Web tools.
+            # Compound jobs need a local read/write surface, else requiring shell_files fails the contract closed.
             explicitly_named_web.update(
                 {"read_file", "write_file", "edit_file", "python"}
             )
@@ -1129,9 +1091,7 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
         {"write_file", "read_file"}.issubset(named_media_chain)
         and named_media_chain.intersection({"inspect_media", "extract_text"})
     ):
-        # The concrete workspace asset already seals the evidence source.
-        # Content words such as "reviews", "which", "highlights", or
-        # "final" must not become a public-Web lookup operation.
+        # The workspace asset is the evidence source; content words must not become a Web lookup.
         return None
     if re.fullmatch(
         _REQUEST_PREFIX + r"(?:which\s+search\s+(?:backend|provider)\s+am\s+i\s+on"
@@ -1158,9 +1118,7 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
         )
         and not re.search(r"\b(?:inbox|emails?|mails?|calendar|meetings?|my\s+notes?)\b", text, re.I)
     ):
-        # Current lookups need discovery before navigation. Letting the model
-        # begin on an arbitrary browser page can ground an answer in stale or
-        # unrelated content without ever establishing a current source set.
+        # Current lookups need discovery before navigating to an arbitrary page.
         web_lookup_fallback = True
     if re.search(
         r"\b(?:reviews?|ratings?|評判|レビュー|testimonials?)\b",
@@ -1172,21 +1130,14 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
         text,
         re.I,
     ) and not re.search(r"\b(?:inbox|emails?|mails?|calendar|meetings?|my\s+notes?)\b", text, re.I):
-        # Product/service review requests are current public-web lookups even
-        # when the user does not say "search". Route them to web_search before
-        # the model sees a schema; otherwise a no-tool contract invites raw
-        # provider-specific markup (notably DeepSeek DSML) that cannot execute.
+        # Reviews are a public-Web lookup; with no tool offered, some models emit unexecutable markup (DeepSeek DSML).
         web_lookup_fallback = True
     if re.search(
         r"\buse\s+(?:the\s+)?(?:odysseus\s+)?web_search\b",
         raw_text,
         re.I,
     ):
-        # An explicit native search workflow owns the turn.  Labels such as
-        # ``Task:`` and subject matter such as Python/memory are payload, not
-        # requests for the scheduler, shell, or personal-memory products.
-        # Keep fetch available only when the user also asks to read/fetch the
-        # discovered source pages.
+        # An explicit web_search workflow owns the turn; labels and subject nouns are payload.
         tools = {"web_search"}
         if re.search(
             r"\b(?:fetch|read|open|visit)\b[^.\n]{0,100}\b(?:sources?|pages?|urls?|links?)\b",
@@ -1201,9 +1152,7 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
         and re.search(r"\b(?:draft|write|create)\b", text, re.I)
         and re.search(r"\b(?:search|find|latest|newest)\b", text, re.I)
     ):
-        # Keep the complete evidence chain available from the first round;
-        # otherwise routing can freeze after read_email and strand an
-        # explicitly requested attachment before the dependent draft.
+        # Offer the whole chain from round one, or routing can freeze after read_email.
         return frozenset({
             "search_emails", "read_email", "download_attachment", "draft_email",
         })
@@ -1215,9 +1164,7 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
         )
         and not re.search(r"\b(?:send|deliver)\s+(?:it|now|immediately)\b", text, re.I)
     ):
-        # A calendar-to-draft workflow needs both schemas from round one.
-        # "email draft" and "draft email" are equivalent; neither grants
-        # authority to send or mutate the calendar.
+        # Both schemas from round one; neither grants send or calendar mutation.
         return frozenset({"manage_calendar", "draft_email"})
     explicit_media_chain = {
         name for name in ("inspect_media", "extract_text", "write_file", "read_file")
@@ -1246,10 +1193,7 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
             re.I,
         )
     ):
-        # Multiple concrete text sources are a bounded fetch/compare
-        # operation. Do not force the rendered browser merely because the
-        # request says "open"; browser state adds screenshots and encourages
-        # repeated DOM searches where web_fetch can supply source text.
+        # Several concrete sources are a fetch/compare; "open" does not call for the rendered browser.
         return frozenset({"web_fetch"})
     if (
         re.search(r"\b[^\s<>\"']+\.(?:pdf|png|jpe?g|webp|tiff?)\b", raw_text, re.I)
@@ -1257,9 +1201,7 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
         and re.search(r"\b(?:write|save|create)\b[^.!?\n]{0,100}\b(?:report|file|markdown|json|csv)\b", text, re.I)
         and re.search(r"\b(?:read|verify|check|inspect)\b[^.!?\n]{0,100}\b(?:saved|output|file|report|it)\b", text, re.I)
     ):
-        # Exact local media-to-artifact workflows do not need a shell or
-        # broad workspace discovery. Keep the model on the evidence, mutation,
-        # and completion tools named by the requested workflow.
+        # A local media-to-artifact workflow needs no shell or workspace discovery.
         return frozenset({"inspect_media", "extract_text", "write_file", "read_file"})
     if re.search(
         r"\b(?:jot|write|put|save)\b[^.!?\n]{0,100}\b(?:in|into|as)\s+"
@@ -1389,12 +1331,7 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
             or re.search(r"\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|ai|jp|co\.jp)\b", text, re.I)
         )
     ):
-        # Navigation is an interactive browser operation even for loopback or
-        # LAN URLs.  The old domain-only check let ``Go to http://127...`` fall
-        # through to the single-URL ``web_fetch`` rule.  With Web Search off,
-        # that made the immutable contract deny the turn before inference.
-        # Selecting private_browser grants only the named interactive target;
-        # it does not enable open-ended web_search/web_fetch.
+        # Navigation is a browser operation even for loopback or LAN URLs, and grants only the named target.
         return frozenset({"private_browser"})
     if (
         re.search(r"\b(?:find|search|look\s+for|recommend)\b", text, re.I)
@@ -1502,9 +1439,7 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
             re.I,
         )
     ):
-        # A bare creator/channel upload question has no local upload target.
-        # Discovery finds the canonical channel while youtube_tool supplies
-        # metadata, transcript, and comments for later turns.
+        # Discovery finds the channel; youtube_tool supplies its metadata and transcript.
         return frozenset({"web_search", "youtube_tool"})
     if (
         re.search(r"\b(?:model\s+)?downloads?\b", text, re.I)
@@ -1583,9 +1518,7 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
         )
         for clause in model_discovery_clauses
     ):
-        # Model discovery belongs to the Hugging Face catalog.  This covers
-        # natural recommendation wording, not only the literal phrase
-        # “Hugging Face model search”.
+        # Model discovery belongs to the Hugging Face catalog, natural wording included.
         return frozenset({"search_hf_models"})
     if (
         re.search(r"\b(?:inbox|mailbox|email)\b", text, re.I)
@@ -1831,20 +1764,13 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
         )
         and not re.search(r"\b(?:another|different|second|other)\s+source\b", text, re.I)
     ):
-        # A concrete page continuation consumes the URL established by prior
-        # typed web evidence.  It is a fetch operation, not a new broad search
-        # and not a browser-automation request merely because the user says
-        # "open".
+        # A page continuation fetches the URL from prior web evidence; "open" alone is not browser automation.
         return frozenset({"web_fetch"})
     if requests_independent_web_source(text):
-        # Asking for independent corroboration requires discovery of a source;
-        # replaying the previous query or fetching the same page cannot satisfy
-        # the operation.
+        # Corroboration needs a new source, not the previous query or page.
         return frozenset({"web_search"})
     if requests_supporting_web_source(text):
-        # The previous answer may have come from model knowledge and therefore
-        # have no concrete URL to fetch. Discover a supporting source instead
-        # of letting the model claim that citations are unavailable.
+        # The previous answer may have had no URL, so discover a source.
         return frozenset({"web_search"})
     if (
         re.match(r"^\s*" + _REQUEST_PREFIX + r"(?:launch|start|run|serve)\b", text, re.I)
@@ -1895,9 +1821,7 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
         re.search(r"\b(?:swap|switch|change|move|use)\b[^.;\n]{0,100}\bmodels?\b", text, re.I)
         or re.search(r"\bmodels?\b[^.;\n]{0,100}\b(?:swap|switch|change|move|use)\b", text, re.I)
     ):
-        # A vague target such as "a lighter model" needs discovery before the
-        # same explicit UI switch. Offering both keeps the model inside the
-        # intended control plane without granting unrelated admin actions.
+        # A vague target ("a lighter model") needs discovery before the UI switch.
         return frozenset({"list_models", "ui_control"})
     if (
         re.match(
@@ -2070,18 +1994,13 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
             re.I,
         )
     ):
-        # A single concrete HTML target is a complete operation. Narrowing it
-        # avoids sending unrelated family schemas (notably union-root PDF
-        # schemas rejected by some OpenAI-compatible providers).
+        # Narrowed so union-root PDF schemas never reach providers that reject them.
         return frozenset({"web_fetch"})
     if _ORDINAL_EMAIL_FOLLOWUP.fullmatch(text):
         return frozenset({"read_email"})
     if (_ORDINAL_SKILL_FOLLOWUP.fullmatch(text)
             and re.search(r"\bskills?\b", text, re.I)):
-        # Bare "open the first one" is product-neutral. The conversation-
-        # aware required-read resolver binds it to the prior successful
-        # collection; treating every ordinal as Skills causes the selected-
-        # tool intersection to erase Calendar/Notes/Documents tools.
+        # Bare "open the first one" is product-neutral; the required-read resolver binds it to the prior collection.
         return frozenset({"manage_skills"})
     native_names = (
         "get_workspace", "read_file", "write_file", "python", "ls",
@@ -2603,9 +2522,7 @@ def _exact_id_read(text: str, maximum: int | None) -> RequiredReadOperation | No
 def _prior_email_rows(history: Iterable) -> list[dict[str, str]]:
     """Extract identifiers from the latest successful server-owned email list."""
     rows = list(history)
-    # Inside the clean loop, prior calls/results are already reconstructed as
-    # OpenAI assistant/tool messages rather than wrapped in persisted metadata.
-    # Treat that complete message sequence as one clean_v3_turn candidate.
+    # Inside the clean loop, history is already native messages; scan it as one clean_v3_turn.
     scan_rows = rows + [{"role": "assistant", "metadata": {"clean_v3_turn": rows}}]
     for row in reversed(scan_rows):
         metadata = row.get("metadata") if isinstance(row, dict) else getattr(row, "metadata", None)
@@ -2838,39 +2755,24 @@ def _fuzzy_possessive_lookup_family(text: str) -> str | None:
 
 def _latest_successful_read_operation(history: Iterable) -> RequiredReadOperation | None:
     """Recover the exact latest safe reader from persisted execution evidence."""
-    for row in reversed(tuple(history)):
-        metadata = row.get("metadata") if isinstance(row, dict) else getattr(row, "metadata", None)
-        if isinstance(metadata, str):
-            try:
-                metadata = json.loads(metadata)
-            except (TypeError, json.JSONDecodeError):
-                metadata = {}
-        for event in reversed((metadata or {}).get("tool_events") or []):
-            if event.get("error") is True or event.get("exit_code") not in (None, 0):
-                continue
-            tool = canonical_tool(event.get("tool", ""))
-            command = event.get("command") or {}
-            if isinstance(command, str):
-                try:
-                    command = json.loads(command)
-                except (TypeError, json.JSONDecodeError):
-                    command = {}
-            command = dict(command) if isinstance(command, dict) else {}
-            action = command.get("action")
-            allowed = _SAFE_READ_ARGS.get((tool, action))
+    for event, command in iter_history_tool_events(history):
+        tool = canonical_tool(event.get("tool", ""))
+        command = dict(command)
+        action = command.get("action")
+        allowed = _SAFE_READ_ARGS.get((tool, action))
+        if allowed is None:
+            allowed = _SAFE_READ_ARGS.get((tool, None))
             if allowed is None:
-                allowed = _SAFE_READ_ARGS.get((tool, None))
-                if allowed is None:
-                    continue
-                command.pop("action", None)
-            safe_args = {
-                key: value for key, value in command.items()
-                if key == "action" or (key in allowed and type(value) is allowed[key])
-            }
-            try:
-                return RequiredReadOperation(tool, safe_args)
-            except ValueError:
                 continue
+            command.pop("action", None)
+        safe_args = {
+            key: value for key, value in command.items()
+            if key == "action" or (key in allowed and type(value) is allowed[key])
+        }
+        try:
+            return RequiredReadOperation(tool, safe_args)
+        except ValueError:
+            continue
     return None
 
 
@@ -2994,6 +2896,89 @@ def _natural_safe_inventory_operation(message: str, maximum: int | None = None) 
     return RequiredReadOperation(tool, {"action": action} if action else {}, maximum)
 
 
+_LIST_EVENTS = {"action": "list_events"}
+
+
+def _request_pattern(pattern: str) -> re.Pattern[str]:
+    return re.compile(_REQUEST_PREFIX + pattern, re.I)
+
+
+def _fixed_read(rules, text: str, maximum: int | None) -> RequiredReadOperation | None:
+    """Seal the first (pattern, tool, args) rule whose pattern matches the whole request."""
+    for pattern, tool, args in rules:
+        if pattern.fullmatch(text):
+            return RequiredReadOperation(tool, args, maximum)
+    return None
+
+
+# Each table is scanned at its own place in required_read_operation_for_request;
+# the order between tables and the checks around them is routing precedence.
+_SCHEDULE_READS = (
+    (_request_pattern(r"(?:show\s+me\s+)?what(?:['’]?s|s|\s+is)\s+scheduled[?!.]*"),
+     "manage_calendar", _LIST_EVENTS),
+    (_request_pattern(
+        r"what(?:['’]?s|s|\s+is|\s+have\s+i\s+got)\s+coming\s+up"
+        r"(?:\s+over\s+the\s+next\s+(?:[1-9]\d*|one|two|three|four|five|six|seven)\s+days?)?[?!.]*"
+    ), "manage_calendar", _LIST_EVENTS),
+)
+_SEARCH_SETTING_READS = (
+    (_request_pattern(r"which\s+search\s+(?:backend|provider)\s+am\s+i\s+on(?:\s+right\s+now)?[?!.]*"),
+     "manage_settings", {"action": "get", "key": "search_provider"}),
+    (_request_pattern(
+        r"(?:what\s+(?:default\s+)?time\s+filter\s+is\s+my\s+search\s+set\s+to(?:\s+by\s+default)?"
+        r"|show\s+me\s+the\s+whole\s+search\s+(?:settings?\s+)?group)[?!.]*"
+    ), "manage_settings", {"action": "list"}),
+)
+_CALENDAR_AND_TASK_READS = (
+    (_request_pattern(
+        r"(?:give|show)\s+me\s+(?:my\s+)?(?:calend(?:ar|er)\s+for\s+(?:this|next)\s+week|upcoming\s+events)"
+        r"(?:\s+(?:please|pls|plz))?[?!.]*"
+    ), "manage_calendar", _LIST_EVENTS),
+    (_request_pattern(r"wat\s+(?:scheduled\s+)?ta(?:s)?ks\s+do\s+i\s+have(?:\s+set\s+up)?(?:\s+rn)?[?!.]*"),
+     "manage_tasks", {"action": "list"}),
+)
+_INBOX_LIST_READS = (
+    (_request_pattern(r"(?:quick\s+)?br(?:ie|ei)f\s+of\s+(?:my|our|the)\s+(?:latest|newest|recent)\s+emails?[?!.]*"),
+     "list_emails", {"folder": "INBOX"}),
+    (_request_pattern(r"find\s+anything\s+urgent\s+that\s+came\s+in\s+recently[?!.]*"),
+     "list_emails", {"folder": "INBOX"}),
+    (_request_pattern(r"(?:is\s+there\s+)?anything\s+waiting\s+in\s+(?:my|our|the)\s+(?:inbox|mailbox)[?!.]*"),
+     "list_emails", {"folder": "INBOX"}),
+    (_request_pattern(
+        r"(?:give\s+me\s+(?:a\s+)?rundown\s+of|summari[sz]e)\s+(?:(?:my|our|the)\s+)?"
+        r"(?:latest|newest|recent)\s+emails?(?:\s+for\s+each\s+account)?[.!?]*"
+    ), "list_emails", {}),
+)
+_CALENDAR_QUESTION_READS = (
+    (_request_pattern(r"what\s+do\s+(?:i|we)\s+have\s+on\s+today[?!.]*"),
+     "manage_calendar", _LIST_EVENTS),
+    (_request_pattern(r"what(?:['’]?s|\s+is)\s+coming\s+up\s+(?:this|next)\s+(?:week|month)[?!.]*"),
+     "manage_calendar", _LIST_EVENTS),
+    (_request_pattern(r"what\s+events?\s+do\s+(?:i|we)\s+(?:have|got)\s+coming\s+up\s+soon[?!.]*"),
+     "manage_calendar", _LIST_EVENTS),
+    (_request_pattern(
+        r"what(?:['’]?s|\s+is)\s+on\s+(?:my|our)\s+plate\s+(?:this|next)\s+(?:week|month)"
+        r"(?:[?!.]\s*anything\s+(?:i|we)\s+should\s+know\s+about)?[?!.]*"
+    ), "manage_calendar", _LIST_EVENTS),
+)
+_CALENDAR_OVERVIEW_READS = (
+    (_request_pattern(
+        r"(?:i\s+(?:need|want)\s+)?(?:a\s+)?(?:quick\s+)?(?:rundown|overview|look)\s+of\s+"
+        r"(?:my|our|the)\s+calend(?:ar|er)[.!?]*"
+    ), "manage_calendar", _LIST_EVENTS),
+    (_request_pattern(r"what\s+does\s+(?:my|our)\s+week\s+look\s+like[.!?]*"),
+     "manage_calendar", _LIST_EVENTS),
+)
+# A calendar is a container and its events are the contents; the plural
+# container request must run before fuzzy inventory collapses both to list_events.
+_CALENDAR_INVENTORY_READS = (
+    (_request_pattern(r"(?:my|our)\s+calend(?:ar|er)\s+events?(?:\s+(?:please|pls|plz))?[.!?]*"),
+     "manage_calendar", _LIST_EVENTS),
+    (_request_pattern(r"(?:list|show)\s+(?:my|our)\s+calendars?(?:\s+(?:please|pls|plz))?[.!?]*"),
+     "manage_calendar", {"action": "list_calendars"}),
+)
+
+
 def required_read_operation_for_request(message: str, history: Iterable = ()) -> RequiredReadOperation | None:
     """Resolve complete list/read requests, or repeat an exact prior read.
 
@@ -3010,16 +2995,9 @@ def required_read_operation_for_request(message: str, history: Iterable = ()) ->
         text,
         re.I,
     ):
-        # These are source-grounding constraints, not requests to read the
-        # user's private Odysseus memory store.  Long research/artifact jobs
-        # often also contain words such as "list" or "show", which must not
-        # convert the evidence constraint into a sealed personal-data read.
+        # Source-grounding constraints, not a request to read the memory store.
         return None
-    # A user can switch families in one conversation and then explicitly come
-    # back using ordinary shorthand (including a one-edit typo):
-    # ``back to emaol show 2 latest``.  This is a complete inbox inventory
-    # request, not a repeat of the earlier account-address lookup and not a
-    # notes continuation merely because notes was the immediately prior turn.
+    # "back to emaol show 2 latest" is a complete inbox read, typo included.
     return_to_latest_email = re.fullmatch(
         _REQUEST_PREFIX
         + r"(?:(?:back|return|switch)(?:\s+back)?\s+to\s+)?"
@@ -3059,58 +3037,16 @@ def required_read_operation_for_request(message: str, history: Iterable = ()) ->
             "list_emails", {"folder": "INBOX", "max_results": count}, count,
         )
     if selected_tools_for_request(message) == frozenset({"web_fetch"}):
-        # A bounded comparison of explicit public URLs is already a complete
-        # web operation. Phrases such as "do not answer from memory" describe
-        # evidence discipline and must not be parsed as a request to list the
-        # user's saved Odysseus memories.
+        # A URL comparison is a web operation; "not from memory" is evidence discipline.
         return None
-    if re.fullmatch(
-        _REQUEST_PREFIX + r"(?:show\s+me\s+)?what(?:['’]?s|s|\s+is)\s+scheduled[?!.]*",
-        text,
-        re.I,
-    ) or re.fullmatch(
-        _REQUEST_PREFIX + r"what(?:['’]?s|s|\s+is|\s+have\s+i\s+got)\s+coming\s+up"
-        r"(?:\s+over\s+the\s+next\s+(?:[1-9]\d*|one|two|three|four|five|six|seven)\s+days?)?"
-        r"[?!.]*",
-        text,
-        re.I,
-    ):
-        return RequiredReadOperation("manage_calendar", {"action": "list_events"}, maximum)
-    if re.fullmatch(
-        _REQUEST_PREFIX + r"which\s+search\s+(?:backend|provider)\s+am\s+i\s+on"
-        r"(?:\s+right\s+now)?[?!.]*",
-        normalized_text,
-        re.I,
-    ):
-        return RequiredReadOperation(
-            "manage_settings", {"action": "get", "key": "search_provider"}, maximum,
-        )
-    if re.fullmatch(
-        _REQUEST_PREFIX + r"(?:what\s+(?:default\s+)?time\s+filter\s+is\s+my\s+"
-        r"search\s+set\s+to(?:\s+by\s+default)?|show\s+me\s+the\s+whole\s+"
-        r"search\s+(?:settings?\s+)?group)[?!.]*",
-        normalized_text,
-        re.I,
-    ):
-        return RequiredReadOperation("manage_settings", {"action": "list"}, maximum)
+    if operation := (_fixed_read(_SCHEDULE_READS, text, maximum)
+                     or _fixed_read(_SEARCH_SETTING_READS, normalized_text, maximum)):
+        return operation
     if selected_tools_for_request(normalized_text) == frozenset({"ui_control"}):
         # Pure surface navigation must not inherit a prior sealed data read.
         return None
-    if re.fullmatch(
-        _REQUEST_PREFIX + r"(?:give|show)\s+me\s+(?:my\s+)?(?:"
-        r"calend(?:ar|er)\s+for\s+(?:this|next)\s+week|upcoming\s+events)"
-        r"(?:\s+(?:please|pls|plz))?[?!.]*",
-        normalized_text,
-        re.I,
-    ):
-        return RequiredReadOperation("manage_calendar", {"action": "list_events"}, maximum)
-    if re.fullmatch(
-        _REQUEST_PREFIX + r"wat\s+(?:scheduled\s+)?ta(?:s)?ks\s+"
-        r"do\s+i\s+have(?:\s+set\s+up)?(?:\s+rn)?[?!.]*",
-        normalized_text,
-        re.I,
-    ):
-        return RequiredReadOperation("manage_tasks", {"action": "list"}, maximum)
+    if operation := _fixed_read(_CALENDAR_AND_TASK_READS, normalized_text, maximum):
+        return operation
     if (
         re.search(r"\b(?:do\s+i\s+have|are\s+there)\b[^?!.]{0,80}\bskills?\b", normalized_text, re.I)
         and re.search(r"\b(?:cover|handle|handling|about|for)\b", normalized_text, re.I)
@@ -3132,38 +3068,9 @@ def required_read_operation_for_request(message: str, history: Iterable = ()) ->
         raw_count = inbox_summary["count"].lower()
         count = int(raw_count) if raw_count.isdecimal() else _READ_COUNT_WORDS[raw_count]
         return RequiredReadOperation("list_emails", {}, count)
-    if (
-        re.fullmatch(
-            _REQUEST_PREFIX + r"(?:quick\s+)?br(?:ie|ei)f\s+of\s+(?:my|our|the)\s+"
-            r"(?:latest|newest|recent)\s+emails?[?!.]*",
-            normalized_text,
-            re.I,
-        )
-        or re.fullmatch(
-            _REQUEST_PREFIX + r"find\s+anything\s+urgent\s+that\s+came\s+in\s+recently[?!.]*",
-            normalized_text,
-            re.I,
-        )
-    ):
-        return RequiredReadOperation("list_emails", {"folder": "INBOX"}, maximum)
-    if re.fullmatch(
-        _REQUEST_PREFIX + r"(?:is\s+there\s+)?anything\s+waiting\s+in\s+"
-        r"(?:my|our|the)\s+(?:inbox|mailbox)[?!.]*",
-        normalized_text,
-        re.I,
-    ):
-        return RequiredReadOperation("list_emails", {"folder": "INBOX"}, maximum)
-    if re.fullmatch(
-        _REQUEST_PREFIX + r"(?:give\s+me\s+(?:a\s+)?rundown\s+of|summari[sz]e)\s+"
-        r"(?:(?:my|our|the)\s+)?(?:latest|newest|recent)\s+emails?"
-        r"(?:\s+for\s+each\s+account)?[.!?]*",
-        normalized_text,
-        re.I,
-    ):
-        return RequiredReadOperation("list_emails", {}, maximum)
-    # Resolve entity ordinals from the intact request.  Presentation parsing
-    # deliberately treats phrases such as "first one" as a result limit, but
-    # in an explicit open/read follow-up the phrase identifies the entity.
+    if operation := _fixed_read(_INBOX_LIST_READS, normalized_text, maximum):
+        return operation
+    # Use the intact request: here "first one" names an entity, not a result limit.
     if operation := _ordinal_visible_collection_read(normalized_text, rows, None):
         return operation
     attachment_read = _explicit_email_attachment_read(normalized_text)
@@ -3182,34 +3089,8 @@ def required_read_operation_for_request(message: str, history: Iterable = ()) ->
     )
     if calendar_abbreviation:
         return RequiredReadOperation("manage_calendar", {"action": "list_events"}, maximum)
-    if re.fullmatch(
-        _REQUEST_PREFIX + r"what\s+do\s+(?:i|we)\s+have\s+on\s+today[?!.]*",
-        normalized_text,
-        re.I,
-    ):
-        return RequiredReadOperation("manage_calendar", {"action": "list_events"}, maximum)
-    if (
-        re.fullmatch(
-            _REQUEST_PREFIX + r"what(?:['’]?s|\s+is)\s+coming\s+up\s+"
-            r"(?:this|next)\s+(?:week|month)[?!.]*",
-            normalized_text,
-            re.I,
-        )
-        or re.fullmatch(
-            _REQUEST_PREFIX + r"what\s+events?\s+do\s+(?:i|we)\s+"
-            r"(?:have|got)\s+coming\s+up\s+soon[?!.]*",
-            normalized_text,
-            re.I,
-        )
-        or re.fullmatch(
-            _REQUEST_PREFIX + r"what(?:['’]?s|\s+is)\s+on\s+(?:my|our)\s+plate\s+"
-            r"(?:this|next)\s+(?:week|month)(?:[?!.]\s*anything\s+"
-            r"(?:i|we)\s+should\s+know\s+about)?[?!.]*",
-            normalized_text,
-            re.I,
-        )
-    ):
-        return RequiredReadOperation("manage_calendar", {"action": "list_events"}, maximum)
+    if operation := _fixed_read(_CALENDAR_QUESTION_READS, normalized_text, maximum):
+        return operation
     contact_resolution = re.fullmatch(
         _REQUEST_PREFIX + r"resolve\s+(?P<query>[^?!.]{2,120}?)\s+in\s+"
         r"(?:my|our|the)\s+(?:contacts?|address\s*book)[.!?]*",
@@ -3293,9 +3174,7 @@ def required_read_operation_for_request(message: str, history: Iterable = ()) ->
     ):
         prior = _latest_successful_read_operation(rows)
         if prior is not None and canonical_tool(prior.tool) == "list_models":
-            # Re-read the live catalog so the model narrows current evidence;
-            # do not manufacture a literal ID substring from qualitative
-            # terms such as "small fast".
+            # Re-read the live catalog rather than turn "small fast" into an ID filter.
             return RequiredReadOperation("list_models", max_items=maximum)
     if re.search(r"\b(?:saved\s+)?cookbo{1,2}k\s+serve\s+presets?\b", normalized_text, re.I):
         return RequiredReadOperation("list_serve_presets", {}, maximum)
@@ -3430,9 +3309,7 @@ def required_read_operation_for_request(message: str, history: Iterable = ()) ->
         re.I,
     )
     if contextual_repeat:
-        # Bind an explicit re-list plus a harmless question to the immediately
-        # preceding read operation. This keeps "the list" as account names,
-        # for example, instead of letting the model switch to inbox messages.
+        # A re-list binds to the immediately preceding read operation.
         for index in range(len(rows) - 1, -1, -1):
             row = rows[index]
             role = row.get("role") if isinstance(row, dict) else getattr(row, "role", "")
@@ -3519,20 +3396,8 @@ def required_read_operation_for_request(message: str, history: Iterable = ()) ->
             {"action": "search", "query": natural_skill_library_search["query"].strip()},
             maximum,
         )
-    if (
-        re.fullmatch(
-            _REQUEST_PREFIX + r"(?:i\s+(?:need|want)\s+)?(?:a\s+)?(?:quick\s+)?"
-            r"(?:rundown|overview|look)\s+of\s+(?:my|our|the)\s+calend(?:ar|er)[.!?]*",
-            text,
-            re.I,
-        )
-        or re.fullmatch(
-            _REQUEST_PREFIX + r"what\s+does\s+(?:my|our)\s+week\s+look\s+like[.!?]*",
-            text,
-            re.I,
-        )
-    ):
-        return RequiredReadOperation("manage_calendar", {"action": "list_events"}, maximum)
+    if operation := _fixed_read(_CALENDAR_OVERVIEW_READS, text, maximum):
+        return operation
     personal_store_contents = re.fullmatch(
         _REQUEST_PREFIX
         + r"(?:what|wat|wht|wuts)(?:['’]?s|\s+(?:is|are))?\s+"
@@ -3610,21 +3475,8 @@ def required_read_operation_for_request(message: str, history: Iterable = ()) ->
         )
     if selected_tools_for_request(text) == {"list_cached_models"}:
         return RequiredReadOperation("list_cached_models", max_items=maximum)
-    if re.fullmatch(
-        _REQUEST_PREFIX + r"(?:my|our)\s+calend(?:ar|er)\s+events?"
-        r"(?:\s+(?:please|pls|plz))?[.!?]*",
-        text, re.I,
-    ):
-        return RequiredReadOperation("manage_calendar", {"action": "list_events"}, maximum)
-    if re.fullmatch(
-        _REQUEST_PREFIX + r"(?:list|show)\s+(?:my|our)\s+calendars?"
-        r"(?:\s+(?:please|pls|plz))?[.!?]*",
-        text, re.I,
-    ):
-        # A calendar is a container; calendar events are its contents.  Keep
-        # the explicit plural-container request ahead of fuzzy inventory
-        # routing, which otherwise collapses both concepts to list_events.
-        return RequiredReadOperation("manage_calendar", {"action": "list_calendars"}, maximum)
+    if operation := _fixed_read(_CALENDAR_INVENTORY_READS, text, maximum):
+        return operation
     if (
         re.search(r"\b(?:documents?|docs?)\b", text, re.I)
         and re.search(r"\b(?:list|show)\s+(?:them|em)\b", text, re.I)
@@ -3680,9 +3532,7 @@ def required_read_operation_for_request(message: str, history: Iterable = ()) ->
         and re.search(r"\b(?:list|show|browse|look\s+thr(?:u|ough)|what(?:['’]?s|\s+is)\s+in)\b", text, re.I)
         and not re.search(r"\b(?:upscale|remove\s+(?:the\s+)?background|delete|generate)\b", text, re.I)
     ):
-        # Gallery inventory is a declared owner-scoped GET. Seal the exact
-        # endpoint so natural wording cannot drift into a fabricated prose
-        # list or an unrelated Cookbook operation.
+        # Gallery inventory is a declared owner-scoped GET.
         return RequiredReadOperation("app_api", {
             "action": "call", "method": "GET", "path": "/api/gallery/library",
         }, maximum)
@@ -3954,10 +3804,7 @@ def required_read_operation_for_request(message: str, history: Iterable = ()) ->
         re.fullmatch(_REQUEST_PREFIX + r"show\s+(?:it|that)[.!?]*", text, re.I)
         and recently_executed_families(rows, maximum=1)
     ):
-        # The family contract can safely offer the most-recent successful
-        # manager, but a bare pronoun does not identify a sealed read action.
-        # Do not scan an intervening prose turn for a different product noun
-        # and manufacture a conflicting required operation.
+        # A bare pronoun does not identify a sealed read; the family contract still applies.
         return None
     while _EXACT_READ_REPEAT.fullmatch(text):
         recent = recently_executed_families(rows, maximum=1)
@@ -4118,9 +3965,7 @@ def required_read_operation_for_request(message: str, history: Iterable = ()) ->
             count = maximum if count is None else min(count, maximum)
         return RequiredReadOperation(tool, {"action": action} if action else {},
                                      count)
-    # A single unambiguous misspelled family target may still seal an explicit
-    # list/show/read request. Keep this narrower than capability routing: no
-    # mailbox contents, web, shell, identifiers, compounds, or mutations.
+    # One unambiguous misspelled family can seal a list/show/read, with no compounds or mutations.
     fuzzy_family = _complete_fuzzy_read_family(text)
     if fuzzy_family is not None:
         exact_families = {
@@ -4195,9 +4040,7 @@ def _clause_capabilities(text: str) -> set[str]:
             re.I,
         )
     ):
-        # A background automation may mention a weekday and personal data it
-        # will process. Those are schedule/input details, not authorization to
-        # substitute a calendar event or Notes mutation.
+        # A weekday or data noun in an automation is schedule input, not a calendar or Notes action.
         return {"tasks"}
     if _CONTEXTUAL_CALENDAR_ACTION.search(text):
         # Blocking or reserving a dated/time-bounded slot is intrinsically a
@@ -4221,9 +4064,7 @@ def _clause_capabilities(text: str) -> set[str]:
         and re.search(r"\bnotes?\b", text, re.I)
         and not re.search(r"\b(?:panel|sidebar|tab|screen)\b", text, re.I)
     ):
-        # The direct object owns a read. Words such as Settings, Calendar,
-        # Email, or Model may be part of a note title and must not broaden
-        # the offered family.
+        # The direct object owns the read; other product words may be part of a note title.
         return {"notes"}
     if (
         re.search(r"\b(?:delete|remove)\b", text, re.I)
@@ -4248,9 +4089,7 @@ def _clause_capabilities(text: str) -> set[str]:
         text,
         re.I,
     ):
-        # Natural phrasal verbs may place the object between "pull" and
-        # "up" ("pull my calendar events up again"). Resolve the named
-        # product exactly as the contiguous "pull up" form does.
+        # "pull my calendar events up" resolves like "pull up".
         named = {
             family for family, pattern in _FAMILY_WORDS.items()
             if re.search(pattern, text, re.I)
@@ -4277,10 +4116,7 @@ def _clause_capabilities(text: str) -> set[str]:
     ):
         return {"calendar"}
     intent = classify_tool_intent(text)
-    # A named personal-store switch such as "what about my notes" is a
-    # lookup, not a question about what the Notes feature is.  The legacy
-    # intent classifier labels both as explanatory, so let the stricter
-    # personal lookup grammar below resolve the former.
+    # action_intents labels "what about my notes" as explanatory; it is a lookup.
     personal_lookup = bool(_LOOKUP.search(text) or _PERSONAL_STORE_LOOKUP.search(text))
     if intent.reason == "explanatory feature question" and not personal_lookup:
         return set()
@@ -4330,10 +4166,7 @@ def _clause_capabilities(text: str) -> set[str]:
     if words == {"search_browser"} and re.search(
         r"\b(?:best|recommend(?:ed|ation)?|which|what|where)\b", text, re.I,
     ):
-        # Read-only web recommendations are often phrased declaratively
-        # ("I want X; what's the best website") rather than as an imperative
-        # search verb. Keep them out of typo-based shell/file routing and let
-        # the normal Web permission policy decide whether lookup can execute.
+        # Declarative web recommendations ("what's the best website") stay out of typo-based shell routing.
         return {"search_browser"}
     if "memory" in words:
         words.discard("sessions")  # Historical chat retrieval uses search_chats.
@@ -4351,19 +4184,12 @@ def _clause_capabilities(text: str) -> set[str]:
         "research" in words and "ui" in words
         and re.search(r"\bresearch\s+(?:panel|sidebar)\b", text, re.I)
     ):
-        # Saved research has a dedicated open/read surface; research is not a
-        # valid ui_control panel enum, so the generic word "panel" must not
-        # offer an impossible UI operation.
+        # research is not a ui_control panel enum.
         words.discard("ui")
-    # The legacy action-intent classifier treats scheduling language as a
-    # calendar operation. An explicit task/todo noun is the stronger product
-    # contract unless the user also names the calendar family.
+    # action_intents reads scheduling language as calendar; a task noun wins unless calendar is named.
     if "tasks" in words and "calendar" not in words:
         return {"tasks"}
-    # In a personal-store lookup, one explicitly named store owns the read;
-    # words describing its labels/content are filters, not second products.
-    # A noun conjunction requests both domains even when action_intents only
-    # returns its first match ("list notes and calendar").
+    # One named store owns a lookup; a noun conjunction ("notes and calendar") requests both.
     mentions = sorted((m.start(), m.end(), f) for f in words
                       for m in re.finditer(_FAMILY_WORDS[f], text, re.I))
     combined = set()
@@ -4387,18 +4213,13 @@ def _clause_capabilities(text: str) -> set[str]:
         and re.match(r"^\s*find\b", text, re.I)
         and not re.match(r"^\s*find\s+(?:[./~]|-[A-Za-z])", text, re.I)
     ):
-        # In a coordinated natural-language request, `find` is commonly a
-        # goal rather than the Unix command. Require shell-shaped arguments
-        # before granting filesystem authority.
+        # In a coordinated request `find` is usually a goal, so require shell-shaped arguments.
         return words
     if intent.needs_tools:
         mapped = {"web": "search_browser",
                   "workspace": "shell_files", "shell": "shell_files"}.get(intent.category, intent.category)
         if mapped in {"shell_files", "search_browser"} and words and mapped not in words:
-            # Broad legacy classifiers treat verbs such as "find" and
-            # "search" as shell/web requests. Explicit product nouns are
-            # stronger evidence: "search my memories/calendar" stays inside
-            # that private product family unless web/shell was also named.
+            # A named product noun keeps "search my memories" in that family.
             return words
         # Explicit task requests belong to the scheduler, although the older
         # action router groups tasks with notes and reminders.
@@ -4420,47 +4241,27 @@ def recently_executed_families(history: Iterable, *, user_turns: int = 6,
                                maximum: int = 3, include_failed_attempts: bool = False) -> tuple[str, ...]:
     """Return bounded, most-recent families proven by persisted tool events."""
     found: list[str] = []
-    turns = 0
-    for row in reversed(tuple(history)):
-        role = row.get("role") if isinstance(row, dict) else getattr(row, "role", "")
-        if role == "user":
-            turns += 1
-            if turns > user_turns:
+    for event, command in iter_history_tool_events(
+        history, user_turns=user_turns, include_failed=include_failed_attempts,
+    ):
+        if ((event.get("error") is True or event.get("exit_code") not in (None, 0))
+                and not (event.get("execution_attempted") is True and event.get("blocked") is False)):
+            continue
+        tool = canonical_tool(event.get("tool", ""))
+        family = None
+        if tool == "ui_control" and command.get("action") == "open_panel":
+            panel = str(command.get("name") or command.get("panel") or "").lower()
+            family = {
+                "calendar": "calendar", "notes": "notes", "email": "email",
+                "documents": "documents", "sessions": "sessions",
+                "skills": "skills", "memory": "memory", "memories": "memory",
+                "brain": "memory", "cookbook": "cookbook_admin",
+            }.get(panel)
+        family = family or next(iter(_families_for_tool(tool)), None)
+        if family and family not in found:
+            found.append(family)
+            if len(found) >= maximum:
                 break
-        metadata = row.get("metadata") if isinstance(row, dict) else getattr(row, "metadata", None)
-        if isinstance(metadata, str):
-            try:
-                metadata = json.loads(metadata)
-            except (TypeError, json.JSONDecodeError):
-                metadata = {}
-        for event in reversed((metadata or {}).get("tool_events") or []):
-            if event.get("error") is True or event.get("exit_code") not in (None, 0):
-                if not (include_failed_attempts
-                        and event.get("execution_attempted") is True
-                        and event.get("blocked") is False):
-                    continue
-            tool = canonical_tool(event.get("tool", ""))
-            family = None
-            if tool == "ui_control":
-                command = event.get("command") or {}
-                if isinstance(command, str):
-                    try:
-                        command = json.loads(command)
-                    except (TypeError, json.JSONDecodeError):
-                        command = {}
-                panel = str((command or {}).get("name") or (command or {}).get("panel") or "").lower()
-                if (command or {}).get("action") == "open_panel":
-                    family = {
-                        "calendar": "calendar", "notes": "notes", "email": "email",
-                        "documents": "documents", "sessions": "sessions",
-                        "skills": "skills", "memory": "memory", "memories": "memory",
-                        "brain": "memory", "cookbook": "cookbook_admin",
-                    }.get(panel)
-            family = family or next(iter(_families_for_tool(tool)), None)
-            if family and family not in found:
-                found.append(family)
-                if len(found) >= maximum:
-                    return tuple(found)
     return tuple(found)
 
 
@@ -4552,73 +4353,16 @@ def immediately_established_family(message: str, history: Iterable) -> str | Non
     return None
 
 
-def recently_read_gallery(history: Iterable, *, user_turns: int = 6) -> bool:
-    """Whether a recent successful app_api call established gallery context."""
-    turns = 0
-    for row in reversed(tuple(history)):
-        role = row.get("role") if isinstance(row, dict) else getattr(row, "role", "")
-        if role == "user":
-            turns += 1
-            if turns > user_turns:
-                break
-        metadata = row.get("metadata") if isinstance(row, dict) else getattr(row, "metadata", None)
-        if isinstance(metadata, str):
-            try:
-                metadata = json.loads(metadata)
-            except (TypeError, json.JSONDecodeError):
-                metadata = {}
-        for event in reversed((metadata or {}).get("tool_events") or []):
-            if event.get("error") is True or event.get("exit_code") not in (None, 0):
-                continue
-            if canonical_tool(event.get("tool", "")) != "app_api":
-                continue
-            command = event.get("command") or {}
-            if isinstance(command, str):
-                try:
-                    command = json.loads(command)
-                except (TypeError, json.JSONDecodeError):
-                    command = {}
-            if str((command or {}).get("path") or "").split("?", 1)[0] == "/api/gallery/library":
-                return True
-    return False
-
-
 def recently_read_gallery(history: Iterable, *, user_turns: int = 4) -> bool:
     """Whether recent successful typed evidence came from the owned gallery."""
-    turns = 0
-    for row in reversed(tuple(history)):
-        role = row.get("role") if isinstance(row, dict) else getattr(row, "role", "")
-        if role == "user":
-            turns += 1
-            if turns > user_turns:
-                break
-        metadata = row.get("metadata") if isinstance(row, dict) else getattr(row, "metadata", None)
-        if isinstance(metadata, str):
-            try:
-                metadata = json.loads(metadata)
-            except (TypeError, json.JSONDecodeError):
-                metadata = {}
-        for event in reversed((metadata or {}).get("tool_events") or []):
-            if (canonical_tool(event.get("tool", "")) != "app_api"
-                    or event.get("error") is True
-                    or event.get("exit_code") not in (None, 0)):
-                continue
-            command = event.get("command") or {}
-            if isinstance(command, str):
-                try:
-                    command = json.loads(command)
-                except (TypeError, json.JSONDecodeError):
-                    command = {}
-            if str((command or {}).get("path") or "").startswith("/api/gallery/"):
-                return True
-    return False
+    return any(
+        canonical_tool(event.get("tool", "")) == "app_api"
+        and str(command.get("path") or "").startswith("/api/gallery/")
+        for event, command in iter_history_tool_events(history, user_turns=user_turns)
+    )
 
 
-# Personal-data product nouns. A broad-briefing phrase ("what's new",
-# "give me an update", "news") must not out-rank these: the user is asking
-# about their own store, not the open Web. First-person possessives,
-# explicit mailbox nouns, and concrete email references identify the store;
-# open-web subjects such as "the latest events in Kyiv" keep their Web route.
+# Personal-data nouns out-rank a broad-briefing phrase; "the latest events in Kyiv" stays on the Web.
 _PERSONAL_STORE_NOUNS = (
     r"(?:e?mails?|inbox|mailbox|calendar|calender|events?|appointments?|"
     r"meetings?|agenda|notes?|checklists?|tasks?|todos?|documents?|docs?|"
@@ -4797,11 +4541,7 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
         re.I,
     )
     if workspace_media and media_action:
-        # A concrete media asset owns score "notes", timestamp ranges, and
-        # other content nouns. Those details must not authorize unrelated
-        # personal Notes or Calendar products. Preserve only explicit
-        # downstream artifact/browser work and deliberate personal-note
-        # mutations.
+        # A media asset owns its content nouns ("notes", time ranges); they grant no Notes or Calendar access.
         if re.search(r"\bOCR\b|\bextract\b[^.\n]{0,80}\b(?:exact\s+)?(?:visible\s+)?text\b", raw_text, re.I):
             primary_media_family = "ocr"
         elif re.search(r"\b(?:transcribe|transcription|captions?|subtitles?)\b", raw_text, re.I):
@@ -4856,12 +4596,7 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
             return _personal
         return frozenset({"search_browser"})
     if re.search(r"\b(?:web_search|web_fetch)\b", raw_text, re.I):
-        # Explicit native-tool requests are stronger than incidental domain
-        # words in the research subject (for example, Git ``pull`` must not
-        # route to scheduled tasks). Keep the whole read-only web family so a
-        # weak search can recover through fetch/browser. A compound artifact
-        # workflow may also have been deliberately selected with a bounded
-        # workspace tool surface; preserve that independent family.
+        # Named native tools beat domain words in the subject (Git "pull" is not tasks); keep the whole web family.
         selected = selected_tools_for_request(raw_text)
         selected_families = (
             frozenset().union(*(_families_for_tool(tool) for tool in selected))
@@ -4873,11 +4608,7 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
         and re.search(r"\b(?:info(?:rmation)?|news|nees|updates?)\b", text, re.I)
         and not names_personal_store(text)
     ):
-        # A named personal store out-ranks the broad-briefing route; the
-        # guard above lets those fall through to the family grammar.
-        # Broad current-information requests still require live Web evidence.
-        # Keep the common ``nees`` typo because a missed route leaves the model
-        # with no way to answer and encourages it to ask unnecessary questions.
+        # Broad current-information requests need live Web evidence; "nees" is a common typo.
         return frozenset({"search_browser"})
     if (
         re.search(r"\b(?:online|on\s+the\s+(?:web|internet))\b", text, re.I)
@@ -4907,10 +4638,7 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
         # Product words inside source titles (for example "documentation")
         # describe remote evidence, not the user's Odysseus document library.
         return frozenset({"search_browser"})
-    # The browser-confirmed visible editor is a typed target, stronger than
-    # incidental nouns inside the requested content or a pasted style guide.
-    # Resolve it before lexical family rules can mistake words such as
-    # "mailbox", "sender", or "reply" for an Email data operation.
+    # The visible editor is a typed target; "mailbox" or "reply" in its content is not an Email operation.
     if active_document and targets_bound_editor_request(text):
         families = {"documents"}
         if _bound_editor_requests_web_verification(text):
@@ -4951,10 +4679,7 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
         r"(?:(?:a|an|the|new|unsent)\s+)*(?:e-?mail|message)\b", text, re.I,
     ))
     if explicit_document_workflow and not explicit_note_workflow and not explicit_email_workflow:
-        # Words such as "notes" and "feedback" commonly occur inside a
-        # document title/body. They must not expose the Notes product beside
-        # an explicit document lifecycle and tempt the model into mutating the
-        # wrong store.
+        # "notes" or "feedback" in a document title must not offer the Notes product.
         if "ui_control" in (selected_tools_for_request(text) or ()):
             return frozenset({"documents", "ui"})
         return frozenset({"documents"})
@@ -5046,10 +4771,7 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
             re.I,
         )
     ):
-        # A failed execution is not evidence for an answer, but a verified,
-        # unblocked attempt does establish the immediate follow-up's tool
-        # family. Keep that family for one user turn so the model can correct
-        # its arguments or choose a sibling tool instead of losing access.
+        # A verified, unblocked failed attempt keeps its family for one turn so the model can correct it.
         recent_family = recently_executed_families(
             history, user_turns=1, maximum=1, include_failed_attempts=True
         )
@@ -5073,10 +4795,7 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
         re.I,
     ):
         return frozenset({"skills"})
-    # An explicit request to persist the prior approach as a reusable skill is
-    # a real family switch. Resolve it before broad Web follow-up vocabulary:
-    # generated names such as “official source lookup” legitimately contain
-    # words like “official” and “like” that otherwise resemble Web context.
+    # Saving the prior approach as a skill is a family switch; generated names can look like Web context.
     if re.search(
         r"\b(?:turn|save|stash)\b[^.;\n]{0,180}\b(?:this|that|it|approach|how\s+you\s+did\s+that)\b"
         r"[^.;\n]{0,180}\b(?:into|as)\s+(?:a\s+)?(?:reusable\s+)?skill\b",
@@ -5520,10 +5239,7 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
         return frozenset({"search_browser"})
     selected_operation = selected_tools_for_request(text)
     if selected_operation:
-        # A complete operation is stronger evidence than a warm prior family.
-        # Resolve its owning families before referential-history inheritance;
-        # otherwise a prior HF search can erase a local-cache comparison, or
-        # a calendar data family can erase an explicit panel-view operation.
+        # A complete operation beats a warm prior family, so resolve it before history inheritance.
         selected_families = frozenset().union(
             *(_families_for_tool(tool) for tool in selected_operation)
         )
@@ -5543,16 +5259,14 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
         and recently_read_gallery(history)
     ):
         return frozenset({"image_editing"})
-    gallery_read = required_read_operation_for_request(text, history)
+    operation = required_read_operation_for_request(text, history)
     if (
-        gallery_read is not None
-        and canonical_tool(gallery_read.tool) == "app_api"
-        and str(gallery_read.args.get("path") or "").split("?", 1)[0]
+        operation is not None
+        and canonical_tool(operation.tool) == "app_api"
+        and str(operation.args.get("path") or "").split("?", 1)[0]
         == "/api/gallery/library"
     ):
-        # A verification re-list may mention the prior "upscaled" result.
-        # The current operation is still the owner-scoped gallery GET; do not
-        # let that descriptive adjective inherit the previous edit family.
+        # A re-list may say "upscaled"; the operation is still the gallery GET.
         return frozenset({"cookbook_admin"})
     if re.fullmatch(
         _REQUEST_PREFIX + r"(?:anything|what(?:['’]?s|\s+is))\s+"
@@ -5808,9 +5522,7 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
             re.I,
         )
     ):
-        # A compound follow-up can request both a fresh readback and panel
-        # navigation. Preserve the successfully executed data family instead
-        # of allowing the navigation clause to consume the whole turn.
+        # A compound follow-up keeps the executed data family beside the panel navigation.
         return frozenset({"ui", recent_family[0]})
     if re.search(
         r"\bopen(?:\s+up)?\s+(?:the\s+)?(?:calendar|schedule|documents?|gallery|images?|"
@@ -5914,9 +5626,7 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
     if (_EXACT_READ_REPEAT.fullmatch(text) or re.search(
         r"\bre-?run\b[^.;\n]{0,100}\b(?:same|again|check)\b", text, re.I
     )):
-        # Repeating an explicitly requested operation retains its family even
-        # when the prior execution failed. The current "re-run" is fresh user
-        # authority; requiring prior success made recovery impossible.
+        # A re-run is fresh user authority, so a failed prior execution still counts.
         for index in range(len(history) - 1, -1, -1):
             row = history[index]
             role = row.get("role") if isinstance(row, dict) else getattr(row, "role", "")
@@ -5927,10 +5637,7 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
                     return inherited
                 break
     if _SHELL_COMMAND_SEQUENCE.search(text) or _EXPLICIT_INLINE_SHELL_COMMAND.search(text):
-        # Two explicit shell operations, including a system-file path, are a
-        # stronger signal than conversational wording such as "quick check".
-        # An explicitly introduced inline command is equally unambiguous even
-        # when a follow-up does not repeat the word "bash".
+        # Two explicit shell operations, or an introduced inline command, outweigh conversational wording.
         return frozenset({"shell_files"})
     if re.search(
         r"\b(?:do|calculate|compute|solve|work)\b[^?!.]{0,100}"
@@ -5938,9 +5645,7 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
         text,
         re.I,
     ):
-        # An explicit request to use Python is execution authority even when
-        # it follows a conversational question ("what's 9x7, do it with
-        # python") rather than starting the sentence.
+        # "do it with python" is execution authority even mid-sentence.
         return frozenset({"shell_files"})
     if re.match(
         r"^\s*(?:in|inside|under)\s+(?:an?\s+|the\s+)?"
@@ -5978,10 +5683,7 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
         r"\bdocumets?\b", text, re.I
     ):
         return frozenset({"documents"})
-    # A complete top-level navigation request is a UI operation even when the
-    # panel name is also a data family (for example documents or calendar).
-    # Keep this strict/full-string so "open document <title>" remains a data
-    # lookup rather than being stolen by UI routing.
+    # Full-string only, so "open document <title>" stays a data lookup.
     if (_PANEL_NAVIGATION.fullmatch(text) or _PANEL_POP_NAVIGATION.search(text)
             or _THEME_CHANGE.search(text) or _PANEL_CONTROLS_NAVIGATION.search(text)
             or _CONTEXTUAL_UI_VIEW_CHANGE.search(text)):
@@ -6030,9 +5732,7 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
             or re.search(r"\bif\s+i\s+only\s+care\s+about\b", text, re.I)
         )
     ):
-        # A natural narrowing of the immediately preceding public-web topic
-        # stays inside that investigation even when it omits words such as
-        # search, web, source, or a demonstrative pronoun.
+        # Narrowing the previous public-web topic stays in that investigation.
         return frozenset({"search_browser"})
     if (
         recent == ("research",)
@@ -6084,9 +5784,7 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
             and re.search(r"\b(?:source|link|url)\b", text, re.I)
             and re.search(r"\b(?:that|this|it|again|same)\b", text, re.I)
             and re.search(r"\b(?:give|show|send|drop|repeat|list)\b", text, re.I)):
-        # Re-rendering a source established by the previous web result does
-        # not become a shell/file request merely because the user says
-        # "on its own line".
+        # "on its own line" does not make a web re-render a shell request.
         return frozenset({"search_browser"})
     if recent == ("search_browser",) and _CONTEXTUAL_WEB_EVIDENCE.search(text):
         return frozenset({"search_browser"})
@@ -6138,20 +5836,15 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
         and _REFERENTIAL_TOOL_CONTINUATION.fullmatch(text)
         and not any(re.search(pattern, text, re.I) for pattern in _FAMILY_WORDS.values())
     ):
-        # Resolve a pure "show/open/read it" against actual successful tool
-        # execution before the exact-read repeater scans intervening prose.
-        # Product nouns explicitly present in this turn still win.
+        # "show/open/read it" resolves to the last successful tool before the read repeater scans prose.
         recent = recently_executed_families(history, maximum=1)
         if recent:
             return frozenset({recent[0]})
-    operation = required_read_operation_for_request(text, history)
     if operation is not None:
         return _families_for_tool(operation.tool)
     selected = selected_tools_for_request(text)
     if selected:
-        # A complete exact operation owns its trailing result-presentation
-        # clause (for example, search chat history and show the match). Do not
-        # split that clause into a second family and fail the contract closed.
+        # The exact operation owns its presentation clause; splitting it would fail the contract closed.
         return frozenset().union(*(_families_for_tool(tool) for tool in selected))
     # Classify independent requests separately so the first routing match
     # cannot hide a second capability. Keep noun conjunctions intact.
@@ -6173,38 +5866,25 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
             re.I,
         )
     ):
-        # arXiv is an external paper source. Long artifact requests often put
-        # the retrieval verb and ``arXiv`` in different list items, so routing
-        # each clause independently can otherwise leave only local file tools.
+        # The verb and "arXiv" often sit in different list items.
         families.add("search_browser")
     if (recent == ("email",)
             and re.search(r"\b(?:from\s+them|latest\s+one|that\s+(?:message|email))\b", text, re.I)):
         families.add("email")
         if "shell_files" not in explicit_families:
             families.discard("shell_files")
-    # Markdown prompts commonly put a requested URL on its own bullet after
-    # ``Read ... at:``. Clause splitting keeps routing bounded, but must not
-    # detach that URL from the explicit retrieval action and leave an artifact
-    # task with only filesystem tools.
+    # A URL on its own bullet after "Read ... at:" stays tied to its retrieval verb.
     if _EXPLICIT_URL_RETRIEVAL.search(text):
         families.add("search_browser")
     if (
         _NAMED_EXTERNAL_DOCUMENT_RETRIEVAL.search(text)
         and not _LOCAL_PDF_REFERENCE.search(text)
     ):
-        # A named paper plus table/figure references is an external retrieval
-        # request even when the user did not already know its URL. Without
-        # this capability, clean-v3 freezes a local-file-only contract and the
-        # model cannot discover the source through the native web tools.
+        # A named paper with table or figure references is an external retrieval.
         families.add("search_browser")
     if requires_external_web_verification(text):
         families.add("search_browser")
-    # A successful tool result is the strongest antecedent for compact
-    # referential continuations such as "get its transcript" or "from that
-    # same PDF, extract ...". Keep this to the single most-recent successful
-    # family. The one ambiguous collision we override is "search those ...
-    # models", where the generic models noun otherwise steals an HF-search
-    # refinement into Cookbook administration.
+    # The last successful family is the antecedent; "search those ... models" stays an HF search.
     if _REFERENCE.search(text) and _REFERENTIAL_TOOL_CONTINUATION.fullmatch(text):
         recent = recently_executed_families(history, maximum=1)
         if recent and not families:
@@ -6241,10 +5921,7 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
     if active_document and not families and _has_action_signal(text) and _REFERENCE.search(text):
         families.add("documents")
     if not families and _has_action_signal(text) and _REFERENCE.search(text):
-        # Typed successful execution is a stronger antecedent than a noun in
-        # an intervening prose-only user turn. After listing Skills, for
-        # example, "which one is about email?" followed by "show it" still
-        # refers to the selected skill, not to the Email product family.
+        # Typed execution beats a noun in an intervening prose-only turn.
         recent = recently_executed_families(history, maximum=1)
         if recent:
             families.add(recent[0])
@@ -6302,8 +5979,12 @@ class TurnContract:
                     and operation.tool not in self.required & self.offered & self.executable):
                 raise ValueError("Required read operation must be available or explicitly unavailable")
 
+    @cached_property
+    def _canonical_offered(self) -> frozenset[str]:
+        return frozenset(canonical_tool(n) for n in self.offered)
+
     def permits(self, name: str) -> bool:
-        return canonical_tool(name) in {canonical_tool(n) for n in self.offered}
+        return canonical_tool(name) in self._canonical_offered
 
     def schemas(self) -> list[dict]:
         # Return copies: compact/full model formatting must not mutate the contract.
@@ -6326,17 +6007,12 @@ def resolve_full_inventory_contract(*, schemas: Iterable[dict], policy: ToolPoli
     families = frozenset({"calendar", "notes", "tasks", "skills", "memory", "documents",
                           "email", "search_browser", "shell_files", "cookbook_admin",
                           "image_editing", "image_generation"})
-    # ``ui_control`` is the executable bridge for explicit client-interface
-    # requests (for example, opening the gallery).  It is not one of the ten
-    # persisted-data families, but omitting it here makes the full-inventory
-    # contract claim that a real backend capability does not exist.
+    # ui_control is not a data family but is a real backend capability.
     trained = frozenset().union(*(FAMILY_TOOLS[f] for f in families)) | {
         # Research jobs and saved reports are available to the interactive
         # model; request selection and backend permissions still apply.
         "ask_user", "update_plan", "ui_control", "manage_research", "trigger_research", "extract_text",
-        # Session tools overlap Cookbook administration except pipeline. It is
-        # nevertheless part of the trained/runtime contract and must survive
-        # the full-inventory intersection for exact pipeline requests.
+        # pipeline is in no other family but belongs to the trained contract.
         "pipeline", "edit_image",
     }
     denied = {canonical_tool(n) for n in policy.all_disabled_names()}
@@ -6377,8 +6053,6 @@ def resolve_turn_contract(*, capabilities: Iterable[str], schemas: Iterable[dict
     operation = required_read_operation
     if operation is None and message is not None:
         operation = required_read_operation_for_request(message, history)
-    if operation is not None and not isinstance(operation, RequiredReadOperation):
-        raise TypeError("required_read_operation must be a RequiredReadOperation")
     inventory = {s["function"]["name"]: s for s in schemas if isinstance(s.get("function"), dict) and s["function"].get("name")}
     # Email aliases are one permission identity in both directions, including
     # when only the legacy schema is present in the inventory.
@@ -6390,16 +6064,12 @@ def resolve_turn_contract(*, capabilities: Iterable[str], schemas: Iterable[dict
     if selected_tools is not None:
         requested = {canonical_tool(n) for n in selected_tools}
         if not families:
-            # An exact operation selected by the request classifier is already
-            # a sufficient capability declaration. Do not erase it merely
-            # because the broader lexical family classifier was conservative.
+            # An exact selected operation is itself a capability declaration.
             selected = requested
         else:
             selected.intersection_update(requested)
     elif operation is not None:
-        # A server-sealed safe read is an operation, not merely a family hint.
-        # Offer exactly that reader so the model cannot drift to a sibling
-        # search/mutation tool after the router has already resolved intent.
+        # A sealed read offers exactly its reader, so the model cannot drift to a sibling tool.
         selected.intersection_update({canonical_tool(operation.tool)})
     elif not families:
         selected.update(CONTRACT_CORE_TOOLS)
@@ -6411,9 +6081,7 @@ def resolve_turn_contract(*, capabilities: Iterable[str], schemas: Iterable[dict
         # Browser is not core. It is a bounded recovery capability for a web
         # turn when static search/fetch cannot read the named site.
         selected.add("private_browser")
-    # Email headers discover records; they are not a complete reading surface.
-    # Keep the read-only continuation available after exact search narrowing.
-    # The executable intersection below still enforces disabled tools/accounts.
+    # Search returns headers only, so keep read_email; the executable intersection still applies.
     if 'search_emails' in selected:
         selected.update({'read_email', 'download_attachment', 'list_email_accounts'})
     selected.update(canonical_tool(n) for n in always_available_tools)

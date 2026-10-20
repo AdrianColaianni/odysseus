@@ -159,12 +159,8 @@ export function createMobileEditor({
         if (e.target === addBtn || addBtn.contains(e.target)) return;
         addBtn.click();
       });
-      // The form's delegated "+ Add" handler does
-      //   inputs.insertBefore(newRow, addBtn)
-      // : but addBtn is no longer a direct child of `.note-checklist-inputs`
-      // now that we wrapped it. Bind a fresh handler that does the same
-      // thing but inserts before the WRAPPING row, and stop propagation
-      // so the broken delegate never runs.
+      // The form's delegated "+ Add" handler inserts before addBtn, which now
+      // sits inside a wrapper row; insert before the wrapper and stop the delegate.
       addBtn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -221,7 +217,7 @@ export function createMobileEditor({
     // when the user uses the back arrow instead of an explicit Save.
     if (opts.save) {
       const saveBtn = overlay.querySelector('.note-form-save, [data-action="save"]');
-      if (saveBtn) try { saveBtn.click(); } catch {}
+      saveBtn?.click();
     }
     overlay.classList.remove('open');
     overlay.classList.add('closing');

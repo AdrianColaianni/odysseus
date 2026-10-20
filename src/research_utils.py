@@ -1,4 +1,3 @@
-# src/research_utils.py
 """Shared utilities for the deep research system.
 
 Centralizes text cleaning, quality filtering, and other logic

@@ -1,4 +1,9 @@
 # The complete application environment plus local parallel test tooling.
 -r requirements.txt
+pytest
+pytest-asyncio
+# starlette.testclient prefers httpx2 and warns on every TestClient import
+# when only classic httpx is present.
+httpx2
 # psutil lets `-n auto` use physical cores instead of logical CPU threads.
 pytest-xdist[psutil]>=3.8,<4

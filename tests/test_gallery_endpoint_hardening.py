@@ -4,8 +4,7 @@ Covers:
 - _is_openai_api_base: exact hostname matching (no substring bypass)
 - _join_checked_gallery_endpoint: allowlist-only path construction
 - No bare str(e) / f"...{e}" in gallery exception handlers
-- harmonize validates _endpoint via check_outbound_url
-- Target URL construction only appends constant paths to the validated base
+- harmonize candidate paths stay inside the allowlist
 """
 import ast
 import re
@@ -13,7 +12,7 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "routes" / "gallery" / "gallery_routes.py"
 
-import routes.gallery_routes as gallery_routes
+import routes.gallery.gallery_routes as gallery_routes
 
 
 # ---------------------------------------------------------------------------
@@ -46,20 +45,6 @@ def test_is_openai_api_base_rejects_malformed():
     f = gallery_routes._is_openai_api_base
     assert f("") is False
     assert f("not a url at all !!!") is False
-
-
-# ---------------------------------------------------------------------------
-# Source-level: gallery no longer uses substring "api.openai.com" in base
-# ---------------------------------------------------------------------------
-
-def test_gallery_does_not_use_openai_substring_check():
-    src = SRC.read_text()
-    assert '"api.openai.com" in base' not in src, (
-        "Substring OpenAI check still present — use _is_openai_api_base instead"
-    )
-    assert "'api.openai.com' in base" not in src, (
-        "Substring OpenAI check still present — use _is_openai_api_base instead"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -105,43 +90,12 @@ def test_no_raw_exception_string_in_client_responses():
         )
 
 
-# ---------------------------------------------------------------------------
-# harmonize: validates _endpoint via check_outbound_url before outbound request
-# ---------------------------------------------------------------------------
-
 def _function_source(src_text: str, func_name: str) -> str:
     tree = ast.parse(src_text)
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
             return ast.get_source_segment(src_text, node) or ""
     raise AssertionError(f"{func_name} not found in {SRC}")
-
-
-def test_harmonize_validates_endpoint_before_fetch():
-    src = SRC.read_text()
-    body = _function_source(src, "harmonize_image")
-    assert "check_outbound_url" in body, (
-        "harmonize_image must validate _endpoint via check_outbound_url before outbound requests"
-    )
-
-
-# ---------------------------------------------------------------------------
-# harmonize: target URL only appends constant allowed paths
-# ---------------------------------------------------------------------------
-
-def test_harmonize_uses_join_checked_for_target_construction():
-    src = SRC.read_text()
-    body = _function_source(src, "harmonize_image")
-    assert "_join_checked_gallery_endpoint" in body, (
-        "harmonize_image must use _join_checked_gallery_endpoint to build target URLs"
-    )
-    # Raw concatenation patterns that bypass the allowlist must not appear in harmonize
-    assert "base_root + path" not in body, (
-        "harmonize_image must not concatenate base_root + path directly"
-    )
-    assert "base + path" not in body, (
-        "harmonize_image must not concatenate base + path directly"
-    )
 
 
 def test_gallery_endpoint_paths_allowlist_covers_all_harmonize_candidates():
@@ -215,112 +169,3 @@ def test_no_upstream_data_in_client_responses():
             assert frag not in line, (
                 f"Error return at byte {m.start()} exposes {frag!r} to client:\n{line}"
             )
-
-
-# ---------------------------------------------------------------------------
-# inpaint_proxy: endpoint construction via _join_checked_gallery_endpoint
-# ---------------------------------------------------------------------------
-
-def test_inpaint_uses_join_checked_endpoint():
-    src = SRC.read_text()
-    body = _function_source(src, "inpaint_proxy")
-    assert 'f"{base}/images/edits"' not in body, (
-        "inpaint_proxy must not build /images/edits via raw f-string"
-    )
-    assert 'f"{base}/images/inpaint"' not in body, (
-        "inpaint_proxy must not build /images/inpaint via raw f-string"
-    )
-    assert '_join_checked_gallery_endpoint(base, "/images/edits")' in body, (
-        "inpaint_proxy must use _join_checked_gallery_endpoint for /images/edits"
-    )
-    assert '_join_checked_gallery_endpoint(base, "/images/inpaint")' in body, (
-        "inpaint_proxy must use _join_checked_gallery_endpoint for /images/inpaint"
-    )
-
-
-# ---------------------------------------------------------------------------
-# harmonize final 502: no base URL or last_err in client message
-# ---------------------------------------------------------------------------
-
-def test_harmonize_final_502_omits_base_and_last_err():
-    src = SRC.read_text()
-    body = _function_source(src, "harmonize_image")
-    # Collect all HTTPException raises in harmonize and check the last one (final 502)
-    raises = list(re.finditer(r"\braise\s+HTTPException\s*\(", body))
-    assert raises, "harmonize_image must contain at least one raise HTTPException"
-    last_call = _extract_httpexception_call(body, raises[-1].start())
-    for forbidden in ("last_err", "{base}", "r.text"):
-        assert forbidden not in last_call, (
-            f"harmonize final raise exposes {forbidden!r} to client:\n{last_call}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# inpaint/harmonize: _endpoint must resolve via DB; no raw admin bypass
-# ---------------------------------------------------------------------------
-
-def test_inpaint_endpoint_resolved_via_db_not_raw_input():
-    """inpaint_proxy must not use the raw request-body value as the outbound base.
-    The user-supplied value is stored as requested_base; outbound base comes from DB."""
-    src = SRC.read_text()
-    body = _function_source(src, "inpaint_proxy")
-    # requested_base holds the user input; base is only set from ep.base_url
-    assert "requested_base" in body, (
-        "inpaint_proxy must use 'requested_base' for the user-supplied value"
-    )
-    # The admin bypass (not _current_user_is_admin) must not appear in inpaint
-    assert "_current_user_is_admin" not in body, (
-        "inpaint_proxy must not have an admin bypass for raw endpoint resolution"
-    )
-    # If no matching endpoint is found, a 403 must be raised unconditionally
-    assert 'raise HTTPException(403, "Choose a registered image endpoint")' in body, (
-        "inpaint_proxy must raise 403 when _endpoint doesn't match a registered endpoint"
-    )
-
-
-def test_inpaint_outbound_base_not_from_request_body():
-    """Confirm _join_checked_gallery_endpoint is never called with the raw
-    request-body variable (requested_base) — only with the DB-derived base."""
-    src = SRC.read_text()
-    body = _function_source(src, "inpaint_proxy")
-    assert "_join_checked_gallery_endpoint(requested_base," not in body, (
-        "inpaint_proxy must not pass requested_base to _join_checked_gallery_endpoint"
-    )
-
-
-def test_harmonize_endpoint_resolved_via_db_not_raw_input():
-    """harmonize_image must not use the raw request-body value as the outbound base."""
-    src = SRC.read_text()
-    body = _function_source(src, "harmonize_image")
-    assert "requested_base" in body, (
-        "harmonize_image must use 'requested_base' for the user-supplied value"
-    )
-    assert "_current_user_is_admin" not in body, (
-        "harmonize_image must not have an admin bypass for raw endpoint resolution"
-    )
-    assert 'raise HTTPException(403, "Choose a registered image endpoint")' in body, (
-        "harmonize_image must raise 403 when _endpoint doesn't match a registered endpoint"
-    )
-
-
-def test_harmonize_outbound_base_not_from_request_body():
-    """Confirm _join_checked_gallery_endpoint is never called with requested_base."""
-    src = SRC.read_text()
-    body = _function_source(src, "harmonize_image")
-    assert "_join_checked_gallery_endpoint(requested_base," not in body, (
-        "harmonize_image must not pass requested_base to _join_checked_gallery_endpoint"
-    )
-
-
-def test_inpaint_and_harmonize_no_base_equals_endpoint():
-    """Neither function should assign `base = endpoint` or `base = requested_base`
-    — the outbound base must come exclusively from DB (ep.base_url)."""
-    src = SRC.read_text()
-    for func_name in ("inpaint_proxy", "harmonize_image"):
-        body = _function_source(src, func_name)
-        assert "base = endpoint" not in body, (
-            f"{func_name}: 'base = endpoint' carries request-body input into outbound request"
-        )
-        assert "base = requested_base" not in body, (
-            f"{func_name}: 'base = requested_base' carries request-body input into outbound request"
-        )

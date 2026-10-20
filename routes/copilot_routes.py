@@ -1,4 +1,3 @@
-# routes/copilot_routes.py
 """GitHub Copilot device-flow login.
 
 Drives the GitHub OAuth *device flow* and, on success, creates (or refreshes)

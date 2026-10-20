@@ -1,4 +1,3 @@
-# src/chat_processor.py
 import logging
 import math
 import re
@@ -7,7 +6,7 @@ from collections import Counter
 from typing import List, Dict, Any, Optional, Tuple
 from src.chat_helpers import extract_urls
 from src.youtube_handler import is_youtube_url
-from src.search import comprehensive_web_search, fetch_webpage_content
+from services.search import comprehensive_web_search, fetch_webpage_content
 from src.prompt_security import UNTRUSTED_CONTEXT_POLICY, untrusted_context_message
 
 logger = logging.getLogger(__name__)
@@ -188,6 +187,7 @@ class ChatProcessor:
             mem_token_cache[mem["id"]] = toks
             for t in toks:
                 doc_freq[t] += 1
+        avg_len = max(sum(len(v) for v in mem_token_cache.values()) / N, 1)
 
         def _bm25_score(query_toks, mem_id):
             """BM25-inspired score between query and a memory."""
@@ -196,7 +196,6 @@ class ChatProcessor:
                 return 0.0
             score = 0.0
             mem_len = len(mem_toks)
-            avg_len = max(sum(len(v) for v in mem_token_cache.values()) / N, 1)
             k1, b = 1.5, 0.75
             for qt in query_toks:
                 if qt not in mem_toks:

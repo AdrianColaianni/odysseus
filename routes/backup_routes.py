@@ -4,7 +4,7 @@ import json
 import logging
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from core.middleware import require_admin
 from services.memory import MemoryStoreUnreadable
 from src.auth_helpers import get_current_user
@@ -14,12 +14,11 @@ logger = logging.getLogger(__name__)
 
 
 def setup_backup_routes(memory_manager, preset_manager, skills_manager) -> APIRouter:
-    router = APIRouter(tags=["backup"])
+    router = APIRouter(tags=["backup"], dependencies=[Depends(require_admin)])
 
     @router.get("/api/export")
     async def export_data(request: Request):
         """Export all user data as a downloadable JSON file."""
-        require_admin(request)
         user = get_current_user(request)
 
         # Memories (filtered by owner when auth is enabled)
@@ -63,7 +62,6 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager) -> APIRo
     @router.post("/api/import")
     async def import_data(request: Request):
         """Import user data from a previously exported JSON file. Merges with existing data."""
-        require_admin(request)
         user = get_current_user(request)
         try:
             body = await request.json()
@@ -75,7 +73,6 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager) -> APIRo
 
         imported = []
 
-        # ── Memories ──
         if "memories" in body and isinstance(body["memories"], list):
             # Strict load: importing on top of an unreadable store would write
             # only the incoming rows back and drop everything already saved.
@@ -107,7 +104,6 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager) -> APIRo
             memory_manager.save(existing)
             imported.append(f"{added} memories")
 
-        # ── Skills ──
         if "skills" in body and isinstance(body["skills"], list):
             existing = skills_manager.load_all()
             # Dedup against THIS user's own skills only. Using every tenant's
@@ -180,7 +176,6 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager) -> APIRo
                 added += 1
             imported.append(f"{added} skills")
 
-        # ── Presets ──
         if "presets" in body and isinstance(body["presets"], dict):
             current = preset_manager.get_all()
             for key, value in body["presets"].items():
@@ -191,21 +186,18 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager) -> APIRo
             preset_manager.save(current)
             imported.append("presets")
 
-        # ── Settings ──
         if "settings" in body and isinstance(body["settings"], dict):
             current = load_settings()
             current.update(body["settings"])
             save_settings(current)
             imported.append("settings")
 
-        # ── Features ──
         if "features" in body and isinstance(body["features"], dict):
             current = load_features()
             current.update(body["features"])
             save_features(current)
             imported.append("features")
 
-        # ── Preferences ──
         if "preferences" in body and isinstance(body["preferences"], dict):
             from routes.prefs_routes import _load_for_user, _save_for_user
             current = _load_for_user(user)

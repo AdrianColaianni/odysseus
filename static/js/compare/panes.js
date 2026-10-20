@@ -2,17 +2,18 @@
 import state from './state.js';
 import { _persistSelections } from './models.js';
 import { buildVoteBar } from './vote.js?v=20260828resendcaldrag1';
-import {
-  ICON_REROLL, ICON_COPY, ICON_EXPAND, ICON_COLLAPSE, ICON_CLOSE,
-  ICON_PLAY, ICON_CODE, SEND_SVG, ICON_DICE,
-} from './icons.js?v=20260908compareprompts1';
-import { _clearProbeWaves } from './probe.js';
-import Storage from '../storage.js';
+import { ICON_REROLL, ICON_COPY, ICON_EXPAND, ICON_COLLAPSE, ICON_PLAY, ICON_CODE, ICON_DICE } from './icons.js?v=20260908compareprompts1';
 import uiModule from '../ui.js?v=20260916largetoolscroll1';
 import spinnerModule from '../spinner.js';
-import { bindMenuDismiss } from '../escMenuStack.js';
+import { bindMenuDismiss, dismissOrRemove } from '../escMenuStack.js';
 
 var escapeHtml = uiModule.esc;
+
+// Agent and research modes pick from the chat models.
+function _modelsForCompareMode() {
+  const type = (state._compareMode === 'agent' || state._compareMode === 'research') ? 'chat' : state._compareMode;
+  return state._cachedModels.filter(m => m.type === type);
+}
 
 // ── Lazy-registered functions from compare.js (avoids circular imports) ──
 let _setSendBtn = null;
@@ -85,7 +86,6 @@ async function _savePaneGenerationSettings(paneIdx, change) {
     const res = await fetch(`${state.API_BASE}/api/session/${encodeURIComponent(sid)}/generation-settings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
       body: JSON.stringify(next),
     });
     if (!res.ok) throw new Error(await res.text());
@@ -101,7 +101,7 @@ function togglePaneSettings(paneIdx, anchorBtn) {
   const existing = document.querySelector('.compare-pane-settings-popup');
   if (existing) {
     const same = existing.dataset.pane === String(paneIdx);
-    if (typeof existing._dismiss === 'function') existing._dismiss(); else existing.remove();
+    dismissOrRemove(existing);
     if (same) return;
   }
   const settings = state._paneGenerationSettings[paneIdx] || {
@@ -620,13 +620,12 @@ async function copyPaneResponse(paneIdx) {
 /** Show a model picker dropdown anchored to the "+" button in the pane header. */
 async function _addPane(anchorBtn) {
   if (state._streaming) return;
-  const _effectiveType = (state._compareMode === 'agent' || state._compareMode === 'research') ? 'chat' : state._compareMode;
-  const filtered = state._cachedModels.filter(m => m.type === _effectiveType);
+  const filtered = _modelsForCompareMode();
   if (!filtered.length) return;
 
   // Toggle existing dropdown
   const existing = document.querySelector('.add-pane-dropdown');
-  if (existing) { if (typeof existing._dismiss === 'function') existing._dismiss(); else existing.remove(); return; }
+  if (existing) { dismissOrRemove(existing); return; }
 
   const dropdown = document.createElement('div');
   dropdown.className = 'add-pane-dropdown';
@@ -897,10 +896,9 @@ function _showModelSwapDropdown(paneIdx, titleBtn) {
 
   // Remove any existing dropdown
   const existing = document.querySelector('.pane-model-dropdown');
-  if (existing) { if (typeof existing._dismiss === 'function') existing._dismiss(); else existing.remove(); return; }
+  if (existing) { dismissOrRemove(existing); return; }
 
-  const _effectiveType = (state._compareMode === 'agent' || state._compareMode === 'research') ? 'chat' : state._compareMode;
-  const filtered = state._cachedModels.filter(m => m.type === _effectiveType);
+  const filtered = _modelsForCompareMode();
   if (filtered.length === 0) return;
 
   const dropdown = document.createElement('div');

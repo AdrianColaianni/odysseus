@@ -4,7 +4,7 @@ import secrets
 import uuid
 
 import bcrypt
-from fastapi import APIRouter, HTTPException, Request, Form
+from fastapi import APIRouter, Depends, HTTPException, Request, Form
 
 from core.database import get_db_session, ApiToken
 from core.middleware import require_admin
@@ -34,6 +34,24 @@ TOKEN_PROFILES = {
     "codex_documents": ["documents:read", "documents:write"],
     "codex_email_drafts": ["email:read", "email:draft", "documents:read", "documents:write"],
 }
+
+
+def mint_api_token(owner: str, name: str, scopes: str) -> tuple[str, str]:
+    """Store a new token and return (token_id, raw_token); only the bcrypt hash and prefix persist."""
+    raw_token = "ody_" + secrets.token_urlsafe(32)
+    token_hash = bcrypt.hashpw(raw_token.encode(), bcrypt.gensalt()).decode()
+    token_id = str(uuid.uuid4())[:8]
+    with get_db_session() as db:
+        db.add(ApiToken(
+            id=token_id,
+            owner=owner,
+            name=name,
+            token_hash=token_hash,
+            token_prefix=raw_token[:8],
+            scopes=scopes,
+            is_active=True,
+        ))
+    return token_id, raw_token
 
 
 def _normalize_scopes(scopes: str | list[str] | None = None, profile: str | None = None) -> list[str]:
@@ -74,11 +92,10 @@ def _normalize_scopes(scopes: str | list[str] | None = None, profile: str | None
 
 
 def setup_api_token_routes() -> APIRouter:
-    router = APIRouter(prefix="/api", tags=["api_tokens"])
+    router = APIRouter(prefix="/api", tags=["api_tokens"], dependencies=[Depends(require_admin)])
 
     @router.get("/tokens")
-    def list_tokens(request: Request):
-        require_admin(request)
+    def list_tokens():
         with get_db_session() as db:
             tokens = db.query(ApiToken).all()
             return [
@@ -104,14 +121,6 @@ def setup_api_token_routes() -> APIRouter:
         except Exception:
             pass
 
-    @router.get("/tokens/profiles")
-    def token_profiles(request: Request):
-        require_admin(request)
-        return {
-            "profiles": TOKEN_PROFILES,
-            "allowed_scopes": sorted(ALLOWED_SCOPES),
-        }
-
     @router.post("/tokens")
     def create_token(
         request: Request,
@@ -119,28 +128,13 @@ def setup_api_token_routes() -> APIRouter:
         scopes: str = Form(None),
         profile: str = Form(None),
     ):
-        require_admin(request)
         name = name.strip()[:MAX_NAME_LEN]
         if not name:
             raise HTTPException(400, "Token name is required")
         owner = get_current_user(request)
         scope_list = _normalize_scopes(scopes, profile)
-        scopes_value = ",".join(scope_list)
 
-        raw_token = "ody_" + secrets.token_urlsafe(32)
-        token_hash = bcrypt.hashpw(raw_token.encode(), bcrypt.gensalt()).decode()
-        token_id = str(uuid.uuid4())[:8]
-
-        with get_db_session() as db:
-            db.add(ApiToken(
-                id=token_id,
-                owner=owner,
-                name=name,
-                token_hash=token_hash,
-                token_prefix=raw_token[:8],
-                scopes=scopes_value,
-                is_active=True,
-            ))
+        token_id, raw_token = mint_api_token(owner, name, ",".join(scope_list))
         _invalidate_cache(request)
 
         return {
@@ -154,7 +148,6 @@ def setup_api_token_routes() -> APIRouter:
 
     @router.patch("/tokens/{token_id}")
     async def update_token(request: Request, token_id: str):
-        require_admin(request)
         current_user = get_current_user(request)
         try:
             payload = await request.json()
@@ -194,7 +187,6 @@ def setup_api_token_routes() -> APIRouter:
 
     @router.delete("/tokens/{token_id}")
     def delete_token(request: Request, token_id: str):
-        require_admin(request)
         current_user = get_current_user(request)
         with get_db_session() as db:
             token = db.query(ApiToken).filter(ApiToken.id == token_id).first()

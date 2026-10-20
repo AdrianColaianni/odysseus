@@ -47,19 +47,15 @@ def _cycle(skill: Skill, times: int = 1) -> Skill:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "description",
-    [GERMAN, JAPANESE, QUOTED_ASCII],
-    ids=["german", "japanese", "quoted-ascii"],
-)
-def test_description_survives_repeated_saves(description):
+def test_description_survives_repeated_saves():
     """Five load/save cycles must leave the text byte-identical.
 
     One cycle is enough to corrupt it; five is where the doubling became
     obvious in the field.
     """
-    result = _cycle(Skill(name="demo", description=description), times=5)
-    assert result.description == description
+    for description in (GERMAN, JAPANESE, QUOTED_ASCII):
+        result = _cycle(Skill(name="demo", description=description), times=5)
+        assert result.description == description
 
 
 def test_corruption_does_not_compound_across_saves():
@@ -160,12 +156,7 @@ def test_lists_round_trip_with_non_ascii_entries():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "sep",
-    ["\u2028", "\u2029", "\x85", "\r", "\v", "\f", "\x1c"],
-    ids=["ls", "ps", "nel", "cr", "vt", "ff", "fs"],
-)
-def test_line_break_characters_do_not_split_the_frontmatter(sep):
+def test_line_break_characters_do_not_split_the_frontmatter():
     """parse_frontmatter() reads one scalar per line via str.splitlines(),
     which breaks on far more than \\n. Any of these landing unescaped in the
     file would silently truncate the value and shift the remainder into a
@@ -175,16 +166,17 @@ def test_line_break_characters_do_not_split_the_frontmatter(sep):
     LINE SEPARATOR and PARAGRAPH SEPARATOR through as themselves — so those
     three are re-escaped explicitly.
     """
-    description = f"before{sep}after, x"
-    markdown = Skill(name="demo", description=description).to_markdown()
+    for sep in ("\u2028", "\u2029", "\x85", "\r", "\v", "\f", "\x1c"):
+        description = f"before{sep}after, x"
+        markdown = Skill(name="demo", description=description).to_markdown()
 
-    frontmatter_text = markdown.split("---")[1]
-    assert len(frontmatter_text.strip().splitlines()) == len(
-        [l for l in frontmatter_text.strip().split("\n") if l.strip()]
-    ), "a scalar leaked a line break into the frontmatter"
+        frontmatter_text = markdown.split("---")[1]
+        assert len(frontmatter_text.strip().splitlines()) == len(
+            [l for l in frontmatter_text.strip().split("\n") if l.strip()]
+        ), "a scalar leaked a line break into the frontmatter"
 
-    fm, _body = parse_frontmatter(markdown)
-    assert fm["description"] == description
+        fm, _body = parse_frontmatter(markdown)
+        assert fm["description"] == description
 
 
 # ---------------------------------------------------------------------------

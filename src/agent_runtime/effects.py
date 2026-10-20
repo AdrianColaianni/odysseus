@@ -47,10 +47,6 @@ def _position(value: Any) -> None:
 _SHA256 = re.compile(r"[a-f0-9]{64}")
 
 
-# ---------------------------------------------------------------------------
-# Exact resource references (Wave 3 consumption only)
-# ---------------------------------------------------------------------------
-
 class ResourceKind(str, Enum):
     FILESYSTEM = "filesystem"
     PROCESS = "process"
@@ -194,10 +190,6 @@ def bound_filesystem_refs(bound: Any) -> tuple[ResourceRef, ...]:
         raise TypeError("Filesystem effect scope requires a server-owned bound operation")
     return tuple(resource_ref(binding.resource, binding.role) for binding in bound.bindings)
 
-
-# ---------------------------------------------------------------------------
-# Claims
-# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class OperationRef:
@@ -343,10 +335,6 @@ class EffectClaim:
                    tuple(Postcondition.from_dict(o) for o in value["obligations"]),
                    value["parent_run_id"], value["external"])
 
-
-# ---------------------------------------------------------------------------
-# Outcomes
-# ---------------------------------------------------------------------------
 
 class ExecutionOutcome(str, Enum):
     NOT_EXECUTED = "not_executed"          # refused before backend invocation
@@ -494,10 +482,6 @@ class EffectOutcome:
                    CleanupState(value["cleanup"]), value["execution_id"], value["replayed"])
 
 
-# ---------------------------------------------------------------------------
-# Observations
-# ---------------------------------------------------------------------------
-
 class ObservationMechanism(str, Enum):
     FILESYSTEM_READ = "filesystem_read"        # admitted read of the exact binding
     OWNED_RECORD_READ = "owned_record_read"    # admitted owner-scoped readback
@@ -602,10 +586,6 @@ def predicate_holds(postcondition: Postcondition, observation: Observation) -> b
     return observation.content_sha256 != postcondition.expected
 
 
-# ---------------------------------------------------------------------------
-# History, invalidation and freshness
-# ---------------------------------------------------------------------------
-
 class Freshness(str, Enum):
     FRESH = "fresh"
     STALE = "stale"          # a later possible mutation or replacement overlaps
@@ -704,10 +684,6 @@ def freshness(observation: Observation, history: EffectHistory) -> Freshness:
                 return Freshness.UNSETTLED
     return Freshness.FRESH
 
-
-# ---------------------------------------------------------------------------
-# Verification
-# ---------------------------------------------------------------------------
 
 class EffectVerdict(str, Enum):
     NOT_EXECUTED = "not_executed"

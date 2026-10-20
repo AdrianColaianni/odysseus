@@ -1,55 +1,13 @@
 """Process identity: is this pid still the process we started?
 
-A recorded pid is not an identity. The kernel reuses pids, and every store in
-this tree that remembers a process — ``data/bg_jobs.json``,
-``data/containment_grants.json``, the Cookbook's task list — outlives the
-process that wrote it, by design: those records exist so a restart does not lose
-a job. The combination is the defect this module closes. A record that says
-``pid 4242`` and a live ``pid 4242`` are not the same claim, and signalling the
-second because the first was written is how a teardown kills a stranger.
+The identity is (pid, start token); a recorded pid alone can name a reused
+slot. :data:`UNVERIFIABLE` (no procfs, no ``ps``, a failed probe, a record with
+no token) is neither OWNED nor GONE: callers must not signal and must not
+report a teardown.
 
-That is not hypothetical here. ODY-86 was pid files unlinked while the daemons
-they named were still live, with ownership never verified; the Cookbook survivor
-sweep still terminates *any* process whose command line matches a tracked one,
-which is a different spelling of the same mistake.
-
-**The identity is (pid, start token).** A pid identifies a slot; the start token
-identifies which process is occupying it. The kernel will not reissue a pid to a
-process that started earlier, so comparing the token recorded at launch with the
-token read now answers "is this still ours" without a handle, a lock file or a
-supervisor.
-
-Four verdicts, and the fourth is the point
-------------------------------------------
-:data:`OWNED`, :data:`GONE` and :data:`FOREIGN` are the answers. The fourth,
-:data:`UNVERIFIABLE`, is what this host could not determine — no procfs, no
-``ps``, a probe that raised, or a record written before anything recorded a
-token. It is deliberately **not** collapsed into either "ours" (which would
-signal strangers) or "gone" (which would abandon live processes).
-
-Process inspection has broken off Linux four times in this tree — ODY-70, -86,
--94, -99 — every time because an inspection mechanism that was absent read as a
-successful answer. So :data:`UNVERIFIABLE` is a containment failure and callers
-must treat it as one: do not signal, and do not report a teardown that was not
-performed. Refusing to act is the only honest option when you cannot tell what
-you would be acting on.
-
-Token granularity, stated because it bounds the guarantee
----------------------------------------------------------
-======== ============================= ===============
-Host     Source                        Resolution
-======== ============================= ===============
-Linux    boot ID + stat field 22       ~10 ms (1 tick)
-macOS    ``ps -o lstart=``             1 s
-Windows  ``GetProcessTimes``           100 ns
-======== ============================= ===============
-
-A pid recycled *within one token tick* is indistinguishable from the original.
-On Linux and Windows that window is too small to hit in practice. On macOS it is
-one second, which a pid wrap could theoretically land inside — so the token
-narrows the risk by many orders of magnitude there without eliminating it. It is
-a strictly better claim than the pid alone, which is the comparison that
-matters; it is not a proof of identity and this module does not claim one.
+Token resolution bounds the guarantee: Linux boot ID + stat field 22 (~10 ms),
+macOS ``ps -o lstart=`` (1 s), Windows ``GetProcessTimes`` (100 ns). A pid
+recycled within one tick is indistinguishable from the original.
 """
 
 from __future__ import annotations
@@ -125,10 +83,6 @@ def inspection_mechanism() -> str:
     if shutil.which("ps"):
         return MECHANISM_PS
     return MECHANISM_NONE
-
-
-def inspection_available() -> bool:
-    return inspection_mechanism() != MECHANISM_NONE
 
 
 # ── Start tokens ────────────────────────────────────────────────────────────

@@ -56,7 +56,6 @@ export function wireSelectionControls({
   document.querySelectorAll('.ge-quick-mask-toggle').forEach(button => {
     button.addEventListener('click', toggleQuickMask);
   });
-  // ── Rectangle / ellipse marquee ──
   document.querySelectorAll('.ge-marquee-shape-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       state.marqueeShape = btn.dataset.marqueeShape === 'ellipse' ? 'ellipse' : 'rectangle';
@@ -111,7 +110,6 @@ export function wireSelectionControls({
   document.getElementById('ge-marquee-copy')?.addEventListener('click', wandCopyToNewLayer);
   document.getElementById('ge-marquee-mask')?.addEventListener('click', wandToMask);
 
-  // ── Lasso section ──
   const lassoFPrev = document.getElementById('ge-lasso-feather-preview');
   function syncLassoFeather(v) {
     if (!lassoFPrev) return;
@@ -142,7 +140,6 @@ export function wireSelectionControls({
   });
   document.getElementById('ge-lasso-invert')?.addEventListener('click', invertSelection);
 
-  // ── Wand section ──
   document.getElementById('ge-wand-feather')?.addEventListener('input', (e) => {
     const v = parseInt(e.target.value, 10) || 0;
     document.getElementById('ge-wand-feather-label').textContent = v + 'px';

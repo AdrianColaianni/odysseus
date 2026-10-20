@@ -15,8 +15,6 @@ import asyncio
 import os
 import threading
 
-os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
-
 import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -256,7 +254,7 @@ async def test_add_and_upload_serialize(tmp_path, monkeypatch):
 
     record = {}
     app = _build_app(tmp_path, monkeypatch, record)
-    monkeypatch.setattr(personal_routes, "UPLOADS_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setattr(personal_routes, "PERSONAL_UPLOADS_DIR", str(tmp_path / "uploads"))
     monkeypatch.setattr(personal_routes, "require_privilege", lambda request, key: "tester")
     (tmp_path / "docs_a").mkdir()
 
@@ -298,7 +296,7 @@ async def test_upload_processes_each_payload_before_reading_the_next(tmp_path, m
 
     record = {}
     app = _build_app(tmp_path, monkeypatch, record)
-    monkeypatch.setattr(personal_routes, "UPLOADS_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setattr(personal_routes, "PERSONAL_UPLOADS_DIR", str(tmp_path / "uploads"))
     monkeypatch.setattr(personal_routes, "require_privilege", lambda request, key: "tester")
 
     files = [
@@ -339,7 +337,7 @@ async def test_add_and_delete_file_serialize(tmp_path, monkeypatch):
 
     record = {}
     app = _build_app(tmp_path, monkeypatch, record)
-    monkeypatch.setattr(personal_routes, "UPLOADS_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setattr(personal_routes, "PERSONAL_UPLOADS_DIR", str(tmp_path / "uploads"))
     (tmp_path / "docs_a").mkdir()
     doomed = tmp_path / "doomed.txt"
     doomed.write_text("bye")

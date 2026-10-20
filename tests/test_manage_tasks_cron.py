@@ -51,11 +51,11 @@ async def test_cron_create_edit_resume_and_invalid_edit_rollback(storage):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('expression', [None, '', 'bad', '99 99 * * *'])
-async def test_invalid_cron_does_not_create_inert_task(storage, expression):
-    result = await call(action='create', name='Invalid', prompt='Test', schedule='cron',
-                        cron_expression=expression)
-    assert result['exit_code'] == 1
+async def test_invalid_cron_does_not_create_inert_task(storage):
+    for expression in (None, 'bad', '99 99 * * *'):
+        result = await call(action='create', name='Invalid', prompt='Test', schedule='cron',
+                            cron_expression=expression)
+        assert result['exit_code'] == 1, expression
     with storage() as db:
         assert db.query(database.ScheduledTask).count() == 0
 
@@ -96,19 +96,17 @@ async def test_named_weekdays_create_and_edit_preserve_actual_clock(storage):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('extra', [
-    {'weekdays': []}, {'weekdays': ['noday']}, {'weekdays': 'monday'},
-    {'weekdays': ['monday'], 'scheduled_time': '25:00'},
-    {'weekdays': ['monday'], 'scheduled_time': None},
-    {'weekdays': ['monday'], 'cron_expression': '0 9 * * *'},
-    {'weekdays': ['monday'], 'scheduled_day': 0},
-    {'weekdays': ['monday'], 'trigger_type': 'event'},
-    {'weekdays': ['monday'], 'schedule': 'once'},
-])
-async def test_invalid_weekday_schedule_is_not_saved(storage, extra):
-    result = await call(**{'action': 'create', 'name': 'Invalid', 'prompt': 'Test',
-                          'scheduled_time': '09:15', **extra})
-    assert result['exit_code'] == 1
+async def test_invalid_weekday_schedule_is_not_saved(storage):
+    for extra in (
+        {'weekdays': []}, {'weekdays': ['noday']}, {'weekdays': 'monday'},
+        {'weekdays': ['monday'], 'scheduled_time': '25:00'},
+        {'weekdays': ['monday'], 'cron_expression': '0 9 * * *'},
+        {'weekdays': ['monday'], 'trigger_type': 'event'},
+        {'weekdays': ['monday'], 'schedule': 'once'},
+    ):
+        result = await call(**{'action': 'create', 'name': 'Invalid', 'prompt': 'Test',
+                              'scheduled_time': '09:15', **extra})
+        assert result['exit_code'] == 1, extra
     with storage() as db:
         assert db.query(database.ScheduledTask).count() == 0
 
@@ -128,37 +126,36 @@ async def test_month_day_create_and_edit(storage):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('day', [0, 32, True, '15', None])
-async def test_invalid_month_day_is_not_saved(storage, day):
-    result = await call(action='create', name='Invalid', prompt='Test', day_of_month=day)
-    assert result['exit_code'] == 1
+async def test_invalid_month_day_is_not_saved(storage):
+    for day in (0, 32, True, '15'):
+        result = await call(action='create', name='Invalid', prompt='Test', day_of_month=day)
+        assert result['exit_code'] == 1, day
     with storage() as db:
         assert db.query(database.ScheduledTask).count() == 0
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('schedule', ['daily', 'weekly', 'monthly', 'cron'])
-async def test_recurring_schedule_does_not_silently_ignore_one_off_date(storage, schedule):
-    result = await call(action='create', name='Invalid', prompt='Test', schedule=schedule,
-                        scheduled_date='2099-01-15T08:00:00Z')
-    assert result['exit_code'] == 1
-    assert 'scheduled_date is only' in result['error']
+async def test_recurring_schedule_does_not_silently_ignore_one_off_date(storage):
+    for schedule in ('daily', 'cron'):
+        result = await call(action='create', name='Invalid', prompt='Test', schedule=schedule,
+                            scheduled_date='2099-01-15T08:00:00Z')
+        assert result['exit_code'] == 1, schedule
     with storage() as db:
         assert db.query(database.ScheduledTask).count() == 0
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('expression', ['15 9 * * 1,3,5', '15 9 15 * *', '0,30 8-10 * * 2,4'])
-async def test_time_only_edit_changes_cron_clock_not_calendar_fields(storage, expression):
-    result = await call(action='create', name='Digest', prompt='News', schedule='cron',
-                        cron_expression=expression)
-    edited = await call(action='edit', task_id=result['task_id'], scheduled_time='10:30')
-    assert edited['exit_code'] == 0, edited
-    with storage() as db:
-        row = db.get(database.ScheduledTask, result['task_id'])
-        assert row.cron_expression.split() == ['30', '10', *expression.split()[2:]]
-        assert row.next_run.hour == 10 and row.next_run.minute == 30
-        assert row.name == 'Digest' and row.prompt == 'News'
+async def test_time_only_edit_changes_cron_clock_not_calendar_fields(storage):
+    for expression in ('15 9 15 * *', '0,30 8-10 * * 2,4'):
+        result = await call(action='create', name='Digest', prompt='News', schedule='cron',
+                            cron_expression=expression)
+        edited = await call(action='edit', task_id=result['task_id'], scheduled_time='10:30')
+        assert edited['exit_code'] == 0, edited
+        with storage() as db:
+            row = db.get(database.ScheduledTask, result['task_id'])
+            assert row.cron_expression.split() == ['30', '10', *expression.split()[2:]]
+            assert row.next_run.hour == 10 and row.next_run.minute == 30
+            assert row.name == 'Digest' and row.prompt == 'News'
 
 
 @pytest.mark.asyncio

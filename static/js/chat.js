@@ -1,14 +1,19 @@
 // static/js/chat.js
 
-/**
- * Main chat functionality - message handling and streaming
- */
-// ES6 module — IIFE removed
+// Main chat functionality: message handling and streaming
 
 import Storage from './storage.js';
 import uiModule from './ui.js?v=20260916largetoolscroll1';
 import sessionModule from './sessions.js';
-import chatRenderer, { renderToolIcon } from './chatRenderer.js?v=20260914metricssummary1';
+import chatRenderer, {
+  renderToolIcon,
+  runningToolNodeHtml,
+  finishedToolNodeHtml,
+  _isPrivateBrowserTool,
+  _privateBrowserActionLabel,
+  _privateBrowserUrlFromCommand,
+  _toolDisplayInfo,
+} from './chatRenderer.js?v=20260914metricssummary1';
 import chatStream from './chatStream.js?v=20260914pdfstrip1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -47,17 +52,12 @@ import { invalidateSettings } from './appConfig.js';
   let API_BASE = '';
   let currentAbort = null;
   let isStreaming = false;
-  // Continuous stall watchdog: while streaming, if the SSE stream produces
-  // NOTHING for STALL_THRESHOLD_MS (no deltas, no tool heartbeat — tools beat
-  // every 2s, so a full minute of silence means it's genuinely stuck or the
-  // model quietly stopped), surface a non-destructive "still working?" prompt
-  // instead of silently hanging. Replaces relying only on the tab-refocus
-  // recovery (which fired only on visibilitychange and silently reloaded).
+  // Stall watchdog: tools heartbeat every 2s, so STALL_THRESHOLD_MS with no
+  // event at all means the stream is stuck; offer a "still working?" prompt.
   let _stallWatchdog = null;
   let _stallBannerShown = false;
   const STALL_THRESHOLD_MS = 60000;
   let _sendInFlight = false;   // covers the window from click → streaming start
-  let _displayOverride = null; // Override visible user bubble text (hides injected prompts)
   let _hideUserBubble = false; // Skip user bubble entirely (e.g. continue after stop)
   let _contextHeaderSeq = 0;
   let _contextHeaderData = null;
@@ -68,44 +68,6 @@ import { invalidateSettings } from './appConfig.js';
   const _selectedNoteIdsBySession = new Map();
   let _pendingSelectedNoteIds = [];
   let _lastPrivateBrowserUrl = '';
-  function _isPrivateBrowserTool(tool) {
-    const name = String(tool || '').toLowerCase();
-    return name === 'private_browser'
-      || name.includes('private_browser')
-      || name.includes('builtin_browser')
-      || name.startsWith('browser_')
-      || name.includes('__browser_');
-  }
-
-  function _privateBrowserActionLabel(command) {
-    const raw = String(command || '').trim();
-    if (!raw) return 'running';
-    try {
-      const parsed = JSON.parse(raw);
-      const action = String(parsed && parsed.action || '').trim();
-      if (action) {
-        const target = parsed.url || parsed.selector || parsed.target || parsed.key || '';
-        return target ? `${action}: ${String(target).slice(0, 90)}` : action;
-      }
-    } catch (_) {}
-    return raw.slice(0, 110);
-  }
-
-  function _privateBrowserUrlFromCommand(command) {
-    const raw = String(command || '').trim();
-    if (!raw) return '';
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed.url === 'string' && parsed.url) return parsed.url;
-      const commands = Array.isArray(parsed && parsed.commands) ? parsed.commands : [];
-      for (const item of commands) {
-        if (Array.isArray(item) && String(item[0] || '').toLowerCase() === 'open' && item[1]) return String(item[1]);
-        if (item && typeof item === 'object' && String(item.action || '').toLowerCase() === 'open' && item.url) return String(item.url);
-      }
-    } catch (_) {}
-    return '';
-  }
-
   function _mountPrivateBrowserSpinner(emptyEl) {
     const slot = emptyEl?.querySelector?.('.private-browser-preview-spinner');
     if (!slot || slot.dataset.whirlpoolMounted === '1') return;
@@ -129,7 +91,7 @@ import { invalidateSettings } from './appConfig.js';
     const imgHtml = screenshotSrc
       ? `<img class="private-browser-preview-img" src="${uiModule.esc(screenshotSrc)}" alt="Private browser screenshot" />`
       : '<div class="private-browser-preview-empty"><span>Browsing…</span><span class="private-browser-preview-spinner" aria-hidden="true"></span></div><img class="private-browser-preview-img" alt="Private browser screenshot" />';
-    const html = `<div class="private-browser-preview"${urlAttr}><div class="private-browser-preview-header"><span class="private-browser-preview-title">Private Browser</span><span class="private-browser-preview-status">${uiModule.esc(_privateBrowserActionLabel(command))}</span><button type="button" class="private-browser-preview-fold" title="Fold browser preview" aria-label="Fold browser preview">×</button></div><div class="private-browser-preview-frame">${imgHtml}</div></div>`;
+    const html = `<div class="private-browser-preview"${urlAttr}><div class="private-browser-preview-header"><span class="private-browser-preview-title">Private Browser</span><span class="private-browser-preview-status">${uiModule.esc(_privateBrowserActionLabel(command, 'running'))}</span><button type="button" class="private-browser-preview-fold" title="Fold browser preview" aria-label="Fold browser preview">×</button></div><div class="private-browser-preview-frame">${imgHtml}</div></div>`;
     setTimeout(() => _mountPrivateBrowserSpinners(document), 0);
     return html;
   }
@@ -174,7 +136,7 @@ import { invalidateSettings } from './appConfig.js';
   function _showPrivateBrowserPreview(command, contentEl) {
     const preview = _ensurePrivateBrowserPreview(contentEl);
     if (!preview || !preview.root) return;
-    if (preview.status) preview.status.textContent = _privateBrowserActionLabel(command);
+    if (preview.status) preview.status.textContent = _privateBrowserActionLabel(command, 'running');
     const url = _privateBrowserUrlFromCommand(command);
     if (url) {
       _lastPrivateBrowserUrl = url;
@@ -192,7 +154,7 @@ import { invalidateSettings } from './appConfig.js';
     if (!json || !_isPrivateBrowserTool(json.tool)) return;
     const preview = _ensurePrivateBrowserPreview(contentEl);
     if (!preview || !preview.root) return;
-    if (preview.status) preview.status.textContent = _privateBrowserActionLabel(json.command || '');
+    if (preview.status) preview.status.textContent = _privateBrowserActionLabel(json.command || '', 'running');
     const url = _privateBrowserUrlFromCommand(json.command || '');
     if (url) {
       _lastPrivateBrowserUrl = url;
@@ -854,7 +816,7 @@ import { invalidateSettings } from './appConfig.js';
       return false;
     }
   }
-  try { window.compactCurrentChatContext = compactCurrentChatContext; } catch (_) {}
+  window.compactCurrentChatContext = compactCurrentChatContext;
 
   export async function refreshChatContextHeader(reason = '') {
     _bindContextHeaderPill();
@@ -1132,7 +1094,7 @@ import { invalidateSettings } from './appConfig.js';
       }
       const node = document.createElement('div');
       node.className = 'agent-thread-node running';
-      node.innerHTML = '<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">▶</span><span class="agent-thread-tool">Writing</span><span class="agent-thread-wave">▁▂▃</span></div><div class="agent-thread-content"></div>';
+      node.innerHTML = runningToolNodeHtml({ iconHtml: '<span class="agent-thread-icon">▶</span>', label: 'Writing' });
       thread.appendChild(node);
       chatBox.insertBefore(thread, msg);
       msg._docWritingThread = thread;
@@ -1607,7 +1569,7 @@ import { invalidateSettings } from './appConfig.js';
   function _openPlanReview() {
     const plan = _getStoredPlan();
     if (!plan) {
-      try { uiModule.showToast && uiModule.showToast('No active plan to review'); } catch (_) {}
+      uiModule.showToast('No active plan to review');
       return;
     }
     let panel = document.getElementById('plan-review-panel');
@@ -1648,17 +1610,13 @@ import { invalidateSettings } from './appConfig.js';
       document.body.appendChild(panel);
     }
     const content = panel.querySelector('.plan-review-content');
-    if (content) content.innerHTML = _escapeQueueText(plan);
+    if (content) content.innerHTML = uiModule.esc(plan);
     panel.hidden = false;
     panel.classList.add('is-open');
   }
 
   // chatRenderer handles the #plan link without importing this module back.
   window.__odysseusOpenPlanReview = _openPlanReview;
-
-  function _escapeQueueText(s) {
-    return String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
 
   function _ensureQueuedBubbleHost() {
     const chatBox = document.getElementById('chat-history');
@@ -1682,7 +1640,7 @@ import { invalidateSettings } from './appConfig.js';
     wrap.className = 'msg msg-user msg-user-queued';
     wrap.dataset.queueId = item.id;
     wrap.title = 'Queued - click to send now and stop the current response';
-    wrap.innerHTML = `<div class="role">You <span class="queued-pill"><svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>Queued</span></div><div class="body">${_escapeQueueText(item.message)}</div>`;
+    wrap.innerHTML = `<div class="role">You <span class="queued-pill"><svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>Queued</span></div><div class="body">${uiModule.esc(item.message)}</div>`;
     wrap.addEventListener('click', (ev) => {
       if (ev.target && ev.target.closest && ev.target.closest('button, a, textarea, input')) return;
       _promoteQueuedRequest(item.id);
@@ -1760,7 +1718,7 @@ import { invalidateSettings } from './appConfig.js';
       _setComposerAndSend(item.message);
       return;
     }
-    try { uiModule.showToast && uiModule.showToast('Sending queued request now'); } catch (_) {}
+    uiModule.showToast('Sending queued request now');
     const input = uiModule.el('message');
     const submitBtn = document.querySelector('.send-btn');
     if (input) {
@@ -1778,7 +1736,7 @@ import { invalidateSettings } from './appConfig.js';
     item.el = _createQueuedBubble(item);
     _queuedAgentRequests.push(item);
     _persistQueuedRequests();
-    try { uiModule.showToast && uiModule.showToast(_queuedAgentRequests.length === 1 ? 'Queued for after this response' : `${_queuedAgentRequests.length} requests queued`); } catch (_) {}
+    uiModule.showToast(_queuedAgentRequests.length === 1 ? 'Queued for after this response' : `${_queuedAgentRequests.length} requests queued`);
     return true;
   }
 
@@ -2316,20 +2274,17 @@ import { invalidateSettings } from './appConfig.js';
       // Clear completed dot now that user is interacting
       if (sessionModule.clearStreamComplete) sessionModule.clearStreamComplete(sessionModule.getCurrentSessionId());
 
-      // Check for document selection context before consuming display override
       const docSel = !approvalForSend && documentModule
         ? documentModule.getSelectionContext()
         : null;
+      let userDisplay = msg;
       if (docSel) {
         const sels = Array.isArray(docSel) ? docSel : [docSel];
         const lineRefs = sels.map(s =>
           s.startLine === s.endLine ? `L${s.startLine}` : `L${s.startLine}-${s.endLine}`
         );
-        _displayOverride = `[Doc edit: ${lineRefs.join(', ')}] ${msg}`;
+        userDisplay = `[Doc edit: ${lineRefs.join(', ')}] ${msg}`;
       }
-
-      const userDisplay = _displayOverride || msg;
-      _displayOverride = null;
       const skipBubble = _hideUserBubble || !!approvalForSend;
       _hideUserBubble = false;
       // Auto-recovery counter: carries across a turn's auto-continues, but resets
@@ -3138,181 +3093,6 @@ import { invalidateSettings } from './appConfig.js';
         'web_fetch': _searchIcon,
       };
 
-      function _safeExternalToolUrl(raw) {
-        const value = String(raw || '').trim();
-        if (!value) return '';
-        try {
-          const parsed = new URL(value.includes('://') ? value : `https://${value}`);
-          if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.href;
-        } catch (_) {}
-        return '';
-      }
-
-      function _webFetchUrlFromCommand(command) {
-        const raw = String(command || '').trim();
-        if (!raw) return '';
-        try {
-          const args = JSON.parse(raw);
-          return _safeExternalToolUrl(args && args.url);
-        } catch (_) {
-          return _safeExternalToolUrl(raw.split(/\s+/)[0]);
-        }
-      }
-
-      function _webSearchQueryFromCommand(command) {
-        const raw = String(command || '').trim();
-        if (!raw) return '';
-        try {
-          const args = JSON.parse(raw);
-          if (args && typeof args.query === 'string') return args.query.trim();
-          if (args && Array.isArray(args.queries) && args.queries.length) return String(args.queries[0] || '').trim();
-        } catch (_) {}
-        return raw;
-      }
-
-      function _searxngSearchUrl(query) {
-        const q = String(query || '').trim();
-        if (!q) return '';
-        try {
-          const url = new URL('/search/web', window.location.origin);
-          url.search = '';
-          url.hash = '';
-          url.searchParams.set('q', q);
-          return url.href;
-        } catch (_) {
-          return '';
-        }
-      }
-
-      function _toolHeaderLinkHtml(url, title = 'Open link') {
-        const href = _safeExternalToolUrl(url);
-        if (!href) return '';
-        return `<a class="agent-thread-header-link" href="${uiModule.esc(href)}" target="_blank" rel="noopener noreferrer" title="${uiModule.esc(title)}" aria-label="${uiModule.esc(title)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></a>`;
-      }
-
-      function _toolHeaderHashLinkHtml(hash, title = 'Open item', iconHtml = '', className = '') {
-        const href = String(hash || '').trim();
-        if (!/^#(?:event|note|email|document|task|research|skill)-[A-Za-z0-9_.:-]+$/.test(href)) return '';
-        const cls = `agent-thread-header-link${className ? ' ' + className : ''}`;
-        return `<a class="${uiModule.esc(cls)}" href="${uiModule.esc(href)}" title="${uiModule.esc(title)}" aria-label="${uiModule.esc(title)}">${iconHtml || '<span aria-hidden="true">↗</span>'}</a>`;
-      }
-
-      function _calendarEventUidFromToolData(command, data) {
-        const direct = String((data && data.uid) || '').trim();
-        if (direct) return direct;
-        const events = data && Array.isArray(data.events) ? data.events : [];
-        if (events.length === 1 && events[0] && events[0].uid) return String(events[0].uid).trim();
-        const text = `${command || ''}\n${(data && data.output) || ''}\n${(data && data.anchor) || ''}`;
-        const match = text.match(/#event-([A-Za-z0-9_.:-]+)/);
-        return match ? match[1] : '';
-      }
-
-      function _emailToolHash(args = {}, data = null) {
-        const uid = String((data && data.uid) || args.uid || '').trim();
-        if (!/^\d+$/.test(uid)) return '';
-        const folder = String((data && data.folder) || args.folder || 'INBOX').trim() || 'INBOX';
-        const account = String((data && (data.account_id || data.account)) || args.account_id || args.account || '').trim();
-        const clean = value => String(value || '').replace(/[^A-Za-z0-9_.@-]/g, '_');
-        return `#email-${[clean(folder), uid, clean(account)].filter(Boolean).join(':')}`;
-      }
-
-      function _toolDisplayInfo(tool, command, data = null) {
-        const rawTool = String(tool || '');
-        const lower = rawTool.toLowerCase();
-        let args = null;
-        try { args = JSON.parse(command || '{}'); } catch (_) {}
-        if (lower === 'web_search' || lower.endsWith('web_search') || lower.includes('__web_search')) {
-          const q = _webSearchQueryFromCommand(command);
-          return {
-            label: '',
-            commandHtml: q
-              ? `<span class="agent-thread-summary">${uiModule.esc(q)}</span>`
-              : '',
-          };
-        }
-        if (lower === 'web_fetch' || lower.endsWith('web_fetch') || lower.includes('__web_fetch')) {
-          const url = _webFetchUrlFromCommand(command);
-          return {
-            label: '',
-            headerActionHtml: _toolHeaderLinkHtml(url, 'Open fetched page'),
-            commandHtml: url
-              ? `<a class="agent-thread-summary agent-thread-summary-link" href="${uiModule.esc(url)}" target="_blank" rel="noopener noreferrer" title="Open ${uiModule.esc(url)}">${uiModule.esc(url)}</a>`
-              : '',
-          };
-        }
-        if (lower === 'manage_calendar' || lower.endsWith('manage_calendar')) {
-          const action = args && args.action ? String(args.action).toLowerCase() : '';
-          const summary = args && args.summary ? String(args.summary) : '';
-          const start = args && args.start ? String(args.start).slice(0, 10) : '';
-          const end = args && args.end ? String(args.end).slice(0, 10) : '';
-          const uid = _calendarEventUidFromToolData(command, data || {});
-          const actionLabel = action.includes('create') ? 'Create event'
-            : action.includes('update') ? 'Update event'
-            : action.includes('delete') ? 'Delete event'
-            : 'Check calendar';
-          const rangeSummary = start && end ? `${start} to ${end}` : '';
-          return {
-            label: actionLabel,
-            // The calendar glyph is rendered as the action link itself.
-            headerActionHtml: '',
-            commandHtml: summary
-              ? `<div class="agent-thread-summary">${uiModule.esc(summary)}</div>`
-              : rangeSummary
-                ? `<div class="agent-thread-summary">${uiModule.esc(rangeSummary)}</div>`
-                : '',
-          };
-        }
-        const emailTool = lower.includes('email');
-        if (emailTool && (lower.includes('read_email') || lower.endsWith('read_email'))) {
-          const uid = args && args.uid ? String(args.uid) : '';
-          const folder = args && args.folder ? String(args.folder) : 'INBOX';
-          const href = _emailToolHash(args || {}, data);
-          return {
-            label: uid ? `Read email UID ${uid}` : 'Read email',
-            headerActionHtml: href
-              ? _toolHeaderHashLinkHtml(href, 'Open this email')
-              : '',
-            commandHtml: uid
-              ? `<a class="agent-thread-summary agent-thread-summary-link" href="${uiModule.esc(href || `#email-${uid}`)}" title="Open this email">UID ${uiModule.esc(uid)} · ${uiModule.esc(folder)}</a>`
-              : '',
-          };
-        }
-        if (emailTool && (lower.includes('list_emails') || lower.endsWith('list_emails'))) {
-          const max = args && args.max_results ? String(args.max_results) : '';
-          const folder = args && args.folder ? String(args.folder) : 'INBOX';
-          const bits = [folder, max ? `${max} latest` : 'latest'].filter(Boolean).join(' · ');
-          return {
-            label: 'Check email',
-            commandHtml: `<div class="agent-thread-summary">${uiModule.esc(bits)}</div>`,
-          };
-        }
-        if (emailTool && (lower.includes('search_emails') || lower.endsWith('search_emails'))) {
-          const q = args && args.query ? String(args.query) : '';
-          return {
-            label: 'Search email',
-            commandHtml: q ? `<div class="agent-thread-summary">${uiModule.esc(q)}</div>` : '',
-          };
-        }
-        return { label: '', commandHtml: '' };
-      }
-
-      function _suppressRawToolOutput(tool, ok) {
-        if (!ok) return false;
-        const lower = String(tool || '').toLowerCase();
-        if (lower === 'manage_calendar' || lower.endsWith('manage_calendar')) return true;
-        return (
-          lower.includes('email')
-          && (
-            lower.includes('list_emails')
-            || lower.includes('search_emails')
-            || lower.includes('read_email')
-            || lower.includes('download_attachment')
-            || lower.includes('scan_spam')
-            || lower.includes('scan_email_unsubscribes')
-          )
-        );
-      }
-
       function _thinkingLabel() {
         if (!_lastToolName) {
           return 'Thinking';
@@ -3771,22 +3551,14 @@ import { invalidateSettings } from './appConfig.js';
               replyTrimmed = _gm[1].trim();
             } else {
               // Pure non-tag: find reply boundary
-              const _rPrefixes = markdownModule.startsWithReasoningPrefix;
-              const _rpStarts = ['Hey', 'Hi ', 'Hi!', 'Hello', 'Sure', 'Yes', 'No ', 'No,', 'Yo', 'OK', 'Here', 'Absolutely', 'Of course', 'Great', 'Alright', 'Thanks', 'Welcome', 'Good ', "I'm happy", "I'd be"];
               const _rt = (extractedReply || '').trimStart();
-              if (_rPrefixes(_rt)) {
+              if (markdownModule.startsWithReasoningPrefix(_rt)) {
                 const _rLines = _rt.split('\n');
-                for (let _ri = 1; _ri < _rLines.length; _ri++) {
-                  const _rl = _rLines[_ri].trim();
-                  if (!_rl) continue;
-                  if (_rpStarts.some(rp => _rl.startsWith(rp))) { replyTrimmed = _rLines.slice(_ri).join('\n'); break; }
-                }
+                const _ri = markdownModule.replyLineIndex(_rLines);
+                if (_ri !== -1) replyTrimmed = _rLines.slice(_ri).join('\n');
                 if (!replyTrimmed) {
-                  for (const rp of _rpStarts) {
-                    const rx = new RegExp('[.!?]\\s*(' + rp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')');
-                    const m = rx.exec(_rt);
-                    if (m && m.index > 20) { replyTrimmed = _rt.slice(m.index + 1).trim(); break; }
-                  }
+                  const _off = markdownModule.inlineReplyOffset(_rt);
+                  if (_off !== -1) replyTrimmed = _rt.slice(_off).trim();
                 }
               }
             }
@@ -3878,7 +3650,6 @@ import { invalidateSettings } from './appConfig.js';
         buffer = lines.pop() || '';
 
         for (const line of lines) {
-          // Log SSE event types (e.g. "event: error") for debugging
           if (line.startsWith('event: ')) {
             const evtType = line.slice(7).trim();
             if (evtType === 'error') _nextIsError = true;
@@ -4192,31 +3963,14 @@ import { invalidateSettings } from './appConfig.js';
                 let hasUnclosedThink = markdownModule.hasUnclosedThinkTag(normalizedRoundText);
                 // Detect non-tag thinking patterns: "Thinking:", "Thinking Process:", Gemma-style reasoning
                 // These patterns don't use <think> tags, so we simulate unclosed thinking during streaming
-                const _replyPrefixes = ['Hey', 'Hi ', 'Hi!', 'Hello', 'Sure', 'Yes', 'No ', 'No,', 'Yo', 'OK', 'Here', 'Absolutely', 'Of course', 'Great', 'Alright', 'Thanks', 'Welcome', 'Good ', "I'm happy", "I'd be"];
                 if (!hasUnclosedThink && !/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>|<\|channel>thought/i.test(normalizedRoundText)) {
                   const _trimmedRT = normalizedRoundText.trimStart();
                   const _isReasoning = markdownModule.startsWithReasoningPrefix(_trimmedRT);
-                  if (_isReasoning) {
-                    // Check if we can see a reply boundary yet (newline then reply pattern)
-                    const _lines = _trimmedRT.split('\n');
-                    let _replyFound = false;
-                    for (let li = 1; li < _lines.length; li++) {
-                      const _l = _lines[li].trim();
-                      if (!_l) continue;
-                      if (_replyPrefixes.some(rp => _l.startsWith(rp))) {
-                        _replyFound = true;
-                        break;
-                      }
-                    }
-                    if (!_replyFound) {
-                      // Also check within-line: "reasoning text.Reply text"
-                      const _inlineReply = _replyPrefixes.some(rp => {
-                        const rx = new RegExp('[.!?]\\s*' + rp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-                        const m = rx.exec(_trimmedRT);
-                        return m && m.index > 20;
-                      });
-                      if (!_inlineReply) hasUnclosedThink = true;
-                    }
+                  // Still thinking until a reply boundary shows, on a new line or inline.
+                  if (_isReasoning
+                      && markdownModule.replyLineIndex(_trimmedRT.split('\n')) === -1
+                      && markdownModule.inlineReplyOffset(_trimmedRT) === -1) {
+                    hasUnclosedThink = true;
                   }
                 }
                 // Detect false close: <think>short</think> where real thinking follows untagged
@@ -4783,18 +4537,20 @@ import { invalidateSettings } from './appConfig.js';
                 }
                 threadWrap.classList.add('streaming');
                 lastToolThread = threadWrap;
-		                const toolInfo = _toolDisplayInfo(json.tool, cmd, json);
-	                const toolLabel = toolInfo.label || _toolLabels[json.tool.toLowerCase()] || json.tool;
-                const toolIcon = renderToolIcon(json.tool, cmd, json) || `<span class="agent-thread-icon">\u25B6</span>`;
-	                const toolHeaderAction = toolInfo.headerActionHtml || '';
-	                const node = document.createElement('div')
-	                node.className = 'agent-thread-node running' + (_isPrivateBrowserTool(json.tool) ? ' open browser-preview-node' : '');
-		                const cmdHtml = _isPrivateBrowserTool(json.tool) ? '' : (toolInfo.commandHtml || (cmd ? `<pre class="agent-thread-cmd">${esc(cmd)}</pre>` : ''));
-                node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header">${toolIcon}<span class="agent-thread-tool">${esc(toolLabel)}</span>${toolHeaderAction}<span class="agent-thread-wave">▁▂▃</span></div><div class="agent-thread-content">${cmdHtml}</div>`;
+                const toolInfo = _toolDisplayInfo(json.tool, cmd, json);
+                const browserTool = _isPrivateBrowserTool(json.tool);
+                const node = document.createElement('div');
+                node.className = 'agent-thread-node running' + (browserTool ? ' open browser-preview-node' : '');
+                node.innerHTML = runningToolNodeHtml({
+                  iconHtml: renderToolIcon(json.tool, cmd, json) || `<span class="agent-thread-icon">\u25B6</span>`,
+                  label: toolInfo.label || _toolLabels[json.tool.toLowerCase()] || json.tool,
+                  headerActionHtml: toolInfo.headerActionHtml || '',
+                  contentHtml: browserTool ? '' : (toolInfo.commandHtml || (cmd ? `<pre class="agent-thread-cmd">${esc(cmd)}</pre>` : '')),
+                });
                 // Expand/collapse via delegated click handler (init at module bottom).
                 threadWrap.appendChild(node);
                 currentToolBubble = node;
-                if (_isPrivateBrowserTool(json.tool)) {
+                if (browserTool) {
                   _showPrivateBrowserPreview(json.command || '', node.querySelector('.agent-thread-content'));
                 }
                 // Animate the wave
@@ -4902,53 +4658,14 @@ import { invalidateSettings } from './appConfig.js';
                     currentToolBubble._elapsedTicker = null;
                   }
                   const ok = (json.exit_code === 0 || json.exit_code == null);
-                  const cmd = json.command || '';
-                  let outHtml = '';
-                  if (!_suppressRawToolOutput(json.tool, ok) && json.output && json.output.trim()) {
-                    outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(json.output)}</pre></details>`;
-                  }
-                  // File-write diff (write_file): show a before/after unified diff.
-                  let diffHtml = '';
-                  if (json.diff && json.diff.text) {
-                    const d = json.diff;
-                    // Collapsed summary: filename + +adds (green) / −dels (red).
-                    const stat = [
-                      d.new_file ? '<span class="diff-stat-new">new</span>' : '',
-                      d.added ? `<span class="diff-stat-add">+${d.added}</span>` : '',
-                      d.removed ? `<span class="diff-stat-del">−${d.removed}</span>` : '',
-                    ].filter(Boolean).join(' ');
-                    const rows = d.text.split('\n').map(line => {
-                      let cls = 'diff-ctx', text = line;
-                      if (line.startsWith('+++') || line.startsWith('---')) cls = 'diff-meta';
-                      else if (line.startsWith('@@')) cls = 'diff-hunk';
-                      // Drop the leading diff marker (+/-/space) — the row colour
-                      // already encodes add/del, and keeping it doubles up with
-                      // markdown "- " bullets (reads as "+-"/"--").
-                      else if (line.startsWith('+')) { cls = 'diff-add'; text = line.slice(1); }
-                      else if (line.startsWith('-')) { cls = 'diff-del'; text = line.slice(1); }
-                      else if (line.startsWith(' ')) { text = line.slice(1); }
-                      return `<span class="${cls}">${esc(text) || '&nbsp;'}</span>`;
-                    }).join('');  // spans are display:block — a literal \n here would double-space the diff
-                    diffHtml = `<details class="agent-tool-output agent-tool-diff"><summary><span class="diff-file">${esc(d.file || 'diff')}</span> <span class="diff-summary-stats">${stat}</span></summary><pre class="diff-pre">${rows}</pre></details>`;
-                  }
-                  // For file edits the "command" is the raw JSON args — redundant
-                  // next to the diff, so hide it when we have a diff to show.
-	                  const toolInfo2 = _toolDisplayInfo(json.tool, cmd, json);
-		                  const browserTool = _isPrivateBrowserTool(json.tool);
-		                  const toolHeaderAction2 = toolInfo2.headerActionHtml || '';
-                  const toolIcon2 = renderToolIcon(json.tool, cmd, json);
-		                  const cmdHtml2 = browserTool ? '' : (toolInfo2.commandHtml || ((cmd && !(json.diff && json.diff.text)) ? `<pre class="agent-thread-cmd">${esc(cmd)}</pre>` : ''));
-                  // Preserve the user's .open choice across the innerHTML
-                  // rewrite \u2014 otherwise expanding a running tool collapses
-                  // it as soon as the result lands, forcing the user to
-                  // click again. Click handling is delegated (see init at
-                  // bottom of file) so no per-node listener needed.
-	                  if (browserTool) {
-                    outHtml = _privateBrowserPreviewHtml(cmd, json.screenshot) + outHtml;
-                  }
-	                  const _wasOpen = currentToolBubble.classList.contains('open') || browserTool;
+                  const browserTool = _isPrivateBrowserTool(json.tool);
+                  // Keep the user's expanded state across the rewrite.
+                  const _wasOpen = currentToolBubble.classList.contains('open') || browserTool;
                   currentToolBubble.className = 'agent-thread-node' + (ok ? '' : ' error') + (_wasOpen ? ' open' : '') + (browserTool ? ' browser-preview-node' : '');
-                  currentToolBubble.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span>${toolIcon2}<span class="agent-thread-tool">${esc(toolInfo2.label || json.tool)}</span>${toolHeaderAction2}<span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron" aria-hidden="true"></span></div><div class="agent-thread-content">${cmdHtml2}${outHtml}${diffHtml}</div>`;
+                  currentToolBubble.innerHTML = finishedToolNodeHtml(json, {
+                    ok,
+                    leadHtml: browserTool ? _privateBrowserPreviewHtml(json.command || '', json.screenshot) : '',
+                  });
                   // Reset so thinking spinner between tools says "Thinking" not the old tool's label
                   _lastToolName = '';
                   uiModule.scrollHistory();
@@ -5209,7 +4926,7 @@ import { invalidateSettings } from './appConfig.js';
                 _removeThinkingSpinner();
                 // Finalize any in-flight bubble so the takeover banner
                 // separates student attempt from teacher attempt.
-                if (spinner && spinner.element) { try { spinner.destroy(); } catch(_){} spinner = null; }
+                if (spinner && spinner.element) { spinner.destroy(); spinner = null; }
                 const chatBox = document.getElementById('chat-history');
                 const banner = document.createElement('div');
                 banner.className = 'teacher-takeover-banner';
@@ -5287,7 +5004,7 @@ import { invalidateSettings } from './appConfig.js';
       // live-view work instead of parsing and rendering the full round once
       // here and then immediately replacing it.
       _cancelLiveThinkingWork();
-      if (spinner && spinner.element) { try { spinner.destroy(); } catch (_) {} spinner = null; }
+      if (spinner && spinner.element) { spinner.destroy(); spinner = null; }
       _cancelThinkingTimer();
       _removeThinkingSpinner();
       // Stop any thread pulse animations
@@ -5296,7 +5013,7 @@ import { invalidateSettings } from './appConfig.js';
       const _isBgFinal = (sessionModule.getCurrentSessionId() !== streamSessionId) || _backgroundStreams.has(streamSessionId);
       if (!_isBgFinal) {
         if (!terminalFinalResponseRendered && !_turnRendering.isVisible(roundHolder.querySelector('.body'), _terminalAnswerHtml(roundText, roundHolder.querySelector('.body')))) _renderStream();
-        if (spinner && spinner.element) { try { spinner.destroy(); } catch (_) {} spinner = null; }
+        if (spinner && spinner.element) { spinner.destroy(); spinner = null; }
         _cancelThinkingTimer();
         _removeThinkingSpinner();
         // Stop this visible thread's pulse animations.
@@ -5409,24 +5126,16 @@ import { invalidateSettings } from './appConfig.js';
 	                  _finalReply = _garbledMatch[1].trim();
 	                } else {
 	                  // Pure non-tag: find reply boundary by prefix patterns
-	                  const _rs2 = ['Hey', 'Hi ', 'Hi!', 'Hello', 'Sure', 'Yes', 'No ', 'No,', 'Yo', 'OK', 'Here', 'Absolutely', 'Of course', 'Great', 'Alright', 'Thanks', 'Welcome', 'Good ', "I'm happy", "I'd be"];
-	                  const _fr = (finalDisplay || '').trimStart();
-	                  if (markdownModule.startsWithReasoningPrefix(_fr)) {
-	                    const _fLines = _fr.split('\n');
-	                    for (let _fi = 1; _fi < _fLines.length; _fi++) {
-	                      const _fl = _fLines[_fi].trim();
-	                      if (!_fl) continue;
-	                      if (_rs2.some(rp => _fl.startsWith(rp))) { _finalReply = _fLines.slice(_fi).join('\n'); break; }
-	                    }
-	                    // Within-line check
-	                    if (!_finalReply) {
-	                      for (const rp of _rs2) {
-	                        const rx = new RegExp('[.!?]\\s*(' + rp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')');
-	                        const m = rx.exec(_fr);
-	                        if (m && m.index > 20) { _finalReply = _fr.slice(m.index + 1).trim(); break; }
-	                      }
-	                    }
-	                  }
+                  const _fr = (finalDisplay || '').trimStart();
+                  if (markdownModule.startsWithReasoningPrefix(_fr)) {
+                    const _fLines = _fr.split('\n');
+                    const _fi = markdownModule.replyLineIndex(_fLines);
+                    if (_fi !== -1) _finalReply = _fLines.slice(_fi).join('\n');
+                    if (!_finalReply) {
+                      const _off = markdownModule.inlineReplyOffset(_fr);
+                      if (_off !== -1) _finalReply = _fr.slice(_off).trim();
+                    }
+                  }
 	                }
 	              }
 	            }
@@ -5487,8 +5196,7 @@ import { invalidateSettings } from './appConfig.js';
           holder._ragSources.forEach(src => {
             const item = document.createElement('div');
             item.className = 'rag-source-item';
-            const _esc = uiModule.esc;
-            item.innerHTML = `<strong>${_esc(src.filename)}</strong> <span class="rag-similarity">${(src.similarity * 100).toFixed(1)}%</span><div class="rag-snippet">${_esc(src.snippet)}</div>`;
+            item.innerHTML = `<strong>${uiModule.esc(src.filename)}</strong> <span class="rag-similarity">${(src.similarity * 100).toFixed(1)}%</span><div class="rag-snippet">${uiModule.esc(src.snippet)}</div>`;
             details.appendChild(item);
           });
           holder.querySelector('.body').appendChild(details);
@@ -6375,7 +6083,7 @@ import { invalidateSettings } from './appConfig.js';
 
     const cleanup = () => {
       replayRendering.settle();
-      try { spinner.destroy(); } catch (_) {}
+      spinner.destroy();
       _resumingStreams.delete(sessionId);
       if (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId() === sessionId) {
         if (submitBtn) updateSubmitButton('idle', submitBtn);
@@ -6432,19 +6140,18 @@ import { invalidateSettings } from './appConfig.js';
     };
 
     const startReplayTool = (json) => {
-      try { spinner.destroy(); } catch (_) {}
+      spinner.destroy();
       if (!roundText.trim() && roundHolder) roundHolder.style.display = 'none';
       const thread = document.createElement('div');
       thread.className = 'agent-thread streaming' + (roundText.trim() ? ' has-top' : '');
       const node = document.createElement('div');
       node.className = 'agent-thread-node running';
       const command = String(json.command || json.args || '');
-      const label = String(json.label || json.tool || 'Tool');
-      const icon = renderToolIcon(json.tool || '', command, json) || '<span class="agent-thread-icon">▶</span>';
-      node.innerHTML = '<div class="agent-thread-dot"></div><div class="agent-thread-header">' +
-        icon + '<span class="agent-thread-tool">' + uiModule.esc(label) + '</span>' +
-        '<span class="agent-thread-wave">▁▂▃</span></div><div class="agent-thread-content">' +
-        (command ? '<pre class="agent-thread-cmd">' + uiModule.esc(command) + '</pre>' : '') + '</div>';
+      node.innerHTML = runningToolNodeHtml({
+        iconHtml: renderToolIcon(json.tool || '', command, json) || '<span class="agent-thread-icon">▶</span>',
+        label: String(json.label || json.tool || 'Tool'),
+        contentHtml: command ? '<pre class="agent-thread-cmd">' + uiModule.esc(command) + '</pre>' : '',
+      });
       thread.appendChild(node);
       box.appendChild(thread);
       replayNodes.push(thread);
@@ -6456,20 +6163,9 @@ import { invalidateSettings } from './appConfig.js';
     const finishReplayTool = (json) => {
       if (!currentToolBubble) return;
       const ok = json.exit_code === 0 || json.exit_code == null;
-      const command = String(json.command || json.args || '');
-      const output = String(json.output || '');
-      const label = String(json.label || json.tool || 'Tool');
-      const icon = renderToolIcon(json.tool || '', command, json) || '';
       currentToolBubble.className = 'agent-thread-node' + (ok ? '' : ' error');
-      currentToolBubble.innerHTML = '<div class="agent-thread-dot"></div><div class="agent-thread-header">' +
-        '<span class="agent-thread-icon">' + (ok ? '✓' : '✗') + '</span>' + icon +
-        '<span class="agent-thread-tool">' + uiModule.esc(label) + '</span>' +
-        '<span class="agent-thread-status">' + (ok ? 'done' : 'failed') + '</span>' +
-        '<span class="agent-thread-chevron" aria-hidden="true"></span></div>' +
-        '<div class="agent-thread-content">' +
-        (command ? '<pre class="agent-thread-cmd">' + uiModule.esc(command) + '</pre>' : '') +
-        (output ? '<details class="agent-tool-output"><summary>Output</summary><pre>' + uiModule.esc(output) + '</pre></details>' : '') +
-        '</div>';
+      currentToolBubble.innerHTML = finishedToolNodeHtml(
+        { ...json, command: String(json.command || json.args || ''), tool: json.tool || json.label || 'Tool' }, { ok });
       if (currentToolThread) currentToolThread.classList.remove('streaming');
     };
 
@@ -6509,7 +6205,7 @@ import { invalidateSettings } from './appConfig.js';
             if (!replayRendering.accepts(json)) continue;
             roundText = finalText;
             gotDelta = true;
-            try { spinner.destroy(); } catch (_) {}
+            spinner.destroy();
             renderDelta(json);
             replayRendering.settle();
           } else if (json.delta) {
@@ -6524,7 +6220,7 @@ import { invalidateSettings } from './appConfig.js';
               docFenceOpened = true;
               rich = true;
             }
-            if (!gotDelta) { gotDelta = true; try { spinner.destroy(); } catch (_) {} }
+            if (!gotDelta) { gotDelta = true; spinner.destroy(); }
             renderDelta(json);
           } else if (json.type === 'doc_stream_open') {
             rich = true;
@@ -7633,11 +7329,6 @@ import { invalidateSettings } from './appConfig.js';
     }
   }
 
-  /** Set a display override for the next user message bubble */
-  export function setDisplayOverride(text) {
-    _displayOverride = text;
-  }
-
   /** Hide the user bubble for the next submit (e.g. continue after stop) */
   export function setHideUserBubble() {
     _hideUserBubble = true;
@@ -8016,21 +7707,6 @@ import { invalidateSettings } from './appConfig.js';
     }
   }
 
-  /**
-   * Continue the AI's response from where it left off.
-   */
-  export async function continueFrom(aiMsgElement) {
-    const sessionId = sessionModule.getCurrentSessionId();
-    if (!sessionId) return;
-
-    const messageInput = uiModule.el('message');
-    if (messageInput) {
-      messageInput.value = 'Continue from where you left off.';
-      const submitBtn = document.querySelector('.send-btn');
-      if (submitBtn) submitBtn.click();
-    }
-  }
-
   // Open a chat attachment in the right place: images → Gallery editor; PDFs &
   // text/code/markdown → Documents viewer; anything else → raw file. A given
   // upload's imported document is reused (cached by upload id) so clicking it
@@ -8138,7 +7814,6 @@ import { invalidateSettings } from './appConfig.js';
     showWelcomeScreen: chatRenderer.showWelcomeScreen,
     checkPendingResearch,
     getImageCost: chatRenderer.getImageCost,
-    setDisplayOverride,
     setHideUserBubble,
     setPendingContinue,
     regenerateFrom,
@@ -8148,7 +7823,6 @@ import { invalidateSettings } from './appConfig.js';
     resendUserMessage,
     deleteMessage,
     rewriteWith,
-    continueFrom,
     _appendViewReportLink,
     hasActiveStream,
     openContextSettings: async () => {

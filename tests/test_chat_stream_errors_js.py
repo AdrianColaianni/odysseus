@@ -1,11 +1,9 @@
 """Execute terminal stream-error classification under Node."""
 
 import json
-import shutil
-import subprocess
 from pathlib import Path
 
-import pytest
+from tests.helpers.node import run_node_module
 
 
 _REPO = Path(__file__).resolve().parents[1]
@@ -13,9 +11,6 @@ _MODULE = (_REPO / "static" / "js" / "chatStreamErrors.js").as_uri()
 
 
 def test_terminal_provider_errors_preserve_text_and_never_auto_retry():
-    if not shutil.which("node"):
-        pytest.skip("node is not installed")
-
     script = f"""
       import {{ createTerminalStreamError, isRecoverableStreamError }} from {json.dumps(_MODULE)};
       const stringError = createTerminalStreamError({{ status: 401, error: 'invalid key' }});
@@ -28,17 +23,7 @@ def test_terminal_provider_errors_preserve_text_and_never_auto_retry():
         networkRecoverable: isRecoverableStreamError(new TypeError('fetch failed')),
       }}));
     """
-    result = subprocess.run(
-        ["node", "--input-type=module"],
-        input=script,
-        capture_output=True,
-        text=True,
-        cwd=_REPO,
-        timeout=30,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
+    assert run_node_module(script) == {
         "stringMessage": "invalid key",
         "objectMessage": "model missing",
         "terminalRecoverable": False,

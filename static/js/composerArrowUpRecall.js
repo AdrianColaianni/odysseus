@@ -60,21 +60,13 @@ export function wireArrowUpRecall(composer, getUserMessages, options = {}) {
     return value ? [value] : [];
   };
   const norm = (value) => String(value || '').replace(/\r\n/g, '\n').trimEnd();
-  const debug = (...args) => {
-    try {
-      if (localStorage.getItem('odysseusArrowRecallDebug') === '1') {
-        console.debug('[arrow-recall]', ...args);
-      }
-    } catch (_) {}
-  };
-
   composer.addEventListener('input', () => {
     if (applyingRecall) return;
     if (norm(composer.value) === norm(lastRecalledValue)) return;
     recallIndex = -1;
     lastRecalledValue = '';
     recallHistory = [];
-    try { delete composer.dataset.odysseusRecallIndex; } catch (_) {}
+    delete composer.dataset.odysseusRecallIndex;
   });
 
   composer.addEventListener('keydown', (e) => {
@@ -86,10 +78,7 @@ export function wireArrowUpRecall(composer, getUserMessages, options = {}) {
 
     const freshHistory = readHistory();
     const history = freshHistory.length ? freshHistory : recallHistory;
-    if (!history.length) {
-      debug('skip:no-history', { value: composer.value });
-      return;
-    }
+    if (!history.length) return;
 
     const rawCurrentValue = String(composer.value || '');
     const currentValue = norm(rawCurrentValue);
@@ -101,15 +90,12 @@ export function wireArrowUpRecall(composer, getUserMessages, options = {}) {
       currentIndex = recallIndex;
     }
     if (currentIndex < 0 && currentValue) {
-      const markedIndex = Number(composer.dataset?.odysseusRecallIndex);
+      const markedIndex = Number(composer.dataset.odysseusRecallIndex);
       if (Number.isInteger(markedIndex) && markedIndex >= 0 && markedIndex < history.length) {
         currentIndex = markedIndex;
       }
     }
-    if (rawCurrentValue !== '' && currentIndex < 0) {
-      debug('skip:draft-in-progress', { value: composer.value });
-      return;
-    }
+    if (rawCurrentValue !== '' && currentIndex < 0) return;
     e.preventDefault();
     e.stopPropagation?.();
     e.stopImmediatePropagation?.();
@@ -121,11 +107,10 @@ export function wireArrowUpRecall(composer, getUserMessages, options = {}) {
         recallHistory = history;
         applyingRecall = true;
         lastRecalledValue = '';
-        try { delete composer.dataset.odysseusRecallIndex; } catch (_) {}
+        delete composer.dataset.odysseusRecallIndex;
         composer.value = '';
-        try { composer.selectionStart = composer.selectionEnd = 0; } catch (_) {}
+        composer.selectionStart = composer.selectionEnd = 0;
         if (autoResize) autoResize(composer);
-        debug('handled-down-clear', { historyLength: history.length });
         setTimeout(() => { applyingRecall = false; }, 0);
         return;
       }
@@ -134,11 +119,10 @@ export function wireArrowUpRecall(composer, getUserMessages, options = {}) {
       recallHistory = history;
       applyingRecall = true;
       lastRecalledValue = recalled;
-      try { composer.dataset.odysseusRecallIndex = String(nextIndex); } catch (_) {}
+      composer.dataset.odysseusRecallIndex = String(nextIndex);
       composer.value = recalled;
-      try { composer.selectionStart = composer.selectionEnd = recalled.length; } catch (_) {}
+      composer.selectionStart = composer.selectionEnd = recalled.length;
       if (autoResize) autoResize(composer);
-      debug('handled-down', { nextIndex, recalled, historyLength: history.length });
       setTimeout(() => { applyingRecall = false; }, 0);
       return;
     }
@@ -148,22 +132,16 @@ export function wireArrowUpRecall(composer, getUserMessages, options = {}) {
     // — the caret-navigation case is never hijacked.
     const nextIndex = currentIndex >= 0 ? Math.min(currentIndex + 1, history.length - 1) : 0;
     const recalled = history[nextIndex];
-    if (!recalled) {
-      debug('skip:no-recalled', { nextIndex, history });
-      return;
-    }
+    if (!recalled) return;
 
     recallIndex = nextIndex;
     recallHistory = history;
     applyingRecall = true;
     lastRecalledValue = recalled;
-    try { composer.dataset.odysseusRecallIndex = String(nextIndex); } catch (_) {}
+    composer.dataset.odysseusRecallIndex = String(nextIndex);
     composer.value = recalled;
-    try {
-      composer.selectionStart = composer.selectionEnd = recalled.length;
-    } catch (_) {}
+    composer.selectionStart = composer.selectionEnd = recalled.length;
     if (autoResize) autoResize(composer);
-    debug('handled', { nextIndex, recalled, historyLength: history.length });
     setTimeout(() => { applyingRecall = false; }, 0);
   }, true);
 

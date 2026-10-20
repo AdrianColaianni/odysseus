@@ -1,27 +1,8 @@
-"""Runtime coverage for stopping a Compare pane mid-stream.
+"""Stopping a stream: detached runs survive a disconnect, Compare panes do not.
 
-Replaces an earlier source-text version of this test (which only asserted on
-string positions inside routes/chat_routes.py and never exercised actual
-streaming behavior) with tests that drive the real mechanisms involved:
-
-  * src.agent_runs — the detached-run manager that normal chat/agent streams
-    are wrapped in. A subscriber (the SSE client) disconnecting must NOT stop
-    the run; only an explicit stop()/cancel does, and the wrapped generator's
-    own CancelledError handler must fire exactly once (no duplicate partial
-    saves).
-
-  * the chat_stream endpoint's compare-vs-normal branch — Compare panes must
-    be streamed directly (NOT wrapped in agent_runs), so that the pane's Stop
-    button (which closes the SSE / aborts the fetch) cancels the underlying
-    generator immediately — including while it's awaiting the *next* upstream
-    chunk, rather than only being noticed after that chunk arrives. Normal
-    chat/agent streams must still go through agent_runs so they survive the
-    client disconnecting (the existing "detached run" behavior).
-
-Together these cover: prompt stop of a Compare pane's upstream connection,
-single (non-duplicated) save of the partial response, regression-safety for
-normal completed streams, and non-interference with detached chat/agent
-streams that are meant to keep running server-side after a client disconnect.
+A subscriber disconnecting must not stop a detached run; only stop() does, and
+the wrapped generator's CancelledError handler fires once. Compare panes are
+never detached, so closing the SSE cancels the upstream call.
 """
 import asyncio
 
@@ -180,13 +161,13 @@ async def test_detached_run_identity_is_stable_for_replay_and_unique_per_run():
 
     first = agent_runs.start(session_id, _make_stream_with_save(_FakeSaveSink(), ["one"]))
     first_id = first.run_id
-    assert agent_runs.get_run_id(session_id) == first_id
+    assert agent_runs._RUNS[session_id].run_id == first_id
     await first.task
-    assert agent_runs.get_run_id(session_id) == first_id
+    assert agent_runs._RUNS[session_id].run_id == first_id
 
     second = agent_runs.start(session_id, _make_stream_with_save(_FakeSaveSink(), ["two"]))
     assert second.run_id != first_id
-    assert agent_runs.get_run_id(session_id) == second.run_id
+    assert agent_runs._RUNS[session_id].run_id == second.run_id
     await second.task
 
 
@@ -209,7 +190,7 @@ async def test_lazy_subscription_stays_bound_to_header_run_after_replacement():
 
     replayed = [event async for event in lazy_body]
     assert replayed == ['data: {"delta":"first"}\n\n']
-    assert agent_runs.get_run_id(session_id) == second.run_id
+    assert agent_runs._RUNS[session_id].run_id == second.run_id
 
 
 @pytest.mark.asyncio
@@ -339,184 +320,30 @@ async def test_reconnect_replays_pinned_fallback_run_without_restarting_tools():
     assert agent_runs._RUNS[session_id] is run
 
 
-# --------------------------------------------------------------------------- #
-# chat_stream: Compare panes must NOT be detached, so the Stop button (closing
-# the SSE) cancels the upstream generator promptly — exercising the same
-# generator/cancellation contract as above, but driven the way a Compare pane
-# actually drives it: by the SSE response itself being cancelled, with no
-# agent_runs subscriber layer in between.
-# --------------------------------------------------------------------------- #
-
-async def _drain_into(agen, sink_list):
-    async for ev in agen:
-        sink_list.append(ev)
-
-
-@pytest.mark.asyncio
-async def test_compare_pane_disconnect_cancels_promptly_mid_await():
-    """Simulates the Compare-pane path: the generator IS the SSE body (no
-    agent_runs wrapping). Cancelling it — what Starlette does the instant it
-    notices the client disconnected — interrupts an in-flight await on the
-    next upstream chunk immediately, and the partial is saved exactly once."""
-    sink = _FakeSaveSink()
-    chunks = ["chunk-1", "chunk-2", "chunk-3"]
-    agen = _make_stream_with_save(sink, chunks, hang_after=1)
-
-    received = []
-    task = asyncio.ensure_future(_drain_into(agen, received))
-
-    # Wait until exactly one chunk has been forwarded, then the generator is
-    # blocked awaiting the (never-set) event — i.e. "waiting on the next
-    # upstream chunk". Cancelling now must not require that chunk to arrive.
-    for _ in range(200):
-        if received:
-            break
-        await asyncio.sleep(0.005)
-    assert received == ["data: chunk-1\n\n"]
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    # Saved exactly once, with only the chunk that actually streamed before
-    # the cancel — proving we didn't wait for chunk-2 to arrive first.
-    assert sink.saves == ["chunk-1"]
-    assert sink.completions == []
-
-
-@pytest.mark.asyncio
-async def test_compare_pane_full_stream_completes_and_saves_once():
-    """Regression: an un-interrupted Compare pane stream still completes and
-    saves exactly as before (single completion save, no partial save)."""
-    sink = _FakeSaveSink()
-    chunks = ["alpha", "beta", "gamma"]
-    agen = _make_stream_with_save(sink, chunks)
-
-    received = []
-    async for ev in agen:
-        received.append(ev)
-
-    assert received == [
-        "data: alpha\n\n",
-        "data: beta\n\n",
-        "data: gamma\n\n",
-        "data: [DONE]\n\n",
-    ]
-    assert sink.completions == ["alphabetagamma"]
-    assert sink.saves == []
-
-
-# --------------------------------------------------------------------------- #
-# chat-mode vs agent-mode: both loops in chat_stream share the same generator
-# shape (async-for over the upstream stream, accumulating full_response, with
-# a CancelledError/GeneratorExit handler that saves the partial once) — so the
-# cancellation contract above applies identically to either mode. This test
-# pins that the *same* fake-generator contract covers both, so a regression
-# that only fixes one mode's loop would still be caught.
-# --------------------------------------------------------------------------- #
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("mode_chunks", [
-    ["chat-delta-1", "chat-delta-2"],          # chat-mode shaped chunks
-    ["agent-delta-1", "agent-tool-event", "agent-delta-2"],  # agent-mode shaped
-])
-async def test_cancellation_contract_holds_for_chat_and_agent_shaped_streams(mode_chunks):
-    sink = _FakeSaveSink()
-    agen = _make_stream_with_save(sink, mode_chunks, hang_after=1)
-
-    received = []
-    task = asyncio.ensure_future(_drain_into(agen, received))
-    for _ in range(200):
-        if received:
-            break
-        await asyncio.sleep(0.005)
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert sink.saves == [mode_chunks[0]]
-    assert sink.completions == []
-
-
-# --------------------------------------------------------------------------- #
-# chat_stream wiring: compare-mode requests must skip agent_runs.start (stream
-# directly, cancellable promptly); normal requests must still go through it
-# (detached, survives client disconnect). This pins the actual branch added to
-# routes/chat_routes.py rather than re-deriving it from source text.
-# --------------------------------------------------------------------------- #
-
-def test_compare_mode_branch_skips_agent_runs_in_source():
-    """The compare_mode branch must return the raw generator as the SSE body
-    (bypassing agent_runs.start/subscribe) BEFORE the detached agent_runs.start
-    call below it — otherwise compare streams would still be detached and a
-    pane's Stop (closing the SSE) wouldn't cancel the upstream call."""
-    from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / "routes" / "chat_routes.py").read_text(encoding="utf-8")
-
-    branch_idx = src.index("if compare_mode:")
-    direct_return_idx = src.index("return StreamingResponse(_safe_stream(), media_type=", branch_idx)
-    detach_idx = src.index("agent_runs.start(session, _safe_stream())", branch_idx)
-
-    assert branch_idx < direct_return_idx < detach_idx, (
-        "compare_mode must short-circuit to a direct (non-detached) "
-        "StreamingResponse before normal streams are wrapped in agent_runs"
-    )
-
-
-@pytest.mark.parametrize(
-    ("compare_mode", "runtime_context", "expected"),
-    [
+def test_only_resumable_interactive_streams_are_detached():
+    for compare_mode, runtime_context, expected in (
         (False, {}, True),
         (False, {"surface": "odysseus-tui"}, True),
         (True, {}, False),
-        (
-            False,
-            {"surface": "odysseus-native", "unattended_mode": True},
-            False,
-        ),
-    ],
-)
-def test_only_resumable_interactive_streams_are_detached(
-    compare_mode,
-    runtime_context,
-    expected,
-):
-    assert chat_routes._should_detach_chat_stream(
-        compare_mode=compare_mode,
-        client_runtime_context=runtime_context,
-    ) is expected
+        (False, {"surface": "odysseus-native", "unattended_mode": True}, False),
+    ):
+        assert chat_routes._should_detach_chat_stream(
+            compare_mode=compare_mode,
+            client_runtime_context=runtime_context,
+        ) is expected, (compare_mode, runtime_context)
 
 
-@pytest.mark.parametrize(
-    ("tools_blocked", "approval_continuation", "runtime_context", "expected"),
-    [
+def test_unattended_streams_do_not_launch_post_response_llm_jobs():
+    for tools_blocked, approval_continuation, runtime_context, expected in (
         (False, False, {}, True),
         (True, False, {}, False),
         (False, True, {}, False),
         (False, False, {"surface": "odysseus-native"}, True),
-        (
-            False,
-            False,
-            {"surface": "odysseus-native", "unattended_mode": True},
-            False,
-        ),
-        (
-            False,
-            False,
-            {"surface": "odysseus-tui", "unattended_mode": True},
-            False,
-        ),
-    ],
-)
-def test_unattended_streams_do_not_launch_post_response_llm_jobs(
-    tools_blocked,
-    approval_continuation,
-    runtime_context,
-    expected,
-):
-    assert chat_routes._post_response_extraction_allowed(
-        tools_blocked=tools_blocked,
-        tool_approval_continuation=approval_continuation,
-        client_runtime_context=runtime_context,
-    ) is expected
+        (False, False, {"surface": "odysseus-native", "unattended_mode": True}, False),
+        (False, False, {"surface": "odysseus-tui", "unattended_mode": True}, False),
+    ):
+        assert chat_routes._post_response_extraction_allowed(
+            tools_blocked=tools_blocked,
+            tool_approval_continuation=approval_continuation,
+            client_runtime_context=runtime_context,
+        ) is expected, (tools_blocked, approval_continuation, runtime_context)

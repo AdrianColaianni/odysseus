@@ -1,40 +1,7 @@
 """Browser coverage for Rich Text slash-command block insertion."""
 
-import json
-import subprocess
-from pathlib import Path
-from tests.helpers.stylesheets import app_css
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-STYLE = app_css()
-
-
-def test_slash_menu_reuses_rich_text_actions_and_is_accessible():
-    for action in (
-        "paragraph",
-        "h1",
-        "h2",
-        "h3",
-        "ul",
-        "ol",
-        "check",
-        "quote",
-        "codeblock",
-        "hr",
-        "table:insert:3:3",
-        "image",
-    ):
-        assert f"action: '{action}'" in DOC_JS
-    assert "applyMdFormat(command.action)" in DOC_JS
-    assert "document.execCommand('delete')" in DOC_JS
-    assert "menu.setAttribute('role', 'listbox')" in DOC_JS
-    assert "button.setAttribute('role', 'option')" in DOC_JS
-    assert "rich.setAttribute('aria-activedescendant', activeItem.id)" in DOC_JS
-    assert "itemBottom - list.clientHeight" in DOC_JS
-    assert ".doc-rich-slash-menu" in STYLE
+from tests.helpers.node import run_node_module
 
 
 def test_slash_menu_filters_converts_blocks_inserts_tables_and_fits_mobile():
@@ -152,15 +119,7 @@ def test_slash_menu_filters_converts_blocks_inserts_tables_and_fits_mobile():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
     assert data["filtered"] == [
         "Heading 1", "Heading 2", "Heading 3", "Heading 4", "Heading 5", "Heading 6",
     ]

@@ -1,5 +1,7 @@
 /** Retained, non-destructive layer effects. */
 import { LAYER_STYLES, styleParams, renderLayerStyle, renderDropShadow } from './layer-styles.js';
+import { copyCanvas, makeCanvas } from './placed-layer.js';
+import { hexToRgb } from '../color/hex.js';
 
 export function effectsWithPreview(owner) {
   const effects = owner.effects || [];
@@ -122,19 +124,9 @@ export function effectLabel(type) {
   }[type] || type;
 }
 
-function copyCanvas(source) {
-  const canvas = document.createElement('canvas');
-  canvas.width = source.width;
-  canvas.height = source.height;
-  canvas.getContext('2d').drawImage(source, 0, 0);
-  return canvas;
-}
-
 function gradientColor(value, alpha = 1) {
-  const raw = String(value || '').replace(/^#/, '');
-  if (!/^[0-9a-f]{6}$/i.test(raw)) return `rgba(0,0,0,${alpha})`;
-  const channels = [0, 2, 4].map(offset => parseInt(raw.slice(offset, offset + 2), 16));
-  return `rgba(${channels.join(',')},${alpha})`;
+  const rgb = hexToRgb(value);
+  return rgb ? `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha})` : `rgba(0,0,0,${alpha})`;
 }
 
 function renderGradient(ctx, effect, width, height) {
@@ -151,9 +143,7 @@ function renderGradient(ctx, effect, width, height) {
 
 function applyEffectMask(source, effected, mask) {
   if (!mask?.canvas || !source || !effected) return effected;
-  const masked = document.createElement('canvas');
-  masked.width = effected.width;
-  masked.height = effected.height;
+  const masked = makeCanvas(effected.width, effected.height);
   const mctx = masked.getContext('2d');
   mctx.drawImage(effected, 0, 0);
   mctx.globalCompositeOperation = 'destination-in';
@@ -164,9 +154,7 @@ function applyEffectMask(source, effected, mask) {
 
 function sharpenCanvas(source, amount, shouldContinue = () => true) {
   if (!amount) return copyCanvas(source);
-  const out = document.createElement('canvas');
-  out.width = source.width;
-  out.height = source.height;
+  const out = makeCanvas(source.width, source.height);
   const src = source.getContext('2d').getImageData(0, 0, source.width, source.height);
   const dst = out.getContext('2d').createImageData(source.width, source.height);
   const a = Math.max(0, Math.min(1, Number(amount) || 0));
@@ -198,9 +186,7 @@ export function renderEffects(source, effects = [], shouldContinue = () => true)
     if (!shouldContinue()) return current;
     const effect = normalizeEffect(raw);
     if (!effect.visible || effect.opacity <= 0) continue;
-    const next = document.createElement('canvas');
-    next.width = current.width;
-    next.height = current.height;
+    const next = makeCanvas(current.width, current.height);
     const ctx = next.getContext('2d');
     if (LAYER_STYLES[effect.type]) {
       ctx.drawImage(renderLayerStyle(current, effect.type, effect.params), 0, 0);
@@ -313,9 +299,7 @@ export async function renderEffectsAsync(source, effects = [], shouldContinue = 
         finish(shouldContinue() ? renderEffects(source, effects, shouldContinue) : source);
         return;
       }
-      const output = document.createElement('canvas');
-      output.width = source.width;
-      output.height = source.height;
+      const output = makeCanvas(source.width, source.height);
       output.getContext('2d').drawImage(bitmap, 0, 0);
       bitmap.close?.();
       finish(output);
@@ -329,5 +313,3 @@ export async function renderEffectsAsync(source, effects = [], shouldContinue = 
     ]);
   });
 }
-
-export const EFFECT_TYPES_LIST = [...EFFECT_TYPES];

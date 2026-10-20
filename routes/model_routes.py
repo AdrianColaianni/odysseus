@@ -45,6 +45,7 @@ from src.endpoint_resolver import (
     build_chat_url,
     build_models_url,
     build_headers,
+    session_url_matches_endpoint,
 )
 from src.auth_helpers import _auth_disabled, effective_user, owner_filter
 
@@ -1137,15 +1138,6 @@ def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> 
         or "ollama" in (parsed_base.hostname or "").lower()
     )
 
-    def _is_loading_model_response(r) -> bool:
-        if getattr(r, "status_code", None) != 503:
-            return False
-        try:
-            body = r.text or ""
-        except Exception:
-            body = ""
-        return "loading model" in body.lower()
-
     def _result_from_response(r) -> Dict[str, Any]:
         if 300 <= r.status_code < 400:
             loc = r.headers.get("location", "")
@@ -1851,13 +1843,7 @@ def setup_model_routes(model_discovery):
             async def _probe_one(data: Dict[str, Any]) -> Dict[str, Any]:
                 t0 = _time.time()
                 try:
-                    # Bumped 1.5s → 3.5s. The previous 1.5s budget was clipping
-                    # local vLLM endpoints on Tailscale links where the model
-                    # server is still loading (Qwen3.5-122B takes 2–3 min to
-                    # warm); /v1/models can take 500–2500 ms on a busy box,
-                    # which pushed _ping_endpoint's full path-discovery sweep
-                    # past the cap and marked the row offline despite the
-                    # user actively chatting with it.
+                    # A loading local server can take 500-2500 ms on /v1/models, so 3.5s keeps it online.
                     ping = await _asyncio.to_thread(_ping_endpoint, data["base"], data.get("api_key"), 3.5)
                     lat = round((_time.time() - t0) * 1000)
                     return {
@@ -2940,18 +2926,6 @@ def setup_model_routes(model_discovery):
             logger.warning("Failed to clear user prefs for endpoint %s: %s", ep_id, e)
             return 0
 
-    def _session_uses_endpoint_url(session_url: str, base_url: str) -> bool:
-        if not session_url or not base_url:
-            return False
-        sess = session_url.rstrip("/")
-        base = _normalize_base(base_url).rstrip("/")
-        variants = {
-            base,
-            base + "/chat/completions",
-            build_chat_url(base).rstrip("/"),
-        }
-        return sess in variants or sess.startswith(base + "/")
-
     def _clear_sessions_for_endpoint(db, base_url: str, endpoint_id: str, owner) -> int:
         """Drop stored auth for sessions using an endpoint being deleted.
 
@@ -2966,7 +2940,7 @@ def setup_model_routes(model_discovery):
         for row in rows:
             if getattr(row, "endpoint_id", None) not in (None, endpoint_id):
                 continue
-            if _session_uses_endpoint_url(row.endpoint_url or "", base_url):
+            if session_url_matches_endpoint(row.endpoint_url or "", base_url):
                 row.headers = {}
                 row.updated_at = datetime.utcnow()
                 cleared += 1
@@ -2985,7 +2959,7 @@ def setup_model_routes(model_discovery):
             for sess in list(getattr(manager, "sessions", {}).values()):
                 if getattr(sess, "owner", None) != owner or getattr(sess, "endpoint_id", None) not in (None, endpoint_id):
                     continue
-                if _session_uses_endpoint_url(getattr(sess, "endpoint_url", "") or "", base_url):
+                if session_url_matches_endpoint(getattr(sess, "endpoint_url", "") or "", base_url):
                     sess.headers = {}
                     cleared += 1
         except Exception:

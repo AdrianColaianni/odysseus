@@ -7,15 +7,11 @@ AttributeError. They now treat a non-dict as empty / not-applicable.
 import asyncio
 import json
 
-import routes.skills_routes as skills_routes
-from routes.skills_routes import (
-    _run_skill_test_job,
-    _run_skill_test_once,
-    _should_check_retrieval_precision,
-    _skill_test_jobs,
-    _skill_test_messages,
-    _skill_test_task,
-)
+from services.skills import agent_runner, evaluation
+from services.skills.agent_runner import _skill_test_jobs
+from services.skills.dependencies import default_dependencies
+from services.skills.evaluation import should_check_retrieval_precision as _should_check_retrieval_precision
+from services.skills.prompts import _skill_test_messages, _skill_test_task
 
 
 def test_non_dict_skill_does_not_crash():
@@ -54,9 +50,9 @@ def test_autonomous_skill_test_reports_exact_approval_as_inconclusive(monkeypatc
         raise AssertionError("approval pause must not be judged as a failed skill")
 
     monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
-    monkeypatch.setattr(skills_routes, "_eval_skill_run", fail_eval)
+    monkeypatch.setattr(evaluation, "evaluate_run", fail_eval)
 
-    transcript, verdict = asyncio.run(_run_skill_test_once(
+    transcript, verdict = asyncio.run(default_dependencies().run_test_once(
         "skill markdown",
         "task",
         "http://example.test",
@@ -93,7 +89,7 @@ def test_manual_skill_test_pauses_with_resumable_exact_approval(monkeypatch):
         "verdict": None,
     }
     try:
-        asyncio.run(_run_skill_test_job(
+        asyncio.run(default_dependencies().run_test_job(
             key,
             "skill",
             "skill markdown",
@@ -148,8 +144,8 @@ def test_manual_skill_test_records_saved_turns_after_baseline(monkeypatch):
             self.updated.append((args, kwargs))
 
     monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
-    monkeypatch.setattr(skills_routes, "_run_skill_audit_arm", fake_baseline)
-    monkeypatch.setattr(skills_routes, "_eval_skill_run", fake_eval)
+    monkeypatch.setattr(agent_runner, "run_audit_arm", fake_baseline)
+    monkeypatch.setattr(evaluation, "evaluate_run", fake_eval)
 
     key = ("owner", "skill")
     fake = FakeSkills()
@@ -159,7 +155,7 @@ def test_manual_skill_test_records_saved_turns_after_baseline(monkeypatch):
         "verdict": None,
     }
     try:
-        asyncio.run(_run_skill_test_job(
+        asyncio.run(default_dependencies().run_test_job(
             key,
             "skill",
             "skill markdown",

@@ -7,9 +7,9 @@ import secrets
 import shutil
 import time
 import tempfile
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any, List
 
-from src.constants import MAX_READ_CHARS, MAX_DIFF_LINES, MAX_OUTPUT_CHARS
+from src.constants import MAX_READ_CHARS, MAX_DIFF_LINES
 from src.path_confinement import is_inside
 
 _CODENAV_SKIP_DIRS = frozenset({
@@ -208,7 +208,7 @@ def _edit_file_text(original: str, old: str, new: str, replace_all: bool) -> tup
 
 class EditFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
+        from src.tool_execution import _resolve_tool_path
         try:
             args = json.loads(content) if content.strip().startswith("{") else {}
         except (json.JSONDecodeError, TypeError):
@@ -277,7 +277,7 @@ class EditFileTool:
 
 class ReadFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
+        from src.tool_execution import _resolve_tool_path
         raw_path, offset, limit = content.split("\n", 1)[0].strip(), 0, 0
         _stripped = content.strip()
         if _stripped.startswith("{"):
@@ -844,8 +844,6 @@ class GlobTool:
             _can_traverse_tool_path,
             _is_denied_tool_path,
             _display_tool_path,
-            _is_sensitive_path,
-            _resolve_tool_path,
             _resolve_search_root,
             _truncate,
         )
@@ -949,11 +947,9 @@ class GrepTool:
         from src.tool_execution import (
             _SENSITIVE_BASENAMES,
             _SENSITIVE_FILE_PATTERNS,
-            _agent_readable_data_subdirs,
             _is_denied_tool_path,
             _display_tool_path,
             _can_traverse_tool_path,
-            _is_sensitive_path,
             _path_within,
             _resolve_search_root,
             _truncate,
@@ -989,7 +985,6 @@ class GrepTool:
             import threading
 
             from src.agent_runtime.resources import _control_plane_snapshot
-            from src.constants import DATA_DIR
 
             rg = shutil.which("rg")
             real_root = os.path.realpath(root)
@@ -1359,7 +1354,7 @@ class GetWorkspaceTool:
         if ws:
             return {
                 "output": "/workspace\n(File tools are confined to this folder; the shell starts "
-                          f"here but is not sandboxed and can reach outside it.)",
+                          "here but is not sandboxed and can reach outside it.)",
                 "exit_code": 0,
             }
         return {

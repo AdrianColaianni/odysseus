@@ -13,13 +13,11 @@ import asyncio
 import types
 
 from routes.auth_routes import setup_auth_routes, DeleteUserRequest
+from tests.helpers.routes import route_endpoint
 
 
 def _handler(router):
-    for route in router.routes:
-        if getattr(route, "path", "") == "/api/auth/users" and "DELETE" in getattr(route, "methods", set()):
-            return route.endpoint
-    raise AssertionError("DELETE /api/auth/users handler not found")
+    return route_endpoint(router, "/api/auth/users", "DELETE")
 
 
 def _fake_request(invalidations):

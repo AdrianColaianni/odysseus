@@ -40,6 +40,7 @@
  *   uiModule:               object | null,
  * }} deps
  */
+import { makeCanvas } from './placed-layer.js';
 import { state } from './state.js';
 import { beginAIOperation, decodeAIImage } from './ai-operation.js';
 
@@ -152,9 +153,7 @@ export function wireInpaintButtons({
       const dilatedMask = dilateMask(mergedMask, padPx);
       const imageB64 = flatCanvas.toDataURL('image/png').split(',')[1];
       const maskB64 = dilatedMask.toDataURL('image/png').split(',')[1];
-      const baseSnap = document.createElement('canvas');
-      baseSnap.width = state.imgWidth;
-      baseSnap.height = state.imgHeight;
+      const baseSnap = makeCanvas(state.imgWidth, state.imgHeight);
       baseSnap.getContext('2d').drawImage(flatCanvas, 0, 0);
       const res = await fetch('/api/image/inpaint', {
         signal: operation.signal,
@@ -195,12 +194,9 @@ export function wireInpaintButtons({
           resultLayer.ctx.imageSmoothingQuality = 'high';
           resultLayer.ctx.drawImage(resultImg, 0, 0, state.imgWidth, state.imgHeight);
           // Snapshot the AI result + hard mask used for this run.
-          const aiSnap = document.createElement('canvas');
-          aiSnap.width = state.imgWidth; aiSnap.height = state.imgHeight;
+          const aiSnap = makeCanvas(state.imgWidth, state.imgHeight);
           aiSnap.getContext('2d').drawImage(resultLayer.canvas, 0, 0);
-          const maskSnap = document.createElement('canvas');
-          maskSnap.width = mergedMask.width;
-          maskSnap.height = mergedMask.height;
+          const maskSnap = makeCanvas(mergedMask.width, mergedMask.height);
           maskSnap.getContext('2d').drawImage(mergedMask, 0, 0);
           resultLayer.inpaintSource = { ai: aiSnap, mask: maskSnap, base: baseSnap, padPx };
           // Apply initial alpha = hard mask (no feather, no edge shift).
@@ -263,7 +259,7 @@ export function wireInpaintButtons({
       if (btnLabel) btnLabel.textContent = idleLabel;
       if (runWp) { try { runWp.destroy(); } catch (_) {} }
       if (canvasWp) { try { canvasWp.destroy(); } catch (_) {} }
-      if (canvasWpEl) { try { canvasWpEl.remove(); } catch (_) {} }
+      canvasWpEl?.remove();
       window.dispatchEvent(new CustomEvent('ge:inpaint-done'));
     }
   }
@@ -320,8 +316,7 @@ export function wireInpaintButtons({
   // opaque pixels as context. Ignores the user's drawn mask.
   document.getElementById('ge-inpaint-outpaint').addEventListener('click', async () => {
     // 1) Flatten visible layers to detect alpha=0 (empty) regions.
-    const flat = document.createElement('canvas');
-    flat.width = state.imgWidth; flat.height = state.imgHeight;
+    const flat = makeCanvas(state.imgWidth, state.imgHeight);
     const fctx = flat.getContext('2d');
     for (const layer of state.layers) {
       if (!layer.visible) continue;
@@ -332,8 +327,7 @@ export function wireInpaintButtons({
     fctx.globalAlpha = 1;
     const flatData = fctx.getImageData(0, 0, state.imgWidth, state.imgHeight).data;
     // 2) White wherever the composite is transparent.
-    const maskRaw = document.createElement('canvas');
-    maskRaw.width = state.imgWidth; maskRaw.height = state.imgHeight;
+    const maskRaw = makeCanvas(state.imgWidth, state.imgHeight);
     const mrCtx = maskRaw.getContext('2d');
     const mrImg = mrCtx.createImageData(state.imgWidth, state.imgHeight);
     let emptyCount = 0;
@@ -353,8 +347,7 @@ export function wireInpaintButtons({
     mrCtx.putImageData(mrImg, 0, 0);
     // 3) Dilate the mask outward 12px so it overlaps a band of
     //    opaque pixels — context for the model to blend cleanly.
-    const expanded = document.createElement('canvas');
-    expanded.width = state.imgWidth; expanded.height = state.imgHeight;
+    const expanded = makeCanvas(state.imgWidth, state.imgHeight);
     const ectx = expanded.getContext('2d');
     ectx.filter = 'blur(12px)';
     ectx.drawImage(maskRaw, 0, 0);

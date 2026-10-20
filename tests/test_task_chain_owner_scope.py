@@ -15,8 +15,10 @@ from tests.helpers.import_state import clear_fake_database_modules
 clear_fake_database_modules()
 
 import core.database as cdb
-import routes.task_routes as task_routes
+import routes.task.task_routes as task_routes
 from core.database import ScheduledTask
+from tests.helpers.route_call import with_db
+from tests.helpers.routes import route_endpoint
 
 _TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _ENGINE = create_engine(
@@ -36,10 +38,7 @@ def _req(user="alice"):
 def _endpoint(method, path):
     task_routes.SessionLocal = _TS
     router = task_routes.setup_task_routes(MagicMock())
-    for route in router.routes:
-        if getattr(route, "path", None) == path and method in getattr(route, "methods", set()):
-            return route.endpoint
-    raise RuntimeError(f"{method} {path} not found")
+    return with_db(route_endpoint(router, path, method))
 
 
 def _seed_task(task_id, owner, *, then_task_id=None):
@@ -85,7 +84,7 @@ async def test_update_task_rejects_cross_owner_chain_target():
     update_task = _endpoint("PUT", "/api/tasks/{task_id}")
 
     with pytest.raises(HTTPException) as exc:
-        await update_task(
+        update_task(
             _req("alice"),
             "alice-source-update",
             task_routes.TaskUpdate(then_task_id="bob-target-update"),
@@ -106,7 +105,7 @@ async def test_update_task_allows_same_owner_chain_target():
     _seed_task("alice-target-allow", "alice")
     update_task = _endpoint("PUT", "/api/tasks/{task_id}")
 
-    out = await update_task(
+    out = update_task(
         _req("alice"),
         "alice-source-allow",
         task_routes.TaskUpdate(then_task_id="alice-target-allow"),

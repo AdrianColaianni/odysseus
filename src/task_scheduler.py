@@ -11,7 +11,6 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, Tuple
 
-from core.auth import RESERVED_USERNAMES
 from src.owner_identity import REQUEST_SENTINEL_OWNERS
 from src.task_action_policy import (
     is_admin_only_task_action,
@@ -285,9 +284,7 @@ RETIRED_HOUSEKEEPING_ACTIONS = frozenset({
 def _digest_windows(now):
     """(label, start, end) buckets for the calendar check-in digest.
 
-    The windows are contiguous so no event is dropped between buckets — an
-    earlier version started the 30-day window at now+8d while the week window
-    ended at now+7d, so events ~7-8 days out fell into no bucket.
+    The windows are contiguous so no event falls between buckets.
     """
     return [
         ("today_tomorrow", now, now + timedelta(days=2)),
@@ -299,10 +296,8 @@ def _digest_windows(now):
 def _checkin_calendar_events(db, owner, start, end):
     """Calendar events in [start, end] for ONE owner, for the check-in digest.
 
-    Ownership lives on CalendarCal.owner; events inherit it via calendar_id.
-    The digest query had no owner scope, so it pulled EVERY user's events into
-    one user's check-in (a cross-tenant leak of summaries/locations). Scope it
-    by joining CalendarCal, mirroring routes/calendar_routes.list_events.
+    Ownership lives on CalendarCal.owner; events inherit it via calendar_id,
+    so the join is the owner scope, mirroring routes/calendar_routes.list_events.
     """
     from core.database import CalendarEvent as _CE, CalendarCal as _CC
     return (
@@ -551,9 +546,7 @@ class TaskScheduler:
             notes = self._pending_notifications[:]
             self._pending_notifications.clear()
             return notes
-        # Strict owner scope — used to OR-in null-owner notifications for
-        # "legacy single-user" compat but that leaked notification bodies to
-        # any authenticated user once a second account existed.
+        # Strict owner scope: null-owner notifications would leak to every account.
         keep, take = [], []
         for n in self._pending_notifications:
             if n.get("owner") == owner:
@@ -660,14 +653,7 @@ class TaskScheduler:
 
         self._running = True
         self._task = asyncio.create_task(self._loop())
-        # Internal background scanner that isn't a user-facing "task" — pure
-        # infra (no LLM), shouldn't clutter the Tasks UI, fires on its own
-        # cadence inside the scheduler process.
-        #
-        # Calendar event reminders are represented as Notes by the calendar UI,
-        # so the Notes scanner is the single reminder dispatch path. Running the
-        # old event scanner too caused duplicate emails/notifications for the
-        # same calendar event.
+        # Calendar reminders are Notes, so this is the single reminder dispatch path.
         self._note_pings_task = asyncio.create_task(self._note_pings_loop())
         logger.info(f"Task scheduler started (concurrency cap: {self._concurrency_cap})")
         # Audit clusters: show any minute-of-day where >1 active scheduled
@@ -706,12 +692,11 @@ class TaskScheduler:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        for attr in ("_note_pings_task", "_event_pings_task"):
-            t = getattr(self, attr, None)
-            if t:
-                t.cancel()
-                try: await t
-                except asyncio.CancelledError: pass
+        t = getattr(self, "_note_pings_task", None)
+        if t:
+            t.cancel()
+            try: await t
+            except asyncio.CancelledError: pass
         logger.info("Task scheduler stopped")
 
     async def _note_pings_loop(self):
@@ -719,7 +704,7 @@ class TaskScheduler:
         Pure infra (no LLM), doesn't surface in the Tasks UI. Iterates
         per-owner so cache pruning in `action_ping_notes` (which removes
         cache entries for notes not in the current scan's seen_ids) doesn't
-        cross-delete other users' entries (review C4).
+        cross-delete other users' entries.
         """
         await asyncio.sleep(30)
         from src.builtin_actions import action_ping_notes, TaskNoop
@@ -734,33 +719,11 @@ class TaskScheduler:
                     logger.warning(f"ping_notes background scanner errored for owner={ow!r}: {e}")
             await asyncio.sleep(60)  # 1 min
 
-    async def _event_pings_loop(self):
-        """Built-in calendar-event scanner — same recipe as note pings. Runs
-        every 10 min, fires reminders via dispatch_reminder. Not a user task.
-        Iterates per-owner so each user only gets their own calendar pings
-        (passing owner="" globally would email User B's events to User A's
-        configured SMTP "from" address — see review C3).
-        """
-        await asyncio.sleep(90)
-        from src.builtin_actions import action_ping_events, TaskNoop
-        while self._running:
-            owners = self._known_task_owners()
-            for ow in (owners or [""]):
-                try:
-                    await action_ping_events(owner=ow)
-                except TaskNoop:
-                    pass
-                except Exception as e:
-                    logger.warning(f"ping_events background scanner errored for owner={ow!r}: {e}")
-            await asyncio.sleep(600)  # 10 min
-
     def _known_task_owners(self) -> list:
         """Distinct non-empty owners that background scanners should visit.
 
-        Scheduled tasks used to be the only owner source. Calendar reminders
-        are stored as Notes, though, so an account with due notes but no task
-        rows could get the browser reminder while the backend email/ntfy
-        scanner never ran for that owner.
+        Includes note owners: calendar reminders are Notes, so an account can
+        have due reminders and no task rows.
         """
         from core.database import SessionLocal, ScheduledTask, Note
         db = SessionLocal()
@@ -790,9 +753,8 @@ class TaskScheduler:
                 await self._check_due_tasks()
             except Exception:
                 logger.exception("Error in task scheduler loop")
-            # Sleep until the next scheduled run, capped at 60s. A `* * * * *`
-            # cron task previously fired up to ~60s late because we always
-            # slept the full minute; now the loop wakes near the boundary.
+            # Sleep until the next scheduled run, capped at 60s, so per-minute
+            # cron tasks fire near the boundary.
             sleep_for = 60.0
             try:
                 from core.database import SessionLocal as _SL, ScheduledTask as _ST
@@ -1462,14 +1424,12 @@ class TaskScheduler:
         try:
             if tz_name:
                 from zoneinfo import ZoneInfo
-                from datetime import timezone, timedelta
+                from datetime import timezone
                 now = _utcnow().replace(tzinfo=timezone.utc).astimezone(ZoneInfo(tz_name))
             else:
-                from datetime import timedelta
                 now = _utcnow()
             time_str = now.strftime("%A, %B %d %Y, %H:%M")
         except Exception:
-            from datetime import timedelta
             now = _utcnow()
             time_str = now.strftime("%H:%M UTC")
 
@@ -1478,7 +1438,7 @@ class TaskScheduler:
         # Calendar: today+tomorrow, this week, month ahead
         # Pull directly from DB so we can include event_type and importance.
         try:
-            from core.database import SessionLocal as _SL, CalendarEvent as _CE
+            from core.database import SessionLocal as _SL
             _db = _SL()
             try:
                 for label, start, end in _digest_windows(now):
@@ -1631,25 +1591,50 @@ class TaskScheduler:
             override_user_message=context,
         )
 
-    async def _execute_llm_task(self, task, db) -> str:
-        """Execute an LLM task with full tool access via the agent loop."""
-        from core.database import Session as DbSession, ChatMessage, CrewMember
-
-        # If this task is wired to a CrewMember (personal assistant, custom
-        # crew), prefer the crew member's persona/model/endpoint as overrides.
+    def _task_target(self, task, db, model: str = None):
+        """The task's crew member plus endpoint and model, crew filling what the task leaves unset."""
+        from core.database import CrewMember
         crew = None
         if getattr(task, "crew_member_id", None):
-            try:
-                crew = db.query(CrewMember).filter(CrewMember.id == task.crew_member_id).first()
-            except Exception:
-                crew = None
-
-        # Determine endpoint + model
+            crew = db.query(CrewMember).filter(CrewMember.id == task.crew_member_id).first()
         endpoint_url = task.endpoint_url
-        model = task.model
-        if (not endpoint_url or not model) and crew:
+        model = model or task.model
+        if crew:
             endpoint_url = endpoint_url or crew.endpoint_url
             model = model or crew.model
+        return crew, endpoint_url, model
+
+    def _ensure_task_session(self, task, db, endpoint_url, model) -> str:
+        """The task's output session id, creating the `[Task] <name>` session on first use."""
+        if task.session_id:
+            return task.session_id
+        from core.database import Session as DbSession
+        session_id = str(uuid.uuid4())
+        name = f"[Task] {task.name}"
+        db.add(DbSession(
+            id=session_id,
+            name=name,
+            endpoint_url=endpoint_url or "",
+            model=model or "",
+            owner=task.owner,
+            folder="Tasks",
+            created_at=_utcnow(),
+            updated_at=_utcnow(),
+        ))
+        task.session_id = session_id
+        db.commit()
+        if self._session_manager:
+            try:
+                self._session_manager.ensure_task_session(
+                    session_id, name, endpoint_url, model, owner=task.owner, task=task
+                )
+            except Exception as e:
+                logger.warning(f"Task {task.id}: in-memory session mirror failed: {e}")
+        return session_id
+
+    async def _execute_llm_task(self, task, db) -> str:
+        """Execute an LLM task with full tool access via the agent loop."""
+        crew, endpoint_url, model = self._task_target(task, db)
         if not endpoint_url or not model:
             endpoint_url, model = self._resolve_defaults(db, task.owner)
         if not endpoint_url or not model:
@@ -1659,32 +1644,7 @@ class TaskScheduler:
         # the run (tasks rarely pin a model, so this is the only record of
         # which model actually produced the output).
         self._last_run_model = model
-
-        # Ensure a session exists for output
-        session_id = task.session_id
-        if not session_id:
-            session_id = str(uuid.uuid4())
-            sess = DbSession(
-                id=session_id,
-                name=f"[Task] {task.name}",
-                endpoint_url=endpoint_url,
-                model=model,
-                owner=task.owner,
-                folder="Tasks",
-                created_at=_utcnow(),
-                updated_at=_utcnow(),
-            )
-            db.add(sess)
-            task.session_id = session_id
-            db.commit()
-            if self._session_manager:
-                try:
-                    self._session_manager.ensure_task_session(
-                        session_id, f"[Task] {task.name}", endpoint_url, model,
-                        owner=task.owner, task=task
-                    )
-                except Exception:
-                    pass
+        session_id = self._ensure_task_session(task, db, endpoint_url, model)
 
         # For assistant check-ins: call each tool directly and post results
         # as separate messages. More reliable than hoping the model calls tools.
@@ -1711,12 +1671,8 @@ class TaskScheduler:
                     system_prompt = f"{char_prompt}\n\n{system_prompt}"
             except Exception:
                 pass
-        # Provide current date/time as a user-role message so the system prompt
-        # stays byte-identical across runs and doesn't bust the Anthropic prompt
-        # cache on every scheduled tick (see issue #2927 and the identical fix on
-        # the interactive-chat path in src/agent_loop.py).  The message is built
-        # once here and shared by both execution paths below (agent loop and the
-        # direct fallback) so time grounding is never lost on either path.
+        # Date/time goes in a user-role message so the system prompt stays
+        # byte-identical and prompt-cacheable across runs (as in src/agent_loop.py).
         tz_name = _resolve_task_timezone(db, task)
         try:
             from src.user_time import current_datetime_context_message_for_tz
@@ -1806,7 +1762,7 @@ class TaskScheduler:
         actions cannot drift into hidden delivery paths that disagree with the
         task's visible output target.
         """
-        from core.database import Session as DbSession, ChatMessage, CrewMember
+        from core.database import ChatMessage
         from core.models import ChatMessage as MemChatMessage
 
         output = task.output_target or "session"
@@ -1827,51 +1783,13 @@ class TaskScheduler:
         if output != "session":
             return
 
-        endpoint_url = task.endpoint_url
-        model_name = model or task.model
-        crew = None
-        if getattr(task, "crew_member_id", None):
-            try:
-                crew = db.query(CrewMember).filter(CrewMember.id == task.crew_member_id).first()
-            except Exception:
-                crew = None
-        if (not endpoint_url or not model_name) and crew:
-            endpoint_url = endpoint_url or crew.endpoint_url
-            model_name = model_name or crew.model
+        crew, endpoint_url, model_name = self._task_target(task, db, model)
         if not endpoint_url or not model_name:
-            try:
-                resolved_url, resolved_model = self._resolve_defaults(db, task.owner)
-                endpoint_url = endpoint_url or resolved_url
-                model_name = model_name or resolved_model
-            except Exception:
-                pass
-
+            resolved_url, resolved_model = self._resolve_defaults(db, task.owner)
+            endpoint_url = endpoint_url or resolved_url
+            model_name = model_name or resolved_model
         endpoint_url = _normalize_chat_endpoint(endpoint_url)
-
-        session_id = task.session_id
-        if not session_id:
-            session_id = str(uuid.uuid4())
-            sess = DbSession(
-                id=session_id,
-                name=f"[Task] {task.name}",
-                endpoint_url=endpoint_url or "",
-                model=model_name or "",
-                owner=task.owner,
-                folder="Tasks",
-                created_at=_utcnow(),
-                updated_at=_utcnow(),
-            )
-            db.add(sess)
-            task.session_id = session_id
-            db.commit()
-            if self._session_manager:
-                try:
-                    self._session_manager.ensure_task_session(
-                        session_id, f"[Task] {task.name}", endpoint_url, model_name,
-                        owner=task.owner, task=task
-                    )
-                except Exception:
-                    pass
+        session_id = self._ensure_task_session(task, db, endpoint_url, model_name)
 
         meta = {}
         if model_name:
@@ -1956,8 +1874,8 @@ class TaskScheduler:
             explicit = target
 
         try:
-            from routes.email_routes import _resolve_send_config
-            from routes.email_helpers import _send_smtp_message
+            from routes.email.email_routes import _resolve_send_config
+            from routes.email.email_helpers import _send_smtp_message
 
             cfg = _resolve_send_config(account_id=account_id or None, owner=task.owner or "")
             to_addr = explicit or cfg.get("from_address") or cfg.get("smtp_user") or ""
@@ -1991,9 +1909,7 @@ class TaskScheduler:
 
         system_content = system_prompt or "You are a helpful assistant executing a scheduled task. Use available tools to complete the task thoroughly."
         user_content = override_user_message or task.prompt
-        # Build the message list. The datetime context message (user-role) is
-        # inserted immediately before the task prompt so the system prefix stays
-        # byte-identical and cacheable across runs (see issue #2927).
+        # The datetime message sits before the task prompt so the system prefix stays cacheable.
         messages: list = [{"role": "system", "content": system_content}]
         if datetime_context_msg:
             messages.append(datetime_context_msg)
@@ -2165,7 +2081,7 @@ class TaskScheduler:
         authority = authority.restrict(disabled_tools=get_setting("disabled_tools", []) or ())
         if not authority.permits(task_operation(task.task_type, getattr(task, "action", None), task.prompt)):
             raise PermissionError("Scheduled research has no matching server request authority.")
-        from core.database import Session as DbSession, ChatMessage
+        from core.database import Session as DbSession
         from src.deep_research import DeepResearcher
         from src.research_handler import RESEARCH_DATA_DIR, ResearchHandler
         from src.research_utils import strip_thinking
@@ -2360,7 +2276,7 @@ class TaskScheduler:
         # the legacy `email_from` setting and the per-account DB rows.
         recipient = None
         try:
-            from routes.email_helpers import _get_email_config
+            from routes.email.email_helpers import _get_email_config
             cfg = _get_email_config() or {}
             recipient = cfg.get("from_address") or None
         except Exception as _e:
@@ -2723,7 +2639,7 @@ class TaskScheduler:
         if not owner or owner in REQUEST_SENTINEL_OWNERS:
             logger.info(f"ensure_assistant_defaults: skip synthetic owner {owner!r}")
             return
-        from core.database import SessionLocal, CrewMember, ScheduledTask
+        from core.database import SessionLocal, CrewMember
         from core.database import Session as DbSession
 
         db = SessionLocal()

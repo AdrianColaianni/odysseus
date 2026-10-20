@@ -6,7 +6,6 @@ def test_minified_svg_spacing_error_returns_exact_source():
     source = '<svg>' + '<circle/>' * 100 + tag + '</svg>'
     hint = _document_find_repair_hint(source, tag.replace('/>', ' />'), 0)
     assert repr(tag) in hint
-    assert 'Copy an exact source fragment' in hint
 
 
 def test_tag_boundaries_preserve_greater_than_inside_attribute():

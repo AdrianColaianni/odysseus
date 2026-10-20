@@ -36,7 +36,7 @@ from sqlalchemy.pool import NullPool
 
 import core.database as cdb
 from core.database import Note
-import routes.note_routes as nr
+import routes.note.note_routes as nr
 
 
 # A deliberately NON-loopback peer. require_user has loopback fall-throughs
@@ -103,7 +103,8 @@ def env(monkeypatch, tmp_path):
     an auth-middleware regression leaves behind. Seeds one note each for alice
     and bob. Returns (app, factory)."""
     factory = _temp_db(tmp_path)
-    monkeypatch.setattr(nr, "SessionLocal", factory)
+    monkeypatch.setattr(nr, "SessionLocal", factory, raising=False)
+    monkeypatch.setattr(cdb, "SessionLocal", factory)
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.delenv("LOCALHOST_BYPASS", raising=False)
 
@@ -172,7 +173,8 @@ async def test_auth_disabled_keeps_single_user_mode_working(monkeypatch, tmp_pat
     identity must still mean full single-user access (issue #622 contract),
     even with a stale configured auth.json on disk."""
     factory = _temp_db(tmp_path)
-    monkeypatch.setattr(nr, "SessionLocal", factory)
+    monkeypatch.setattr(nr, "SessionLocal", factory, raising=False)
+    monkeypatch.setattr(cdb, "SessionLocal", factory)
     monkeypatch.setenv("AUTH_ENABLED", "false")
 
     app = _build_app(factory)

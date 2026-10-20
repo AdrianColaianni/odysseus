@@ -12,6 +12,7 @@ and `email_pollers.py` (the background loops):
     - Pydantic models, shared constants, scheduled-DB bootstrap
 """
 
+import contextlib
 import os
 import base64
 import time
@@ -31,6 +32,7 @@ from email.mime.base import MIMEBase
 from email import encoders
 import mimetypes
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
 
 from fastapi import Query, HTTPException, Request
 from pydantic import BaseModel
@@ -540,13 +542,7 @@ def _apply_email_style_mechanics(text: str) -> str:
 def _require_auth(request: Request) -> str:
     """Defense-in-depth: reject unauthenticated callers even if upstream
     middleware was bypassed (e.g. localhost-bypass, SSRF from a sibling
-    service). Mirrors core.middleware.require_admin's resolution path.
-
-    v2 review HIGH-13: previously fell open whenever auth_manager wasn't
-    `is_configured`, exposing IMAP creds and SMTP send to any network
-    caller on a half-configured deploy. Now: anonymous callers in
-    unconfigured mode are only honoured if they're coming from
-    localhost; everyone else gets 401.
+    service). Before auth is configured, only loopback callers get through.
     """
     u = get_current_user(request)
     if u:
@@ -585,11 +581,8 @@ def require_user(request: Request) -> str:
 
 def _assert_owns_account(account_id: str, owner: str) -> None:
     """Reject requests that name an `account_id` belonging to another user.
-    Previously the account lookup in `_get_email_config` filtered only on
-    `id == account_id`, letting a multi-user deploy enumerate / operate
-    against any other user's IMAP/SMTP mailbox. Call this *before* opening
-    the IMAP connection or reading creds. `owner == ""` is the unconfigured /
-    single-user case — accept any account."""
+    Call this *before* opening the IMAP connection or reading creds.
+    `owner == ""` is the unconfigured / single-user case: accept any account."""
     if not account_id or not owner:
         return
     try:
@@ -825,6 +818,12 @@ def attachment_extract_dir(folder: str, uid: str, *, owner: str, account_id: str
         return attachment_scope_dir(ATTACHMENTS_DIR, folder, uid, owner=owner, account_id=account_id)
     except ValueError:
         raise HTTPException(400, "Invalid attachment location")
+
+
+def _scheduled_db():
+    """Open the email cache DB; use as `with _scheduled_db() as conn:` so it always closes."""
+    import sqlite3
+    return contextlib.closing(sqlite3.connect(SCHEDULED_DB))
 
 
 def _init_scheduled_db():
@@ -1145,6 +1144,33 @@ def _save_settings(settings):
     atomic_write_json(str(SETTINGS_FILE), settings, indent=2)
 
 
+_AUTO_REPLY_BOOL_KEYS = {
+    "email_auto_reply",
+    "email_auto_reply_exclude_automated",
+    "email_auto_reply_pause_notifications",
+}
+_AUTO_REPLY_TEXT_KEYS = {
+    "email_auto_reply_start",
+    "email_auto_reply_end",
+    "email_auto_reply_subject",
+    "email_auto_reply_message",
+    "email_auto_reply_cooldown",
+    "email_auto_reply_scope",
+    "email_auto_reply_account_id",
+    "email_auto_reply_enabled_at",
+}
+_AUTO_REPLY_KEYS = _AUTO_REPLY_BOOL_KEYS | _AUTO_REPLY_TEXT_KEYS
+
+
+def _get_auto_reply_settings_for_account(settings: dict, account_id: str | None = None) -> dict:
+    key = str(account_id or "").strip()
+    out = {k: settings.get(k) for k in _AUTO_REPLY_KEYS if k in settings}
+    by_account = settings.get("email_auto_reply_by_account") or {}
+    if key and isinstance(by_account, dict) and isinstance(by_account.get(key), dict):
+        out.update({k: v for k, v in by_account[key].items() if k in _AUTO_REPLY_KEYS})
+    return out
+
+
 def _get_email_config(account_id: str | None = None, owner: str = "") -> dict:
     """Return IMAP/SMTP config as a dict.
 
@@ -1363,9 +1389,6 @@ def _imap_connect(account_id: str | None = None, owner: str = "",
     #   STARTTLS on → plain + upgrade
     #   STARTTLS off + port 993 → implicit SSL (IMAPS)
     #   STARTTLS off + any other port → plain (local Dovecot, custom ports)
-    # The last branch is critical: previously this fell into IMAP4_SSL
-    # for any non-STARTTLS port, which would fail the TLS handshake on
-    # plain local servers (Dovecot on 31143, etc.).
     conn = _open_imap_connection(
         cfg["imap_host"],
         cfg["imap_port"],
@@ -1477,6 +1500,218 @@ def _decode_header(raw):
             else:
                 decoded.append(data)
         return "".join(decoded)
+
+
+def _folder_name_from_list_line(line) -> str | None:
+    decoded = line.decode() if isinstance(line, bytes) else str(line)
+    match = re.search(r'"([^"]*)"\s*$|(\S+)\s*$', decoded)
+    if not match:
+        return None
+    return match.group(1) or match.group(2)
+
+
+def _folder_role_from_name(name: str) -> str:
+    lower = (name or "").lower()
+    if "trash" in lower or "bin" in lower or "deleted" in lower:
+        return "trash"
+    if "spam" in lower or "junk" in lower:
+        return "junk"
+    if "archive" in lower or "all mail" in lower:
+        return "archive"
+    return ""
+
+
+def _uid_from_fetch_meta(meta_b: bytes) -> str:
+    m = re.search(rb"\bUID\s+(\d+)\b", meta_b)
+    return m.group(1).decode() if m else ""
+
+
+def _parse_list_unsubscribe_header(value: str | None) -> list[dict]:
+    """Parse RFC List-Unsubscribe entries into safe reviewable actions.
+
+    We return mailto/http entries but only the mailto kind is executable by the
+    first-pass Odysseus flow. HTTP unsubscribe links are useful evidence but
+    often contain tracking tokens and should be opened manually unless/until we
+    add a browser-confirmed flow.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    pieces = re.findall(r"<([^>]+)>", raw)
+    if not pieces:
+        pieces = [p.strip() for p in raw.split(",") if p.strip()]
+    out: list[dict] = []
+    seen = set()
+    for piece in pieces:
+        target = piece.strip().strip("<>").strip()
+        if not target:
+            continue
+        parsed = urlparse(target)
+        scheme = parsed.scheme.lower()
+        key = target.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if scheme == "mailto":
+            addr = unquote(parsed.path or "").strip()
+            if not addr or "\r" in addr or "\n" in addr:
+                continue
+            query = parse_qs(parsed.query or "", keep_blank_values=True)
+            subject = unquote((query.get("subject") or ["unsubscribe"])[0] or "unsubscribe")
+            body = unquote((query.get("body") or ["unsubscribe"])[0] or "unsubscribe")
+            subject = re.sub(r"[\r\n]+", " ", subject).strip() or "unsubscribe"
+            body = re.sub(r"[\r\n]+", "\n", body).strip() or "unsubscribe"
+            out.append({
+                "kind": "mailto",
+                "target": addr,
+                "subject": subject[:200],
+                "body": body[:1000],
+                "executable": True,
+            })
+        elif scheme in {"http", "https"}:
+            out.append({
+                "kind": "url",
+                "target": target,
+                "executable": False,
+            })
+    return out
+
+
+def _email_unsubscribe_candidate_from_msg(msg, uid: str, folder: str, *, spam_cached: dict | None = None) -> dict | None:
+    sender = _decode_header(msg.get("From", ""))
+    sender_name, sender_addr = email.utils.parseaddr(sender)
+    subject = _decode_header(msg.get("Subject", "(no subject)"))
+    list_id = _decode_header(msg.get("List-Id", ""))
+    precedence = (msg.get("Precedence") or "").strip().lower()
+    auto_submitted = (msg.get("Auto-Submitted") or "").strip().lower()
+    methods = _parse_list_unsubscribe_header(msg.get("List-Unsubscribe"))
+    has_unsub = bool(methods)
+    reasons: list[str] = []
+    score = 0
+    if has_unsub:
+        score += 45
+        reasons.append("has unsubscribe header")
+    if list_id:
+        score += 20
+        reasons.append("mailing-list header")
+    if precedence in {"bulk", "junk", "list"}:
+        score += 20
+        reasons.append(f"precedence={precedence}")
+    if auto_submitted and auto_submitted != "no":
+        score += 10
+        reasons.append(f"auto-submitted={auto_submitted}")
+    if spam_cached and spam_cached.get("spam"):
+        score += 35
+        if spam_cached.get("reason"):
+            reasons.append(str(spam_cached.get("reason")))
+        else:
+            reasons.append("previously classified as spam")
+    subj_l = (subject or "").lower()
+    if re.search(r"\b(unsubscribe|newsletter|sale|discount|offer|promo|limited time)\b", subj_l):
+        score += 10
+        reasons.append("promotional subject")
+    executable = [m for m in methods if m.get("executable")]
+    if score < 45 or not has_unsub:
+        return None
+    return {
+        "uid": str(uid),
+        "folder": folder,
+        "message_id": (msg.get("Message-ID") or "").strip(),
+        "subject": subject,
+        "from_name": sender_name or sender_addr,
+        "from_address": sender_addr,
+        "list_id": list_id,
+        "score": min(score, 100),
+        "reasons": reasons[:5],
+        "methods": methods,
+        "can_execute": bool(executable),
+        "recommended_method": executable[0] if executable else (methods[0] if methods else None),
+        "spam_reason": (spam_cached or {}).get("reason") or "",
+    }
+
+
+def _unsubscribe_candidate_dedupe_key(candidate: dict) -> tuple[str, str, str]:
+    list_id = str(candidate.get("list_id") or "").strip().lower()
+    method = candidate.get("recommended_method") or {}
+    method_kind = str(method.get("kind") or "").strip().lower()
+    method_target = str(method.get("target") or "").strip().lower()
+    sender = str(candidate.get("from_address") or "").strip().lower()
+    # A sender address is the actionable identity here. Newsletter links are
+    # often tokenized per message, so list/url keys would show the same sender
+    # repeatedly and cause repeated unsubscribe attempts.
+    if sender:
+        return ("sender", sender, "")
+    if list_id:
+        return ("list", list_id, method_target)
+    if method_target:
+        return ("method", method_kind, method_target)
+    return ("sender", "", str(candidate.get("subject") or "").strip().lower())
+
+
+def _dedupe_unsubscribe_candidates(candidates: list[dict]) -> list[dict]:
+    deduped: dict[tuple[str, str, str], dict] = {}
+    for candidate in candidates or []:
+        key = _unsubscribe_candidate_dedupe_key(candidate)
+        existing = deduped.get(key)
+        if not existing:
+            copy = dict(candidate)
+            copy["duplicate_count"] = 1
+            copy["duplicate_uids"] = [str(candidate.get("uid") or "")]
+            deduped[key] = copy
+            continue
+        existing["duplicate_count"] = int(existing.get("duplicate_count") or 1) + 1
+        uid = str(candidate.get("uid") or "")
+        if uid:
+            existing.setdefault("duplicate_uids", []).append(uid)
+        if int(candidate.get("score") or 0) > int(existing.get("score") or 0):
+            keep_count = existing.get("duplicate_count")
+            keep_uids = existing.get("duplicate_uids")
+            replacement = dict(candidate)
+            replacement["duplicate_count"] = keep_count
+            replacement["duplicate_uids"] = keep_uids
+            deduped[key] = replacement
+    return list(deduped.values())
+
+
+def _email_search_terms(query: str) -> list[str]:
+    q = (query or "").strip()
+    if not q:
+        return []
+    # Preserve quoted phrases, then split the rest. This makes:
+    #   honda insurance -> honda AND insurance
+    #   "Yoko Honda" insurance -> "Yoko Honda" AND insurance
+    # The cap avoids creating huge IMAP expressions from pasted paragraphs.
+    parts = []
+    consumed = []
+    for m in re.finditer(r'"([^"]{1,120})"', q):
+        phrase = m.group(1).strip()
+        if phrase:
+            parts.append(phrase)
+        consumed.append((m.start(), m.end()))
+    remainder = q
+    for start, end in reversed(consumed):
+        remainder = remainder[:start] + " " + remainder[end:]
+    parts.extend(re.findall(r"[^\s,;]+", remainder))
+    out = []
+    seen = set()
+    for p in parts:
+        p = p.strip().strip('"').strip()
+        if len(p) < 2:
+            continue
+        key = p.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+        if len(out) >= 6:
+            break
+    return out
+
+
+def _smtp_ready(cfg: dict) -> bool:
+    if not cfg.get("smtp_host") or not cfg.get("smtp_user"):
+        return False
+    return bool(cfg.get("smtp_password") or cfg.get("oauth_provider"))
 
 
 def _detect_sent_folder(conn):
@@ -1977,7 +2212,7 @@ def _pre_retrieve_context(
         is_known = False
         if contacts_allowed:
             try:
-                from routes.contacts_routes import _fetch_contacts
+                from routes.contacts.contacts_routes import _fetch_contacts
                 for c in _fetch_contacts() or []:
                     # Contacts are normalized to plural `emails` lists, but
                     # keep the legacy singular key fallback for older data.
@@ -2077,7 +2312,7 @@ def _pre_retrieve_context(
                 except Exception: pass
 
         try:
-            from routes.contacts_routes import _fetch_contacts
+            from routes.contacts.contacts_routes import _fetch_contacts
             all_contacts = _fetch_contacts() if contacts_allowed else []
             for term in terms_list:
                 t_lower = term.lower()

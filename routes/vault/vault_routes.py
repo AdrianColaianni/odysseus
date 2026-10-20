@@ -12,7 +12,7 @@ import shutil
 import asyncio
 from pathlib import Path
 from datetime import datetime
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi import HTTPException
 from pydantic import BaseModel
 
@@ -138,12 +138,11 @@ class VaultLoginRequest(BaseModel):
 
 
 def setup_vault_routes():
-    router = APIRouter(prefix="/api/vault", tags=["vault"])
+    router = APIRouter(prefix="/api/vault", tags=["vault"], dependencies=[Depends(require_admin)])
 
     @router.get("/config")
-    async def get_config(request: Request):
+    async def get_config():
         """Return vault config (no sensitive fields)."""
-        require_admin(request)
         cfg = _load_config()
         return {
             "server_url": cfg.get("server_url", ""),
@@ -156,7 +155,6 @@ def setup_vault_routes():
     @router.post("/config")
     async def save_config(req: VaultConfig, request: Request):
         """Save vault URL + email. Runs 'bw config server' to point at Vaultwarden."""
-        require_admin(request)
         cfg = _load_config()
         _bind_config_owner(cfg, request)
         cfg["server_url"] = req.server_url.strip().rstrip("/")
@@ -171,9 +169,8 @@ def setup_vault_routes():
         return {"ok": True}
 
     @router.post("/login")
-    async def login(req: VaultLoginRequest, request: Request):
+    async def login(req: VaultLoginRequest):
         """Log in to Vaultwarden (required once per account)."""
-        require_admin(request)
         cfg = _load_config()
         # Update email
         cfg["email"] = req.email
@@ -196,9 +193,8 @@ def setup_vault_routes():
         return {"ok": True}
 
     @router.post("/unlock")
-    async def unlock(req: VaultUnlockRequest, request: Request):
+    async def unlock(req: VaultUnlockRequest):
         """Unlock the vault and save the session key."""
-        require_admin(request)
         # Pass the master password on stdin, not argv. argv is visible through
         # `ps` / /proc/<pid>/cmdline; stdin also avoids leaving the secret in
         # the child process environment.
@@ -218,9 +214,8 @@ def setup_vault_routes():
         return {"ok": True, "message": "Vault unlocked"}
 
     @router.post("/lock")
-    async def lock(request: Request):
+    async def lock():
         """Lock the vault (clear session from config)."""
-        require_admin(request)
         cfg = _load_config()
         cfg.pop("session", None)
         cfg.pop("unlocked_at", None)
@@ -230,9 +225,8 @@ def setup_vault_routes():
         return {"ok": True, "message": "Vault locked"}
 
     @router.post("/logout")
-    async def logout(request: Request):
+    async def logout():
         """Log out of the Bitwarden CLI completely."""
-        require_admin(request)
         await _run_bw(["logout"])
         cfg = _load_config()
         cfg.pop("session", None)

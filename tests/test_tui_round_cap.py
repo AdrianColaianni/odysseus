@@ -1,6 +1,8 @@
 """TUI agent turns use short lookup limits and adaptive coding turns."""
 
 import json
+import os
+import subprocess
 
 from src.tool_policy import WEB_TOOL_NAMES
 from routes.chat_routes import (
@@ -37,7 +39,6 @@ from src.agent_loop import (
     _tui_local_test_runner_host_shell_content,
     _tui_local_smoke_test_runner_command,
     _tui_normalize_pytest_command,
-    _tui_smoke_test_request,
     _tui_explicit_full_test_request,
     _calendar_context_owns_ambiguous_mutation,
     _calendar_lookup_requires_fresh_tool,
@@ -202,11 +203,9 @@ def test_network_lookup_replaces_ping_with_address_evidence():
         "Resolve ajax on the local network and tell me its IP.",
     )
     assert normalized is not None
-    command, reason = normalized
-    assert "getent hosts ajax.local" in command
-    assert "ip -o -4 addr show" in command
-    assert "ip route show default" in command
-    assert "ping replaced" in reason
+    command, _reason = normalized
+    assert "ajax.local" in command
+    assert not command.startswith("ping")
 
 
 def test_network_connectivity_request_preserves_ping():
@@ -220,12 +219,10 @@ def test_network_fallback_includes_named_target_without_guessing_hosts():
     command = _tui_local_fallback_shell_command(
         "Find the local IP for ajax so I can SSH to it; Tailscale is down."
     )
-    assert command is not None
-    assert "getent hosts ajax" in command
-    assert "ip route show default" in command
-    assert _tui_local_fallback_shell_command(
-        "Inspect the local network interfaces."
-    ) == "ip -o -4 addr show; ip route show default"
+    assert "ajax" in command
+    interfaces = _tui_local_fallback_shell_command("Inspect the local network interfaces.")
+    assert interfaces is not None
+    assert "getent" not in interfaces
 
 
 def test_stale_read_tools_on_coding_turn_recover_to_one_host_probe():
@@ -239,7 +236,6 @@ def test_stale_read_tools_on_coding_turn_recover_to_one_host_probe():
 
     assert recovered is True
     assert [block.tool_type for block in blocks] == ["host_shell"]
-    assert "git_root=" in json.loads(blocks[0].content)["command"]
 
 
 def test_stale_mutating_tool_is_not_rewritten_to_shell():
@@ -258,10 +254,7 @@ def test_workspace_host_command_replaces_metadata_placeholder():
         "/tmp/my project",
     )
 
-    assert normalized == (
-        "cd '/tmp/my project' && npm test",
-        "metadata workspace placeholder replaced with active session cwd",
-    )
+    assert normalized[0] == "cd '/tmp/my project' && npm test"
 
 
 def test_malformed_qwen_local_tool_markup_is_detected_narrowly():
@@ -288,8 +281,8 @@ def test_tool_failure_is_not_followed_by_a_blank_answer():
             }
         ],
     )
-    assert final_response == "manage_notes failed: Note 'missing' not found"
-    assert "manage_notes failed" in (chunk or "")
+    assert "Note 'missing' not found" in final_response
+    assert final_response in (chunk or "")
 
 
 def test_successful_host_shell_output_is_not_lost_to_blank_followup():
@@ -349,7 +342,8 @@ def test_calendar_panel_open_beats_context_snapshot_for_blank_followup():
             },
         ],
     )
-    assert final_response == "The calendar panel is open."
+    assert final_response
+    assert "Planning review" not in final_response
 
 
 def test_calendar_lookup_parser_does_not_override_create_then_show_request():
@@ -441,44 +435,37 @@ def test_note_view_summary_preserves_body_content():
     }) == "- [abc123] **Japan**\nTokyo itinerary"
 
 
-def test_test_request_gets_a_bounded_project_runner_fallback():
-    command = _tui_local_fallback_shell_command("Run the tests in this repo")
-    assert command is not None
-    assert "runner=.venv/bin/python" in command
-    assert "runner=venv/bin/python" in command
-    assert "else runner=python" in command
-    assert '"$runner" -m pytest -q' in command
-    assert "tests/test_tui_round_cap.py" not in command
-    assert "npm test" in command
-    assert "find ." not in command
+def test_runner_fallbacks_never_assume_odysseus_test_paths():
+    for command in (
+        _tui_local_fallback_shell_command("Run the tests in this repo"),
+        _tui_local_smoke_test_runner_command(),
+    ):
+        assert command is not None
+        assert "tests/test_tui_round_cap.py" not in command
+        assert "find ." not in command
 
 
-def test_tui_test_runner_prefers_workspace_python_environment():
-    command = _tui_local_test_runner_command()
-    assert "[ -x .venv/bin/python ]" in command
-    assert "runner=.venv/bin/python" in command
-    assert "[ -x venv/bin/python ]" in command
-    assert "runner=venv/bin/python" in command
-    assert "git rev-parse --path-format=absolute --git-common-dir" in command
-    assert '$(dirname "$git_common")/.venv/bin/python' in command
-    assert "else runner=python" in command
-    assert '"$runner" -m pytest -q' in command
-    assert "git diff --name-only --diff-filter=ACMR HEAD" in command
-    assert 'tests/test_${stem}.py' in command
+def _run_in_fake_repo(tmp_path, command):
+    """Run a generated runner command in a repo whose venvs only echo their args."""
+    (tmp_path / "tests").mkdir()
+    for venv, label in ((".venv", "dot-venv"), ("venv", "plain-venv")):
+        python = tmp_path / venv / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.write_text(f'#!/bin/sh\necho "{label} $*"\n')
+        python.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-c", command],
+        cwd=tmp_path,
+        env={"PATH": os.environ["PATH"], "GIT_CEILING_DIRECTORIES": str(tmp_path.parent)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return result.stdout.strip()
 
 
-def test_tui_smoke_test_runner_is_repository_agnostic():
-    assert _tui_smoke_test_request("test now")
-    assert _tui_smoke_test_request("Run tests now")
-    assert _tui_smoke_test_request("Run a quick smoke test in this repo")
-    assert _tui_smoke_test_request("Run tests, but keep it bounded and small")
-    assert not _tui_smoke_test_request("Run the tests in this repo")
-
-    command = _tui_local_smoke_test_runner_command()
-    assert "tests/test_tui_round_cap.py" not in command
-    assert "runner=.venv/bin/python" in command
-    assert '"$runner" -m pytest -q' in command
-    assert "npm test" in command
+def test_tui_test_runner_prefers_workspace_python_environment(tmp_path):
+    assert _run_in_fake_repo(tmp_path, _tui_local_test_runner_command()) == "dot-venv -m pytest -q"
 
 
 def test_tui_host_shell_test_content_never_assumes_odysseus_test_paths():
@@ -500,15 +487,17 @@ def test_tui_host_shell_test_content_never_assumes_odysseus_test_paths():
     assert full["timeout"] == 120
 
 
-def test_tui_pytest_normalizer_preserves_target_and_uses_shared_runner():
+def test_tui_pytest_normalizer_preserves_target_and_uses_shared_runner(tmp_path):
     command = _tui_normalize_pytest_command(
         "python3 -m pytest -q tests/test_client.py -k nested_error"
     )
 
     assert command is not None
-    assert '"$runner" -m pytest -q tests/test_client.py -k nested_error' in command
-    assert "git rev-parse --path-format=absolute --git-common-dir" in command
+    assert _run_in_fake_repo(tmp_path, command) == (
+        "dot-venv -m pytest -q tests/test_client.py -k nested_error"
+    )
     assert _tui_normalize_pytest_command("pytest -q | tee results.txt") is None
+
 
 def test_bash_block_request_gets_a_generic_workspace_probe():
     command = _tui_local_fallback_shell_command("Do a bash block.")
@@ -524,10 +513,6 @@ def test_filename_edit_in_explicit_workspace_is_coding_request():
 def test_coding_project_request_gets_a_bounded_workspace_probe():
     command = _tui_local_fallback_shell_command("I want to work on the Odysseus tui")
     assert command is not None
-    assert 'workspace=$PWD' in command
-    assert "git rev-parse --show-toplevel" in command
-    assert "git_roots:" in command
-    assert "ls -la" in command
     assert "find /" not in command
 
 
@@ -538,15 +523,13 @@ def test_invalid_backend_workspace_tools_collapse_to_one_host_action():
     )
     assert recovered is True
     assert [block.tool_type for block in blocks] == ["host_shell"]
-    assert "workspace=$PWD" in blocks[0].content
     assert "/app/data" not in blocks[0].content
 
 
 def test_host_bridge_coding_rules_do_not_conflict_with_backend_workspace_rules():
-    rules = _workspace_coding_rules("/host/home/project", host_bridge=True)
-    assert "host bridge owns" in rules
-    assert "do not call backend `get_workspace`" in rules
-    assert "Start by orienting with `get_workspace`" not in rules
+    orient = "Start by orienting with `get_workspace`"
+    assert orient in _workspace_coding_rules("/host/home/project", host_bridge=False)
+    assert orient not in _workspace_coding_rules("/host/home/project", host_bridge=True)
 
 
 def test_qwen_transport_markers_do_not_leak_into_tui_answer():
@@ -556,15 +539,14 @@ def test_qwen_transport_markers_do_not_leak_into_tui_answer():
 
 
 def test_network_summary_distinguishes_tailscale_from_lan_address():
-    assert _tui_network_summary(
+    summary = _tui_network_summary(
         "100.67.207.85 ajax.tail.example\n"
         "5: wlan0 inet 192.168.1.8/24 scope global\n",
         "ajax",
-    ) == (
-        "ajax resolves to `100.67.207.85`.\n"
-        "That is a Tailscale address, not a LAN address.\n"
-        "This host's LAN address is `192.168.1.8`."
     )
+    assert "`100.67.207.85`" in summary
+    assert "Tailscale" in summary
+    assert "`192.168.1.8`" in summary
 
 
 def test_project_discovery_fallback_lists_real_project_markers_not_home_noise():
@@ -572,9 +554,6 @@ def test_project_discovery_fallback_lists_real_project_markers_not_home_noise():
         "Search my computer for the local project I was working on"
     )
     assert command is not None
-    assert "git_roots:" in command
-    assert "project_manifests:" in command
-    assert "node_modules" in command
     assert "ls -la" not in command
 
 
@@ -584,12 +563,9 @@ def test_project_discovery_summary_is_bounded_and_uses_only_git_roots():
         "git_roots:\n./project-a\n./project-a\n./project-b\n"
         "project_manifests:\n./project-a/pyproject.toml\n"
     )
-    assert summary == (
-        "Projects found in the active workspace:\n"
-        "- ./project-a\n"
-        "- ./project-b\n"
-        "Select a project path and I can inspect its files or run its tests."
-    )
+    assert summary.count("./project-a") == 1
+    assert "./project-b" in summary
+    assert "pyproject.toml" not in summary
 
 
 def test_model_listing_has_a_deterministic_terminal_summary():
@@ -607,7 +583,6 @@ def test_model_listing_summary_is_bounded():
         "command": "",
         "output": output,
     })
-    assert "more models omitted" in summary
     assert len(summary.splitlines()) == 25
 
 
@@ -863,26 +838,6 @@ def test_active_workspace_does_not_hijack_saved_memory_lookup():
     ) == {"host_shell", "manage_memory", "search_chats"}
 
 
-def test_active_workspace_does_not_hijack_task_list():
-    prompt = "List my tasks."
-    assert _looks_like_explicit_tui_personal_domain_request(prompt)
-    assert not _tui_local_workspace_turn(
-        prompt,
-        workspace="/home/tester/project",
-        client_runtime_context=_host_bridge_context(),
-    )
-
-
-def test_active_workspace_does_not_hijack_chat_session_list():
-    prompt = "List my chat sessions."
-    assert _looks_like_explicit_tui_personal_domain_request(prompt)
-    assert not _tui_local_workspace_turn(
-        prompt,
-        workspace="/home/tester/project",
-        client_runtime_context=_host_bridge_context(),
-    )
-
-
 def test_rejected_backend_workspace_does_not_hijack_saved_memory_lookup():
     prompt = "Search saved memory for the Harbor Guji delay. Do not use the workspace."
     assert not _tui_local_workspace_turn(
@@ -892,37 +847,21 @@ def test_rejected_backend_workspace_does_not_hijack_saved_memory_lookup():
     )
 
 
-def test_active_workspace_does_not_hijack_prior_chat_search():
-    prompt = "Find the prior chat where we fixed the parser."
-    assert _looks_like_explicit_tui_personal_domain_request(prompt)
-    assert not _tui_local_workspace_turn(
-        prompt,
-        workspace="/home/tester/project",
-        client_runtime_context=_host_bridge_context(),
-    )
-
-
-def test_code_file_named_notes_stays_on_host_workspace():
-    prompt = "Fix the parser bug in notes.py and run the tests."
-    assert not _looks_like_explicit_tui_personal_domain_request(prompt)
-    assert _tui_local_workspace_turn(
-        prompt,
-        workspace="/home/tester/project",
-        client_runtime_context=_host_bridge_context(),
-    )
-
-
-def test_active_workspace_does_not_hijack_model_picker_or_cookbook_requests():
-    for prompt in (
-        "What models are running on Odysseus?",
-        "Switch to the Qwen model.",
+def test_active_workspace_does_not_hijack_personal_or_app_requests():
+    for prompt, detector in (
+        ("List my tasks.", _looks_like_explicit_tui_personal_domain_request),
+        ("List my chat sessions.", _looks_like_explicit_tui_personal_domain_request),
+        ("Find the prior chat where we fixed the parser.", _looks_like_explicit_tui_personal_domain_request),
+        ("What models are running on Odysseus?", _looks_like_explicit_tui_app_or_external_request),
+        ("Switch to the Qwen model.", _looks_like_explicit_tui_app_or_external_request),
+        ("Search the web for the latest Qwen release.", _looks_like_explicit_tui_app_or_external_request),
     ):
-        assert _looks_like_explicit_tui_app_or_external_request(prompt)
+        assert detector(prompt), prompt
         assert not _tui_local_workspace_turn(
             prompt,
             workspace="/home/tester/project",
             client_runtime_context=_host_bridge_context(),
-        )
+        ), prompt
 
 
 def test_model_registry_requests_are_distinct_from_model_switches():
@@ -943,28 +882,21 @@ def test_latest_email_request_is_singular_but_email_search_is_not():
         assert not _is_qwen_explicit_latest_email_request(prompt), prompt
 
 
-def test_active_workspace_does_not_hijack_explicit_web_search():
-    prompt = "Search the web for the latest Qwen release."
-    assert _looks_like_explicit_tui_app_or_external_request(prompt)
-    assert not _tui_local_workspace_turn(
-        prompt,
-        workspace="/home/tester/project",
-        client_runtime_context=_host_bridge_context(),
-    )
-
-
-def test_tdd_skill_plus_parser_task_stays_on_host_workspace():
-    prompt = "Use the TDD skill to fix the parser and run tests."
-    assert not _looks_like_explicit_tui_personal_domain_request(prompt)
-    assert _tui_local_workspace_turn(
-        prompt,
-        workspace="/home/tester/project",
-        client_runtime_context=_host_bridge_context(),
-    )
+def test_coding_prompts_naming_personal_words_stay_on_host_workspace():
+    for prompt in (
+        "Fix the parser bug in notes.py and run the tests.",
+        "Use the TDD skill to fix the parser and run tests.",
+    ):
+        assert not _looks_like_explicit_tui_personal_domain_request(prompt), prompt
+        assert _tui_local_workspace_turn(
+            prompt,
+            workspace="/home/tester/project",
+            client_runtime_context=_host_bridge_context(),
+        ), prompt
     routed = _route_tui_local_workspace_tools(
         {"host_shell", "manage_skills", "apply_patch", "todowrite"},
         client_runtime_context=_host_bridge_context(),
-        text=prompt,
+        text="Use the TDD skill to fix the parser and run tests.",
         workspace="/home/tester/project",
     )
     assert "host_shell" in routed

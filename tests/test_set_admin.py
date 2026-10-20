@@ -18,6 +18,7 @@ import pytest
 from fastapi import HTTPException
 
 from tests.helpers.import_state import clear_module
+from tests.helpers.routes import route_endpoint
 
 
 # ---------------------------------------------------------------------------
@@ -218,11 +219,7 @@ def _auth_route_endpoint(path, method):
     from routes.auth_routes import setup_auth_routes
 
     auth_manager = MagicMock()
-    router = setup_auth_routes(auth_manager)
-    for route in router.routes:
-        if getattr(route, "path", "") == path and method in getattr(route, "methods", set()):
-            return auth_manager, route.endpoint
-    raise AssertionError(f"{method} {path} route not registered")
+    return auth_manager, route_endpoint(setup_auth_routes(auth_manager), path, method)
 
 
 def _fake_auth_request(token="session-token"):

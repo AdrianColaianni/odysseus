@@ -6,10 +6,6 @@ allows up to 2.0 (static/index.html), so _build_anthropic_payload must clamp int
 [0.0, 1.0]. The clamp lives only in the Anthropic builder — OpenAI keeps its
 wider 0.0-2.0 range.
 """
-import os
-
-os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
-
 from src.llm_core import _build_anthropic_payload
 
 

@@ -1,35 +1,15 @@
 import asyncio
 import json
 import logging
-import os
 import sqlite3
-import sys
-import tempfile
-from pathlib import Path
 
 import pytest
-
-
-_TMP_DATA = Path(tempfile.mkdtemp(prefix="odysseus-email-summary-"))
-os.environ.setdefault("DATA_DIR", str(_TMP_DATA))
-os.environ.setdefault("DATABASE_URL", f"sqlite:///{_TMP_DATA / 'app.db'}")
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-
-def _route_endpoint(router, path: str, method: str):
-    method = method.upper()
-    for route in router.routes:
-        if route.path == path and method in getattr(route, "methods", set()):
-            return route.endpoint
-    raise AssertionError(f"route not found: {method} {path}")
+from tests.helpers.routes import route_endpoint
 
 
 @pytest.mark.asyncio
 async def test_generate_email_summary_uses_shared_llm_adapter(monkeypatch):
-    import routes.email_helpers as email_helpers
+    import routes.email.email_helpers as email_helpers
     import src.llm_core as llm_core
 
     calls = {}
@@ -68,7 +48,7 @@ async def test_generate_email_summary_uses_shared_llm_adapter(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_scheduled_email_summary_uses_background_fallback_chain(monkeypatch):
-    import routes.email_helpers as email_helpers
+    import routes.email.email_helpers as email_helpers
     import src.llm_core as llm_core
     import src.task_endpoint as task_endpoint
 
@@ -126,7 +106,7 @@ async def test_scheduled_email_summary_uses_background_fallback_chain(monkeypatc
 
 @pytest.mark.asyncio
 async def test_scheduled_local_summary_is_preempted_by_foreground_call(monkeypatch):
-    import routes.email_helpers as email_helpers
+    import routes.email.email_helpers as email_helpers
     import src.llm_core as llm_core
     import src.task_endpoint as task_endpoint
 
@@ -238,13 +218,12 @@ async def test_local_model_gate_serializes_per_endpoint_not_globally(monkeypatch
 
 @pytest.mark.asyncio
 async def test_manual_email_summary_uses_shared_helper_and_caches(tmp_path, monkeypatch):
-    import routes.email_helpers as email_helpers
-    import routes.email_routes as email_routes
+    import routes.email.email_helpers as email_helpers
+    import routes.email.email_routes as email_routes
     import src.endpoint_resolver as endpoint_resolver
 
     db_path = tmp_path / "scheduled_emails.db"
     monkeypatch.setattr(email_helpers, "SCHEDULED_DB", db_path)
-    monkeypatch.setattr(email_routes, "SCHEDULED_DB", db_path)
     email_helpers._init_scheduled_db()
 
     resolve_calls = []
@@ -269,16 +248,16 @@ async def test_manual_email_summary_uses_shared_helper_and_caches(tmp_path, monk
     monkeypatch.setattr(email_routes, "_generate_email_summary", fake_generate_email_summary)
 
     router = email_routes.setup_email_routes()
-    summarize = _route_endpoint(router, "/api/email/summarize", "POST")
+    summarize = route_endpoint(router, "/api/email/summarize", "POST")
 
     result = await summarize(
-        {
+        email_routes.EmailTextRequest.model_validate({
             "body": "This is a long enough email body for manual summary.",
             "subject": "Manual subject",
             "from": "Sender <sender@example.com>",
             "message_id": "<manual@example.com>",
             "folder": "INBOX",
-        },
+        }),
         owner="alice",
     )
 
@@ -312,7 +291,7 @@ async def test_manual_email_summary_never_exposes_provider_exception(
     exception_kind,
 ):
     from fastapi import HTTPException
-    import routes.email_routes as email_routes
+    import routes.email.email_routes as email_routes
     import src.endpoint_resolver as endpoint_resolver
 
     secret_detail = (
@@ -340,13 +319,13 @@ async def test_manual_email_summary_never_exposes_provider_exception(
     caplog.set_level(logging.WARNING, logger=email_routes.__name__)
 
     router = email_routes.setup_email_routes()
-    summarize = _route_endpoint(router, "/api/email/summarize", "POST")
+    summarize = route_endpoint(router, "/api/email/summarize", "POST")
     result = await summarize(
-        {
+        email_routes.EmailTextRequest.model_validate({
             "body": "This email body is long enough to summarize.",
             "subject": "Sensitive provider failure",
             "from": "Sender <sender@example.com>",
-        },
+        }),
         owner="alice",
     )
 
@@ -369,8 +348,8 @@ async def test_manual_email_summary_never_exposes_provider_exception(
 
 @pytest.mark.asyncio
 async def test_scheduled_email_summary_uses_shared_helper_and_caches(tmp_path, monkeypatch):
-    import routes.email_helpers as email_helpers
-    import routes.email_pollers as email_pollers
+    import routes.email.email_helpers as email_helpers
+    import routes.email.email_pollers as email_pollers
 
     db_path = tmp_path / "scheduled_emails.db"
     monkeypatch.setattr(email_helpers, "SCHEDULED_DB", db_path)

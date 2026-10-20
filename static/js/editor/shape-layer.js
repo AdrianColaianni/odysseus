@@ -1,5 +1,6 @@
 /** Retained vector-shape model and raster-cache renderer. */
 
+import { makeCanvas } from './placed-layer.js';
 import { normalizeGradientStops } from './gradient-stops.js';
 
 export { normalizeGradientStops } from './gradient-stops.js';
@@ -98,9 +99,7 @@ function shapePath(ctx, shape, padding) {
 
 function baseShapeCanvas(shape) {
   const padding = Math.ceil(Math.max(2, shape.strokeWidth / 2 + 2));
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.ceil(shape.width + padding * 2));
-  canvas.height = Math.max(1, Math.ceil(shape.height + padding * 2));
+  const canvas = makeCanvas(Math.max(1, Math.ceil(shape.width + padding * 2)), Math.max(1, Math.ceil(shape.height + padding * 2)));
   const ctx = canvas.getContext('2d');
   shapePath(ctx, shape, padding);
   ctx.lineJoin = 'round';
@@ -146,9 +145,7 @@ export function renderShapeLayer(layer) {
   const sin = Math.abs(Math.sin(radians));
   const width = Math.max(1, Math.ceil(scaledWidth * cos + scaledHeight * sin));
   const height = Math.max(1, Math.ceil(scaledWidth * sin + scaledHeight * cos));
-  const rendered = document.createElement('canvas');
-  rendered.width = width;
-  rendered.height = height;
+  const rendered = makeCanvas(width, height);
   const ctx = rendered.getContext('2d');
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';

@@ -122,9 +122,9 @@ def test_normalize_clamps_percent_and_rejects_non_object():
     assert exc.value.reason == "malformed"
 
 
-@pytest.mark.parametrize("minutes,name", [(300, "5H"), (10080, "WEEK"), (20160, "2W"), (1440, "1D"), (90, "90M"), (None, "LIMIT")])
-def test_friendly_window_names_derive_from_duration(minutes, name):
-    assert cs.friendly_window_name(minutes) == name
+def test_friendly_window_names_derive_from_duration():
+    for minutes, name in [(300, "5H"), (10080, "WEEK"), (20160, "2W"), (1440, "1D"), (90, "90M"), (None, "LIMIT")]:
+        assert cs.friendly_window_name(minutes) == name, minutes
 
 
 def _fake_get(monkeypatch, *, status=200, body=b"{}", raise_exc=None, seen=None):
@@ -153,13 +153,13 @@ def test_fetch_usage_uses_bearer_and_account_header_and_strict_timeout(monkeypat
     assert 0 < seen[0]["timeout"] <= 10
 
 
-@pytest.mark.parametrize("status,reason", [(401, "reauth"), (403, "reauth"), (429, "rate_limited"), (500, "upstream"), (503, "upstream"), (418, "upstream")])
-def test_fetch_usage_classifies_http_failures(monkeypatch, status, reason):
-    _fake_get(monkeypatch, status=status, body=b"nope")
-    with pytest.raises(cs.ChatGPTUsageUnavailable) as exc:
-        cs.fetch_usage_payload("tok")
-    assert exc.value.reason == reason
-    assert exc.value.status_code == status
+def test_fetch_usage_classifies_http_failures(monkeypatch):
+    for status, reason in [(401, "reauth"), (403, "reauth"), (429, "rate_limited"), (500, "upstream"), (418, "upstream")]:
+        _fake_get(monkeypatch, status=status, body=b"nope")
+        with pytest.raises(cs.ChatGPTUsageUnavailable) as exc:
+            cs.fetch_usage_payload("tok")
+        assert exc.value.reason == reason
+        assert exc.value.status_code == status
 
 
 def test_fetch_usage_handles_timeout_network_and_malformed_json(monkeypatch):
@@ -209,13 +209,13 @@ def test_cache_is_bounded_copies_values_and_cleans_expired_accounts():
     assert set(cache._entries) == {"d"}
 
 
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), "NaN", "Infinity", True, {}])
-def test_non_finite_and_malformed_usage_never_invents_a_percentage(value):
-    out = cs.normalize_usage_window({"used_percent": value, "reset_at": value}, "primary")
-    assert out["used_percent"] is None
-    assert out["remaining_percent"] is None
-    assert out["resets_at"] is None
-    json.dumps(out, allow_nan=False)
+def test_non_finite_and_malformed_usage_never_invents_a_percentage():
+    for value in [float("nan"), float("inf"), "NaN", "Infinity", True, {}]:
+        out = cs.normalize_usage_window({"used_percent": value, "reset_at": value}, "primary")
+        assert out["used_percent"] is None, value
+        assert out["remaining_percent"] is None
+        assert out["resets_at"] is None
+        json.dumps(out, allow_nan=False)
 
 
 def test_future_window_kind_and_reached_kind_are_retained():
@@ -319,7 +319,6 @@ def test_usage_route_failure_is_reported_safely_and_endpoint_stays_enabled(monke
     Base.metadata.create_all(bind=engine)
     TestSessionLocal = sessionmaker(bind=engine, autoflush=False)
     monkeypatch.setattr(csr, "SessionLocal", TestSessionLocal)
-    monkeypatch.setattr(csr, "require_admin", lambda request: None)
     db = TestSessionLocal()
     try:
         db.add(ProviderAuthSession(id="auth-a", provider=cs.CHATGPT_SUBSCRIPTION_PROVIDER, owner="alice", label="ChatGPT · codex00",

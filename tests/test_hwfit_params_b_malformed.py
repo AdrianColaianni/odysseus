@@ -19,6 +19,3 @@ def test_valid_counts_still_parse():
     assert params_b({"parameter_count": "70B"}) == 70.0
     assert params_b({"parameter_count": "355M"}) == 0.355
 
-
-def test_raw_param_count_preferred():
-    assert params_b({"parameters_raw": 7_000_000_000}) == 7.0

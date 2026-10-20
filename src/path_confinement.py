@@ -1,57 +1,14 @@
-"""The filesystem confinement boundary. One implementation, every call site.
+"""The one filesystem confinement check: is this path inside that root.
 
-"Is this path inside that root" is asked in twenty places in this tree, and
-twenty times it is answered by a locally written ``realpath`` +
-``os.path.commonpath`` pair. Each one is defensible on its own. Together they
-are the problem: the boundary has no single definition, so a site that gets a
-detail wrong is wrong *alone*, and a site added tomorrow starts from whichever
-neighbour its author happened to copy.
+Rules every caller relies on:
+- Both sides are canonicalized (realpath); canonicalizing one side breaks on
+  symlinked roots such as macOS /tmp.
+- ``commonpath``, never ``startswith``: ``/a/bc`` is not inside ``/a/b``.
+- A relative candidate joins the root, never the process cwd.
+- NUL and newline raise ValueError; ``commonpath`` raising means outside.
 
-The details that differ between those copies, and what this module settles:
-
-**Both sides get canonicalized.** Comparing a ``realpath``-ed candidate against
-a root that was only ``abspath``-ed is the bug class that has already cost this
-project real time: on macOS ``/tmp`` is a symlink to ``/private/tmp``, so the
-two sides disagree about a path neither of them is wrong about. It reads as an
-escape and refuses a legitimate access. Canonicalizing one side is worse than
-canonicalizing neither.
-
-**``commonpath``, never ``startswith``.** ``/a/bc`` begins with ``/a/b`` and is
-not inside it.
-
-**Case folding is the filesystem's business, not the comparison's.**
-``os.path.normcase`` lowercases on Windows and is the identity everywhere else
-— including macOS, whose default filesystem is case-insensitive while its
-``realpath`` preserves case. So normcase alone does not make the comparison
-agree with the filesystem on macOS, and :func:`is_inside` does not pretend
-otherwise: it answers about the canonical path, which is the question a
-confinement check should be asking. Where a caller needs to match the
-filesystem's own folding it must compare real paths of real files, not strings.
-
-**A relative candidate joins the root, never the process cwd.** ``abspath`` of a
-relative path silently uses ``os.getcwd()``, which is whatever the server
-happens to be running in. A confinement helper that does that is resolving
-against the wrong base before it even starts comparing.
-
-**NUL and newline are rejected, not caught.** Several of the copies wrap the
-whole comparison in ``except Exception: return False``, which turns a malformed
-path into "outside" — the safe answer, reached by accident. Here it is a
-``ValueError`` with a reason.
-
-**``commonpath`` raising means outside.** It raises across Windows drive letters
-and for mixed absolute/relative inputs. Both mean the candidate is not under the
-root, so the refusal is deliberate rather than incidental.
-
-What this module does *not* do: decide whether a path is sensitive (``.ssh``,
-``id_rsa``, …). That is a separate deny list applied inside an allowed root, and
-it lives with the callers that own it — ``src/tool_execution`` for the agent
-tools. Confinement answers "inside the root"; it does not answer "allowed".
-
-Relationship to :mod:`src.containment`: that module is the boundary for *where a
-process runs*; this one is the boundary for *which paths a path check accepts*.
-A contained process is restricted by a mount namespace, which this module cannot
-express and does not try to; an in-process read of a model-supplied path is
-restricted by this module, which a namespace does not see.
+Sensitive-path deny lists (``.ssh``, ...) live with their callers, such as
+src/tool_execution. Process confinement is src.containment.
 """
 
 from __future__ import annotations

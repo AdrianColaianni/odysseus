@@ -37,9 +37,6 @@ class Spinner {
    * Create and return the spinner HTML element
    */
   createElement() {
-    if (this.animation === 'sinewave') {
-      return this._createSineWaveElement();
-    }
     if (this.animation === 'whirlpool') {
       return this._createWhirlpoolElement();
     }
@@ -49,89 +46,6 @@ class Spinner {
     this.element = span;
     this.updateDisplay();
     return span;
-  }
-
-  _createSineWaveElement() {
-    const wrapper = document.createElement('span');
-    wrapper.className = 'ai-spinner ai-spinner-sinewave';
-    wrapper.style.cssText = 'font-family: monospace; white-space: pre; display: inline-flex; align-items: center; gap: 6px;';
-
-    const canvas = document.createElement('canvas');
-    canvas.width = 50;
-    canvas.height = 18;
-    canvas.style.cssText = 'display: inline-block; vertical-align: middle;';
-
-    const msgSpan = document.createElement('span');
-    msgSpan.textContent = this.message;
-    this._msgSpan = msgSpan;
-
-    if (this.style === 'left') {
-      wrapper.appendChild(canvas);
-      wrapper.appendChild(msgSpan);
-    } else if (this.style === 'right') {
-      wrapper.appendChild(msgSpan);
-      wrapper.appendChild(canvas);
-    } else {
-      wrapper.appendChild(msgSpan);
-    }
-
-    this._canvas = canvas;
-    this._ctx = canvas.getContext('2d');
-    this._waveT = 0;
-    this._wavePrev = performance.now();
-    this.element = wrapper;
-    return wrapper;
-  }
-
-  _drawSineWave() {
-    if (!this.isRunning) return;
-    const ctx = this._ctx;
-    const W = this._canvas.width;
-    const H = this._canvas.height;
-    const midY = H / 2;
-    const AMP = 7;
-    const CYCLES = 2.5;
-    const PAD = 3;
-    const trackW = W - 2 * PAD;
-    const BASE_SPEED = 0.44;
-    const MIN_SPEED = 0.4;
-    const MAX_SPEED = 2.5;
-
-    const now = performance.now();
-    const dt = (now - this._wavePrev) / 1000;
-    this._wavePrev = now;
-
-    const dotPhase = 0.5 * CYCLES * 2 * Math.PI + this._waveT;
-    const norm = (1 + Math.sin(dotPhase)) / 2;
-    const speedMul = MIN_SPEED + (MAX_SPEED - MIN_SPEED) * Math.pow(norm, 1.3);
-    this._waveT += dt * BASE_SPEED * speedMul * CYCLES * 2 * Math.PI;
-
-    ctx.clearRect(0, 0, W, H);
-
-    // wave line
-    ctx.beginPath();
-    for (let i = 0; i <= 80; i++) {
-      const frac = i / 80;
-      const x = PAD + frac * trackW;
-      const phase = frac * CYCLES * 2 * Math.PI + this._waveT;
-      const y = midY + Math.sin(phase) * AMP;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.strokeStyle = 'rgba(156, 222, 242, 0.5)';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-
-    // dot
-    const cx = W / 2;
-    const cPhase = 0.5 * CYCLES * 2 * Math.PI + this._waveT;
-    const cy = midY + Math.sin(cPhase) * AMP;
-    ctx.beginPath();
-    ctx.arc(cx, cy, 1.5, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(156, 222, 242, 0.9)';
-    ctx.fill();
-
-    if (this.isRunning) this._requestFrame();
   }
 
   _createWhirlpoolElement() {
@@ -277,8 +191,7 @@ class Spinner {
   _requestFrame() {
     this.rafId = requestAnimationFrame(() => {
       this.rafId = null;
-      if (this.animation === 'sinewave') this._drawSineWave();
-      else this._drawWhirlpool();
+      this._drawWhirlpool();
     });
   }
 
@@ -297,9 +210,6 @@ class Spinner {
           this.rafId = null;
         }
       } else if (this.isRunning && !this.rafId) {
-        // Reset the wave clock so the hidden interval doesn't arrive as one
-        // huge dt and skip the animation forward.
-        this._wavePrev = performance.now();
         this._requestFrame();
       }
     };
@@ -339,13 +249,6 @@ class Spinner {
     if (this.isRunning) return;
     this.isRunning = true;
 
-    if (this.animation === 'sinewave') {
-      this._wavePrev = performance.now();
-      this._armVisibilityPause();
-      this._drawSineWave();
-      return;
-    }
-
     if (this.animation === 'whirlpool') {
       this._wpStartedAt = performance.now();
       this._wpUnattachedSince = null;
@@ -382,7 +285,7 @@ class Spinner {
    */
   updateMessage(newMessage) {
     this.message = newMessage;
-    if ((this.animation === 'sinewave' || this.animation === 'whirlpool') && this._msgSpan) {
+    if (this.animation === 'whirlpool' && this._msgSpan) {
       this._msgSpan.textContent = newMessage;
     } else {
       this.updateDisplay();

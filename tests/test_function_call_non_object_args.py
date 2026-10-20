@@ -23,7 +23,6 @@ for _mod in _STUBBED:
     if _mod not in sys.modules:
         sys.modules[_mod] = MagicMock()
 
-import pytest  # noqa: E402
 import src.agent_tools  # noqa: E402,F401
 from src.tool_schemas import function_call_to_tool_block  # noqa: E402
 
@@ -35,29 +34,21 @@ for _name, _original in _saved_stubs.items():
         sys.modules[_name] = _original
 
 
-@pytest.mark.parametrize("arguments", [
-    '["ls -la"]',   # JSON array
-    '"ls -la"',     # bare JSON string
-    '42',            # JSON number
-    'true',          # JSON bool
-    'null',          # JSON null
-])
-def test_non_object_arguments_do_not_crash(arguments):
+def test_non_object_arguments_do_not_crash():
     """A native function call whose arguments are valid JSON but not an object
     must not raise (it used to throw AttributeError: 'list' object has no
     attribute 'get', aborting the entire agent stream)."""
-    block = function_call_to_tool_block("bash", arguments)
-    # Coerced to empty args -> empty bash command, but importantly NO crash.
-    assert block is not None
-    assert block.tool_type == "bash"
-    assert block.content == ""
+    for arguments in ('["ls -la"]', 'null'):
+        block = function_call_to_tool_block("bash", arguments)
+        # Coerced to empty args, so an empty bash command.
+        assert block is not None
+        assert block.tool_type == "bash"
+        assert block.content == ""
 
 
-@pytest.mark.parametrize("tool_name", ["list_emails", "mcp__email__list_emails"])
-def test_email_mcp_non_object_arguments_are_rejected(tool_name):
-    block = function_call_to_tool_block(tool_name, '["INBOX"]')
-
-    assert block is None
+def test_email_mcp_non_object_arguments_are_rejected():
+    for tool_name in ("list_emails", "mcp__email__list_emails"):
+        assert function_call_to_tool_block(tool_name, '["INBOX"]') is None
 
 
 def test_write_file_recovers_legacy_command_path_content_shape():

@@ -18,6 +18,7 @@ import asyncio
 import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from tests.helpers.routes import route_endpoint
 
 
 # Stub `core.auth` / `core.database` before importing the route module.
@@ -78,10 +79,7 @@ from routes.auth_routes import setup_auth_routes, LoginRequest
 
 def _login_endpoint(auth_manager):
     router = setup_auth_routes(auth_manager)
-    for r in router.routes:
-        if getattr(r, "path", None) == "/api/auth/login" and "POST" in getattr(r, "methods", set()):
-            return r.endpoint
-    raise AssertionError("login route not found on the auth router")
+    return route_endpoint(router, "/api/auth/login", "POST")
 
 
 def test_login_offloads_bcrypt_bearing_calls(monkeypatch):

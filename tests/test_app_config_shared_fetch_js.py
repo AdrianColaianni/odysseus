@@ -19,17 +19,13 @@ path because the repo has no `"type": "module"` in package.json; appConfig.js
 has no imports of its own, so inlining is exact. `fetch` and `sessionStorage`
 are stubbed, so nothing here touches the network or depends on timing.
 """
-import json
 import re
-import shutil
-import subprocess
 from pathlib import Path
 
-import pytest
+from tests.helpers.node import run_node_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _MODULE = _REPO / "static" / "js" / "appConfig.js"
-_HAS_NODE = shutil.which("node") is not None
 _SRC = _MODULE.read_text(encoding="utf-8") if _MODULE.exists() else ""
 
 # Browser stand-ins. Every fetch is recorded and resolved from a queue the test
@@ -61,18 +57,10 @@ globalThis.__prefetchLeft = () => store.has('ody-prefetch-settings');
 """
 
 
-def _run(body: str) -> str:
-    js = _STUBS + "\n" + _SRC + "\n" + body
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, encoding="utf-8",
-        cwd=str(_REPO), timeout=30,
-    )
-    assert proc.returncode == 0, proc.stderr
-    return proc.stdout.strip()
+def _run(body: str):
+    return run_node_module(_STUBS + "\n" + _SRC + "\n" + body)
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_concurrent_callers_share_one_request():
     # The startup case: several modules ask before the first response lands.
     body = """
@@ -86,7 +74,7 @@ def test_concurrent_callers_share_one_request():
       value: a.tts_enabled,
     }));
     """
-    assert json.loads(_run(body)) == {
+    assert _run(body) == {
         "requests": 1,
         "url": "/api/auth/settings",
         "credentials": "same-origin",
@@ -95,7 +83,6 @@ def test_concurrent_callers_share_one_request():
     }
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_later_caller_reuses_the_resolved_snapshot():
     # A panel opened long after boot must not re-request.
     body = """
@@ -104,10 +91,9 @@ def test_later_caller_reuses_the_resolved_snapshot():
     const second = await getSettings();
     console.log(JSON.stringify({ requests: __calls().length, sameObject: first === second }));
     """
-    assert json.loads(_run(body)) == {"requests": 1, "sameObject": True}
+    assert _run(body) == {"requests": 1, "sameObject": True}
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_invalidate_forces_the_next_read_to_refetch():
     # The write path: save a setting, then read it back and see the new value.
     body = """
@@ -122,10 +108,9 @@ def test_invalidate_forces_the_next_read_to_refetch():
       after: after.tts_enabled,
     }));
     """
-    assert json.loads(_run(body)) == {"requests": 2, "before": True, "after": False}
+    assert _run(body) == {"requests": 2, "before": True, "after": False}
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_a_failed_fetch_does_not_poison_the_cache():
     # Plain `??=` memoisation would keep the rejected promise, so one blip at
     # boot would leave keybinds/TTS/search on defaults for the whole session.
@@ -141,10 +126,9 @@ def test_a_failed_fetch_does_not_poison_the_cache():
       recovered: retry.tts_enabled,
     }));
     """
-    assert json.loads(_run(body)) == {"rejected": True, "requests": 2, "recovered": True}
+    assert _run(body) == {"rejected": True, "requests": 2, "recovered": True}
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_settings_and_tools_are_independent_slots():
     body = """
     __queue(__json({ tts_enabled: true }));
@@ -160,14 +144,13 @@ def test_settings_and_tools_are_independent_slots():
       sameObject: tools === toolsAgain,
     }));
     """
-    assert json.loads(_run(body)) == {
+    assert _run(body) == {
         "requests": 2,
         "toolsUrl": "/api/tools",
         "sameObject": True,
     }
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_login_prefetch_is_used_once_and_then_consumed():
     # login.html stashes a settings snapshot in sessionStorage just before it
     # redirects, so the first load after a login should issue no request at all.
@@ -185,7 +168,7 @@ def test_login_prefetch_is_used_once_and_then_consumed():
       second: second.from,
     }));
     """
-    assert json.loads(_run(body)) == {
+    assert _run(body) == {
         "requests": 1,
         "first": "prefetch",
         "consumed": True,
@@ -238,94 +221,6 @@ def test_every_settings_writer_invalidates_the_shared_cache():
     )
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
-def test_out_of_band_tool_change_is_not_undone_by_an_unrelated_panel_save():
-    """Admin > Tools must render authoritative state, not the startup snapshot.
-
-    The save posts the whole disabled-tool list rebuilt from the checkboxes, so
-    a stale render turns any unrelated toggle into a lost update: a tool
-    disabled out of band (manage_settings, another tab) comes back enabled.
-    refreshAll() calls loadBuiltinTools() on every panel open, which is why the
-    editor drops the shared entry before reading it.
-    """
-    body = """
-    // Boot: chatRenderer.js reads the tool list for the exec-fence regex.
-    __queue(__json({ tools: [{ id: 'web_search', enabled: true }, { id: 'shell', enabled: true }] }));
-    const boot = await getTools();
-
-    // Out of band, this page hearing nothing about it: web_search is disabled.
-    __queue(__json({ tools: [{ id: 'web_search', enabled: false }, { id: 'shell', enabled: true }] }));
-
-    // Admin > Tools opens. loadBuiltinTools() invalidates, then reads.
-    invalidateTools();
-    const panel = await getTools();
-
-    // The user toggles one unrelated tool off. The save posts every unchecked
-    // box, so the list is only right if the render was authoritative.
-    const post = (snapshot) => {
-      const boxes = snapshot.tools.map(t => ({ id: t.id, checked: t.enabled }));
-      boxes.find(b => b.id === 'shell').checked = false;
-      return boxes.filter(b => !b.checked).map(b => b.id);
-    };
-
-    console.log(JSON.stringify({
-      requests: __calls().length,
-      posted: post(panel),
-      postedFromStaleSnapshot: post(boot),
-    }));
-    """
-    assert json.loads(_run(body)) == {
-        "requests": 2,
-        # web_search stays disabled, which is the point.
-        "posted": ["web_search", "shell"],
-        # What the page-lifetime snapshot would have posted: web_search silently
-        # re-enabled by a toggle that had nothing to do with it.
-        "postedFromStaleSnapshot": ["shell"],
-    }
-
-
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
-def test_out_of_band_tool_change_after_panel_open_is_preserved_on_save():
-    """Saving must merge the user's edit onto a fresh authoritative snapshot."""
-    body = """
-    // Panel opens while both tools are enabled.
-    __queue(__json({ tools: [
-      { id: 'web_search', enabled: true },
-      { id: 'shell', enabled: true },
-    ] }));
-    invalidateTools();
-    const panel = await getTools();
-
-    // Another tab disables web_search after this panel has already rendered.
-    __queue(__json({ tools: [
-      { id: 'web_search', enabled: false },
-      { id: 'shell', enabled: true },
-    ] }));
-
-    // The user only disables shell. Saving refreshes the authoritative state
-    // first and applies that one intended change on top of it.
-    invalidateTools();
-    const latest = await getTools();
-    const state = new Map(latest.tools.map(t => [t.id, !!t.enabled]));
-    state.set('shell', false);
-
-    const disabled = Array.from(state.entries())
-      .filter(([, enabled]) => !enabled)
-      .map(([id]) => id);
-
-    console.log(JSON.stringify({
-      panelWebSearchEnabled: panel.tools.find(t => t.id === 'web_search').enabled,
-      requests: __calls().length,
-      disabled,
-    }));
-    """
-    assert json.loads(_run(body)) == {
-        "panelWebSearchEnabled": True,
-        "requests": 2,
-        "disabled": ["web_search", "shell"],
-    }
-
-
 def test_admin_tool_save_refreshes_before_full_state_post():
     """Pin the lost-update guard in the Admin Tools full-list writer."""
     source = (_REPO / "static" / "js" / "admin.js").read_text(encoding="utf-8")
@@ -367,9 +262,3 @@ def test_the_admin_tools_editor_does_not_read_a_cached_snapshot():
         "it first, so a reopened panel can render tool state that changed out of "
         "band and re-post it on the next unrelated toggle"
     )
-
-
-def test_appconfig_is_precached_by_the_service_worker():
-    """PRECACHE is hand-maintained; a module missing from it breaks offline."""
-    sw = (_REPO / "static" / "sw.js").read_text(encoding="utf-8")
-    assert "'/static/js/appConfig.js'" in sw

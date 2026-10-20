@@ -1,29 +1,12 @@
-/* Email, calendar, notes and tasks panels.
- *
- * This is an eagerly loaded tail segment of the app stylesheet cascade. The
- * former static/style.css now lives in the numbered 00-17 fragments; these
- * three pre-existing panel files follow those fragments without changing
- * their relative order. Nothing here is lazy-loaded.
- *
- * LOAD ORDER IS PART OF THE CONTRACT. static/index.html and the PRECACHE list
- * in static/sw.js must agree:
- *   1. static/css/00-tokens.css through static/css/17-research.css,
- *      in numeric order
- *   2. static/css/documents-gallery-editor.css
- *   3. static/css/email-calendar-notes-tasks.css
- *   4. static/css/cookbook-research-memory-settings.css
- *
- * Rules in this file retain their existing cascade position. Shared rules
- * formerly kept in static/style.css now live in the numbered fragments.
- */
+/* Email, calendar, notes and tasks panels. */
 
 @keyframes email-notif-breathe {
       0%, 100% {
-        box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, var(--red)) 60%, transparent);
+        box-shadow: 0 0 0 0 color-mix(in srgb, var(--red) 60%, transparent);
         opacity: 0.85;
       }
       50% {
-        box-shadow: 0 0 6px 2px color-mix(in srgb, var(--accent, var(--red)) 55%, transparent);
+        box-shadow: 0 0 6px 2px color-mix(in srgb, var(--red) 55%, transparent);
         opacity: 1;
       }
     }
@@ -52,7 +35,7 @@
 }
 #tool-tasks-btn.task-completion-pending,
 #rail-tasks.task-completion-pending {
-  color: var(--accent, var(--green, #86efac));
+  color: var(--green, #86efac);
 }
 #tool-tasks-btn.task-failure-pending::after,
 #rail-tasks.task-failure-pending::after,
@@ -68,8 +51,8 @@
 }
 #tool-tasks-btn.task-completion-pending::after,
 #rail-tasks.task-completion-pending::after {
-  background: var(--accent, var(--green, #86efac));
-  box-shadow: 0 0 7px var(--accent, var(--green, #86efac)), 0 0 3px var(--accent, var(--green, #86efac));
+  background: var(--green, #86efac);
+  box-shadow: 0 0 7px var(--green, #86efac), 0 0 3px var(--green, #86efac);
 }
 #tool-tasks-btn.task-failure-pending.task-completion-pending,
 #rail-tasks.task-failure-pending.task-completion-pending {
@@ -118,7 +101,7 @@
   margin: 8px 0;
 }
 .task-log-row-toggle::before {
-  color: color-mix(in srgb, var(--accent, var(--fg)) 80%, transparent);
+  color: color-mix(in srgb, var(--fg) 80%, transparent);
   opacity: 0.8;
 }
 .task-log-row-toggle:hover::before { opacity: 1; }
@@ -139,7 +122,7 @@ select.task-form-input { text-overflow: ellipsis; }
 }
 .task-form-notif-toggle input:checked + .task-form-notif-switch::after {
   transform: translateX(13px);
-  background: var(--accent, var(--red));
+  background: var(--red);
 }
 .email-list { overflow-y: auto; max-height: 400px; }
 .email-item:hover .email-menu-btn { opacity: 0.5; }
@@ -148,13 +131,13 @@ select.task-form-input { text-overflow: ellipsis; }
    a reply, briefly tint the whole row with the accent and pop the check
    so the state change is hard to miss. Self-removes after ~1.2s. */
 @keyframes email-auto-done-row {
-  0%   { background: color-mix(in srgb, var(--accent, var(--red)) 22%, transparent); }
-  60%  { background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent); }
+  0%   { background: color-mix(in srgb, var(--red) 22%, transparent); }
+  60%  { background: color-mix(in srgb, var(--red) 14%, transparent); }
   100% { background: transparent; }
 }
 @keyframes email-auto-done-check {
-  0%   { transform: scale(1); box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, var(--red)) 45%, transparent); }
-  40%  { transform: scale(1.4); box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent, var(--red)) 0%, transparent); }
+  0%   { transform: scale(1); box-shadow: 0 0 0 0 color-mix(in srgb, var(--red) 45%, transparent); }
+  40%  { transform: scale(1.4); box-shadow: 0 0 0 6px color-mix(in srgb, var(--red) 0%, transparent); }
   100% { transform: scale(1); }
 }
 .email-item.email-auto-done-flash { animation: email-auto-done-row 1.2s ease-out; }
@@ -167,16 +150,16 @@ select.task-form-input { text-overflow: ellipsis; }
   text-underline-offset: 3px;
 }
 #email-lib-grid .doclib-card.email-card-unread:not(.email-card-expanded) {
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 58%, var(--border)) !important;
+  border-color: color-mix(in srgb, var(--red) 58%, var(--border)) !important;
   box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--accent, var(--red)) 24%, transparent),
-    0 0 10px -4px color-mix(in srgb, var(--accent, var(--red)) 55%, transparent);
+    0 0 0 1px color-mix(in srgb, var(--red) 24%, transparent),
+    0 0 10px -4px color-mix(in srgb, var(--red) 55%, transparent);
 }
 #email-lib-grid .doclib-card.email-card-unread:not(.email-card-expanded):hover {
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 76%, var(--border)) !important;
+  border-color: color-mix(in srgb, var(--red) 76%, var(--border)) !important;
   box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--accent, var(--red)) 32%, transparent),
-    0 0 12px -3px color-mix(in srgb, var(--accent, var(--red)) 65%, transparent);
+    0 0 0 1px color-mix(in srgb, var(--red) 32%, transparent),
+    0 0 12px -3px color-mix(in srgb, var(--red) 65%, transparent);
 }
 .email-card-favorite.active:hover,
 .email-card-favorite.active:focus-visible { opacity: 1; }
@@ -206,9 +189,6 @@ select.task-form-input { text-overflow: ellipsis; }
 @keyframes email-search-progress-pulse {
   0%, 100% { transform: scale(0.9); opacity: 0.55; box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-primary, var(--red)) 35%, transparent); }
   50% { transform: scale(1.1); opacity: 1; box-shadow: 0 0 0 5px transparent; }
-}
-@keyframes email-inline-image-spin {
-  to { transform: rotate(360deg); }
 }
 @keyframes email-card-unread-breathe {
   0%, 100% {
@@ -244,9 +224,9 @@ select.task-form-input { text-overflow: ellipsis; }
   width: 16px;
   height: 16px;
   border: 2px solid color-mix(in srgb, var(--fg) 20%, transparent);
-  border-top-color: var(--accent, var(--red));
+  border-top-color: var(--red);
   border-radius: 50%;
-  animation: email-inline-image-spin 0.75s linear infinite;
+  animation: spin 0.75s linear infinite;
 }
 .email-inline-image-frame.is-loading {
   animation: email-skeleton-shimmer 1.35s ease-in-out infinite;
@@ -258,7 +238,7 @@ select.task-form-input { text-overflow: ellipsis; }
    rendered with a theme-aware accent so it stays legible in any theme. The
    sanitizer rewrites `<span style="background:yellow">…</span>` to <mark>. */
 .email-reader-body mark {
-  background: color-mix(in srgb, var(--accent, var(--red)) 22%, transparent);
+  background: color-mix(in srgb, var(--red) 22%, transparent);
   color: inherit;
   padding: 0 2px;
   border-radius: 2px;
@@ -345,7 +325,6 @@ select.task-form-input { text-overflow: ellipsis; }
 .email-tag-clickable:hover {
   filter: brightness(1.12);
 }
-@keyframes email-spin { to { transform: rotate(360deg); } }
 /* Compose + button: show on section hover, spin on button hover */
 #email-compose-btn {
   opacity: 0.4 !important;
@@ -438,7 +417,7 @@ select.task-form-input { text-overflow: ellipsis; }
 /* Envelope icon picks up the user's accent so the primary action is
    easy to spot at any size. The SVG already uses stroke=currentColor,
    so a color: rule on the svg propagates. */
-#email-lib-compose-btn svg { color: var(--accent, var(--red)); }
+#email-lib-compose-btn svg { color: var(--red); }
 @media (max-width: 768px) {
   /* On mobile they're 1px higher than desktop. */
   #email-lib-select-btn, #email-lib-refresh-btn, #email-lib-settings-btn { top: -3px; }
@@ -473,7 +452,7 @@ select.task-form-input { text-overflow: ellipsis; }
   animation: none;
 }
 .email-settings-section-toggle:focus-visible {
-  outline: 1px solid var(--accent, var(--red));
+  outline: 1px solid var(--red);
   outline-offset: 3px;
   border-radius: 3px;
 }
@@ -510,7 +489,7 @@ select.task-form-input { text-overflow: ellipsis; }
 }
 .email-settings-grid > label > span:first-child,
 .email-settings-field > span {
-  color: var(--accent, var(--red));
+  color: var(--red);
 }
 @media (max-width: 768px) {
   .email-settings-section[open] > .email-settings-section-body {
@@ -625,7 +604,7 @@ body.notes-drag-mode .note-card-pin svg {
   min-height: 32px;
 }
 .note-fullscreen-overlay .note-cl-rm:active { opacity: 1; }
-/* + Add (new checklist item) was tiny — bump for thumbs */
+/* + Add (new checklist item) sized for thumbs */
 .note-fullscreen-overlay .note-cl-add {
   display: inline-flex;
   align-items: center;
@@ -650,13 +629,13 @@ body.notes-drag-mode .note-card-pin svg {
   height: 16px;
 }
 .note-form-content-reader a {
-  color: var(--accent, var(--red));
+  color: var(--red);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 .note-form-content-reader a:active { opacity: 0.7; }
 .note-fullscreen-overlay .note-cl-text-reader a {
-  color: var(--accent, var(--red));
+  color: var(--red);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
@@ -667,11 +646,8 @@ body.notes-drag-mode .note-card-pin svg {
   width: 36px;
   height: 36px;
 }
-/* The plain-note textarea was rows="4" — fine for an in-grid card but
-   cramped in fullscreen. Let it grow to fill the available height so
-   writing feels like a real notepad, not a tweet box. The read-mode
-   reader inherits the same minimum so the layout doesn't jump when
-   the user taps to edit. */
+/* The plain-note textarea grows to fill the fullscreen height. The
+   read-mode reader shares the minimum so tapping to edit does not jump. */
 .note-fullscreen-overlay .note-form-content,
 .note-fullscreen-overlay .note-form-content-reader {
   min-height: 55vh;
@@ -721,27 +697,27 @@ body.notes-drag-mode .note-card-pin svg {
   0%, 100% {
     box-shadow:
       inset 0 2px 0 0 color-mix(in srgb, var(--fg) 14%, transparent),
-      0 0 0 0 color-mix(in srgb, var(--accent, var(--red)) 0%, transparent);
+      0 0 0 0 color-mix(in srgb, var(--red) 0%, transparent);
   }
   50% {
     box-shadow:
       inset 0 2px 0 0 color-mix(in srgb, var(--fg) 14%, transparent),
-      0 0 0 5px color-mix(in srgb, var(--accent, var(--red)) 26%, transparent),
-      0 0 18px color-mix(in srgb, var(--accent, var(--red)) 30%, transparent);
+      0 0 0 5px color-mix(in srgb, var(--red) 26%, transparent),
+      0 0 18px color-mix(in srgb, var(--red) 30%, transparent);
   }
 }
 @keyframes note-reminder-glow {
   0%, 100% {
     box-shadow:
       inset 0 2px 0 0 color-mix(in srgb, var(--fg) 14%, transparent),
-      0 0 0 3px color-mix(in srgb, var(--accent, var(--red)) 14%, transparent),
-      0 0 14px color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
+      0 0 0 3px color-mix(in srgb, var(--red) 14%, transparent),
+      0 0 14px color-mix(in srgb, var(--red) 18%, transparent);
   }
   50% {
     box-shadow:
       inset 0 2px 0 0 color-mix(in srgb, var(--fg) 14%, transparent),
-      0 0 0 6px color-mix(in srgb, var(--accent, var(--red)) 22%, transparent),
-      0 0 26px color-mix(in srgb, var(--accent, var(--red)) 30%, transparent);
+      0 0 0 6px color-mix(in srgb, var(--red) 22%, transparent),
+      0 0 26px color-mix(in srgb, var(--red) 30%, transparent);
   }
 }
 .note-card-selected {
@@ -759,8 +735,6 @@ body.notes-mobile-mode.notes-drag-mode .note-card-pin {
 body.notes-mobile-mode.notes-drag-mode .note-card-pin.active {
   opacity: 1;
 }
-/* Edit + Done are now side-by-side at top-right by default — title-only
-   fallback no longer needed. */
 .note-card-selectmode .note-card-done { display: none !important; }
 .note-card:hover .note-card-corner-copy { visibility: visible; }
 /* Copy stays on every active card regardless of body shape — Edit + Done
@@ -773,7 +747,7 @@ body.notes-mobile-mode.notes-drag-mode .note-card-pin.active {
 .note-card:hover .note-card-corner-unarchive { visibility: visible; }
 @keyframes note-ai-shine {
   0%, 100% { opacity: 0.85; filter: drop-shadow(0 0 0 transparent); }
-  50%      { opacity: 1;    filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent, var(--red)) 60%, transparent)); }
+  50%      { opacity: 1;    filter: drop-shadow(0 0 4px color-mix(in srgb, var(--red) 60%, transparent)); }
 }
 .note-form-improve-btn:disabled,
 .note-form-improve-btn.busy {
@@ -801,8 +775,8 @@ body.notes-mobile-mode.notes-drag-mode .note-card-pin.active {
 }
 .note-card-action svg { transform: translateY(2px); }
 @keyframes notes-quick-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, var(--red)) 0%, transparent); }
-  50%      { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, var(--red)) 14%, transparent); }
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--red) 0%, transparent); }
+  50%      { box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 14%, transparent); }
 }
 .notes-quick-input::placeholder {
   color: color-mix(in srgb, var(--fg) 45%, transparent);
@@ -814,7 +788,7 @@ body.notes-mobile-mode.notes-drag-mode .note-card-pin.active {
    hint hides); only the colour/animation toggle, not the layout. */
 .notes-quick-add::before {
   content: '|';
-  color: var(--accent, var(--red));
+  color: var(--red);
   margin-right: 6px;
   font-weight: 500;
   font-size: 13px;
@@ -857,8 +831,8 @@ body.notes-mobile-mode.notes-drag-mode .note-card-pin.active {
   position: absolute;
   top: 0;
   left: 0;
-  /* 3 pills now (note / todo / draw) — Goal was removed. Slider takes
-     1/3 of the track and translates by full multiples of itself. */
+  /* 3 pills (note / todo / draw): the slider takes 1/3 of the track and
+     translates by whole multiples of itself. */
   width: 33.3333%;
   height: 100%;
   background: color-mix(in srgb, var(--fg) 10%, transparent);
@@ -929,10 +903,6 @@ body.notes-mobile-mode.notes-drag-mode .note-card-pin.active {
   transform: scale(0.98);
 }
 .notes-today-title:hover { text-decoration: underline; }
-.notes-bulk-btn {
-  opacity: 0.6;
-}
-.notes-bulk-btn:hover { opacity: 1; }
 .note-form-label.flash-once {
   animation: noteLabelFlash 0.6s ease-out;
 }
@@ -1028,7 +998,7 @@ body.notes-mobile-mode.notes-drag-mode .note-card-pin.active {
    in its own hue so the colour reads even before you focus on the card. */
 .note-card { box-shadow: inset 0 2px 0 0 color-mix(in srgb, var(--fg) 14%, transparent); }
 .note-color-red    { box-shadow: inset 0 2px 0 0 color-mix(in srgb, var(--red) 55%, transparent); }
-.note-color-orange { box-shadow: inset 0 2px 0 0 color-mix(in srgb, #d19a66 60%, transparent); }
+.note-color-orange { box-shadow: inset 0 2px 0 0 color-mix(in srgb, var(--accent-warm) 60%, transparent); }
 .note-color-yellow { box-shadow: inset 0 2px 0 0 color-mix(in srgb, var(--hl-string) 60%, transparent); }
 .note-color-green  { box-shadow: inset 0 2px 0 0 color-mix(in srgb, #98c379 60%, transparent); }
 .note-color-blue   { box-shadow: inset 0 2px 0 0 color-mix(in srgb, var(--hl-function) 60%, transparent); }
@@ -1271,13 +1241,13 @@ button.cal-view-btn {
 }
 .cal-slide-in-right { animation: cal-slide-from-right 0.22s cubic-bezier(0.25, 0.8, 0.25, 1); }
 .cal-slide-in-left { animation: cal-slide-from-left 0.22s cubic-bezier(0.25, 0.8, 0.25, 1); }
-.cal-day.cal-today .cal-day-num { color:var(--bg); font-weight:800; background:var(--accent, var(--red)); border-radius:10px; padding:1px 6px; display:inline-block; opacity:1; line-height:1.3; }
+.cal-day.cal-today .cal-day-num { color:var(--bg); font-weight:800; background:var(--red); border-radius:10px; padding:1px 6px; display:inline-block; opacity:1; line-height:1.3; }
 /* Selected day — same square geometry as `.cal-today` so the two read as
    peers, but rendered as an outline + softer fill instead of a solid
    accent block. Today wins when both classes are on the same cell. */
 .cal-day.cal-selected:not(.cal-today) {
-  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent, var(--fg)) 65%, transparent);
-  background: color-mix(in srgb, var(--accent, var(--fg)) 12%, var(--bg));
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--fg) 65%, transparent);
+  background: color-mix(in srgb, var(--fg) 12%, var(--bg));
   border-radius: 8px;
 }
 .cal-day.cal-weekend:not(.cal-today) { background:color-mix(in srgb, var(--fg) 2.5%, var(--bg)); }
@@ -1320,9 +1290,9 @@ button.cal-view-btn {
 .cal-event-link-target {
   animation: cal-event-link-target-flash 2.2s ease-out;
   box-shadow:
-    inset 0 0 0 2px color-mix(in srgb, var(--accent, var(--red)) 88%, transparent),
-    0 0 0 3px color-mix(in srgb, var(--accent, var(--red)) 20%, transparent),
-    0 8px 20px color-mix(in srgb, var(--accent, var(--red)) 18%, transparent) !important;
+    inset 0 0 0 2px color-mix(in srgb, var(--red) 88%, transparent),
+    0 0 0 3px color-mix(in srgb, var(--red) 20%, transparent),
+    0 8px 20px color-mix(in srgb, var(--red) 18%, transparent) !important;
 }
 @keyframes cal-event-link-target-flash {
   0%, 28% {
@@ -1339,9 +1309,9 @@ button.cal-view-btn {
 #cal-settings > svg {
   top: 3px !important;
 }
-.cal-wk-col.cal-wk-today .cal-wk-col-head { background: color-mix(in srgb, var(--accent, var(--red)) 12%, var(--bg)); }
+.cal-wk-col.cal-wk-today .cal-wk-col-head { background: color-mix(in srgb, var(--red) 12%, var(--bg)); }
 .cal-wk-col.cal-wk-today .cal-wk-dn,
-.cal-wk-col.cal-wk-today .cal-wk-dt { color: var(--accent, var(--red)); font-weight: 700; }
+.cal-wk-col.cal-wk-today .cal-wk-dt { color: var(--red); font-weight: 700; }
 /* Sunday: a softer rest-day tint so the week edge reads visually, even
    when today is mid-week. Falls back gracefully under the .cal-wk-today
    rules above (today on a Sunday still gets the accent treatment). */
@@ -1360,8 +1330,8 @@ button.cal-view-btn {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--accent, var(--red, #f87171));
-  box-shadow:0 0 0 3px color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
+  background: var(--red, #f87171);
+  box-shadow:0 0 0 3px color-mix(in srgb, var(--red) 18%, transparent);
 }
 .cal-wk-now::after {
   content:'now';
@@ -1375,7 +1345,7 @@ button.cal-view-btn {
   font-weight:800;
   text-transform:uppercase;
   color:var(--bg);
-  background:var(--accent, var(--red));
+  background:var(--red);
   box-shadow:0 1px 4px color-mix(in srgb, #000 22%, transparent);
 }
 @keyframes cal-wk-hover-label-reveal {
@@ -1428,12 +1398,12 @@ button.cal-view-btn {
   top: 6px;
   height: 3px;
   border-radius: 2px;
-  background: var(--accent, var(--fg));
+  background: var(--fg);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--bg) 75%, transparent);
 }
 .cal-wk-col.cal-wk-slot-day-selected .cal-wk-col-head {
-  color: var(--accent, var(--fg));
-  box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--accent, var(--fg)) 70%, transparent);
+  color: var(--fg);
+  box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--fg) 70%, transparent);
 }
 .cal-year-month:hover .cal-year-month-title { opacity:1; color:var(--accent); }
 .cal-year-day { cursor:pointer; opacity:0.5; }
@@ -1458,8 +1428,8 @@ button.cal-view-btn {
   background:color-mix(in srgb, var(--fg) 22%, var(--bg));
   box-shadow:0 0 0 3px var(--bg);
 }
-.cal-agenda-day.is-today::after { background:var(--accent, var(--red)); }
-.cal-agenda-day.is-today .cal-agenda-date { opacity: 1; color: var(--accent, var(--red)); border-bottom-color: color-mix(in srgb, var(--accent, var(--red)) 35%, var(--border)); }
+.cal-agenda-day.is-today::after { background:var(--red); }
+.cal-agenda-day.is-today .cal-agenda-date { opacity: 1; color: var(--red); border-bottom-color: color-mix(in srgb, var(--red) 35%, var(--border)); }
 .cal-agenda-event:hover .cal-event-more,
 .cal-event-item:hover .cal-event-more { opacity:0.6; }
 button.cal-event-more {
@@ -1487,10 +1457,10 @@ button.cal-event-more:hover { opacity:1 !important; }
    mono icon picker). accent-color covers the spinner parts where supported. */
 .cal-form-bespoke input[type="date"],
 .cal-form-bespoke input[type="time"],
-.cal-form-bespoke input[type="datetime-local"] { accent-color: var(--accent, var(--red)); }
+.cal-form-bespoke input[type="datetime-local"] { accent-color: var(--red); }
 .cal-form-bespoke input[type="date"]::-webkit-datetime-edit-month-field,
 .cal-form-bespoke input[type="date"]::-webkit-datetime-edit-day-field {
-  color: var(--accent, var(--red));
+  color: var(--red);
   font-weight: 600;
 }
 .cal-form-bespoke input[type="date"]::-webkit-datetime-edit-year-field {
@@ -1500,7 +1470,7 @@ button.cal-event-more:hover { opacity:1 !important; }
 .cal-form-bespoke input[type="date"]::-webkit-calendar-picker-indicator,
 .cal-form-bespoke input[type="time"]::-webkit-calendar-picker-indicator,
 .cal-form-bespoke input[type="datetime-local"]::-webkit-calendar-picker-indicator {
-  background-color: var(--accent, var(--red));
+  background-color: var(--red);
   background-image: none;
   cursor: pointer;
   width: 14px; height: 14px;
@@ -1516,10 +1486,10 @@ button.cal-event-more:hover { opacity:1 !important; }
 }
 /* Title underline + clock focus ring + primary button track --ev-color
    when set; default to --accent / --fg otherwise. */
-.cal-form-bespoke .cal-input.cal-hero-title:focus { border-bottom-color: var(--ev-color, var(--accent, color-mix(in srgb, var(--fg) 60%, transparent))); }
+.cal-form-bespoke .cal-input.cal-hero-title:focus { border-bottom-color: var(--ev-color, color-mix(in srgb, var(--fg) 60%, transparent)); }
 .cal-form-bespoke[style*="--ev-color"] .cal-input.cal-hero-title { border-bottom-color: color-mix(in srgb, var(--ev-color) 35%, var(--border)); }
 .cal-form-bespoke .cal-hero-time:focus-visible,
-.cal-form-bespoke .cal-hero-date:focus-visible { outline-color: var(--ev-color, var(--accent, color-mix(in srgb, var(--fg) 50%, transparent))); }
+.cal-form-bespoke .cal-hero-date:focus-visible { outline-color: var(--ev-color, color-mix(in srgb, var(--fg) 50%, transparent)); }
 /* Custom-BG events paint the form card with the uploaded image. Make sure
    the action row + buttons stay clearly readable on top of it. */
 .cal-form-bespoke.cal-form-bg-image .cal-form-actions {
@@ -1536,11 +1506,11 @@ button.cal-event-more:hover { opacity:1 !important; }
 .cal-form-today span { letter-spacing: 0.04em; text-transform: none; opacity: 0.85; font-weight: 500; }
 .cal-hero-time .cal-hero-clock,
 .cal-hero-time .cal-hero-ampm { line-height: 1; }
-.cal-hero-time:focus-visible { outline: 2px solid var(--accent, color-mix(in srgb, var(--fg) 50%, transparent)); outline-offset: 2px; }
-.cal-hero-date:focus-visible { outline: 2px solid var(--accent, color-mix(in srgb, var(--fg) 50%, transparent)); outline-offset: 2px; }
+.cal-hero-time:focus-visible { outline: 2px solid color-mix(in srgb, var(--fg) 50%, transparent); outline-offset: 2px; }
+.cal-hero-date:focus-visible { outline: 2px solid color-mix(in srgb, var(--fg) 50%, transparent); outline-offset: 2px; }
 .cal-input.cal-hero-title:focus {
   border-color: transparent;
-  border-bottom-color: var(--accent, color-mix(in srgb, var(--fg) 60%, transparent));
+  border-bottom-color: color-mix(in srgb, var(--fg) 60%, transparent);
 }
 .cal-form-bespoke.is-expanded .cal-form-details {
   max-height: 720px;
@@ -1551,13 +1521,13 @@ button.cal-event-more:hover { opacity:1 !important; }
 .cal-form-bespoke .cal-form-row { margin-bottom: 8px; }
 .cal-loc-input-wrap > input { height: 100%; }
 .cal-loc-input-wrap > input::placeholder { color: transparent; }
-.cal-loc-hint svg { color: var(--accent, var(--red)); }
+.cal-loc-hint svg { color: var(--red); }
 .cal-loc-input-wrap > input:placeholder-shown ~ .cal-loc-hint { display: inline-flex; }
 .cal-loc-map.is-disabled { opacity: 0.3; pointer-events: none; cursor: default; }
 select.cal-input { appearance:auto; }
 textarea.cal-input { resize:vertical; font-family:inherit; }
-button.cal-btn.cal-btn-danger { color:var(--accent, var(--red)); border-color:var(--accent, var(--red)); background:transparent; }
-button.cal-btn.cal-btn-danger:hover { background:var(--accent, var(--red)); color:var(--bg); }
+button.cal-btn.cal-btn-danger { color:var(--red); border-color:var(--red); background:transparent; }
+button.cal-btn.cal-btn-danger:hover { background:var(--red); color:var(--bg); }
 /* Brief outline flash on a note card when it's the target of a
    #note-<id> link click from chat — same pattern as the cookbook
    task flash, just scoped to .note-card. */
@@ -1565,6 +1535,6 @@ button.cal-btn.cal-btn-danger:hover { background:var(--accent, var(--red)); colo
   animation: note-card-flash-anim 1.6s ease-out;
 }
 @keyframes note-card-flash-anim {
-  0%   { box-shadow: 0 0 0 2px var(--accent, var(--red)); }
+  0%   { box-shadow: 0 0 0 2px var(--red); }
   100% { box-shadow: 0 0 0 2px transparent; }
 }

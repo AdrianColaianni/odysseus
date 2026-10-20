@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlparse
 from sqlalchemy import DDL, event, create_engine, Column, String, Text, Boolean, DateTime, Integer, Float, ForeignKey, JSON, Index, func, inspect, text
+from sqlalchemy.pool import StaticPool
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
@@ -35,13 +36,11 @@ class TimestampMixin:
     def updated_at(cls):
         return Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive, nullable=False)
 
-# Ensure the writable data directory exists before SQLite connects.
-from src.constants import DATA_DIR, AUTH_FILE, MEMORY_FILE, USER_PREFS_FILE, SETTINGS_FILE
-Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
+from src.constants import APP_DB, DATA_DIR, AUTH_FILE, MEMORY_FILE, USER_PREFS_FILE, SETTINGS_FILE
 
 
 def _default_database_url() -> str:
-    return f"sqlite:///{Path(DATA_DIR) / 'app.db'}"
+    return f"sqlite:///{APP_DB}"
 
 
 def _normalize_sqlite_url(url: str) -> str:
@@ -75,7 +74,9 @@ DATABASE_URL = _normalize_sqlite_url(os.getenv("DATABASE_URL", _default_database
 # Create engine
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False, "timeout": 30} if "sqlite" in DATABASE_URL else {}
+    connect_args={"check_same_thread": False, "timeout": 30} if "sqlite" in DATABASE_URL else {},
+    # Each in-memory connection is its own empty database, so every thread must share one.
+    **({"poolclass": StaticPool} if DATABASE_URL.endswith(":memory:") else {}),
 )
 
 
@@ -925,12 +926,9 @@ class Memory(Base):
         Index('ix_memories_session', 'session_id', 'timestamp'),  # Composite for session-based queries
     )
 
-def _migrate_add_last_message_at_column():
-    """Add last_message_at to sessions + backfill from the latest message
-    timestamp per session (fallback to last_accessed / created_at when a
-    session has no messages). Idempotent: column-add is guarded, and the
-    backfill only touches rows where last_message_at is still NULL so it
-    won't clobber live values on later restarts."""
+def _migrate_backfill_last_message_at():
+    """Fill NULL sessions.last_message_at from the newest message, else
+    last_accessed, else created_at."""
     import sqlite3
     db_path = DATABASE_URL.replace("sqlite:///", "")
     if not os.path.exists(db_path):
@@ -938,12 +936,6 @@ def _migrate_add_last_message_at_column():
     conn = None
     try:
         conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(sessions)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if "last_message_at" not in columns:
-            conn.execute("ALTER TABLE sessions ADD COLUMN last_message_at DATETIME")
-        # Backfill any NULL rows: newest message timestamp, else last_accessed,
-        # else created_at. Only fills NULLs so it's safe on every startup.
         conn.execute(
             """
             UPDATE sessions
@@ -961,152 +953,14 @@ def _migrate_add_last_message_at_column():
             "ON sessions(archived, last_message_at)"
         )
         conn.commit()
-        logging.getLogger(__name__).info("Migrated: added + backfilled 'last_message_at' on sessions")
     except Exception as e:
-        logging.getLogger(__name__).warning(f"last_message_at migration failed: {e}")
+        logging.getLogger(__name__).warning(f"last_message_at backfill failed: {e}")
     finally:
         try:
             conn.close()
         except Exception:
             pass
 
-def _migrate_add_memory_extraction_enabled_column():
-    """Add per-session auto memory extraction toggle."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()]
-        if "memory_extraction_enabled" not in columns:
-            conn.execute("ALTER TABLE sessions ADD COLUMN memory_extraction_enabled BOOLEAN DEFAULT 1")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added memory_extraction_enabled to sessions")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"memory_extraction_enabled migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def _migrate_add_skill_injection_enabled_column():
-    """Add per-session skill injection toggle."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()]
-        if "skill_injection_enabled" not in columns:
-            conn.execute("ALTER TABLE sessions ADD COLUMN skill_injection_enabled BOOLEAN DEFAULT 1")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added skill_injection_enabled to sessions")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"skill_injection_enabled migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def _migrate_add_memory_injection_enabled_column():
-    """Add per-session memory context injection toggle."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()]
-        if "memory_injection_enabled" not in columns:
-            conn.execute("ALTER TABLE sessions ADD COLUMN memory_injection_enabled BOOLEAN DEFAULT 1")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added memory_injection_enabled to sessions")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"memory_injection_enabled migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def _migrate_add_session_generation_settings_columns():
-    """Add per-chat model generation controls."""
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
-        additions = {
-            "thinking_mode": "VARCHAR DEFAULT 'off'",
-            "temperature_override": "FLOAT",
-            "max_tokens_override": "INTEGER",
-        }
-        for name, sql_type in additions.items():
-            if name not in columns:
-                conn.execute(f"ALTER TABLE sessions ADD COLUMN {name} {sql_type}")
-        conn.commit()
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"session generation settings migration failed: {e}")
-    finally:
-        if conn is not None:
-            conn.close()
-
-def _migrate_add_document_archived_column():
-    """Add `archived` to documents (soft-archive flag). Guarded + idempotent."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(documents)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if "archived" not in columns:
-            conn.execute("ALTER TABLE documents ADD COLUMN archived BOOLEAN DEFAULT 0")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added 'archived' to documents")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"documents.archived migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-
-def _migrate_add_owner_column():
-    """Add owner column to sessions table if it doesn't exist."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(sessions)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if "owner" not in columns:
-            conn.execute("ALTER TABLE sessions ADD COLUMN owner TEXT")
-            conn.execute("CREATE INDEX IF NOT EXISTS ix_sessions_owner ON sessions(owner)")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added 'owner' column to sessions")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"Migration check failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
 
 def _migrate_model_endpoints():
     """Recreate model_endpoints table if schema changed (url->base_url)."""
@@ -1131,515 +985,17 @@ def _migrate_model_endpoints():
         except Exception:
             pass
 
-def _migrate_add_hidden_models_column():
-    """Add hidden_models column to model_endpoints if it doesn't exist."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(model_endpoints)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if columns and "hidden_models" not in columns:
-            conn.execute("ALTER TABLE model_endpoints ADD COLUMN hidden_models TEXT")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added 'hidden_models' column to model_endpoints")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"hidden_models migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def _migrate_add_model_endpoint_owner_column():
-    """Add owner column to model_endpoints if it doesn't exist.
-
-    Without this column, the per-user model picker query
-    `(owner == user) | (owner IS NULL)` fails with `OperationalError:
-    no such column: model_endpoints.owner`, leaving non-admin users
-    with an empty picker even when `allowed_models` is unrestricted.
-    Backfills NULL for existing rows (treated as shared by the filter).
-    """
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(model_endpoints)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if columns and "owner" not in columns:
-            conn.execute("ALTER TABLE model_endpoints ADD COLUMN owner VARCHAR")
-            conn.execute("CREATE INDEX IF NOT EXISTS ix_model_endpoints_owner ON model_endpoints(owner)")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added 'owner' column + index to model_endpoints")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"model_endpoints.owner migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-
-def _migrate_add_provider_auth_id_column():
-    """Add provider_auth_id column to model_endpoints if it doesn't exist."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(model_endpoints)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if columns and "provider_auth_id" not in columns:
-            conn.execute("ALTER TABLE model_endpoints ADD COLUMN provider_auth_id VARCHAR")
-            conn.execute("CREATE INDEX IF NOT EXISTS ix_model_endpoints_provider_auth_id ON model_endpoints(provider_auth_id)")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added 'provider_auth_id' column + index to model_endpoints")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"model_endpoints.provider_auth_id migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-
-def _migrate_add_model_type_column():
-    """Add model_type column to model_endpoints if it doesn't exist."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(model_endpoints)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if columns and "model_type" not in columns:
-            conn.execute("ALTER TABLE model_endpoints ADD COLUMN model_type TEXT DEFAULT 'llm'")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added 'model_type' column to model_endpoints")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"model_type migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def _migrate_add_model_endpoint_refresh_columns():
-    """Add endpoint classification / refresh policy columns if missing."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(model_endpoints)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if columns and "endpoint_kind" not in columns:
-            conn.execute("ALTER TABLE model_endpoints ADD COLUMN endpoint_kind TEXT DEFAULT 'auto'")
-        if columns and "model_refresh_mode" not in columns:
-            conn.execute("ALTER TABLE model_endpoints ADD COLUMN model_refresh_mode TEXT DEFAULT 'auto'")
-        if columns and "model_refresh_interval" not in columns:
-            conn.execute("ALTER TABLE model_endpoints ADD COLUMN model_refresh_interval INTEGER")
-        if columns and "model_refresh_timeout" not in columns:
-            conn.execute("ALTER TABLE model_endpoints ADD COLUMN model_refresh_timeout INTEGER")
-        conn.commit()
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"model_endpoints refresh-policy migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def _migrate_add_task_run_model_column():
-    """Add model column to task_runs if it doesn't exist (records which model ran)."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(task_runs)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if columns and "model" not in columns:
-            conn.execute("ALTER TABLE task_runs ADD COLUMN model TEXT")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added 'model' column to task_runs")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"task_runs model migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def _migrate_add_supports_tools_column():
-    """Add supports_tools column to model_endpoints if it doesn't exist."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(model_endpoints)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if columns and "supports_tools" not in columns:
-            conn.execute("ALTER TABLE model_endpoints ADD COLUMN supports_tools BOOLEAN")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added 'supports_tools' column to model_endpoints")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"supports_tools migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-
-def _migrate_add_model_tool_modes_column():
-    """Add per-model tool-surface preferences to model_endpoints if missing."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(model_endpoints)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if columns and "model_tool_modes" not in columns:
-            conn.execute("ALTER TABLE model_endpoints ADD COLUMN model_tool_modes TEXT")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added 'model_tool_modes' column to model_endpoints")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"model_tool_modes migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-
-def _migrate_add_cached_models_column():
-    """Add cached_models column to model_endpoints if it doesn't exist."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(model_endpoints)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if columns and "cached_models" not in columns:
-            conn.execute("ALTER TABLE model_endpoints ADD COLUMN cached_models TEXT")
-            conn.commit()
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"cached_models migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def _migrate_add_pinned_models_column():
-    """Add pinned_models column to model_endpoints if it doesn't exist."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(model_endpoints)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if columns and "pinned_models" not in columns:
-            conn.execute("ALTER TABLE model_endpoints ADD COLUMN pinned_models TEXT")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added 'pinned_models' column to model_endpoints")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"pinned_models migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def _migrate_add_notes_sort_order():
-    """Add sort_order, image_url, repeat columns to notes if they don't exist."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(notes)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if columns and "sort_order" not in columns:
-            conn.execute("ALTER TABLE notes ADD COLUMN sort_order INTEGER DEFAULT 0")
-        if columns and "image_url" not in columns:
-            conn.execute("ALTER TABLE notes ADD COLUMN image_url TEXT")
-        if columns and "repeat" not in columns:
-            conn.execute("ALTER TABLE notes ADD COLUMN repeat TEXT DEFAULT 'none'")
-        if columns and "ai_classification" not in columns:
-            conn.execute("ALTER TABLE notes ADD COLUMN ai_classification TEXT")
-        if columns and "ai_content_hash" not in columns:
-            conn.execute("ALTER TABLE notes ADD COLUMN ai_content_hash TEXT")
-        if columns and "agent_session_id" not in columns:
-            conn.execute("ALTER TABLE notes ADD COLUMN agent_session_id TEXT")
-        conn.commit()
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"notes migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def _migrate_add_mode_column():
-    """Add mode column to sessions table if it doesn't exist."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(sessions)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if "mode" not in columns:
-            conn.execute("ALTER TABLE sessions ADD COLUMN mode TEXT")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added 'mode' column to sessions")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"Migration check for mode failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def _migrate_add_folder_column():
-    """Add folder column to sessions table if it doesn't exist."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(sessions)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if "folder" not in columns:
-            conn.execute("ALTER TABLE sessions ADD COLUMN folder TEXT")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added 'folder' column to sessions")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"Migration check for folder failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def _migrate_add_session_cwd_column():
-    """Add cwd column to sessions table if it doesn't exist."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(sessions)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if "cwd" not in columns:
-            conn.execute("ALTER TABLE sessions ADD COLUMN cwd TEXT")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added 'cwd' column to sessions")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"Migration check for cwd failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def _migrate_add_session_endpoint_id_column():
-    """Add the nullable binding and index without rewriting existing sessions."""
-    with engine.begin() as connection:
-        schema = inspect(connection)
-        if not schema.has_table("sessions"):
-            return
-        columns = {column["name"] for column in schema.get_columns("sessions")}
-        if "endpoint_id" not in columns:
-            connection.execute(text("ALTER TABLE sessions ADD COLUMN endpoint_id VARCHAR"))
-        index = next(index for index in Session.__table__.indexes if index.name == "ix_sessions_endpoint_id")
-        index.create(bind=connection, checkfirst=True)
-
-
-def _migrate_add_token_columns():
-    """Add cumulative token tracking columns to sessions table."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(sessions)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if "total_input_tokens" not in columns:
-            conn.execute("ALTER TABLE sessions ADD COLUMN total_input_tokens INTEGER DEFAULT 0")
-            conn.execute("ALTER TABLE sessions ADD COLUMN total_output_tokens INTEGER DEFAULT 0")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added token tracking columns to sessions")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"Migration check for token columns failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def _migrate_add_total_cost_usd():
-    """Add cumulative USD cost column to sessions table."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(sessions)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if "total_cost_usd" not in columns:
-            conn.execute("ALTER TABLE sessions ADD COLUMN total_cost_usd REAL DEFAULT 0.0")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added total_cost_usd column to sessions")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"Migration check for total_cost_usd failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def _migrate_add_owner_to_table(table_name: str, index_name: str):
-    """Generic helper: add owner TEXT column + index to a table if missing."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute(f"PRAGMA table_info({table_name})")
-        columns = [row[1] for row in cursor.fetchall()]
-        if "owner" not in columns:
-            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN owner TEXT")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name}(owner)")
-            conn.commit()
-            logging.getLogger(__name__).info(f"Migrated: added 'owner' column to {table_name}")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"Migration owner column for {table_name} failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def _migrate_add_multiuser_owner_columns():
-    """Add owner column to memories, gallery_images, user_tools, comparisons."""
-    _migrate_add_owner_to_table("memories", "ix_memories_owner")
-    _migrate_add_owner_to_table("gallery_images", "ix_gallery_images_owner")
-    _migrate_add_owner_to_table("user_tools", "ix_user_tools_owner")
-    _migrate_add_owner_to_table("comparisons", "ix_comparisons_owner")
-    _migrate_add_owner_to_table("api_tokens", "ix_api_tokens_owner")
-    # documents derived ownership from their session join until this column
-    # existed; the legacy-owner sweep (below) backfills it on the next boot.
-    _migrate_add_owner_to_table("documents", "ix_documents_owner")
-
-
-def _migrate_add_gallery_caption_column():
-    """Add OCR/vision caption storage for gallery images."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        columns = [row[1] for row in conn.execute("PRAGMA table_info(gallery_images)").fetchall()]
-        if columns and "caption" not in columns:
-            conn.execute("ALTER TABLE gallery_images ADD COLUMN caption TEXT DEFAULT ''")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added caption column to gallery_images")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"Migration gallery caption column failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-
-def _migrate_add_api_token_scopes_column():
-    """Add API token scopes for existing installs.
-
-    Existing tokens get the current only-supported scope (`chat`) so they keep
-    working after the schema migration, but route checks no longer treat tokens
-    as an unscoped bearer credential.
-    """
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        columns = [row[1] for row in conn.execute("PRAGMA table_info(api_tokens)").fetchall()]
-        if columns and "scopes" not in columns:
-            conn.execute("ALTER TABLE api_tokens ADD COLUMN scopes TEXT NOT NULL DEFAULT 'chat'")
-            conn.execute("UPDATE api_tokens SET scopes = 'chat' WHERE scopes IS NULL OR scopes = ''")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added scopes column to api_tokens")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"api_tokens.scopes migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
 
 def _migrate_assign_legacy_owner():
     """Assign all null-owner data to the first (admin) user.
 
     Runs at boot AND periodically (sweep_null_owners) so that data created
     while auth is disabled / middleware is bypassed via localhost doesn't
-    sit in the DB as world-visible. Previously only swept 5 tables; the
-    actual set of owner-bearing tables is much larger.
+    sit in the DB as world-visible.
     """
     import sqlite3
     import json as _json
 
-    # Find admin user from auth.json. The auth schema uses `is_admin: True`,
-    # not `role: "admin"` — old code looked for the wrong field and silently
-    # fell through to "first user" every time.
     auth_path = os.path.join(os.path.dirname(DATABASE_URL.replace("sqlite:///", "")), "auth.json")
     if not os.path.isabs(auth_path):
         auth_path = AUTH_FILE
@@ -1669,9 +1025,6 @@ def _migrate_assign_legacy_owner():
     conn = None
     try:
         conn = sqlite3.connect(db_path)
-        # Every table with an `owner` column. New tables added later will be
-        # picked up automatically because we only UPDATE when the column
-        # exists; the explicit list documents intent.
         tables = [
             "sessions", "memories", "gallery_images", "user_tools",
             "comparisons", "documents", "signatures", "notes",
@@ -1777,85 +1130,11 @@ def _migrate_backfill_document_owner_from_session():
         logging.getLogger(__name__).warning(f"document owner backfill: {e}")
 
 
-def _migrate_add_tidy_verdict():
-    """Add tidy_verdict column to documents table if missing."""
-    try:
-        with engine.connect() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(documents)"))]
-            if "tidy_verdict" not in cols:
-                conn.execute(text("ALTER TABLE documents ADD COLUMN tidy_verdict VARCHAR"))
-                conn.commit()
-                logging.getLogger(__name__).info("Added tidy_verdict column to documents")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"tidy_verdict migration: {e}")
-
-
-def _migrate_add_doc_source_email_cols():
-    """Add source-email provenance columns to documents (for the Sign-and-Reply flow)."""
-    cols_to_add = {
-        "source_email_uid":        "VARCHAR",
-        "source_email_folder":     "VARCHAR",
-        "source_email_account_id": "VARCHAR",
-        "source_email_message_id": "VARCHAR",
-    }
-    try:
-        with engine.connect() as conn:
-            existing = {r[1] for r in conn.execute(text("PRAGMA table_info(documents)"))}
-            for col, spec in cols_to_add.items():
-                if col not in existing:
-                    conn.execute(text(f"ALTER TABLE documents ADD COLUMN {col} {spec}"))
-                    logging.getLogger(__name__).info(f"Added {col} column to documents")
-            # Index for lookup-by-message-id (the "find existing draft" path)
-            conn.execute(text(
-                "CREATE INDEX IF NOT EXISTS ix_documents_source_email_message_id "
-                "ON documents (source_email_message_id)"
-            ))
-            conn.commit()
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"doc source-email migration: {e}")
-
-
-def _migrate_add_calendar_source_email_cols():
-    """Add provenance fields so email-created events can link back to the email."""
-    cols_to_add = {
-        "source_email_uid": "VARCHAR",
-        "source_email_folder": "VARCHAR",
-        "source_email_account_id": "VARCHAR",
-        "source_email_message_id": "VARCHAR",
-    }
-    try:
-        with engine.connect() as conn:
-            existing = {r[1] for r in conn.execute(text("PRAGMA table_info(calendar_events)"))}
-            for col, spec in cols_to_add.items():
-                if col not in existing:
-                    conn.execute(text(f"ALTER TABLE calendar_events ADD COLUMN {col} {spec}"))
-            conn.execute(text(
-                "CREATE INDEX IF NOT EXISTS ix_calendar_events_source_email_message_id "
-                "ON calendar_events (source_email_message_id)"
-            ))
-            conn.commit()
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"calendar source-email migration: {e}")
-
-def _migrate_add_task_automation_columns():
-    """Add automation columns to scheduled_tasks table if missing."""
-    new_cols = {
-        "task_type": "VARCHAR DEFAULT 'llm'",
-        "action": "VARCHAR",
-        "trigger_type": "VARCHAR DEFAULT 'schedule'",
-        "trigger_event": "VARCHAR",
-        "trigger_count": "INTEGER",
-        "trigger_counter": "INTEGER DEFAULT 0",
-    }
+def _migrate_make_task_schedule_nullable():
+    """Rebuild scheduled_tasks when prompt, schedule or scheduled_time is still NOT NULL."""
     try:
         with engine.connect() as conn:
             cols_info = list(conn.execute(text("PRAGMA table_info(scheduled_tasks)")))
-            col_names = [r[1] for r in cols_info]
-            for col_name, col_def in new_cols.items():
-                if col_name not in col_names:
-                    conn.execute(text(f"ALTER TABLE scheduled_tasks ADD COLUMN {col_name} {col_def}"))
-
-            # Check if prompt/schedule/scheduled_time are still NOT NULL — need table rebuild
             notnull_map = {r[1]: r[3] for r in cols_info}
             needs_rebuild = (
                 notnull_map.get("prompt", 0) == 1 or
@@ -1906,89 +1185,9 @@ def _migrate_add_task_automation_columns():
                 conn.execute(text("DROP TABLE _old_scheduled_tasks"))
 
             conn.commit()
-            logging.getLogger(__name__).info("Task automation columns migration complete")
     except Exception as e:
-        logging.getLogger(__name__).warning(f"task automation migration: {e}")
+        logging.getLogger(__name__).warning(f"scheduled_tasks rebuild: {e}")
 
-def _migrate_add_email_oauth_columns():
-    """Add Google OAuth and display_name columns to email_accounts if missing."""
-    try:
-        with engine.connect() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(email_accounts)"))]
-            for col, typedef in [
-                ("oauth_provider",      "TEXT"),
-                ("oauth_access_token",  "TEXT"),
-                ("oauth_refresh_token", "TEXT"),
-                ("oauth_token_expiry",  "TEXT"),
-                ("display_name",        "TEXT"),
-            ]:
-                if col not in cols:
-                    conn.execute(text(f"ALTER TABLE email_accounts ADD COLUMN {col} {typedef}"))
-            conn.commit()
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"email oauth columns migration: {e}")
-
-
-def _migrate_add_oauth_config():
-    """Add oauth_config column to mcp_servers table if missing."""
-    try:
-        with engine.connect() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(mcp_servers)"))]
-            if "oauth_config" not in cols:
-                conn.execute(text("ALTER TABLE mcp_servers ADD COLUMN oauth_config TEXT"))
-                conn.commit()
-                logging.getLogger(__name__).info("Added oauth_config column to mcp_servers")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"oauth_config migration: {e}")
-
-def _migrate_add_disabled_tools():
-    """Add disabled_tools column to mcp_servers table if missing."""
-    try:
-        with engine.connect() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(mcp_servers)"))]
-            if "disabled_tools" not in cols:
-                conn.execute(text("ALTER TABLE mcp_servers ADD COLUMN disabled_tools TEXT"))
-                conn.commit()
-                logging.getLogger(__name__).info("Added disabled_tools column to mcp_servers")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"disabled_tools migration: {e}")
-
-def _migrate_add_mcp_oauth_tokens_column():
-    """Add oauth_tokens column to mcp_servers table if missing.
-
-    The model declares this column as EncryptedText, but the SQL type is plain
-    TEXT on purpose: EncryptedText is a SQLAlchemy TypeDecorator that encrypts at
-    the Python layer and stores the ciphertext as TEXT, so the DB column type is
-    TEXT. This matches the existing encrypted columns (see _migrate_encrypt_*)."""
-    try:
-        with engine.connect() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(mcp_servers)"))]
-            if "oauth_tokens" not in cols:
-                conn.execute(text("ALTER TABLE mcp_servers ADD COLUMN oauth_tokens TEXT"))
-                conn.commit()
-                logging.getLogger(__name__).info("Added oauth_tokens column to mcp_servers")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"oauth_tokens migration: {e}")
-
-def _migrate_add_task_v2_columns():
-    """Add cron_expression, then_task_id, webhook_token to scheduled_tasks."""
-    new_cols = {
-        "cron_expression": "VARCHAR",
-        "then_task_id": "VARCHAR",
-        "webhook_token": "VARCHAR",
-    }
-    try:
-        with engine.connect() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(scheduled_tasks)"))]
-            for col_name, col_def in new_cols.items():
-                if col_name not in cols:
-                    conn.execute(text(f"ALTER TABLE scheduled_tasks ADD COLUMN {col_name} {col_def}"))
-            if "webhook_token" not in cols:
-                conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_scheduled_tasks_webhook ON scheduled_tasks(webhook_token)"))
-            conn.commit()
-            logging.getLogger(__name__).info("Task v2 columns migration complete")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"task v2 migration: {e}")
 
 def _migrate_drop_ping_notes_tasks():
     """One-time cleanup: ping_notes and ping_events used to be seeded as
@@ -2009,56 +1208,6 @@ def _migrate_drop_ping_notes_tasks():
             conn.commit()
     except Exception as e:
         logging.getLogger(__name__).debug(f"drop_ping_notes_tasks: {e}")
-
-
-def _migrate_add_notifications_enabled():
-    """Per-task notification on/off toggle (default ON)."""
-    try:
-        with engine.connect() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(scheduled_tasks)"))]
-            if "notifications_enabled" not in cols:
-                conn.execute(text("ALTER TABLE scheduled_tasks ADD COLUMN notifications_enabled BOOLEAN DEFAULT 1"))
-                conn.commit()
-                logging.getLogger(__name__).info("Added notifications_enabled column to scheduled_tasks")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"notifications_enabled migration: {e}")
-
-
-def _migrate_add_crew_member_id():
-    """Add crew_member_id column to sessions and scheduled_tasks tables if missing."""
-    try:
-        with engine.connect() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(sessions)"))]
-            if "crew_member_id" not in cols:
-                conn.execute(text("ALTER TABLE sessions ADD COLUMN crew_member_id TEXT"))
-                conn.commit()
-                logging.getLogger(__name__).info("Added crew_member_id column to sessions")
-            cols2 = [r[1] for r in conn.execute(text("PRAGMA table_info(scheduled_tasks)"))]
-            if "crew_member_id" not in cols2:
-                conn.execute(text("ALTER TABLE scheduled_tasks ADD COLUMN crew_member_id TEXT"))
-                conn.commit()
-                logging.getLogger(__name__).info("Added crew_member_id column to scheduled_tasks")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"crew_member_id migration: {e}")
-
-def _migrate_add_assistant_columns():
-    """Add is_default_assistant + timezone columns to crew_members for the personal-assistant feature."""
-    try:
-        with engine.connect() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(crew_members)"))]
-            if "is_default_assistant" not in cols:
-                conn.execute(text("ALTER TABLE crew_members ADD COLUMN is_default_assistant BOOLEAN DEFAULT 0"))
-                conn.commit()
-                logging.getLogger(__name__).info("Added is_default_assistant column to crew_members")
-            if "timezone" not in cols:
-                conn.execute(text("ALTER TABLE crew_members ADD COLUMN timezone TEXT"))
-                conn.commit()
-                logging.getLogger(__name__).info("Added timezone column to crew_members")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"assistant columns migration: {e}")
-
-
-
 
 
 class Note(TimestampMixin, Base):
@@ -2332,121 +1481,6 @@ def _migrate_seed_email_account():
             db.close()
 
 
-# WARNING: Foreign-key enforcement is enabled globally for all SQLite connections.
-# Any future migrations or schema changes that temporarily violate foreign-key
-# constraints will fail. To perform such operations, foreign_keys must be
-# temporarily disabled around the migration workflow.
-def _migrate_add_task_authority_column():
-    """Retain snapshots after legacy task-table rebuilds; support all DBs."""
-    from sqlalchemy import inspect
-    with engine.begin() as conn:
-        columns = {column["name"] for column in inspect(conn).get_columns("scheduled_tasks")}
-        if "request_authority_json" not in columns:
-            conn.execute(text("ALTER TABLE scheduled_tasks ADD COLUMN request_authority_json TEXT"))
-
-
-def init_db():
-    """
-    Initialize the database by creating all tables.
-    Should be called when starting the application.
-    """
-    _migrate_model_endpoints()
-    Base.metadata.create_all(bind=engine)
-    # Lock the DB file (and any SQLite sidecars) to 0o600 — it holds bearer-token
-    # + bcrypt hashes and encrypted provider keys. POSIX only; safe_chmod no-ops
-    # on Windows (ACL-restricted profile dir) and the path helper returns None for
-    # Postgres / in-memory. Must stay AFTER create_all: the file is born here at
-    # the umask default, and nothing below resets the mode. The path comes from
-    # engine.url (SQLAlchemy's parsed URL), so a driver-qualified or query-tagged
-    # DATABASE_URL still resolves to the real file instead of slipping through.
-    db_path = _sqlite_db_path(engine.url)
-    if db_path is not None:
-        # Fail closed-loud on the main file: this is the only access control on
-        # it, so if the chmod genuinely fails (read-only FS, foreign owner) an
-        # operator should hear about it. safe_chmod also returns False as a
-        # Windows no-op, so guard on IS_WINDOWS to avoid a spurious warning there.
-        if not safe_chmod(db_path, 0o600) and not IS_WINDOWS:
-            logger.warning(
-                "Could not restrict %s to 0o600; it holds secrets and may be "
-                "world-readable. Check filesystem permissions and ownership.",
-                db_path,
-            )
-        # Re-lock any sidecars present at startup. New ones inherit the main
-        # file's mode (now 0o600, since we set it first), and they're usually
-        # absent here, but a stale -wal/-shm/-journal left by an older 0o644
-        # install could still expose secret pages. Absent sidecars are the
-        # normal case, not an error — only a failed chmod warrants a warning.
-        for suffix in _SQLITE_SIDECARS:
-            sidecar = db_path + suffix
-            if (
-                os.path.exists(sidecar)
-                and not safe_chmod(sidecar, 0o600)
-                and not IS_WINDOWS
-            ):
-                logger.warning(
-                    "Could not restrict %s to 0o600; it may expose DB pages.",
-                    sidecar,
-                )
-    _migrate_add_hidden_models_column()
-    _migrate_add_cached_models_column()
-    _migrate_add_pinned_models_column()
-    _migrate_add_notes_sort_order()
-    _migrate_add_model_type_column()
-    _migrate_add_model_endpoint_refresh_columns()
-    _migrate_add_model_endpoint_owner_column()
-    _migrate_add_provider_auth_id_column()
-    _migrate_add_supports_tools_column()
-    _migrate_add_model_tool_modes_column()
-    _migrate_add_task_run_model_column()
-    _migrate_add_owner_column()
-    _migrate_add_document_archived_column()
-    _migrate_add_last_message_at_column()
-    _migrate_add_memory_extraction_enabled_column()
-    _migrate_add_memory_injection_enabled_column()
-    _migrate_add_skill_injection_enabled_column()
-    _migrate_add_session_generation_settings_columns()
-    _migrate_add_folder_column()
-    _migrate_add_session_cwd_column()
-    _migrate_add_session_endpoint_id_column()
-    _migrate_add_token_columns()
-    _migrate_add_total_cost_usd()
-    _migrate_add_mode_column()
-    _migrate_add_multiuser_owner_columns()
-    _migrate_add_gallery_caption_column()
-    _migrate_add_api_token_scopes_column()
-    _migrate_backfill_document_owner_from_session()
-    _migrate_assign_legacy_owner()
-    _migrate_add_tidy_verdict()
-    _migrate_add_doc_source_email_cols()
-    _migrate_add_calendar_source_email_cols()
-    _migrate_add_oauth_config()
-    _migrate_add_email_oauth_columns()
-    _migrate_add_task_automation_columns()
-    _migrate_add_task_authority_column()
-    _migrate_add_disabled_tools()
-    _migrate_add_mcp_oauth_tokens_column()
-    _migrate_add_task_v2_columns()
-    _migrate_add_notifications_enabled()
-    _migrate_drop_ping_notes_tasks()
-    _migrate_add_crew_member_id()
-    _migrate_add_assistant_columns()
-    _migrate_add_email_smtp_security()
-    _migrate_email_account_default_invariant()
-    _migrate_seed_email_account()
-    _migrate_add_calendar_metadata()
-    _migrate_add_calendar_is_utc()
-    _migrate_add_calendar_origin()
-    _migrate_add_calendar_account_id()
-    _migrate_add_caldav_sync_columns()
-    _migrate_add_calendar_recurrence_exdates()
-    _migrate_add_note_gallery_id()
-    _migrate_chat_messages_fts()
-    _migrate_encrypt_email_passwords()
-    _migrate_encrypt_signatures()
-    _migrate_encrypt_endpoint_keys()
-    _migrate_backfill_task_folders()
-
-
 def _migrate_backfill_task_folders():
     """Backfill folder='Tasks' on pre-existing task/research sessions.
 
@@ -2473,6 +1507,16 @@ def _migrate_backfill_task_folders():
         logging.getLogger(__name__).warning(f"task folder backfill: {e}")
 
 
+def _fts_content_expr(alias):
+    return (
+        f"CASE WHEN instr(COALESCE({alias}.content, ''), ';base64,') > 0 "
+        f"OR instr(COALESCE({alias}.content, ''), 'data:image/') > 0 "
+        f"OR instr(COALESCE({alias}.content, ''), 'data:audio/') > 0 "
+        "THEN '[inline media omitted from search index]' "
+        f"ELSE COALESCE({alias}.content, '') END"
+    )
+
+
 def _migrate_chat_messages_fts():
     """Create and backfill the session transcript FTS index for SQLite."""
     if not DATABASE_URL.startswith("sqlite"):
@@ -2484,20 +1528,7 @@ def _migrate_chat_messages_fts():
     conn = None
     try:
         conn = sqlite3.connect(db_path)
-        fts_content_expr_new = (
-            "CASE WHEN instr(COALESCE(new.content, ''), ';base64,') > 0 "
-            "OR instr(COALESCE(new.content, ''), 'data:image/') > 0 "
-            "OR instr(COALESCE(new.content, ''), 'data:audio/') > 0 "
-            "THEN '[inline media omitted from search index]' "
-            "ELSE COALESCE(new.content, '') END"
-        )
-        fts_content_expr_cm = (
-            "CASE WHEN instr(COALESCE(cm.content, ''), ';base64,') > 0 "
-            "OR instr(COALESCE(cm.content, ''), 'data:image/') > 0 "
-            "OR instr(COALESCE(cm.content, ''), 'data:audio/') > 0 "
-            "THEN '[inline media omitted from search index]' "
-            "ELSE COALESCE(cm.content, '') END"
-        )
+        fts_content_expr_new = _fts_content_expr("new")
         try:
             conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS temp._odysseus_fts5_probe USING fts5(content)")
             conn.execute("DROP TABLE IF EXISTS temp._odysseus_fts5_probe")
@@ -2558,7 +1589,7 @@ def _migrate_chat_messages_fts():
             conn.execute(
                 f"""
                 INSERT INTO chat_messages_fts(content, message_id, session_id, role)
-                SELECT {fts_content_expr_cm}, cm.id, cm.session_id, cm.role
+                SELECT {_fts_content_expr("cm")}, cm.id, cm.session_id, cm.role
                 FROM chat_messages cm
                 LEFT JOIN temp._odysseus_fts_message_ids known ON known.message_id = cm.id
                 WHERE known.message_id IS NULL
@@ -2604,37 +1635,6 @@ def _scrub_legacy_chat_message_fts_media(conn) -> None:
             )
     except Exception as e:
         logging.getLogger(__name__).warning(f"chat_messages FTS media scrub failed: {e}")
-
-
-def _migrate_add_email_smtp_security():
-    """Add explicit SMTP security mode for Proton Bridge/custom local SMTP."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(email_accounts)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if columns and "smtp_security" not in columns:
-            conn.execute("ALTER TABLE email_accounts ADD COLUMN smtp_security TEXT DEFAULT 'ssl'")
-            conn.execute(
-                "UPDATE email_accounts SET smtp_security = CASE "
-                "WHEN COALESCE(smtp_port, 465) = 587 THEN 'starttls' "
-                "WHEN COALESCE(smtp_port, 465) = 465 THEN 'ssl' "
-                "ELSE 'ssl' END "
-                "WHERE smtp_security IS NULL OR smtp_security = ''"
-            )
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added smtp_security column to email_accounts")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"smtp_security migration skipped: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
 
 
 def _migrate_encrypt_endpoint_keys():
@@ -2727,177 +1727,172 @@ def _migrate_encrypt_email_passwords():
         logger.warning(f"Password migration failed (will retry next start): {e}")
 
 
-def _migrate_add_calendar_is_utc():
-    """Add is_utc column to calendar_events so imported events can preserve
-    their original UTC timestamps (Z-suffix on the wire) without touching
-    legacy naive-local rows."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
+def _add_column(table, column, ddl, index=None, unique=False):
+    """Add a column the model gained after its table shipped. Idempotent."""
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(calendar_events)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if columns and "is_utc" not in columns:
-            conn.execute("ALTER TABLE calendar_events ADD COLUMN is_utc BOOLEAN DEFAULT 0 NOT NULL")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added 'is_utc' column to calendar_events")
+        with engine.begin() as conn:
+            schema = inspect(conn)
+            if not schema.has_table(table):
+                return
+            if column not in {c["name"] for c in schema.get_columns(table)}:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+                logger.info("Migrated: added %s.%s", table, column)
+            if index:
+                conn.execute(text(
+                    f"CREATE {'UNIQUE ' if unique else ''}INDEX IF NOT EXISTS {index} ON {table} ({column})"
+                ))
     except Exception as e:
-        logging.getLogger(__name__).warning(f"is_utc migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        if (table, column) in _REQUIRED_COLUMNS:
+            raise
+        logger.warning("Adding column %s.%s failed: %s", table, column, e)
 
 
-def _migrate_add_calendar_origin():
-    """Add `origin` to calendar_events so the CalDAV sync can tell server-pulled
-    rows (prunable when they vanish upstream) from locally-created ones (agent /
-    email triage / failed write-back), which must never be pruned. Idempotent."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(calendar_events)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if columns and "origin" not in columns:
-            conn.execute("ALTER TABLE calendar_events ADD COLUMN origin TEXT")
-            conn.execute("CREATE INDEX IF NOT EXISTS ix_calendar_events_origin ON calendar_events(origin)")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added 'origin' column to calendar_events")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"calendar_events.origin migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+# Session endpoint binding and the task authority snapshot gate access, so
+# startup stops rather than run without them.
+_REQUIRED_COLUMNS = {("sessions", "endpoint_id"), ("scheduled_tasks", "request_authority_json")}
+
+# Runs in order after create_all. A tuple is (table, column, DDL[, index[, unique]])
+# for _add_column; a callable is a data migration that depends on the columns above it.
+_MIGRATIONS = (
+    ("model_endpoints", "hidden_models", "TEXT"),
+    ("model_endpoints", "cached_models", "TEXT"),
+    ("model_endpoints", "pinned_models", "TEXT"),
+    ("notes", "sort_order", "INTEGER DEFAULT 0"),
+    ("notes", "image_url", "TEXT"),
+    ("notes", "repeat", "TEXT DEFAULT 'none'"),
+    ("notes", "ai_classification", "TEXT"),
+    ("notes", "ai_content_hash", "TEXT"),
+    ("notes", "agent_session_id", "TEXT"),
+    ("model_endpoints", "model_type", "TEXT DEFAULT 'llm'"),
+    ("model_endpoints", "endpoint_kind", "TEXT DEFAULT 'auto'"),
+    ("model_endpoints", "model_refresh_mode", "TEXT DEFAULT 'auto'"),
+    ("model_endpoints", "model_refresh_interval", "INTEGER"),
+    ("model_endpoints", "model_refresh_timeout", "INTEGER"),
+    ("model_endpoints", "owner", "VARCHAR", "ix_model_endpoints_owner"),
+    ("model_endpoints", "provider_auth_id", "VARCHAR", "ix_model_endpoints_provider_auth_id"),
+    ("model_endpoints", "supports_tools", "BOOLEAN"),
+    ("model_endpoints", "model_tool_modes", "TEXT"),
+    ("task_runs", "model", "TEXT"),
+    ("sessions", "owner", "TEXT", "ix_sessions_owner"),
+    ("documents", "archived", "BOOLEAN DEFAULT FALSE"),
+    ("sessions", "last_message_at", "TIMESTAMP"),
+    _migrate_backfill_last_message_at,
+    ("sessions", "memory_extraction_enabled", "BOOLEAN DEFAULT TRUE"),
+    ("sessions", "memory_injection_enabled", "BOOLEAN DEFAULT TRUE"),
+    ("sessions", "skill_injection_enabled", "BOOLEAN DEFAULT TRUE"),
+    ("sessions", "thinking_mode", "VARCHAR DEFAULT 'off'"),
+    ("sessions", "temperature_override", "FLOAT"),
+    ("sessions", "max_tokens_override", "INTEGER"),
+    ("sessions", "folder", "TEXT"),
+    ("sessions", "cwd", "TEXT"),
+    ("sessions", "endpoint_id", "VARCHAR", "ix_sessions_endpoint_id"),
+    ("sessions", "total_input_tokens", "INTEGER DEFAULT 0"),
+    ("sessions", "total_output_tokens", "INTEGER DEFAULT 0"),
+    ("sessions", "total_cost_usd", "REAL DEFAULT 0.0"),
+    ("sessions", "mode", "TEXT"),
+    ("memories", "owner", "TEXT", "ix_memories_owner"),
+    ("gallery_images", "owner", "TEXT", "ix_gallery_images_owner"),
+    ("user_tools", "owner", "TEXT", "ix_user_tools_owner"),
+    ("comparisons", "owner", "TEXT", "ix_comparisons_owner"),
+    ("api_tokens", "owner", "TEXT", "ix_api_tokens_owner"),
+    ("documents", "owner", "TEXT", "ix_documents_owner"),
+    ("gallery_images", "caption", "TEXT DEFAULT ''"),
+    # Existing tokens get `chat`, the one scope they could already use.
+    ("api_tokens", "scopes", "TEXT NOT NULL DEFAULT 'chat'"),
+    # Session-linked documents take their session's owner before the admin sweep.
+    _migrate_backfill_document_owner_from_session,
+    _migrate_assign_legacy_owner,
+    ("documents", "tidy_verdict", "VARCHAR"),
+    ("documents", "source_email_uid", "VARCHAR"),
+    ("documents", "source_email_folder", "VARCHAR"),
+    ("documents", "source_email_account_id", "VARCHAR"),
+    ("documents", "source_email_message_id", "VARCHAR", "ix_documents_source_email_message_id"),
+    ("calendar_events", "source_email_uid", "VARCHAR"),
+    ("calendar_events", "source_email_folder", "VARCHAR"),
+    ("calendar_events", "source_email_account_id", "VARCHAR"),
+    ("calendar_events", "source_email_message_id", "VARCHAR", "ix_calendar_events_source_email_message_id"),
+    ("mcp_servers", "oauth_config", "TEXT"),
+    ("email_accounts", "oauth_provider", "TEXT"),
+    ("email_accounts", "oauth_access_token", "TEXT"),
+    ("email_accounts", "oauth_refresh_token", "TEXT"),
+    ("email_accounts", "oauth_token_expiry", "TEXT"),
+    ("email_accounts", "display_name", "TEXT"),
+    ("scheduled_tasks", "task_type", "VARCHAR DEFAULT 'llm'"),
+    ("scheduled_tasks", "action", "VARCHAR"),
+    ("scheduled_tasks", "trigger_type", "VARCHAR DEFAULT 'schedule'"),
+    ("scheduled_tasks", "trigger_event", "VARCHAR"),
+    ("scheduled_tasks", "trigger_count", "INTEGER"),
+    ("scheduled_tasks", "trigger_counter", "INTEGER DEFAULT 0"),
+    # The rebuild copies only the columns above, so later scheduled_tasks columns come after it.
+    _migrate_make_task_schedule_nullable,
+    ("scheduled_tasks", "request_authority_json", "TEXT"),
+    ("mcp_servers", "disabled_tools", "TEXT"),
+    # EncryptedText stores its ciphertext as TEXT.
+    ("mcp_servers", "oauth_tokens", "TEXT"),
+    ("scheduled_tasks", "cron_expression", "VARCHAR"),
+    ("scheduled_tasks", "then_task_id", "VARCHAR"),
+    ("scheduled_tasks", "webhook_token", "VARCHAR", "ix_scheduled_tasks_webhook", True),
+    ("scheduled_tasks", "notifications_enabled", "BOOLEAN DEFAULT TRUE"),
+    _migrate_drop_ping_notes_tasks,
+    ("sessions", "crew_member_id", "TEXT"),
+    ("scheduled_tasks", "crew_member_id", "TEXT"),
+    ("crew_members", "is_default_assistant", "BOOLEAN DEFAULT FALSE"),
+    ("crew_members", "timezone", "TEXT"),
+    ("email_accounts", "smtp_security", "TEXT DEFAULT 'ssl'"),
+    _migrate_email_account_default_invariant,
+    _migrate_seed_email_account,
+    ("calendar_events", "importance", "TEXT DEFAULT 'normal'"),
+    ("calendar_events", "event_type", "TEXT"),
+    ("calendar_events", "last_pinged", "TIMESTAMP"),
+    ("calendar_events", "is_utc", "BOOLEAN DEFAULT FALSE NOT NULL"),
+    ("calendar_events", "origin", "TEXT", "ix_calendar_events_origin"),
+    ("calendars", "account_id", "TEXT", "ix_calendars_account_id"),
+    ("calendar_events", "remote_href", "TEXT"),
+    ("calendar_events", "remote_etag", "TEXT"),
+    ("calendar_events", "caldav_sync_pending", "TEXT"),
+    ("calendars", "caldav_base_url", "TEXT"),
+    ("calendar_events", "recurrence_exdates", "TEXT DEFAULT ''"),
+    ("notes", "gallery_id", "VARCHAR", "ix_notes_gallery_id"),
+    _migrate_chat_messages_fts,
+    _migrate_encrypt_email_passwords,
+    _migrate_encrypt_signatures,
+    _migrate_encrypt_endpoint_keys,
+    _migrate_backfill_task_folders,
+)
 
 
-def _migrate_add_calendar_account_id():
-    """Add `account_id` to calendars so each CalDAV-backed calendar knows which
-    credential set (from caldav_accounts in user prefs) owns it. Idempotent."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(calendars)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if columns and "account_id" not in columns:
-            conn.execute("ALTER TABLE calendars ADD COLUMN account_id TEXT")
-            conn.execute("CREATE INDEX IF NOT EXISTS ix_calendars_account_id ON calendars(account_id)")
-            conn.commit()
-            logging.getLogger(__name__).info("Migrated: added 'account_id' column to calendars")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"calendars.account_id migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-
-def _migrate_add_caldav_sync_columns():
-    """Add remote CalDAV metadata used for bidirectional sync."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    try:
-        conn = sqlite3.connect(db_path)
-        ev_columns = [row[1] for row in conn.execute("PRAGMA table_info(calendar_events)").fetchall()]
-        if ev_columns and "remote_href" not in ev_columns:
-            conn.execute("ALTER TABLE calendar_events ADD COLUMN remote_href TEXT")
-        if ev_columns and "remote_etag" not in ev_columns:
-            conn.execute("ALTER TABLE calendar_events ADD COLUMN remote_etag TEXT")
-        if ev_columns and "caldav_sync_pending" not in ev_columns:
-            conn.execute("ALTER TABLE calendar_events ADD COLUMN caldav_sync_pending TEXT")
-
-        cal_columns = [row[1] for row in conn.execute("PRAGMA table_info(calendars)").fetchall()]
-        if cal_columns and "caldav_base_url" not in cal_columns:
-            conn.execute("ALTER TABLE calendars ADD COLUMN caldav_base_url TEXT")
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"CalDAV sync metadata migration failed: {e}")
-
-
-def _migrate_add_calendar_metadata():
-    """Add importance/event_type/last_pinged columns to calendar_events table."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.execute("PRAGMA table_info(calendar_events)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if columns and "importance" not in columns:
-            conn.execute("ALTER TABLE calendar_events ADD COLUMN importance TEXT DEFAULT 'normal'")
-        if columns and "event_type" not in columns:
-            conn.execute("ALTER TABLE calendar_events ADD COLUMN event_type TEXT")
-        if columns and "last_pinged" not in columns:
-            conn.execute("ALTER TABLE calendar_events ADD COLUMN last_pinged DATETIME")
-        conn.commit()
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"calendar_events migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-
-def _migrate_add_calendar_recurrence_exdates():
-    """Add skipped recurrence occurrences for deleting one instance of a series."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        columns = [row[1] for row in conn.execute("PRAGMA table_info(calendar_events)").fetchall()]
-        if columns and "recurrence_exdates" not in columns:
-            conn.execute("ALTER TABLE calendar_events ADD COLUMN recurrence_exdates TEXT DEFAULT ''")
-        conn.commit()
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"calendar_events recurrence_exdates migration failed: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def _migrate_add_note_gallery_id():
-    """Keep a drawn note linked to one Gallery image across edits."""
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        columns = [row[1] for row in conn.execute("PRAGMA table_info(notes)").fetchall()]
-        if columns and "gallery_id" not in columns:
-            conn.execute("ALTER TABLE notes ADD COLUMN gallery_id VARCHAR")
-            conn.execute("CREATE INDEX IF NOT EXISTS ix_notes_gallery_id ON notes(gallery_id)")
-            conn.commit()
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"notes gallery_id migration failed: {e}")
-    finally:
-        if conn is not None:
-            conn.close()
+def init_db():
+    """Create the tables and bring an existing database up to the current schema."""
+    Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
+    _migrate_model_endpoints()
+    Base.metadata.create_all(bind=engine)
+    # The file holds token hashes and encrypted keys; create_all makes it at the umask default.
+    db_path = _sqlite_db_path(engine.url)
+    if db_path is not None:
+        # safe_chmod returns False as a Windows no-op, which is not a failure.
+        if not safe_chmod(db_path, 0o600) and not IS_WINDOWS:
+            logger.warning(
+                "Could not restrict %s to 0o600; it holds secrets and may be "
+                "world-readable. Check filesystem permissions and ownership.",
+                db_path,
+            )
+        # A stale sidecar from an older 0o644 install can still hold secret pages.
+        for suffix in _SQLITE_SIDECARS:
+            sidecar = db_path + suffix
+            if (
+                os.path.exists(sidecar)
+                and not safe_chmod(sidecar, 0o600)
+                and not IS_WINDOWS
+            ):
+                logger.warning(
+                    "Could not restrict %s to 0o600; it may expose DB pages.",
+                    sidecar,
+                )
+    for step in _MIGRATIONS:
+        if callable(step):
+            step()
+        else:
+            _add_column(*step)
 
 
 def get_db():
@@ -2927,36 +1922,6 @@ def get_db_session() -> Generator:
     finally:
         session.close()
 
-def bulk_insert_messages(session_id: str, messages: list):
-    """Efficiently insert multiple messages"""
-    with get_db_session() as db:
-        db.bulk_insert_mappings(
-            ChatMessage,
-            [
-                {
-                    'session_id': session_id,
-                    'role': msg['role'],
-                    'content': msg['content'],
-                    'timestamp': utcnow_naive()
-                }
-                for msg in messages
-            ]
-        )
-
-def cleanup_old_sessions(days: int = 30):
-    """Remove sessions older than specified days"""
-    from datetime import timedelta
-    
-    with get_db_session() as db:
-        cutoff_date = utcnow_naive() - timedelta(days=days)
-        
-        deleted_count = db.query(Session).filter(
-            Session.archived == True,
-            Session.last_accessed < cutoff_date,
-            Session.is_important == False
-        ).delete()
-        
-        return deleted_count
 
 def get_session_stats():
     """Get database statistics"""
@@ -2971,21 +1936,13 @@ def get_session_stats():
         return stats
 
 def get_detailed_stats():
-    """Get comprehensive database statistics including file size"""
-    stats = get_session_stats()  # Use existing function
-    
-    # Add database file size
-    db_size_mb = 0.0
-    if "sqlite" in DATABASE_URL:
-        db_path = DATABASE_URL.replace("sqlite:///", "")
-        if not os.path.isabs(db_path):
-            db_path = os.path.abspath(db_path)
-        
-        if os.path.exists(db_path):
-            db_size = os.path.getsize(db_path)
-            db_size_mb = round(db_size / (1024 * 1024), 2)
-    
-    stats['database_size_mb'] = db_size_mb
+    """Session counts plus the SQLite file size in MB."""
+    stats = get_session_stats()
+    db_path = _sqlite_db_path(engine.url)
+    stats['database_size_mb'] = (
+        round(os.path.getsize(db_path) / (1024 * 1024), 2)
+        if db_path and os.path.exists(db_path) else 0.0
+    )
     return stats
 
 def update_session_last_accessed(session_id: str):
@@ -3025,10 +1982,6 @@ def set_session_mode(session_id: str, mode: str) -> bool:
         logger.warning("Failed to persist mode %r for session %s", mode, session_id)
         return False
 
-def get_session_by_id(session_id: str):
-    """Get a session by ID"""
-    with get_db_session() as db:
-        return db.query(Session).filter(Session.id == session_id).first()
 
 def get_upcoming_events(owner, horizon_days: int = 60, limit: int = 40):
     """Upcoming, non-cancelled events as {uid, title, start} dicts, soonest first.
@@ -3056,17 +2009,3 @@ def get_upcoming_events(owner, horizon_days: int = 60, limit: int = 40):
             for e in q.order_by(CalendarEvent.dtstart).limit(limit).all()
         ]
 
-def archive_session(session_id: str):
-    """Archive a session"""
-    with get_db_session() as db:
-        session = db.query(Session).filter(Session.id == session_id).first()
-        if session:
-            session.archived = True
-            db.commit()
-            return True
-    return False
-
-# Initialize the database by creating all tables
-
-
-init_db()

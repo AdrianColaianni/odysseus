@@ -292,7 +292,7 @@ def test_oversized_title_does_not_hide_partial_notice(monkeypatch):
             "total_bytes": 9_000_000,
         }
 
-    import src.search.content as alias_mod
+    import services.search.content as alias_mod
     monkeypatch.setattr(alias_mod, "fetch_webpage_content", fake_fetch)
 
     out = asyncio.run(WebFetchTool().execute(
@@ -320,7 +320,7 @@ def test_tool_layer_emits_partial_notice_and_parses_full(monkeypatch):
             "total_bytes": 5_000_000,
         }
 
-    import src.search.content as alias_mod
+    import services.search.content as alias_mod
     monkeypatch.setattr(alias_mod, "fetch_webpage_content", fake_fetch)
 
     out = asyncio.run(WebFetchTool().execute(

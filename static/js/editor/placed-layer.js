@@ -78,11 +78,16 @@ export function frameTransformMatrix(sourceBounds, target) {
   );
 }
 
+export function makeCanvas(width, height) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  return canvas;
+}
+
 export function copyCanvas(source) {
   if (!source) return null;
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Number(source.width) || 1);
-  canvas.height = Math.max(1, Number(source.height) || 1);
+  const canvas = makeCanvas(Math.max(1, Number(source.width) || 1), Math.max(1, Number(source.height) || 1));
   canvas.getContext('2d').drawImage(source, 0, 0);
   return canvas;
 }

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import * as rules from '../frontend/src/features/notes/domain/recurrence.js';
+import * as rules from '../static/js/features/notes/domain/recurrence.js';
 
 const baseline = fs.readFileSync(new URL('./fixtures/notesRecurrenceBaseline.mjs', import.meta.url), 'utf8');
 const timed = new Set(['_formatDueDate', '_isDueOverdue', '_isDueTodayOrOverdue', '_laterTodayDate', '_tomorrowDate', '_nextWeekDate', '_formatReminderTag', '_snapToRepeat', '_advanceRecurring']);

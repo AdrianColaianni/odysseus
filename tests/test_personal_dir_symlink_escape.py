@@ -74,20 +74,3 @@ def test_shared_boundary_refuses_a_symlink_out_of_the_base(tmp_path):
     # A real directory inside the base is still reachable.
     (base / "real").mkdir()
     assert confine(base, "real") == os.path.join(os.path.realpath(base), "real")
-
-
-def test_realpath_catches_symlink_escape(tmp_path):
-    # The principle the fix relies on: abspath keeps the symlink path inside the
-    # base (confinement fooled); realpath resolves it outside (confinement holds).
-    base = tmp_path / "personal"
-    base.mkdir()
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    link = base / "escape"
-    os.symlink(outside, link)
-
-    base_abs = os.path.realpath(base)  # base itself may live under a symlinked tmp
-    # abspath: the symlink still looks inside base -> escape not detected
-    assert os.path.commonpath([os.path.abspath(base / "escape"), os.path.abspath(base)]) == os.path.abspath(base)
-    # realpath: the symlink resolves to `outside` -> escape detected
-    assert os.path.commonpath([os.path.realpath(link), base_abs]) != base_abs

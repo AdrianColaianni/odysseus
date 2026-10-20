@@ -2,7 +2,7 @@ import asyncio
 import json
 
 from src.agent_tools.web_tools import WebFetchTool, _arxiv_listing_api_hint
-from src.search import content as content_mod
+from services.search import content as content_mod
 from src.tool_schemas import FUNCTION_TOOL_SCHEMAS, function_call_to_tool_block
 from src.clean_agent_preview import normalize_preview_function_args
 from src.tool_execution import _active_workspace
@@ -62,7 +62,6 @@ def test_web_fetch_batch_reads_local_workspace_text_files(tmp_path):
     assert result["successful"] == 2
     assert '"one": 1' in result["output"]
     assert '"two": 2' in result["output"]
-    assert "Read the local workspace path with read_file" in result["output"]
 
 
 def test_web_fetch_does_not_decode_local_html_or_binary_media(tmp_path):

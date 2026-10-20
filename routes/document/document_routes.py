@@ -8,11 +8,12 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File, Form, Depends
+from sqlalchemy.orm import Session
 from fastapi.responses import HTMLResponse
 
 from sqlalchemy import case, func, or_
-from core.database import SessionLocal, Document, DocumentVersion
+from core.database import SessionLocal, Document, DocumentVersion, get_db
 from core.database import Session as DbSession
 from src.auth_helpers import get_current_user, _auth_disabled
 from src.constants import MAIL_ATTACHMENTS_DIR
@@ -33,10 +34,8 @@ def _get_session_or_404(db, session_id: str, user: Optional[str]):
 def _aggregate_language_facets(lang_rows):
     """Sum document counts per display language for the library facet.
 
-    NULL-language and explicit "text" rows share the "text" bucket (the
-    language filter treats them as one), so they must be ADDED. The old dict
-    comprehension keyed both to "text", silently overwriting one group and
-    undercounting the facet versus what the filter actually returns.
+    NULL-language and explicit "text" rows share the "text" bucket, as in the
+    language filter, so their counts add.
     """
     out = {}
     for lang, cnt in lang_rows:
@@ -71,10 +70,10 @@ def _email_source_key(content: str) -> tuple[str, str]:
     return uid, folder
 
 
-from routes.document_helpers import (
+from routes.document.document_helpers import (
     DocumentCreate, DocumentUpdate, DocumentPatch,
     _doc_to_dict, _version_to_dict,
-    _verify_doc_owner, _owner_session_filter,
+    _get_owned_document, _verify_doc_owner, _owner_session_filter,
     _slug, _resolve_user_upload_path, _assert_pdf_marker_upload_owned, _derive_title,
     _PDF_RENDER_SCALE,
 )
@@ -105,12 +104,10 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         except RuntimeError as exc:
             raise HTTPException(503, str(exc)) from exc
 
-    # ---- POST /api/document ----
     @router.post("/api/document")
-    async def create_document(request: Request, req: DocumentCreate) -> Dict[str, Any]:
+    def create_document(request: Request, req: DocumentCreate, db: Session = Depends(get_db)) -> Dict[str, Any]:
         from src.auth_helpers import require_privilege
         user = require_privilege(request, "can_use_documents")
-        db = SessionLocal()
         try:
             # session_id is optional: a doc can be a session-less "library" doc
             # (e.g. files imported from the library) — session_id is nullable and
@@ -218,12 +215,9 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             db.rollback()
             logger.error(f"Failed to create document: {e}")
             raise HTTPException(500, f"Failed to create document: {e}")
-        finally:
-            db.close()
 
-    # ---- POST /api/documents/import-pdf ----
     @router.post("/api/documents/import-pdf")
-    async def import_pdf(
+    def import_pdf(
         request: Request,
         file: UploadFile = File(...),
         session_id: Optional[str] = Form(None),
@@ -323,7 +317,6 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         finally:
             db.close()
 
-    # ---- POST /api/documents/import-docx ----
     @router.post("/api/documents/import-docx")
     async def import_docx(
         request: Request,
@@ -398,37 +391,30 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             db.close()
 
     @router.get("/api/document/{doc_id}/render-docx")
-    async def render_docx(doc_id: str, request: Request) -> Dict[str, Any]:
+    async def render_docx(doc_id: str, request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
         """Return a sanitized-by-client DOCX-to-HTML preview fragment."""
         from src.auth_helpers import require_privilege
 
         user = require_privilege(request, "can_use_documents")
-        db = SessionLocal()
+        doc = _get_owned_document(db, doc_id, user)
+        match = re.search(r'<!--\s*docx_source\s+upload_id="([^"]+)"\s*-->', doc.current_content or "")
+        if not match:
+            raise HTTPException(400, "Document has no DOCX source")
+        path = _locate_current_user_upload(request, match.group(1), user)
+        if not path:
+            raise HTTPException(404, "Original DOCX upload is no longer available")
         try:
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
-            match = re.search(r'<!--\s*docx_source\s+upload_id="([^"]+)"\s*-->', doc.current_content or "")
-            if not match:
-                raise HTTPException(400, "Document has no DOCX source")
-            path = _locate_current_user_upload(request, match.group(1), user)
-            if not path:
-                raise HTTPException(404, "Original DOCX upload is no longer available")
-            try:
-                import mammoth
-                result = await asyncio.to_thread(mammoth.convert_to_html, str(path))
-            except ImportError as exc:
-                raise HTTPException(503, "DOCX preview needs the Mammoth document dependency") from exc
-            except Exception as exc:
-                logger.warning("DOCX preview failed for %s: %s", doc_id, exc)
-                raise HTTPException(422, "Could not render this DOCX preview") from exc
-            return {"html": result.value or "", "messages": [str(m) for m in (result.messages or [])]}
-        finally:
-            db.close()
+            import mammoth
+            result = await asyncio.to_thread(mammoth.convert_to_html, str(path))
+        except ImportError as exc:
+            raise HTTPException(503, "DOCX preview needs the Mammoth document dependency") from exc
+        except Exception as exc:
+            logger.warning("DOCX preview failed for %s: %s", doc_id, exc)
+            raise HTTPException(422, "Could not render this DOCX preview") from exc
+        return {"html": result.value or "", "messages": [str(m) for m in (result.messages or [])]}
 
     @router.get("/api/document/{doc_id}/convert-original/{target}")
-    async def convert_original_document(doc_id: str, target: str, request: Request):
+    async def convert_original_document(doc_id: str, target: str, request: Request, db: Session = Depends(get_db)):
         """Convert the preserved DOCX/PDF upload directly with LibreOffice.
 
         The extracted Markdown is for search and AI context only. It must not
@@ -447,23 +433,16 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(400, "Unsupported conversion target")
 
         user = require_privilege(request, "can_use_documents")
-        db = SessionLocal()
-        try:
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
-            content = doc.current_content or ""
-            match = re.search(
-                r'<!--\s*(?:docx|pdf(?:_form)?)_source\s+upload_id="([^"\s]+)"\s*-->',
-                content,
-                re.IGNORECASE,
-            )
-            upload_id = find_source_upload_id(content) or (match.group(1) if match else None)
-            if not upload_id:
-                raise HTTPException(400, "This document has no preserved original file")
-        finally:
-            db.close()
+        doc = _get_owned_document(db, doc_id, user)
+        content = doc.current_content or ""
+        match = re.search(
+            r'<!--\s*(?:docx|pdf(?:_form)?)_source\s+upload_id="([^"\s]+)"\s*-->',
+            content,
+            re.IGNORECASE,
+        )
+        upload_id = find_source_upload_id(content) or (match.group(1) if match else None)
+        if not upload_id:
+            raise HTTPException(400, "This document has no preserved original file")
 
         source = _locate_current_user_upload(request, upload_id, user)
         if not source:
@@ -507,9 +486,8 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             headers={"Content-Disposition": f'attachment; filename="{source.stem}.{target}"'},
         )
 
-    # ---- GET /api/documents/library ----
     @router.get("/api/documents/library")
-    async def documents_library(
+    def documents_library(
         request: Request,
         search: Optional[str] = Query(None),
         language: Optional[str] = Query(None),
@@ -517,9 +495,9 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         offset: int = Query(0, ge=0),
         limit: int = Query(20, ge=1, le=50),
         archived: bool = Query(False),
+        db: Session = Depends(get_db),
     ) -> Dict[str, Any]:
         user = get_current_user(request)
-        db = SessionLocal()
         try:
             from sqlalchemy import or_
             pdf_marker_cond = or_(
@@ -626,92 +604,60 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         except Exception as e:
             logger.error(f"Failed to fetch document library: {e}")
             raise HTTPException(500, f"Failed to fetch document library: {e}")
-        finally:
-            db.close()
 
-    # ---- GET /api/documents/{session_id} ----
     @router.get("/api/documents/{session_id}")
-    async def list_documents(request: Request, session_id: str) -> List[Dict[str, Any]]:
+    def list_documents(request: Request, session_id: str, db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            if not user:
-                if not _auth_disabled():
-                    raise HTTPException(403, "Authentication required")
-            # v2 review HIGH-9: raise 403 explicitly when the caller
-            # can't see this session, instead of returning [] which the
-            # UI treats identically to "no docs" and silently masks
-            # auth failures.
-            _get_session_or_404(db, session_id, user)
-            q = db.query(Document).filter(
-                Document.session_id == session_id
-            )
-            if user:
-                q = q.filter(or_(Document.owner == user, Document.owner.is_(None)))
-            docs = q.order_by(Document.created_at.desc()).all()
-            return [_doc_to_dict(d) for d in docs]
-        finally:
-            db.close()
+        if not user:
+            if not _auth_disabled():
+                raise HTTPException(403, "Authentication required")
+        # v2 review HIGH-9: raise 403 explicitly when the caller
+        # can't see this session, instead of returning [] which the
+        # UI treats identically to "no docs" and silently masks
+        # auth failures.
+        _get_session_or_404(db, session_id, user)
+        q = db.query(Document).filter(
+            Document.session_id == session_id
+        )
+        if user:
+            q = q.filter(or_(Document.owner == user, Document.owner.is_(None)))
+        docs = q.order_by(Document.created_at.desc()).all()
+        return [_doc_to_dict(d) for d in docs]
 
-    # ---- GET /api/document/{doc_id} ----
     @router.get("/api/document/{doc_id}")
-    async def get_document(request: Request, doc_id: str) -> Dict[str, Any]:
+    def get_document(request: Request, doc_id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
-            return _doc_to_dict(doc)
-        finally:
-            db.close()
+        doc = _get_owned_document(db, doc_id, user)
+        return _doc_to_dict(doc)
 
-    # ---- GET /api/document/{doc_id}/visual-report ----
     @router.get("/api/document/{doc_id}/visual-report", response_class=HTMLResponse)
-    async def document_visual_report(request: Request, doc_id: str) -> HTMLResponse:
+    def document_visual_report(request: Request, doc_id: str, db: Session = Depends(get_db)) -> HTMLResponse:
         """Render a Markdown document with the same standalone report UI used by Deep Research."""
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
-            if (doc.language or "").lower() != "markdown":
-                raise HTTPException(400, "Visual reports are available for Markdown documents")
+        doc = _get_owned_document(db, doc_id, user)
+        if (doc.language or "").lower() != "markdown":
+            raise HTTPException(400, "Visual reports are available for Markdown documents")
 
-            from src.visual_report import generate_visual_report
+        from src.visual_report import generate_visual_report
 
-            html_content = generate_visual_report(
-                question=doc.title or "Document",
-                report_markdown=doc.current_content or "",
-                sources=[],
-                stats={},
-            )
-            return HTMLResponse(content=html_content)
-        finally:
-            db.close()
+        html_content = generate_visual_report(
+            question=doc.title or "Document",
+            report_markdown=doc.current_content or "",
+            sources=[],
+            stats={},
+        )
+        return HTMLResponse(content=html_content)
 
-    # ---- POST /api/document/{doc_id}/archive — soft-archive / restore ----
     @router.post("/api/document/{doc_id}/archive")
-    async def archive_document(request: Request, doc_id: str, archived: bool = Query(True)) -> Dict[str, Any]:
+    def archive_document(request: Request, doc_id: str, archived: bool = Query(True), db: Session = Depends(get_db)) -> Dict[str, Any]:
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
-            doc.archived = bool(archived)
-            db.commit()
-            return {"ok": True, "id": doc_id, "archived": doc.archived}
-        finally:
-            db.close()
+        doc = _get_owned_document(db, doc_id, user)
+        doc.archived = bool(archived)
+        db.commit()
+        return {"ok": True, "id": doc_id, "archived": doc.archived}
 
-    # ---- POST /api/document/{doc_id}/extract-pdf-text ----
     @router.post("/api/document/{doc_id}/extract-pdf-text")
-    async def extract_pdf_text(request: Request, doc_id: str) -> Dict[str, Any]:
+    def extract_pdf_text(request: Request, doc_id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
         """Re-run pypdf+VL text extraction against the PDF linked to this doc
         and merge the result into the doc's markdown content. Idempotent — the
         existing body (everything below the title heading) is replaced.
@@ -724,54 +670,46 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         from src.pdf_form_doc import find_source_upload_id
 
         user = get_current_user(request)
-        db = SessionLocal()
+        doc = _get_owned_document(db, doc_id, user)
+
+        content = doc.current_content or ""
+        upload_id = find_source_upload_id(content)
+        if not upload_id:
+            raise HTTPException(400, "Document is not a PDF — no pdf_source marker found")
+
+        pdf_path = _locate_current_user_upload(request, upload_id, user)
+        if not pdf_path:
+            raise HTTPException(404, "Source PDF could not be located")
+
         try:
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
+            body_text = strip_pdf_content_marker(_process_pdf(pdf_path, owner=user))
+        except Exception as e:
+            logger.error(f"extract_pdf_text failed for {pdf_path}: {e}")
+            raise HTTPException(500, f"Extraction failed: {e}")
 
-            content = doc.current_content or ""
-            upload_id = find_source_upload_id(content)
-            if not upload_id:
-                raise HTTPException(400, "Document is not a PDF — no pdf_source marker found")
+        if not body_text:
+            return {"ok": True, "id": doc_id, "extracted": False, "reason": "No readable content"}
 
-            pdf_path = _locate_current_user_upload(request, upload_id, user)
-            if not pdf_path:
-                raise HTTPException(404, "Source PDF could not be located")
+        # Preserve everything up through the title (front-matter marker +
+        # first H1) and replace the rest with the freshly extracted text.
+        head_re = re.compile(r'^(<!--[^>]+-->\s*\n+#[^\n]*\n+)', re.MULTILINE)
+        head_match = head_re.match(content)
+        head = head_match.group(1) if head_match else (content.splitlines()[0] + "\n\n# " + (doc.title or "PDF") + "\n\n")
+        doc.current_content = head + body_text.strip() + "\n"
+        doc.version_count = (doc.version_count or 1) + 1
+        db.add(DocumentVersion(
+            id=str(__import__("uuid").uuid4()),
+            document_id=doc_id,
+            version_number=doc.version_count,
+            content=doc.current_content,
+            summary="PDF text re-extracted (OCR)",
+            source="ocr",
+        ))
+        db.commit()
+        return {"ok": True, "id": doc_id, "extracted": True, "chars": len(body_text)}
 
-            try:
-                body_text = strip_pdf_content_marker(_process_pdf(pdf_path, owner=user))
-            except Exception as e:
-                logger.error(f"extract_pdf_text failed for {pdf_path}: {e}")
-                raise HTTPException(500, f"Extraction failed: {e}")
-
-            if not body_text:
-                return {"ok": True, "id": doc_id, "extracted": False, "reason": "No readable content"}
-
-            # Preserve everything up through the title (front-matter marker +
-            # first H1) and replace the rest with the freshly extracted text.
-            head_re = re.compile(r'^(<!--[^>]+-->\s*\n+#[^\n]*\n+)', re.MULTILINE)
-            head_match = head_re.match(content)
-            head = head_match.group(1) if head_match else (content.splitlines()[0] + "\n\n# " + (doc.title or "PDF") + "\n\n")
-            doc.current_content = head + body_text.strip() + "\n"
-            doc.version_count = (doc.version_count or 1) + 1
-            db.add(DocumentVersion(
-                id=str(__import__("uuid").uuid4()),
-                document_id=doc_id,
-                version_number=doc.version_count,
-                content=doc.current_content,
-                summary="PDF text re-extracted (OCR)",
-                source="ocr",
-            ))
-            db.commit()
-            return {"ok": True, "id": doc_id, "extracted": True, "chars": len(body_text)}
-        finally:
-            db.close()
-
-    # ---- POST /api/documents/export-zip — bundle selected docs into a .zip ----
     @router.post("/api/documents/export-zip")
-    async def documents_export_zip(request: Request):
+    async def documents_export_zip(request: Request, db: Session = Depends(get_db)):
         """Zip the selected documents (each as a text file with the right
         extension) — mirrors the gallery's bulk download-zip so multi-export
         is one file instead of a blocked flood of individual downloads."""
@@ -791,61 +729,52 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             "cpp": ".cpp", "typescript": ".ts", "ruby": ".rb", "php": ".php",
             "text": ".txt", "email": ".eml", "xml": ".xml", "toml": ".toml", "ini": ".ini",
         }
-        db = SessionLocal()
-        try:
-            import io
-            import re
-            import zipfile
-            from fastapi import Response
-            docs = db.query(Document).filter(Document.id.in_(ids)).all()
-            buf = io.BytesIO()
-            used = set()
-            wrote = 0
-            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                for doc in docs:
-                    try:
-                        _verify_doc_owner(db, doc, user)
-                    except HTTPException:
-                        continue   # skip docs the user doesn't own
-                    ext = _ext.get(doc.language or "text", ".txt")
-                    base = (doc.title or "document").strip() or "document"
-                    base = re.sub(r"[^\w\-. ]+", "", base)[:60].strip() or doc.id
-                    name = base if "." in base else base + ext
-                    i = 1
-                    while name in used:
-                        name = f"{base}-{i}" + ("" if "." in base else ext)
-                        i += 1
-                    used.add(name)
-                    content = doc.current_content or ""
-                    if (doc.language or "").lower() == "email":
-                        content = re.sub(r"\r?\n---\r?\n", "\r\n\r\n", content, count=1)
-                    zf.writestr(name, content)
-                    wrote += 1
-            if not wrote:
-                raise HTTPException(404, "No documents found")
-            return Response(
-                content=buf.getvalue(),
-                media_type="application/zip",
-                headers={"Content-Disposition": 'attachment; filename="documents.zip"'},
-            )
-        finally:
-            db.close()
+        import io
+        import re
+        import zipfile
+        from fastapi import Response
+        docs = db.query(Document).filter(Document.id.in_(ids)).all()
+        buf = io.BytesIO()
+        used = set()
+        wrote = 0
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for doc in docs:
+                try:
+                    _verify_doc_owner(db, doc, user)
+                except HTTPException:
+                    continue   # skip docs the user doesn't own
+                ext = _ext.get(doc.language or "text", ".txt")
+                base = (doc.title or "document").strip() or "document"
+                base = re.sub(r"[^\w\-. ]+", "", base)[:60].strip() or doc.id
+                name = base if "." in base else base + ext
+                i = 1
+                while name in used:
+                    name = f"{base}-{i}" + ("" if "." in base else ext)
+                    i += 1
+                used.add(name)
+                content = doc.current_content or ""
+                if (doc.language or "").lower() == "email":
+                    content = re.sub(r"\r?\n---\r?\n", "\r\n\r\n", content, count=1)
+                zf.writestr(name, content)
+                wrote += 1
+        if not wrote:
+            raise HTTPException(404, "No documents found")
+        return Response(
+            content=buf.getvalue(),
+            media_type="application/zip",
+            headers={"Content-Disposition": 'attachment; filename="documents.zip"'},
+        )
 
-    # ---- PUT /api/document/{doc_id} — user manual edit ----
     # Coalesce window: if the last user version was saved within this many
     # seconds, update it in-place (user is still actively editing).
     # Once the gap exceeds this, the next save creates a new version.
     VERSION_COALESCE_SECONDS = 60
 
     @router.put("/api/document/{doc_id}")
-    async def update_document(request: Request, doc_id: str, req: DocumentUpdate) -> Dict[str, Any]:
+    def update_document(request: Request, doc_id: str, req: DocumentUpdate, db: Session = Depends(get_db)) -> Dict[str, Any]:
         user = get_current_user(request)
-        db = SessionLocal()
         try:
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
+            doc = _get_owned_document(db, doc_id, user)
 
             incoming_content = req.content
             from src.agent_tools.document_tools import _coerce_email_document_content, _looks_like_email_document
@@ -908,19 +837,12 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         except Exception as e:
             db.rollback()
             raise HTTPException(500, f"Failed to update document: {e}")
-        finally:
-            db.close()
 
-    # ---- PATCH /api/document/{doc_id} — metadata only ----
     @router.patch("/api/document/{doc_id}")
-    async def patch_document(request: Request, doc_id: str, req: DocumentPatch) -> Dict[str, Any]:
+    def patch_document(request: Request, doc_id: str, req: DocumentPatch, db: Session = Depends(get_db)) -> Dict[str, Any]:
         user = get_current_user(request)
-        db = SessionLocal()
         try:
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
+            doc = _get_owned_document(db, doc_id, user)
             if req.title is not None:
                 doc.title = req.title
             if req.language is not None:
@@ -933,7 +855,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 if not req.session_id:
                     # Tab closed / doc detached from its session — drop the
                     # in-memory active-doc pointer so the last-resort injection
-                    # path doesn't re-surface this doc in a later chat (#1160).
+                    # path doesn't re-surface this doc in a later chat.
                     try:
                         from src.agent_tools.document_tools import clear_active_document
                         clear_active_document(doc_id)
@@ -947,22 +869,15 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         except Exception as e:
             db.rollback()
             raise HTTPException(500, str(e))
-        finally:
-            db.close()
 
-    # ---- DELETE /api/document/{doc_id} — soft delete ----
     @router.delete("/api/document/{doc_id}")
-    async def delete_document(request: Request, doc_id: str) -> Dict[str, str]:
+    def delete_document(request: Request, doc_id: str, db: Session = Depends(get_db)) -> Dict[str, str]:
         user = get_current_user(request)
-        db = SessionLocal()
         try:
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
+            doc = _get_owned_document(db, doc_id, user)
             doc.is_active = False
             # Closed/deleted — drop the in-memory active-doc pointer so it isn't
-            # re-injected into a later, unrelated chat (#1160).
+            # re-injected into a later, unrelated chat.
             try:
                 from src.agent_tools.document_tools import clear_active_document
                 clear_active_document(doc_id)
@@ -975,65 +890,42 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         except Exception as e:
             db.rollback()
             raise HTTPException(500, str(e))
-        finally:
-            db.close()
 
-    # ---- GET /api/document/{doc_id}/versions ----
     @router.get("/api/document/{doc_id}/versions")
-    async def list_versions(request: Request, doc_id: str) -> List[Dict[str, Any]]:
+    def list_versions(request: Request, doc_id: str, db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            # Verify ownership before listing versions
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
-            versions = db.query(DocumentVersion).filter(
-                DocumentVersion.document_id == doc_id
-            ).order_by(DocumentVersion.version_number.desc()).all()
-            return [{
-                "id": v.id,
-                "version_number": v.version_number,
-                "content": v.content,
-                "summary": v.summary,
-                "source": v.source,
-                "created_at": v.created_at.isoformat() if v.created_at else None,
-            } for v in versions]
-        finally:
-            db.close()
+        # Verify ownership before listing versions
+        doc = _get_owned_document(db, doc_id, user)
+        versions = db.query(DocumentVersion).filter(
+            DocumentVersion.document_id == doc_id
+        ).order_by(DocumentVersion.version_number.desc()).all()
+        return [{
+            "id": v.id,
+            "version_number": v.version_number,
+            "content": v.content,
+            "summary": v.summary,
+            "source": v.source,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+        } for v in versions]
 
-    # ---- GET /api/document/{doc_id}/version/{num} ----
     @router.get("/api/document/{doc_id}/version/{num}")
-    async def get_version(request: Request, doc_id: str, num: int) -> Dict[str, Any]:
+    def get_version(request: Request, doc_id: str, num: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            # Verify ownership
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
-            ver = db.query(DocumentVersion).filter(
-                DocumentVersion.document_id == doc_id,
-                DocumentVersion.version_number == num,
-            ).first()
-            if not ver:
-                raise HTTPException(404, "Version not found")
-            return _version_to_dict(ver)
-        finally:
-            db.close()
+        # Verify ownership
+        doc = _get_owned_document(db, doc_id, user)
+        ver = db.query(DocumentVersion).filter(
+            DocumentVersion.document_id == doc_id,
+            DocumentVersion.version_number == num,
+        ).first()
+        if not ver:
+            raise HTTPException(404, "Version not found")
+        return _version_to_dict(ver)
 
-    # ---- POST /api/document/{doc_id}/restore/{num} ----
     @router.post("/api/document/{doc_id}/restore/{num}")
-    async def restore_version(request: Request, doc_id: str, num: int) -> Dict[str, Any]:
+    def restore_version(request: Request, doc_id: str, num: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
         user = get_current_user(request)
-        db = SessionLocal()
         try:
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
+            doc = _get_owned_document(db, doc_id, user)
 
             old_ver = db.query(DocumentVersion).filter(
                 DocumentVersion.document_id == doc_id,
@@ -1062,15 +954,11 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         except Exception as e:
             db.rollback()
             raise HTTPException(500, str(e))
-        finally:
-            db.close()
 
-    # ---- POST /api/documents/tidy — clean up broken/empty documents ----
     @router.post("/api/documents/tidy")
-    async def tidy_documents(request: Request) -> Dict[str, Any]:
+    def tidy_documents(request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
         """Fix empty titles and remove broken/empty documents (user's docs only)."""
         user = get_current_user(request)
-        db = SessionLocal()
         try:
             q = (
                 db.query(Document)
@@ -1177,17 +1065,15 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             db.rollback()
             logger.error(f"Document tidy failed: {e}")
             raise HTTPException(500, f"Tidy failed: {e}")
-        finally:
-            db.close()
 
-    # ---- POST /api/documents/ai-tidy — AI-powered cleanup of junk/test documents ----
     @router.post("/api/documents/ai-tidy")
-    async def ai_tidy_documents(request: Request) -> Dict[str, Any]:
+    async def ai_tidy_documents(request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
         """Use AI to judge if documents are junk/test/accidental, then delete them.
         Caches verdicts so previously-reviewed docs are skipped."""
         from src.task_endpoint import resolve_task_endpoint
         from src.endpoint_resolver import resolve_endpoint
         from src.llm_core import llm_call_async
+        from src.text_helpers import extract_llm_json
 
         user = get_current_user(request)
         url, model, headers = resolve_task_endpoint(owner=user or None)
@@ -1197,7 +1083,6 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         if not url or not model:
             raise HTTPException(500, "No endpoint configured for AI tidy")
 
-        db = SessionLocal()
         try:
             q = (
                 db.query(Document)
@@ -1238,14 +1123,9 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 timeout=30,
             )
 
-            # Parse verdicts
-            import re
-            match = re.search(r'\[.*?\]', response, re.DOTALL)
-            if not match:
+            verdicts = extract_llm_json(response, opener="[")
+            if not isinstance(verdicts, list):
                 raise HTTPException(500, "AI returned invalid response")
-
-            import json as _json
-            verdicts = _json.loads(match.group())
 
             deleted = 0
             reviewed = 0
@@ -1274,12 +1154,9 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             db.rollback()
             logger.error(f"AI tidy failed: {e}")
             raise HTTPException(500, f"AI tidy failed: {e}")
-        finally:
-            db.close()
 
-    # ---- POST /api/document/{doc_id}/export-pdf/preview ----
     @router.post("/api/document/{doc_id}/export-pdf/preview")
-    async def export_pdf_preview(doc_id: str, request: Request) -> Dict[str, Any]:
+    def export_pdf_preview(doc_id: str, request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
         """Return the field-value mapping that would be written to the PDF.
 
         Frontend shows this in a confirmation modal so the user can spot/fix
@@ -1288,60 +1165,52 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         from src.pdf_form_doc import find_source_upload_id, parse_markdown_to_values, load_field_sidecar
 
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
+        doc = _get_owned_document(db, doc_id, user)
 
-            upload_id = find_source_upload_id(doc.current_content or "")
-            if not upload_id:
-                raise HTTPException(400, "Document is not linked to a source PDF")
+        upload_id = find_source_upload_id(doc.current_content or "")
+        if not upload_id:
+            raise HTTPException(400, "Document is not linked to a source PDF")
 
-            pdf_path = _locate_current_user_upload(request, upload_id, user)
-            if not pdf_path:
-                raise HTTPException(404, f"Source PDF {upload_id} not found in uploads")
+        pdf_path = _locate_current_user_upload(request, upload_id, user)
+        if not pdf_path:
+            raise HTTPException(404, f"Source PDF {upload_id} not found in uploads")
 
-            fields = load_field_sidecar(pdf_path)
-            if not fields:
-                raise HTTPException(404, "Field schema sidecar missing for source PDF")
+        fields = load_field_sidecar(pdf_path)
+        if not fields:
+            raise HTTPException(404, "Field schema sidecar missing for source PDF")
 
-            values = parse_markdown_to_values(doc.current_content or "")
-            field_meta = {f["name"]: f for f in fields}
+        values = parse_markdown_to_values(doc.current_content or "")
+        field_meta = {f["name"]: f for f in fields}
 
-            preview = []
-            for name, current in values.items():
-                meta = field_meta.get(name)
-                if not meta:
-                    continue
-                preview.append({
-                    "name": name,
-                    "label": meta.get("label") or name,
-                    "type": meta.get("type"),
-                    "options": meta.get("options") or [],
-                    "page": meta.get("page"),
-                    "value": current,
-                })
+        preview = []
+        for name, current in values.items():
+            meta = field_meta.get(name)
+            if not meta:
+                continue
+            preview.append({
+                "name": name,
+                "label": meta.get("label") or name,
+                "type": meta.get("type"),
+                "options": meta.get("options") or [],
+                "page": meta.get("page"),
+                "value": current,
+            })
 
-            unknown = [
-                name for name in values
-                if name not in field_meta
-            ]
-            return {
-                "doc_id": doc_id,
-                "upload_id": upload_id,
-                "fields": preview,
-                "unknown_fields": unknown,
-                "total": len(fields),
-                "filled": sum(1 for p in preview if p["value"] not in ("", False, None)),
-            }
-        finally:
-            db.close()
+        unknown = [
+            name for name in values
+            if name not in field_meta
+        ]
+        return {
+            "doc_id": doc_id,
+            "upload_id": upload_id,
+            "fields": preview,
+            "unknown_fields": unknown,
+            "total": len(fields),
+            "filled": sum(1 for p in preview if p["value"] not in ("", False, None)),
+        }
 
-    # ---- GET /api/document/{doc_id}/render-pages ----
     @router.get("/api/document/{doc_id}/render-pages")
-    async def render_pages(doc_id: str, request: Request) -> Dict[str, Any]:
+    def render_pages(doc_id: str, request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
         """Return per-page metadata for the interactive PDF view.
 
         Each page entry has its rendered-image dimensions (matching what
@@ -1352,87 +1221,72 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         from src.pdf_form_doc import find_source_upload_id, parse_markdown_to_values, load_field_sidecar
 
         user = get_current_user(request)
-        db = SessionLocal()
+        doc = _get_owned_document(db, doc_id, user)
+        upload_id = find_source_upload_id(doc.current_content or "")
+        if not upload_id:
+            raise HTTPException(400, "Document is not linked to a source PDF")
+        pdf_path = _locate_current_user_upload(request, upload_id, user)
+        if not pdf_path:
+            raise HTTPException(404, f"Source PDF {upload_id} not found")
+
+        fitz = _load_pdf_viewer_fitz()
+        schema = load_field_sidecar(pdf_path) or []
+        values = parse_markdown_to_values(doc.current_content or "")
+
+        # Group fields by page
+        by_page: Dict[int, list] = {}
+        for f in schema:
+            by_page.setdefault(f["page"], []).append(f)
+
+        scale = _PDF_RENDER_SCALE
+        pdf_doc = fitz.open(pdf_path)
         try:
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
-            upload_id = find_source_upload_id(doc.current_content or "")
-            if not upload_id:
-                raise HTTPException(400, "Document is not linked to a source PDF")
-            pdf_path = _locate_current_user_upload(request, upload_id, user)
-            if not pdf_path:
-                raise HTTPException(404, f"Source PDF {upload_id} not found")
-
-            fitz = _load_pdf_viewer_fitz()
-            schema = load_field_sidecar(pdf_path) or []
-            values = parse_markdown_to_values(doc.current_content or "")
-
-            # Group fields by page
-            by_page: Dict[int, list] = {}
-            for f in schema:
-                by_page.setdefault(f["page"], []).append(f)
-
-            scale = _PDF_RENDER_SCALE
-            pdf_doc = fitz.open(pdf_path)
-            try:
-                pages_out = []
-                for page_index in range(pdf_doc.page_count):
-                    page = pdf_doc[page_index]
-                    page_no = page_index + 1
-                    pw, ph = page.rect.width, page.rect.height
-                    img_w = int(pw * scale)
-                    img_h = int(ph * scale)
-                    fields_out = []
-                    for f in by_page.get(page_no, []):
-                        x0, y0, x1, y1 = f["rect"]
-                        fields_out.append({
-                            "name": f["name"],
-                            "type": f["type"],
-                            "label": f.get("label") or "",
-                            "options": f.get("options") or [],
-                            "value": values.get(f["name"], f.get("value", "")),
-                            "rect_px": [
-                                int(x0 * scale), int(y0 * scale),
-                                int(x1 * scale), int(y1 * scale),
-                            ],
-                        })
-                    pages_out.append({
-                        "page": page_no,
-                        "width": img_w,
-                        "height": img_h,
-                        "fields": fields_out,
+            pages_out = []
+            for page_index in range(pdf_doc.page_count):
+                page = pdf_doc[page_index]
+                page_no = page_index + 1
+                pw, ph = page.rect.width, page.rect.height
+                img_w = int(pw * scale)
+                img_h = int(ph * scale)
+                fields_out = []
+                for f in by_page.get(page_no, []):
+                    x0, y0, x1, y1 = f["rect"]
+                    fields_out.append({
+                        "name": f["name"],
+                        "type": f["type"],
+                        "label": f.get("label") or "",
+                        "options": f.get("options") or [],
+                        "value": values.get(f["name"], f.get("value", "")),
+                        "rect_px": [
+                            int(x0 * scale), int(y0 * scale),
+                            int(x1 * scale), int(y1 * scale),
+                        ],
                     })
-                return {"doc_id": doc_id, "scale": scale, "pages": pages_out}
-            finally:
-                pdf_doc.close()
+                pages_out.append({
+                    "page": page_no,
+                    "width": img_w,
+                    "height": img_h,
+                    "fields": fields_out,
+                })
+            return {"doc_id": doc_id, "scale": scale, "pages": pages_out}
         finally:
-            db.close()
+            pdf_doc.close()
 
-    # ---- GET /api/document/{doc_id}/page/{n}.png ----
     @router.get("/api/document/{doc_id}/page/{page_no}.png")
-    async def render_page_png(doc_id: str, page_no: int, request: Request):
+    def render_page_png(doc_id: str, page_no: int, request: Request, db: Session = Depends(get_db)):
         """Render one page of the source PDF as a PNG (no values stamped — the
         frontend overlays HTML form inputs on top)."""
         from fastapi.responses import Response
         from src.pdf_form_doc import find_source_upload_id
 
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
-            upload_id = find_source_upload_id(doc.current_content or "")
-            if not upload_id:
-                raise HTTPException(400, "Document is not linked to a source PDF")
-            pdf_path = _locate_current_user_upload(request, upload_id, user)
-            if not pdf_path:
-                raise HTTPException(404, "Source PDF not found")
-        finally:
-            db.close()
+        doc = _get_owned_document(db, doc_id, user)
+        upload_id = find_source_upload_id(doc.current_content or "")
+        if not upload_id:
+            raise HTTPException(400, "Document is not linked to a source PDF")
+        pdf_path = _locate_current_user_upload(request, upload_id, user)
+        if not pdf_path:
+            raise HTTPException(404, "Source PDF not found")
 
         fitz = _load_pdf_viewer_fitz()
         pdf_doc = fitz.open(pdf_path)
@@ -1451,9 +1305,8 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         finally:
             pdf_doc.close()
 
-    # ---- POST /api/document/{doc_id}/ai-fill-annotations ----
     @router.post("/api/document/{doc_id}/ai-fill-annotations")
-    async def ai_fill_annotations(doc_id: str, request: Request) -> Dict[str, Any]:
+    async def ai_fill_annotations(doc_id: str, request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
         """Ask a vision-capable LLM to locate fillable areas on a flat PDF and
         propose annotation values for each, given a free-form user instruction.
 
@@ -1474,20 +1327,13 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(400, "instruction is required")
 
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
-            upload_id = find_source_upload_id(doc.current_content or "")
-            if not upload_id:
-                raise HTTPException(400, "Document is not linked to a source PDF")
-            pdf_path = _locate_current_user_upload(request, upload_id, user)
-            if not pdf_path:
-                raise HTTPException(404, "Source PDF not found")
-        finally:
-            db.close()
+        doc = _get_owned_document(db, doc_id, user)
+        upload_id = find_source_upload_id(doc.current_content or "")
+        if not upload_id:
+            raise HTTPException(400, "Document is not linked to a source PDF")
+        pdf_path = _locate_current_user_upload(request, upload_id, user)
+        if not pdf_path:
+            raise HTTPException(404, "Source PDF not found")
 
         # Resolve VL model (admin-configured or auto-detected vision-capable)
         settings = _load_vl_settings()
@@ -1591,9 +1437,8 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
 
         return {"annotations": all_annotations}
 
-    # ---- GET /api/document/{doc_id}/render-pdf ----
     @router.get("/api/document/{doc_id}/render-pdf")
-    async def render_pdf(doc_id: str, request: Request):
+    def render_pdf(doc_id: str, request: Request, db: Session = Depends(get_db)):
         """Inline PDF preview filled with the current markdown values.
 
         Same plumbing as the export route, but no signature stamping and
@@ -1622,78 +1467,70 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                     logger.warning(f"Could not unlink temp PDF {_p}: {_e}")
 
         user = get_current_user(request)
-        db = SessionLocal()
+        doc = _get_owned_document(db, doc_id, user)
+        upload_id = find_source_upload_id(doc.current_content or "")
+        if not upload_id:
+            raise HTTPException(400, "Document is not linked to a source PDF")
+        pdf_path = _locate_current_user_upload(request, upload_id, user)
+        if not pdf_path:
+            raise HTTPException(404, f"Source PDF {upload_id} not found")
+
+        # Fail fast with a clear 503 if the optional PyMuPDF dependency
+        # is missing — fill_fields/stamp_annotations will otherwise
+        # raise RuntimeError deep inside and bubble out as a 500.
+        # Mirrors the convention in _load_pdf_viewer_fitz above.
+        _load_pdf_viewer_fitz()
+
+        values = parse_markdown_to_values(doc.current_content or "")
+        out_path = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
+        _to_unlink.append(out_path)
         try:
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
-            upload_id = find_source_upload_id(doc.current_content or "")
-            if not upload_id:
-                raise HTTPException(400, "Document is not linked to a source PDF")
-            pdf_path = _locate_current_user_upload(request, upload_id, user)
-            if not pdf_path:
-                raise HTTPException(404, f"Source PDF {upload_id} not found")
+            fill_fields(pdf_path, out_path, values)
+        except Exception as e:
+            logger.error(f"render_pdf fill_fields failed for {doc_id}: {e}")
+            _cleanup_temps()
+            raise HTTPException(500, f"PDF render failed: {e}")
 
-            # Fail fast with a clear 503 if the optional PyMuPDF dependency
-            # is missing — fill_fields/stamp_annotations will otherwise
-            # raise RuntimeError deep inside and bubble out as a 500.
-            # Mirrors the convention in _load_pdf_viewer_fitz above.
-            _load_pdf_viewer_fitz()
-
-            values = parse_markdown_to_values(doc.current_content or "")
-            out_path = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
-            _to_unlink.append(out_path)
+        annotations = parse_markdown_annotations(doc.current_content or "")
+        if annotations:
+            ann_sig_ids = [
+                a["value"][len("signature:"):].strip()
+                for a in annotations
+                if a.get("kind") == "signature"
+                and isinstance(a.get("value"), str)
+                and a["value"].startswith("signature:")
+            ]
+            ann_signature_pngs: dict[str, bytes] = {}
+            if ann_sig_ids:
+                # SECURITY: filter by owner so a caller can't reference
+                # someone else's signature ID from doc markdown and have
+                # it stamped/exported.
+                _sig_q = db.query(Signature).filter(Signature.id.in_(ann_sig_ids))
+                if user:
+                    _sig_q = _sig_q.filter(Signature.owner == user)
+                sig_rows = _sig_q.all()
+                for s in sig_rows:
+                    try:
+                        ann_signature_pngs[s.id] = base64.b64decode(s.data_png)
+                    except Exception as e:
+                        logger.warning(f"Bad annotation signature data for {s.id}: {e}")
+            annotated_path = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
+            _to_unlink.append(annotated_path)
             try:
-                fill_fields(pdf_path, out_path, values)
+                stamp_annotations(out_path, annotated_path, annotations, ann_signature_pngs)
+                out_path = annotated_path
             except Exception as e:
-                logger.error(f"render_pdf fill_fields failed for {doc_id}: {e}")
-                _cleanup_temps()
-                raise HTTPException(500, f"PDF render failed: {e}")
+                logger.error(f"stamp_annotations (render) failed for {doc_id}: {e}")
 
-            annotations = parse_markdown_annotations(doc.current_content or "")
-            if annotations:
-                ann_sig_ids = [
-                    a["value"][len("signature:"):].strip()
-                    for a in annotations
-                    if a.get("kind") == "signature"
-                    and isinstance(a.get("value"), str)
-                    and a["value"].startswith("signature:")
-                ]
-                ann_signature_pngs: dict[str, bytes] = {}
-                if ann_sig_ids:
-                    # SECURITY: filter by owner so a caller can't reference
-                    # someone else's signature ID from doc markdown and have
-                    # it stamped/exported.
-                    _sig_q = db.query(Signature).filter(Signature.id.in_(ann_sig_ids))
-                    if user:
-                        _sig_q = _sig_q.filter(Signature.owner == user)
-                    sig_rows = _sig_q.all()
-                    for s in sig_rows:
-                        try:
-                            ann_signature_pngs[s.id] = base64.b64decode(s.data_png)
-                        except Exception as e:
-                            logger.warning(f"Bad annotation signature data for {s.id}: {e}")
-                annotated_path = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
-                _to_unlink.append(annotated_path)
-                try:
-                    stamp_annotations(out_path, annotated_path, annotations, ann_signature_pngs)
-                    out_path = annotated_path
-                except Exception as e:
-                    logger.error(f"stamp_annotations (render) failed for {doc_id}: {e}")
+        return FileResponse(
+            out_path,
+            media_type="application/pdf",
+            headers={"Content-Disposition": "inline"},
+            background=BackgroundTask(_cleanup_temps),
+        )
 
-            return FileResponse(
-                out_path,
-                media_type="application/pdf",
-                headers={"Content-Disposition": "inline"},
-                background=BackgroundTask(_cleanup_temps),
-            )
-        finally:
-            db.close()
-
-    # ---- GET /api/document/{doc_id}/export-pdf ----
     @router.get("/api/document/{doc_id}/export-pdf")
-    async def export_pdf(doc_id: str, request: Request):
+    def export_pdf(doc_id: str, request: Request, db: Session = Depends(get_db)):
         """Stream the filled PDF for download.
 
         Reads field values and signature selections from the markdown — there
@@ -1720,116 +1557,108 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                     logger.warning(f"Could not unlink temp PDF {_p}: {_e}")
 
         user = get_current_user(request)
-        db = SessionLocal()
+        doc = _get_owned_document(db, doc_id, user)
+
+        upload_id = find_source_upload_id(doc.current_content or "")
+        if not upload_id:
+            raise HTTPException(400, "Document is not linked to a source PDF")
+
+        pdf_path = _locate_current_user_upload(request, upload_id, user)
+        if not pdf_path:
+            raise HTTPException(404, f"Source PDF {upload_id} not found in uploads")
+
+        schema = load_field_sidecar(pdf_path) or []
+        sig_field_names = {f["name"] for f in schema if f.get("type") == "signature"}
+
+        all_values = parse_markdown_to_values(doc.current_content or "")
+        # Split: signature fields go to stamps, everything else to fill_fields
+        text_values: dict = {}
+        sig_ids: dict[str, str] = {}
+        for name, raw in all_values.items():
+            if name in sig_field_names and isinstance(raw, str) and raw.startswith("signature:"):
+                sig_ids[name] = raw[len("signature:"):].strip()
+            elif name not in sig_field_names:
+                text_values[name] = raw
+
+        stamps: dict = {}
+        if sig_ids:
+            # SECURITY: filter by owner — same reason as render_pdf.
+            _sig_q2 = db.query(Signature).filter(Signature.id.in_(list(sig_ids.values())))
+            if user:
+                _sig_q2 = _sig_q2.filter(Signature.owner == user)
+            rows = _sig_q2.all()
+            by_id = {s.id: s for s in rows}
+            for field_name, sid in sig_ids.items():
+                s = by_id.get(sid)
+                if not s:
+                    continue
+                try:
+                    stamps[field_name] = base64.b64decode(s.data_png)
+                except Exception as e:
+                    logger.warning(f"Bad signature data for {sid}: {e}")
+
+        filled_path = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
+        _to_unlink.append(filled_path)
         try:
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
+            fill_fields(pdf_path, filled_path, text_values)
+        except Exception as e:
+            logger.error(f"fill_fields failed for doc {doc_id}: {e}")
+            _cleanup_temps()
+            raise HTTPException(500, f"PDF fill failed: {e}")
 
-            upload_id = find_source_upload_id(doc.current_content or "")
-            if not upload_id:
-                raise HTTPException(400, "Document is not linked to a source PDF")
-
-            pdf_path = _locate_current_user_upload(request, upload_id, user)
-            if not pdf_path:
-                raise HTTPException(404, f"Source PDF {upload_id} not found in uploads")
-
-            schema = load_field_sidecar(pdf_path) or []
-            sig_field_names = {f["name"] for f in schema if f.get("type") == "signature"}
-
-            all_values = parse_markdown_to_values(doc.current_content or "")
-            # Split: signature fields go to stamps, everything else to fill_fields
-            text_values: dict = {}
-            sig_ids: dict[str, str] = {}
-            for name, raw in all_values.items():
-                if name in sig_field_names and isinstance(raw, str) and raw.startswith("signature:"):
-                    sig_ids[name] = raw[len("signature:"):].strip()
-                elif name not in sig_field_names:
-                    text_values[name] = raw
-
-            stamps: dict = {}
-            if sig_ids:
-                # SECURITY: filter by owner — same reason as render_pdf.
-                _sig_q2 = db.query(Signature).filter(Signature.id.in_(list(sig_ids.values())))
-                if user:
-                    _sig_q2 = _sig_q2.filter(Signature.owner == user)
-                rows = _sig_q2.all()
-                by_id = {s.id: s for s in rows}
-                for field_name, sid in sig_ids.items():
-                    s = by_id.get(sid)
-                    if not s:
-                        continue
-                    try:
-                        stamps[field_name] = base64.b64decode(s.data_png)
-                    except Exception as e:
-                        logger.warning(f"Bad signature data for {sid}: {e}")
-
-            filled_path = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
-            _to_unlink.append(filled_path)
+        out_path = filled_path
+        if stamps:
+            stamped_path = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
+            _to_unlink.append(stamped_path)
             try:
-                fill_fields(pdf_path, filled_path, text_values)
+                stamp_signatures(filled_path, stamped_path, stamps)
+                out_path = stamped_path
             except Exception as e:
-                logger.error(f"fill_fields failed for doc {doc_id}: {e}")
-                _cleanup_temps()
-                raise HTTPException(500, f"PDF fill failed: {e}")
+                logger.error(f"stamp_signatures failed for doc {doc_id}: {e}")
 
-            out_path = filled_path
-            if stamps:
-                stamped_path = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
-                _to_unlink.append(stamped_path)
-                try:
-                    stamp_signatures(filled_path, stamped_path, stamps)
-                    out_path = stamped_path
-                except Exception as e:
-                    logger.error(f"stamp_signatures failed for doc {doc_id}: {e}")
+        # Burn freeform annotations (Text/Check/Sign drops) on top.
+        annotations = parse_markdown_annotations(doc.current_content or "")
+        if annotations:
+            # Resolve any signature annotations to their PNG bytes.
+            ann_sig_ids = [
+                a["value"][len("signature:"):].strip()
+                for a in annotations
+                if a.get("kind") == "signature"
+                and isinstance(a.get("value"), str)
+                and a["value"].startswith("signature:")
+            ]
+            ann_signature_pngs: dict[str, bytes] = {}
+            if ann_sig_ids:
+                # SECURITY: filter by owner so a caller can't reference
+                # someone else's signature ID from doc markdown and have
+                # it stamped/exported.
+                _sig_q = db.query(Signature).filter(Signature.id.in_(ann_sig_ids))
+                if user:
+                    _sig_q = _sig_q.filter(Signature.owner == user)
+                sig_rows = _sig_q.all()
+                for s in sig_rows:
+                    try:
+                        ann_signature_pngs[s.id] = base64.b64decode(s.data_png)
+                    except Exception as e:
+                        logger.warning(f"Bad annotation signature data for {s.id}: {e}")
+            annotated_path = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
+            _to_unlink.append(annotated_path)
+            try:
+                stamp_annotations(out_path, annotated_path, annotations, ann_signature_pngs)
+                out_path = annotated_path
+            except Exception as e:
+                logger.error(f"stamp_annotations failed for doc {doc_id}: {e}")
 
-            # Burn freeform annotations (Text/Check/Sign drops) on top.
-            annotations = parse_markdown_annotations(doc.current_content or "")
-            if annotations:
-                # Resolve any signature annotations to their PNG bytes.
-                ann_sig_ids = [
-                    a["value"][len("signature:"):].strip()
-                    for a in annotations
-                    if a.get("kind") == "signature"
-                    and isinstance(a.get("value"), str)
-                    and a["value"].startswith("signature:")
-                ]
-                ann_signature_pngs: dict[str, bytes] = {}
-                if ann_sig_ids:
-                    # SECURITY: filter by owner so a caller can't reference
-                    # someone else's signature ID from doc markdown and have
-                    # it stamped/exported.
-                    _sig_q = db.query(Signature).filter(Signature.id.in_(ann_sig_ids))
-                    if user:
-                        _sig_q = _sig_q.filter(Signature.owner == user)
-                    sig_rows = _sig_q.all()
-                    for s in sig_rows:
-                        try:
-                            ann_signature_pngs[s.id] = base64.b64decode(s.data_png)
-                        except Exception as e:
-                            logger.warning(f"Bad annotation signature data for {s.id}: {e}")
-                annotated_path = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
-                _to_unlink.append(annotated_path)
-                try:
-                    stamp_annotations(out_path, annotated_path, annotations, ann_signature_pngs)
-                    out_path = annotated_path
-                except Exception as e:
-                    logger.error(f"stamp_annotations failed for doc {doc_id}: {e}")
+        download_name = _slug(doc.title or "form") + "_annotated.pdf"
+        return FileResponse(
+            out_path,
+            media_type="application/pdf",
+            filename=download_name,
+            background=BackgroundTask(_cleanup_temps),
+        )
 
-            download_name = _slug(doc.title or "form") + "_annotated.pdf"
-            return FileResponse(
-                out_path,
-                media_type="application/pdf",
-                filename=download_name,
-                background=BackgroundTask(_cleanup_temps),
-            )
-        finally:
-            db.close()
-
-    # ---- POST /api/document/{doc_id}/prepare-signed-reply ----
     @router.post("/api/document/{doc_id}/prepare-signed-reply")
-    async def prepare_signed_reply(doc_id: str, request: Request):
+    def prepare_signed_reply(doc_id: str, request: Request, db: Session = Depends(get_db)):
         """Bake the current PDF state (form fields + signature stamps +
         annotations) into a flattened PDF, drop it in COMPOSE_UPLOADS_DIR
         and return the reply context (To/Subject/threading headers) so the
@@ -1857,171 +1686,164 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         _COMPOSE_DIR.mkdir(parents=True, exist_ok=True)
 
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc:
-                raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
+        doc = _get_owned_document(db, doc_id, user)
 
-            if not (doc.source_email_uid and doc.source_email_folder):
-                raise HTTPException(400, "Document has no source email — cannot reply")
+        if not (doc.source_email_uid and doc.source_email_folder):
+            raise HTTPException(400, "Document has no source email — cannot reply")
 
-            # 1) Build the flattened PDF (same pipeline as export_pdf)
-            upload_id = find_source_upload_id(doc.current_content or "")
-            if not upload_id:
-                raise HTTPException(400, "Document is not linked to a source PDF")
-            pdf_path = _locate_current_user_upload(request, upload_id, user)
-            if not pdf_path:
-                raise HTTPException(404, f"Source PDF {upload_id} not found")
+        # 1) Build the flattened PDF (same pipeline as export_pdf)
+        upload_id = find_source_upload_id(doc.current_content or "")
+        if not upload_id:
+            raise HTTPException(400, "Document is not linked to a source PDF")
+        pdf_path = _locate_current_user_upload(request, upload_id, user)
+        if not pdf_path:
+            raise HTTPException(404, f"Source PDF {upload_id} not found")
 
-            schema = load_field_sidecar(pdf_path) or []
-            sig_field_names = {f["name"] for f in schema if f.get("type") == "signature"}
-            all_values = parse_markdown_to_values(doc.current_content or "")
-            text_values: dict = {}
-            sig_ids: dict[str, str] = {}
-            for name, raw in all_values.items():
-                if name in sig_field_names and isinstance(raw, str) and raw.startswith("signature:"):
-                    sig_ids[name] = raw[len("signature:"):].strip()
-                elif name not in sig_field_names:
-                    text_values[name] = raw
+        schema = load_field_sidecar(pdf_path) or []
+        sig_field_names = {f["name"] for f in schema if f.get("type") == "signature"}
+        all_values = parse_markdown_to_values(doc.current_content or "")
+        text_values: dict = {}
+        sig_ids: dict[str, str] = {}
+        for name, raw in all_values.items():
+            if name in sig_field_names and isinstance(raw, str) and raw.startswith("signature:"):
+                sig_ids[name] = raw[len("signature:"):].strip()
+            elif name not in sig_field_names:
+                text_values[name] = raw
 
-            stamps: dict = {}
-            if sig_ids:
-                # SECURITY: filter by owner — same reason as render_pdf.
-                _sig_q2 = db.query(Signature).filter(Signature.id.in_(list(sig_ids.values())))
+        stamps: dict = {}
+        if sig_ids:
+            # SECURITY: filter by owner — same reason as render_pdf.
+            _sig_q2 = db.query(Signature).filter(Signature.id.in_(list(sig_ids.values())))
+            if user:
+                _sig_q2 = _sig_q2.filter(Signature.owner == user)
+            rows = _sig_q2.all()
+            by_id = {s.id: s for s in rows}
+            for fname, sid in sig_ids.items():
+                s = by_id.get(sid)
+                if not s:
+                    continue
+                try:
+                    stamps[fname] = base64.b64decode(s.data_png)
+                except Exception:
+                    pass
+
+        import os
+        _to_unlink: list[str] = []
+        filled_path = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
+        _to_unlink.append(filled_path)
+        fill_fields(pdf_path, filled_path, text_values)
+        out_path = filled_path
+        if stamps:
+            stamped_path = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
+            _to_unlink.append(stamped_path)
+            try:
+                stamp_signatures(filled_path, stamped_path, stamps)
+                out_path = stamped_path
+            except Exception as e:
+                logger.warning(f"stamp_signatures failed for {doc_id}: {e}")
+
+        annotations = parse_markdown_annotations(doc.current_content or "")
+        if annotations:
+            ann_sig_ids = [
+                a["value"][len("signature:"):].strip()
+                for a in annotations
+                if a.get("kind") == "signature"
+                and isinstance(a.get("value"), str)
+                and a["value"].startswith("signature:")
+            ]
+            ann_signature_pngs: dict[str, bytes] = {}
+            if ann_sig_ids:
+                # SECURITY: filter by owner so a caller can't reference
+                # someone else's signature ID from doc markdown and have
+                # it stamped/exported.
+                _sig_q = db.query(Signature).filter(Signature.id.in_(ann_sig_ids))
                 if user:
-                    _sig_q2 = _sig_q2.filter(Signature.owner == user)
-                rows = _sig_q2.all()
-                by_id = {s.id: s for s in rows}
-                for fname, sid in sig_ids.items():
-                    s = by_id.get(sid)
-                    if not s:
-                        continue
+                    _sig_q = _sig_q.filter(Signature.owner == user)
+                sig_rows = _sig_q.all()
+                for s in sig_rows:
                     try:
-                        stamps[fname] = base64.b64decode(s.data_png)
+                        ann_signature_pngs[s.id] = base64.b64decode(s.data_png)
                     except Exception:
                         pass
-
-            import os
-            _to_unlink: list[str] = []
-            filled_path = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
-            _to_unlink.append(filled_path)
-            fill_fields(pdf_path, filled_path, text_values)
-            out_path = filled_path
-            if stamps:
-                stamped_path = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
-                _to_unlink.append(stamped_path)
-                try:
-                    stamp_signatures(filled_path, stamped_path, stamps)
-                    out_path = stamped_path
-                except Exception as e:
-                    logger.warning(f"stamp_signatures failed for {doc_id}: {e}")
-
-            annotations = parse_markdown_annotations(doc.current_content or "")
-            if annotations:
-                ann_sig_ids = [
-                    a["value"][len("signature:"):].strip()
-                    for a in annotations
-                    if a.get("kind") == "signature"
-                    and isinstance(a.get("value"), str)
-                    and a["value"].startswith("signature:")
-                ]
-                ann_signature_pngs: dict[str, bytes] = {}
-                if ann_sig_ids:
-                    # SECURITY: filter by owner so a caller can't reference
-                    # someone else's signature ID from doc markdown and have
-                    # it stamped/exported.
-                    _sig_q = db.query(Signature).filter(Signature.id.in_(ann_sig_ids))
-                    if user:
-                        _sig_q = _sig_q.filter(Signature.owner == user)
-                    sig_rows = _sig_q.all()
-                    for s in sig_rows:
-                        try:
-                            ann_signature_pngs[s.id] = base64.b64decode(s.data_png)
-                        except Exception:
-                            pass
-                annotated_path = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
-                _to_unlink.append(annotated_path)
-                try:
-                    stamp_annotations(out_path, annotated_path, annotations, ann_signature_pngs)
-                    out_path = annotated_path
-                except Exception as e:
-                    logger.warning(f"stamp_annotations failed for {doc_id}: {e}")
-
-            # 2) Move/copy into COMPOSE_UPLOADS_DIR with the token format
-            #    `<uuid>_<original_name>` that /api/email/send expects.
-            filename = _slug(doc.title or "signed") + "_signed.pdf"
-            token = f"{_uuid.uuid4().hex}_{filename}"
-            dest = _COMPOSE_DIR / token
-            shutil.copyfile(out_path, str(dest))
-            # Unlink the intermediate temp PDFs now that they've been
-            # copied into COMPOSE_UPLOADS_DIR.
-            for _p in _to_unlink:
-                try:
-                    os.unlink(_p)
-                except FileNotFoundError:
-                    pass
-                except Exception as _e:
-                    logger.warning(f"Could not unlink temp PDF {_p}: {_e}")
-
-            # 3) Fetch the source email's headers so we can build a clean reply
-            #    context (To/Subject/In-Reply-To/References).
+            annotated_path = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
+            _to_unlink.append(annotated_path)
             try:
-                from routes.email_routes import _imap, _decode_header
-                from routes.email_helpers import _q
-            except Exception:
-                _imap = None
-                _decode_header = lambda x: x or ""
-                _q = lambda x: x or ""
+                stamp_annotations(out_path, annotated_path, annotations, ann_signature_pngs)
+                out_path = annotated_path
+            except Exception as e:
+                logger.warning(f"stamp_annotations failed for {doc_id}: {e}")
 
-            to_addr = ""
-            from_name = ""
-            subject = ""
-            in_reply_to = doc.source_email_message_id or ""
-            references = in_reply_to
-            if _imap:
-                try:
-                    with _imap(doc.source_email_account_id or None) as conn:
-                        conn.select(_q(doc.source_email_folder), readonly=True)
-                        status, data = conn.fetch(doc.source_email_uid.encode(), "(RFC822.HEADER)")
-                    if status == "OK" and data and data[0]:
-                        raw_hdr = data[0][1]
-                        m = _email_mod.message_from_bytes(raw_hdr)
-                        sender = _decode_header(m.get("From", ""))
-                        from_name, to_addr = _email_mod.utils.parseaddr(sender)
-                        if not to_addr:
-                            to_addr = sender
-                        subject = _decode_header(m.get("Subject", "") or "")
-                        if subject and not subject.lower().startswith("re:"):
-                            subject = "Re: " + subject
-                        msg_refs = (m.get("References") or "").strip()
-                        msg_in_reply = (m.get("Message-ID") or "").strip() or in_reply_to
-                        in_reply_to = msg_in_reply
-                        references = (msg_refs + " " + msg_in_reply).strip() if msg_refs else msg_in_reply
-                except Exception as e:
-                    logger.warning(f"prepare-signed-reply header fetch failed: {e}")
+        # 2) Move/copy into COMPOSE_UPLOADS_DIR with the token format
+        #    `<uuid>_<original_name>` that /api/email/send expects.
+        filename = _slug(doc.title or "signed") + "_signed.pdf"
+        token = f"{_uuid.uuid4().hex}_{filename}"
+        dest = _COMPOSE_DIR / token
+        shutil.copyfile(out_path, str(dest))
+        # Unlink the intermediate temp PDFs now that they've been
+        # copied into COMPOSE_UPLOADS_DIR.
+        for _p in _to_unlink:
+            try:
+                os.unlink(_p)
+            except FileNotFoundError:
+                pass
+            except Exception as _e:
+                logger.warning(f"Could not unlink temp PDF {_p}: {_e}")
 
-            return {
-                "ok": True,
-                "attachment": {
-                    "token": token,
-                    "filename": filename,
-                    "size": dest.stat().st_size,
-                },
-                "reply": {
-                    "to": to_addr,
-                    "to_name": from_name,
-                    "subject": subject,
-                    "in_reply_to": in_reply_to,
-                    "references": references,
-                    "account_id": doc.source_email_account_id or None,
-                    "source_uid": doc.source_email_uid,
-                    "source_folder": doc.source_email_folder,
-                    "source_message_id": doc.source_email_message_id,
-                },
-            }
-        finally:
-            db.close()
+        # 3) Fetch the source email's headers so we can build a clean reply
+        #    context (To/Subject/In-Reply-To/References).
+        try:
+            from routes.email.email_routes import _imap, _decode_header
+            from routes.email.email_helpers import _q
+        except Exception:
+            _imap = None
+            _decode_header = lambda x: x or ""
+            _q = lambda x: x or ""
+
+        to_addr = ""
+        from_name = ""
+        subject = ""
+        in_reply_to = doc.source_email_message_id or ""
+        references = in_reply_to
+        if _imap:
+            try:
+                with _imap(doc.source_email_account_id or None) as conn:
+                    conn.select(_q(doc.source_email_folder), readonly=True)
+                    status, data = conn.fetch(doc.source_email_uid.encode(), "(RFC822.HEADER)")
+                if status == "OK" and data and data[0]:
+                    raw_hdr = data[0][1]
+                    m = _email_mod.message_from_bytes(raw_hdr)
+                    sender = _decode_header(m.get("From", ""))
+                    from_name, to_addr = _email_mod.utils.parseaddr(sender)
+                    if not to_addr:
+                        to_addr = sender
+                    subject = _decode_header(m.get("Subject", "") or "")
+                    if subject and not subject.lower().startswith("re:"):
+                        subject = "Re: " + subject
+                    msg_refs = (m.get("References") or "").strip()
+                    msg_in_reply = (m.get("Message-ID") or "").strip() or in_reply_to
+                    in_reply_to = msg_in_reply
+                    references = (msg_refs + " " + msg_in_reply).strip() if msg_refs else msg_in_reply
+            except Exception as e:
+                logger.warning(f"prepare-signed-reply header fetch failed: {e}")
+
+        return {
+            "ok": True,
+            "attachment": {
+                "token": token,
+                "filename": filename,
+                "size": dest.stat().st_size,
+            },
+            "reply": {
+                "to": to_addr,
+                "to_name": from_name,
+                "subject": subject,
+                "in_reply_to": in_reply_to,
+                "references": references,
+                "account_id": doc.source_email_account_id or None,
+                "source_uid": doc.source_email_uid,
+                "source_folder": doc.source_email_folder,
+                "source_message_id": doc.source_email_message_id,
+            },
+        }
 
     return router

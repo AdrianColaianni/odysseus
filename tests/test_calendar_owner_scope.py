@@ -11,30 +11,37 @@ and passes the account owner to do_manage_calendar. This test pins that
 get_upcoming_events scopes to the owner; it fails if the owner filter is
 dropped (the original cross-tenant behavior).
 """
-import ast
 import asyncio
 import sys
 import types
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
+from tests.helpers.database import disposable_database
+from tests.helpers.db_stubs import stub_sessions
+from tests.helpers.route_call import with_db
+from tests.helpers.routes import route_endpoint
 
 
-def test_get_upcoming_events_is_owner_scoped():
-    source = Path("core/database.py").read_text()
-    tree = ast.parse(source)
-    fn = next(
-        node for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "get_upcoming_events"
-    )
-    body = ast.unparse(fn)
+def test_get_upcoming_events_is_owner_scoped(tmp_path, monkeypatch):
+    import core.database as database
+    from datetime import timedelta
 
-    assert "join(CalendarCal)" in body
-    assert "if owner is not None:" in body
-    assert "q.filter(CalendarCal.owner == owner)" in body
+    with disposable_database(tmp_path) as factory:
+        monkeypatch.setattr(database, "SessionLocal", factory)
+        soon = database.utcnow_naive() + timedelta(days=1)
+        with factory() as db:
+            for owner in ("alice", "bob"):
+                db.add(database.CalendarCal(id=f"{owner}-cal", owner=owner, name=owner))
+                db.add(database.CalendarEvent(
+                    uid=f"{owner}-event", calendar_id=f"{owner}-cal", summary=owner,
+                    dtstart=soon, dtend=soon + timedelta(hours=1),
+                ))
+            db.commit()
+
+        assert [e["uid"] for e in database.get_upcoming_events("alice")] == ["alice-event"]
 
 
 class _Expr:
@@ -150,6 +157,7 @@ class _FakeSession:
 def _install_calendar_db_stub(monkeypatch):
     db = types.ModuleType("core.database")
     db.SessionLocal = MagicMock()
+    db.get_db = lambda: stub_sessions(db)
     db.CalendarCal = _CalendarCal
     db.CalendarDeletedEvent = MagicMock()
     db.CalendarEvent = _CalendarEvent
@@ -190,11 +198,7 @@ def _import_calendar_routes(monkeypatch):
 
 def _route_endpoint(calendar_routes, path, method):
     router = calendar_routes.setup_calendar_routes()
-    full_path = f"/api/calendar{path}"
-    for route in router.routes:
-        if route.path == full_path and method in route.methods:
-            return route.endpoint
-    raise AssertionError(f"route not found: {method} {full_path}")
+    return with_db(route_endpoint(router, f"/api/calendar{path}", method))
 
 
 def _request(user="alice"):
@@ -227,7 +231,8 @@ def _event(owner, uid):
 def test_create_event_rejects_null_owner_calendar_href_at_route_boundary(monkeypatch):
     calendar_routes = _import_calendar_routes(monkeypatch)
     session = _FakeSession(calendars=[_calendar(None)])
-    monkeypatch.setattr(calendar_routes, "SessionLocal", lambda: session)
+    monkeypatch.setattr(calendar_routes, "SessionLocal", lambda: session, raising=False)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", lambda: session)
     create_event = _route_endpoint(calendar_routes, "/events", "POST")
 
     with pytest.raises(HTTPException) as exc:
@@ -249,7 +254,8 @@ def test_create_event_rejects_null_owner_calendar_href_at_route_boundary(monkeyp
 def test_create_event_rejects_cross_owner_calendar_href_at_route_boundary(monkeypatch):
     calendar_routes = _import_calendar_routes(monkeypatch)
     session = _FakeSession(calendars=[_calendar("bob")])
-    monkeypatch.setattr(calendar_routes, "SessionLocal", lambda: session)
+    monkeypatch.setattr(calendar_routes, "SessionLocal", lambda: session, raising=False)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", lambda: session)
     create_event = _route_endpoint(calendar_routes, "/events", "POST")
 
     with pytest.raises(HTTPException) as exc:
@@ -275,8 +281,8 @@ def test_list_events_filters_by_calendar_owner_before_output(monkeypatch):
         _event("bob", "bob-event"),
         _event("alice", "alice-event"),
     ])
-    monkeypatch.setattr(calendar_routes, "SessionLocal", lambda: session)
-
+    monkeypatch.setattr(calendar_routes, "SessionLocal", lambda: session, raising=False)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", lambda: session)
     expanded = []
 
     def fake_expand(event, _start, _end, *, db=None, owner=None):
@@ -289,11 +295,11 @@ def test_list_events_filters_by_calendar_owner_before_output(monkeypatch):
     monkeypatch.setattr(calendar_routes, "_expand_rrule", fake_expand)
     list_events = _route_endpoint(calendar_routes, "/events", "GET")
 
-    out = asyncio.run(list_events(
+    out = list_events(
         _request(),
         start="2026-06-01T00:00:00",
         end="2026-06-03T00:00:00",
-    ))
+    )
 
     assert out == {"events": [{"uid": "alice-event", "dtstart": "2026-06-02T10:00:00"}]}
     assert expanded == ["alice-event"]
@@ -304,11 +310,12 @@ def test_list_events_filters_by_calendar_owner_before_output(monkeypatch):
 def test_export_ics_rejects_null_owner_calendar_at_route_boundary(monkeypatch):
     calendar_routes = _import_calendar_routes(monkeypatch)
     session = _FakeSession(calendars=[_calendar(None)])
-    monkeypatch.setattr(calendar_routes, "SessionLocal", lambda: session)
+    monkeypatch.setattr(calendar_routes, "SessionLocal", lambda: session, raising=False)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", lambda: session)
     export_ics = _route_endpoint(calendar_routes, "/export/{cal_id}", "GET")
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(export_ics(_request(), cal_id="cal-target"))
+        export_ics(_request(), cal_id="cal-target")
 
     assert exc.value.status_code == 404
     assert not session.event_query.all_called
@@ -318,11 +325,12 @@ def test_export_ics_rejects_null_owner_calendar_at_route_boundary(monkeypatch):
 def test_export_ics_rejects_cross_owner_calendar_at_route_boundary(monkeypatch):
     calendar_routes = _import_calendar_routes(monkeypatch)
     session = _FakeSession(calendars=[_calendar("bob")])
-    monkeypatch.setattr(calendar_routes, "SessionLocal", lambda: session)
+    monkeypatch.setattr(calendar_routes, "SessionLocal", lambda: session, raising=False)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", lambda: session)
     export_ics = _route_endpoint(calendar_routes, "/export/{cal_id}", "GET")
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(export_ics(_request(), cal_id="cal-target"))
+        export_ics(_request(), cal_id="cal-target")
 
     assert exc.value.status_code == 404
     assert not session.event_query.all_called
@@ -334,10 +342,11 @@ def test_export_ics_sanitizes_calendar_name_for_download_header(monkeypatch):
     cal = _calendar("alice")
     cal.name = 'Work\r\nX-Injected: yes";/..\\evil'
     session = _FakeSession(calendars=[cal])
-    monkeypatch.setattr(calendar_routes, "SessionLocal", lambda: session)
+    monkeypatch.setattr(calendar_routes, "SessionLocal", lambda: session, raising=False)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", lambda: session)
     export_ics = _route_endpoint(calendar_routes, "/export/{cal_id}", "GET")
 
-    response = asyncio.run(export_ics(_request(), cal_id="cal-target"))
+    response = export_ics(_request(), cal_id="cal-target")
 
     assert (
         response.headers["content-disposition"]

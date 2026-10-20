@@ -6,7 +6,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from tests.helpers.document_source import document_source
 from tests.helpers.js_modules import email_library_source, js_function_source
 
 
@@ -19,22 +18,6 @@ def _extract_between(source: str, signature: str, next_marker: str) -> str:
     start = source.index(signature)
     end = source.index(next_marker, start)
     return source[start:end].rstrip()
-
-
-def test_library_unread_preview_has_one_authoritative_request_and_rollback():
-    source = email_library_source()
-    function = js_function_source("_toggleCardPreview", source)
-
-    assert function.count("/api/email/read/") == 1
-    assert "/api/email/mark-read/" not in function
-    assert "&mark_seen=true" in function
-    assert "_syncEmailReadState(uidAtStart, true, readContext)" in function
-    assert "_syncEmailReadState(uidAtStart, false, readContext)" in function
-    assert "openGeneration === _emailCardOpenSeq" in function
-    assert "_emailReadMutations.get(readContextKey)?.generation !== readMutation.generation" in function
-    assert "authoritativeReadSucceeded = true;" in function
-    assert "if (!authoritativeReadSucceeded) restoreUnreadState();" in function
-    assert "if (!isCurrentOpen()) return" in function
 
 
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
@@ -101,52 +84,10 @@ console.log(JSON.stringify({{
     }
 
 
-def test_library_reply_open_carries_immutable_mailbox_context():
-    library_source = email_library_source()
-    inbox_source = _INBOX_JS.read_text(encoding="utf-8")
-
-    assert "const mailboxGeneration = _emailMailboxGeneration;" in library_source
-    assert "messageFolder = String(options.email?.folder || libraryFolder)" in library_source
-    assert "return onEmailClick({ ...options, mailboxContext });" in library_source
-    assert "mailboxContext?.messageFolder || _currentFolder" in inbox_source
-    assert "mailboxContextIsCurrent()" in inbox_source
-    reply_branch = inbox_source[
-        inbox_source.index("const reuseExisting = mode !== 'forward'"):
-        inbox_source.index("const createReplyDoc =", inbox_source.index("const reuseExisting = mode !== 'forward'"))
-    ]
-    assert reply_branch.index("if (!isCurrentOpen()) return;") < reply_branch.index("_createEmailChat(data")
-    assert "let activeSid = sessionModule?.getCurrentSessionId?.() || '';" in reply_branch
-    assert "_createEmailChat(data);" in reply_branch
-    assert "forceNew: !aiSuggestedBody" not in reply_branch
-
-
-def test_attachment_warning_only_checks_authored_reply_text():
-    source = document_source()
-    helper = source[source.index("function _bodyMentionsAttachment"):source.index("\n\n  function _clearMissingAttachmentWarnings", source.index("function _bodyMentionsAttachment"))]
-
-    assert "_emailReplyOwnText(text)" in helper
-    assert "text.split(/^>|^On .* wrote:/m)" not in helper
-
-
-def test_email_send_saves_recovery_draft_before_send_and_retains_it_on_failure():
-    source = document_source()
-    send = source[source.index("async function _sendEmail"):source.index("\n\n  async function _saveDraft", source.index("async function _sendEmail"))]
-
-    assert "async function _saveEmailDraftForRecovery" in source
-    assert send.index("_saveEmailDraftForRecovery({") < send.index("fetch(`${API_BASE}/api/email/send`")
-    assert send.index("if (isLibraryOpen()) closeLibrary();") > send.index("const sendRequest = fetch(")
-    assert send.index("if (isLibraryOpen()) closeLibrary();") < send.index("const res = await sendRequest")
-    success_branch = send[send.index("if (data.success) {"):]
-    assert "fetch(`${API_BASE}/api/document/${sendDocId}`, { method: 'DELETE' })" in success_branch
-    assert "Draft kept in Drafts." in send
-    assert "recoveryDraft.draft_uid" in send
-
-
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_inbox_late_read_response_cannot_apply_after_newer_open():
     source = _INBOX_JS.read_text(encoding="utf-8")
-    function = _extract_between(source, "async function _openEmail", "\nfunction _showEmailMenu")
-    assert "let _openEmailRequestSeq = 0;" in source
+    function = _extract_between(source, "async function _openEmail", "\nasync function _createEmailChat")
 
     harness = f"""
 const realLog = console.log;
@@ -156,8 +97,10 @@ const window = {{ __odysseusActiveEmailAccount: 'acct-a' }};
 let _currentFolder = 'INBOX';
 const _acct = () => '&account_id=acct-a';
 let _openEmailRequestSeq = 0;
+const showError = () => {{}};
+const showToast = () => {{}};
+const jsonRequest = (method, body) => ({{ method, body }});
 let _docModule = null;
-const spinnerModule = {{ createWhirlpool() {{ throw new Error('spinner should not run'); }} }};
 const sessionModule = null;
 let firstResolve;
 const calls = [];
@@ -173,9 +116,9 @@ async function fetch(url) {{
 {function}
 const oldEmail = {{ uid: '1', is_read: false }};
 const newerEmail = {{ uid: '2', is_read: false }};
-const first = _openEmail(oldEmail, null);
+const first = _openEmail(oldEmail);
 await Promise.resolve();
-const second = _openEmail(newerEmail, null);
+const second = _openEmail(newerEmail);
 await second;
 firstResolve();
 await first;
@@ -201,7 +144,7 @@ realLog(JSON.stringify({{ calls, oldRead: oldEmail.is_read, newerRead: newerEmai
 @pytest.mark.parametrize("context_change", ["account", "folder", "library"])
 def test_inbox_late_read_response_cannot_apply_after_mailbox_switch(context_change):
     source = _INBOX_JS.read_text(encoding="utf-8")
-    function = _extract_between(source, "async function _openEmail", "\nfunction _showEmailMenu")
+    function = _extract_between(source, "async function _openEmail", "\nasync function _createEmailChat")
 
     changes = {
         "account": "window.__odysseusActiveEmailAccount = 'acct-b';",
@@ -210,9 +153,9 @@ def test_inbox_late_read_response_cannot_apply_after_mailbox_switch(context_chan
     }
     change = changes[context_change]
     open_call = (
-        "_openEmail(email, null, null, 'reply', '', '', mailboxContext)"
+        "_openEmail(email, null, 'reply', '', '', mailboxContext)"
         if context_change == "library"
-        else "_openEmail(email, null)"
+        else "_openEmail(email)"
     )
     harness = f"""
 const realLog = console.log;
@@ -222,6 +165,9 @@ const window = {{ __odysseusActiveEmailAccount: 'acct-a' }};
 let _currentFolder = 'INBOX';
 const _acct = () => '&account_id=acct-a';
 let _openEmailRequestSeq = 0;
+const showError = () => {{}};
+const showToast = () => {{}};
+const jsonRequest = (method, body) => ({{ method, body }});
 let libraryCurrent = true;
 const mailboxContext = {{
   accountId: 'acct-a',
@@ -231,7 +177,6 @@ const mailboxContext = {{
 let createCalls = 0;
 let _docModule = {{}};
 async function _createEmailChat() {{ createCalls += 1; return 'stale-session'; }}
-const spinnerModule = {{ createWhirlpool() {{ throw new Error('spinner should not run'); }} }};
 const sessionModule = null;
 let resolveRead;
 async function fetch() {{

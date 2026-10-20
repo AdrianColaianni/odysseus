@@ -73,7 +73,7 @@ Compare frontend code is part of the app DOM security surface. Current stream/se
 
 ## Shared Celebration Renderer
 
-`static/js/compare/vote.js` imports and reexports `spawnConfetti` from `static/js/shared/ui/confetti.js`, published from `frontend/src/shared/ui/confetti.js`. Notes imports the shared renderer directly; voting no longer owns its implementation. Vote behavior and callers retain the compatibility export.
+`static/js/compare/vote.js` and Notes both import `spawnConfetti` from `static/js/shared/ui/confetti.js`.
 
 ## Current Gaps
 

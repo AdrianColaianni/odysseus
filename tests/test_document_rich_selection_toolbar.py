@@ -1,25 +1,7 @@
 """Browser coverage for contextual Rich Text selection formatting."""
 
-import json
-import subprocess
-from pathlib import Path
-from tests.helpers.stylesheets import app_css
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-STYLE = app_css()
-
-
-def test_selection_toolbar_uses_shared_formatting_path_and_preserves_range():
-    assert 'id = \'doc-rich-selection-toolbar\'' in DOC_JS
-    assert "_restoreRichSelectionToolbarRange(rich)" in DOC_JS
-    assert "applyMdFormat(button.dataset.richSelectionAction)" in DOC_JS
-    assert "toolbar.addEventListener('pointerdown', preserve)" in DOC_JS
-    assert "liveSelection.collapseToEnd()" in DOC_JS
-    assert "const isMobileViewport = viewportWidth <= 768;" in DOC_JS
-    assert ".doc-rich-selection-toolbar" in STYLE
+from tests.helpers.node import run_node_module
 
 
 def test_selection_toolbar_formats_and_stays_inside_desktop_and_mobile_viewports():
@@ -105,15 +87,7 @@ def test_selection_toolbar_formats_and_stays_inside_desktop_and_mobile_viewports
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
     assert data["activeBold"] is True
     assert data["desktopGeometry"] == {"within": True, "separate": True}
     assert "<i>" in data["formattedHtml"] or "<em>" in data["formattedHtml"]

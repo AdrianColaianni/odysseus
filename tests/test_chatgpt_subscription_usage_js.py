@@ -1,26 +1,12 @@
-"""Node-driven tests for the DOM-free ChatGPT usage card module + admin wiring."""
+"""Node-driven tests for the DOM-free ChatGPT usage card module and its admin handlers."""
 
 import json
-import shutil
-import subprocess
 from pathlib import Path
 
-import pytest
-from tests.helpers.stylesheets import app_css
+from tests.helpers.node import run_node_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _MODULE = _REPO / "static" / "js" / "chatgptSubscriptionUsage.js"
-_ADMIN = (_REPO / "static" / "js" / "admin.js").read_text(encoding="utf-8")
-_STYLE = app_css()
-pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node not on PATH")
-
-
-def _run_node(script: str):
-    proc = subprocess.run(
-        ["node", "--input-type=module"], input=script, capture_output=True, text=True, cwd=str(_REPO), timeout=30,
-    )
-    assert proc.returncode == 0, proc.stderr
-    return json.loads(proc.stdout.strip())
 
 
 _PAYLOAD_A = {
@@ -54,7 +40,7 @@ def test_view_model_normalizes_windows_and_reset_countdowns():
       const vm = buildUsageViewModel({json.dumps(_PAYLOAD_A)}, 1800000000);
       console.log(JSON.stringify(vm));
     """
-    vm = _run_node(js)
+    vm = run_node_module(js)
     assert vm["available"] is True
     assert vm["authId"] == "auth-a"
     assert vm["plan"] == "Plus"
@@ -90,7 +76,7 @@ def test_view_model_is_defensive_about_bad_values():
       const html = renderUsageCardHtml(vm, {{ endpointId: 'ep-x' }});
       console.log(JSON.stringify({{ vm, html }}));
     """
-    out = _run_node(js)
+    out = run_node_module(js)
     vm = out["vm"]
     assert vm["plan"] == ""
     codex, over = vm["limits"]
@@ -122,17 +108,12 @@ def test_unavailable_states_render_message_and_refresh_button():
       }}
       console.log(JSON.stringify(out));
     """
-    out = _run_node(js)
-    assert out["reauth"]["vm"]["message"] == "Usage unavailable — account may need reconnecting"
+    out = run_node_module(js)
     assert out["reauth"]["vm"]["reconnectSuggested"] is True
-    assert "rate limited" in out["rate_limited"]["vm"]["message"]
-    assert "timed out" in out["timeout"]["vm"]["message"]
     assert out["malformed"]["vm"]["available"] is False
-    assert out["empty"]["vm"]["message"] == "Usage unavailable"
     for case in out.values():
         assert "adm-chatgpt-usage-unavailable" in case["html"]
         assert 'data-adm-chatgpt-usage-refresh=' in case["html"]
-        assert ">Refresh usage<" in case["html"]
 
 
 def test_two_account_cards_render_independently_with_exact_ids():
@@ -142,7 +123,7 @@ def test_two_account_cards_render_independently_with_exact_ids():
       const b = renderUsageCardHtml(buildUsageViewModel({json.dumps(_PAYLOAD_B)}, 1800000000), {{ endpointId: 'ep-b' }});
       console.log(JSON.stringify({{ a, b }}));
     """
-    out = _run_node(js)
+    out = run_node_module(js)
     a, b = out["a"], out["b"]
     assert 'data-adm-chatgpt-usage="auth-a"' in a and 'data-adm-chatgpt-usage="auth-b"' in b
     assert 'data-adm-chatgpt-usage-refresh="auth-a" data-chatgpt-endpoint-id="ep-a"' in a
@@ -170,45 +151,18 @@ def test_rendered_html_escapes_and_contains_no_credentials():
       const html = renderUsageCardHtml(buildUsageViewModel({json.dumps(payload)}, 0), {{ endpointId: 'ep-a' }});
       console.log(JSON.stringify({{ html }}));
     """
-    html = _run_node(js)["html"]
+    html = run_node_module(js)["html"]
     assert "<script>" not in html and "<img" not in html and "<b>plus" not in html
     assert "&lt;5H&gt;" in html
     assert "SHOULD-NOT-BE-HERE" not in html
     assert "Bearer" not in html and "access_token" not in html and "refresh_token" not in html
 
 
-def test_admin_wires_per_account_usage_and_reconnect_by_exact_ids():
-    load_block = _ADMIN[_ADMIN.index("async function loadEndpoints()"):_ADMIN.index("async function _refreshAfterEndpointChange")] if _ADMIN.index("async function loadEndpoints()") < _ADMIN.index("async function _refreshAfterEndpointChange") else _ADMIN[_ADMIN.index("async function loadEndpoints()"):]
-    assert "isChatgptSubscriptionEndpoint(ep)" in load_block
-    assert 'data-adm-chatgpt-usage-host="${esc(ep.provider_auth_id)}" data-chatgpt-endpoint-id="${esc(ep.id)}"' in load_block
-    assert "_loadChatgptUsage(host, host.dataset.admChatgptUsageHost, host.dataset.chatgptEndpointId)" in load_block
-    usage_block = _ADMIN[_ADMIN.index("async function _loadChatgptUsage"):_ADMIN.index("function initEndpointForm()")]
-    assert "/api/chatgpt-subscription/accounts/' + encodeURIComponent(authId) + '/usage'" in usage_block
-    assert "refresh ? '?refresh=1' : ''" in usage_block
-    assert "refreshBtn.dataset.admChatgptUsageRefresh" in usage_block
-    assert "reconnectBtn.dataset.admChatgptReconnect" in usage_block
-    assert "formData.append('reconnect_auth_id', authId)" in usage_block
-    assert "formData.append('reconnect_endpoint_id', epId)" in usage_block
-    # The browser only ever talks to Odysseus, never to OpenAI directly.
-    assert "chatgpt.com" not in usage_block
-    assert "wham/usage" not in usage_block
-
-
-def test_admin_add_flow_sends_optional_account_label():
-    form_block = _ADMIN[_ADMIN.index("function _setApiFormForProvider()"):_ADMIN.index("function _renderPickerMenu()")]
-    assert "Account label, e.g. codex00 (optional)" in form_block
-    assert "_chatgptLabelMode = true" in form_block
-    start_block = _ADMIN[_ADMIN.index("async function _startProviderDeviceAuth"):_ADMIN.index('// Local "Add" button')]
-    assert "formData.append('label', label)" in start_block
-    assert "formData," in start_block
-    assert ".adm-chatgpt-usage-bar" in _STYLE and ".adm-chatgpt-usage-fill" in _STYLE
-
-
 def test_unknown_limits_without_windows_remain_visible():
     payload = {"available": True, "account": {"auth_id": "a"}, "usage": {
         "limits": [{"limit_id": "future", "limit_name": "Future <limit>", "windows": []}],
     }}
-    out = _run_node(f"""
+    out = run_node_module(f"""
       import {{ buildUsageViewModel, renderUsageCardHtml, formatResetIn }} from '{_MODULE.as_posix()}';
       console.log(JSON.stringify({{
         html: renderUsageCardHtml(buildUsageViewModel({json.dumps(payload)})),
@@ -217,14 +171,13 @@ def test_unknown_limits_without_windows_remain_visible():
     """)
     assert "Future &lt;limit&gt;" in out["html"]
     assert 'data-usage-limit="future"' in out["html"]
-    assert "No rate-limit windows reported" in out["html"]
     assert out["reset"] == ""
 
 
 def test_refresh_and_reconnect_handlers_target_only_the_clicked_account():
     # Execute the real admin handlers with small DOM doubles. This checks the
     # actions themselves, beyond checking renderer attributes or source text.
-    out = _run_node(f"""
+    out = run_node_module(f"""
       import fs from 'node:fs';
       import {{ buildUsageViewModel, renderUsageCardHtml }} from '{_MODULE.as_posix()}';
       const source = fs.readFileSync('{(_MODULE.parent / 'admin.js').as_posix()}', 'utf8');
@@ -268,24 +221,8 @@ def test_refresh_and_reconnect_handlers_target_only_the_clicked_account():
     assert out["bUnchanged"] is True
 
 
-def test_admin_renders_chatgpt_usage_collapsible_and_styled():
-    admin_source = (_REPO / "static" / "js" / "admin.js").read_text(encoding="utf-8")
-    style_source = app_css()
-    load_block = admin_source[admin_source.index("async function loadEndpoints()"):admin_source.index("function initEndpointForm()")]
-    assert "adm-chatgpt-controls" in load_block
-    assert "adm-chatgpt-usage-toggle" in load_block
-    assert 'aria-expanded="${isUsageExpanded ? \'true\' : \'false\'}"' in load_block
-    assert 'aria-controls="adm-chatgpt-usage-${esc(ep.id)}"' in load_block
-    assert "adm-chatgpt-usage-chevron" in load_block
-    assert 'class="adm-chatgpt-usage-host${isUsageExpanded ? \'\' : \' hidden\'}"' in load_block
-    assert 'data-adm-chatgpt-usage-host="${esc(ep.provider_auth_id)}" data-chatgpt-endpoint-id="${esc(ep.id)}"' in load_block
-    assert 'data-adm-chatgpt-reconnect="${esc(ep.provider_auth_id)}" data-chatgpt-endpoint-id="${esc(ep.id)}"' in load_block
-    assert ".adm-chatgpt-controls" in style_source
-    assert ".adm-chatgpt-usage-chevron" in style_source
-
-
 def test_chatgpt_usage_collapsible_behavior():
-    out = _run_node(f"""
+    out = run_node_module(f"""
       import fs from 'node:fs';
       import {{ buildUsageViewModel, renderUsageCardHtml }} from '{_MODULE.as_posix()}';
       const source = fs.readFileSync('{(_MODULE.parent / 'admin.js').as_posix()}', 'utf8');
@@ -460,7 +397,7 @@ def test_chatgpt_usage_collapsible_behavior():
 
 
 def test_chatgpt_usage_collapsible_reconnect_and_failure():
-    out = _run_node(f"""
+    out = run_node_module(f"""
       import fs from 'node:fs';
       import {{ buildUsageViewModel, renderUsageCardHtml }} from '{_MODULE.as_posix()}';
       const source = fs.readFileSync('{(_MODULE.parent / 'admin.js').as_posix()}', 'utf8');

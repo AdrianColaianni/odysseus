@@ -155,8 +155,8 @@ class ResearchNavigator:
     async def search(self, query: str, *, count: int = 10) -> list[dict[str, Any]]:
         """Run a provider-chain web search and return structured results."""
         try:
-            from src.search.providers import _get_search_settings
-            from src.search.core import _build_provider_chain, _call_provider
+            from services.search.providers import _get_search_settings
+            from services.search.core import _build_provider_chain, _call_provider
 
             settings = _get_search_settings()
             provider = self.search_provider or (settings.get("research_search_provider") or "").strip()
@@ -193,7 +193,7 @@ class ResearchNavigator:
     async def fetch(self, url: str, *, timeout: int = 10, max_bytes: int | None = None) -> ResearchPage:
         """Fetch readable text from a URL using Odysseus' web fetcher."""
         try:
-            from src.search.content import fetch_webpage_content
+            from services.search.content import fetch_webpage_content
 
             kwargs: dict[str, Any] = {"timeout": timeout}
             if max_bytes is not None:

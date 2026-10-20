@@ -33,12 +33,13 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
+from tests.helpers.route_call import with_db
 
 
 def _route(router, name):
     for r in router.routes:
         if getattr(getattr(r, "endpoint", None), "__name__", "") == name:
-            return r.endpoint
+            return with_db(r.endpoint)
     raise AssertionError(name)
 
 
@@ -165,7 +166,7 @@ def test_rename_updates_in_memory_session_owner(rename_endpoint):
     sess = SimpleNamespace(owner="alice")
     sm = SimpleNamespace(sessions={"s1": sess})
 
-    asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path, sm)))
+    endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path, sm))
 
     assert sess.owner == "alice2", "in-memory session owner was not updated on rename"
 
@@ -177,7 +178,7 @@ def test_rename_session_owner_case_insensitive(rename_endpoint):
     sess = SimpleNamespace(owner="Alice")
     sm = SimpleNamespace(sessions={"s1": sess})
 
-    asyncio.run(endpoint("alice", SimpleNamespace(username="bob"), _request(tmp_path, sm)))
+    endpoint("alice", SimpleNamespace(username="bob"), _request(tmp_path, sm))
 
     assert sess.owner == "bob"
 
@@ -189,7 +190,7 @@ def test_rename_leaves_other_sessions_untouched(rename_endpoint):
     sess_other = SimpleNamespace(owner="carol")
     sm = SimpleNamespace(sessions={"s1": sess_alice, "s2": sess_other})
 
-    asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path, sm)))
+    endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path, sm))
 
     assert sess_alice.owner == "alice2"
     assert sess_other.owner == "carol", "unrelated session owner was modified"
@@ -203,7 +204,7 @@ def test_rename_no_session_manager_does_not_crash(rename_endpoint):
         app=SimpleNamespace(state=SimpleNamespace(invalidate_token_cache=lambda: None)),
         state=SimpleNamespace(current_user="admin"),
     )
-    res = asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), req))
+    res = endpoint("alice", SimpleNamespace(username="alice2"), req)
     assert res["ok"] is True
 
 
@@ -220,7 +221,7 @@ def test_rename_updates_research_json_owner(rename_endpoint):
     p = dr_dir / "abc123.json"
     p.write_text(json.dumps(report), encoding="utf-8")
 
-    asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path)))
+    endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path))
 
     updated = json.loads(p.read_text(encoding="utf-8"))
     assert updated["owner"] == "alice2", "deep_research JSON owner was not updated on rename"
@@ -234,7 +235,7 @@ def test_rename_research_json_case_insensitive(rename_endpoint):
     p = (dr_dir / "r1.json")
     p.write_text(json.dumps({"owner": "Alice"}), encoding="utf-8")
 
-    asyncio.run(endpoint("alice", SimpleNamespace(username="bob"), _request(tmp_path)))
+    endpoint("alice", SimpleNamespace(username="bob"), _request(tmp_path))
 
     assert json.loads(p.read_text())["owner"] == "bob"
 
@@ -249,7 +250,7 @@ def test_rename_leaves_other_research_untouched(rename_endpoint):
     p_alice.write_text(json.dumps({"owner": "alice"}), encoding="utf-8")
     p_carol.write_text(json.dumps({"owner": "carol"}), encoding="utf-8")
 
-    asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path)))
+    endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path))
 
     assert json.loads(p_alice.read_text())["owner"] == "alice2"
     assert json.loads(p_carol.read_text())["owner"] == "carol"
@@ -258,14 +259,14 @@ def test_rename_leaves_other_research_untouched(rename_endpoint):
 def test_rename_no_deep_research_dir_does_not_crash(rename_endpoint):
     endpoint, _am, tmp_path = rename_endpoint
     # No deep_research dir — must not crash.
-    res = asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path)))
+    res = endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path))
     assert res["ok"] is True
 
 
 def test_rename_updates_active_research_task_owner(rename_endpoint):
     endpoint, _am, tmp_path = rename_endpoint
 
-    from routes.research_routes import setup_research_routes
+    from routes.research.research_routes import setup_research_routes
     from src.research_handler import ResearchHandler
 
     rh = ResearchHandler.__new__(ResearchHandler)
@@ -286,18 +287,18 @@ def test_rename_updates_active_research_task_owner(rename_endpoint):
         },
     }
 
-    asyncio.run(endpoint(
+    endpoint(
         "alice",
         SimpleNamespace(username="alice2"),
         _request(tmp_path, research_handler=rh),
-    ))
+    )
 
     assert rh._active_tasks["alice-task"]["owner"] == "alice2"
     assert rh._active_tasks["carol-task"]["owner"] == "carol"
 
     router = setup_research_routes(rh)
     active = next(
-        r.endpoint for r in router.routes
+        with_db(r.endpoint) for r in router.routes
         if getattr(r, "path", "") == "/api/research/active"
     )
 
@@ -354,11 +355,11 @@ def test_rename_updates_active_research_before_completed_json_sweep(rename_endpo
         def rename_owner(self, _old, _new):
             owner_seen_by_active_hook.append(json.loads(report.read_text(encoding="utf-8"))["owner"])
 
-    asyncio.run(endpoint(
+    endpoint(
         "alice",
         SimpleNamespace(username="alice2"),
         _request(tmp_path, research_handler=FakeResearchHandler()),
-    ))
+    )
 
     assert owner_seen_by_active_hook == ["alice"]
     assert json.loads(report.read_text(encoding="utf-8"))["owner"] == "alice2"
@@ -393,7 +394,7 @@ def test_rename_research_respects_custom_data_dir(monkeypatch, tmp_path):
     am.rename_user.return_value = True
     endpoint = _route(ar.setup_auth_routes(am), "rename_user")
 
-    asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path)))
+    endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path))
 
     assert json.loads(p.read_text(encoding="utf-8"))["owner"] == "alice2", (
         "research JSON at custom DATA_DIR was not patched — DEEP_RESEARCH_DIR constant not used"
@@ -413,7 +414,7 @@ def test_rename_updates_memory_json_owner(rename_endpoint):
     ]
     (tmp_path / "memory.json").write_text(json.dumps(entries), encoding="utf-8")
 
-    asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path)))
+    endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path))
 
     updated = json.loads((tmp_path / "memory.json").read_text(encoding="utf-8"))
     assert updated[0]["owner"] == "alice2", "memory.json entry owner was not updated on rename"
@@ -426,7 +427,7 @@ def test_rename_memory_json_case_insensitive(rename_endpoint):
     entries = [{"id": "1", "text": "x", "owner": "Alice"}]
     (tmp_path / "memory.json").write_text(json.dumps(entries), encoding="utf-8")
 
-    asyncio.run(endpoint("alice", SimpleNamespace(username="bob"), _request(tmp_path)))
+    endpoint("alice", SimpleNamespace(username="bob"), _request(tmp_path))
 
     assert json.loads((tmp_path / "memory.json").read_text())[0]["owner"] == "bob"
 
@@ -434,7 +435,7 @@ def test_rename_memory_json_case_insensitive(rename_endpoint):
 def test_rename_no_memory_json_does_not_crash(rename_endpoint):
     endpoint, _am, tmp_path = rename_endpoint
     # No memory.json — must not crash.
-    res = asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path)))
+    res = endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path))
     assert res["ok"] is True
 
 
@@ -472,12 +473,10 @@ def test_rename_updates_upload_metadata_owner(rename_endpoint):
         },
     )
 
-    asyncio.run(
-        endpoint(
-            "alice",
-            SimpleNamespace(username="alice2"),
-            _request(tmp_path, upload_handler=handler),
-        )
+    endpoint(
+        "alice",
+        SimpleNamespace(username="alice2"),
+        _request(tmp_path, upload_handler=handler),
     )
 
     updated = json.loads((upload_dir / "uploads.json").read_text(encoding="utf-8"))
@@ -491,7 +490,7 @@ def test_rename_updates_personal_rag_upload_owner(rename_endpoint, monkeypatch):
     endpoint, _am, tmp_path = rename_endpoint
     from routes import personal_routes
 
-    monkeypatch.setattr(personal_routes, "UPLOADS_DIR", str(tmp_path / "personal_uploads"))
+    monkeypatch.setattr(personal_routes, "PERSONAL_UPLOADS_DIR", str(tmp_path / "personal_uploads"))
     old_dir = Path(personal_routes._personal_upload_dir_for_owner("alice"))
     old_file = old_dir / "note.txt"
     old_file.write_text("private RAG note", encoding="utf-8")
@@ -510,12 +509,10 @@ def test_rename_updates_personal_rag_upload_owner(rename_endpoint, monkeypatch):
         ),
     )
 
-    asyncio.run(
-        endpoint(
-            "alice",
-            SimpleNamespace(username="alice2"),
-            _request(tmp_path, personal_docs_manager=personal_docs_manager),
-        )
+    endpoint(
+        "alice",
+        SimpleNamespace(username="alice2"),
+        _request(tmp_path, personal_docs_manager=personal_docs_manager),
     )
 
     new_dir = Path(personal_routes._personal_upload_dir_for_owner("alice2"))
@@ -561,7 +558,7 @@ def test_rename_updates_skill_md_owner(rename_endpoint):
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(_SKILL_MD.format(owner="alice"), encoding="utf-8")
 
-    asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path)))
+    endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path))
 
     content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
     assert "owner: alice2" in content
@@ -576,7 +573,7 @@ def test_rename_leaves_other_skill_owners_untouched(rename_endpoint):
         d.mkdir(parents=True)
         (d / "SKILL.md").write_text(_SKILL_MD.format(owner=owner).replace("test-skill", name), encoding="utf-8")
 
-    asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path)))
+    endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path))
 
     assert "owner: alice2" in (tmp_path / "skills" / "general" / "alice-skill" / "SKILL.md").read_text()
     assert "owner: carol" in (tmp_path / "skills" / "general" / "carol-skill" / "SKILL.md").read_text()
@@ -594,7 +591,7 @@ def test_rename_updates_usage_sidecar_keys(rename_endpoint):
     }
     (skills_root / "_usage.json").write_text(json.dumps(usage), encoding="utf-8")
 
-    asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path)))
+    endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path))
 
     updated = json.loads((skills_root / "_usage.json").read_text(encoding="utf-8"))
     assert "alice2::test-skill" in updated
@@ -605,7 +602,7 @@ def test_rename_updates_usage_sidecar_keys(rename_endpoint):
 
 def test_rename_no_skills_dir_does_not_crash(rename_endpoint):
     endpoint, _am, tmp_path = rename_endpoint
-    res = asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path)))
+    res = endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path))
     assert res["ok"] is True
 
 
@@ -618,7 +615,7 @@ def test_rename_skill_md_owner_case_insensitive(rename_endpoint):
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(_SKILL_MD.format(owner="Alice"), encoding="utf-8")
 
-    asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path)))
+    endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path))
 
     assert "owner: alice2" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
 
@@ -633,7 +630,7 @@ def test_rename_usage_keys_case_insensitive(rename_endpoint):
     usage = {"Alice::my-skill": {"uses": 5, "last_used": 999}}
     (skills_root / "_usage.json").write_text(json.dumps(usage), encoding="utf-8")
 
-    asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path)))
+    endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path))
 
     updated = json.loads((skills_root / "_usage.json").read_text(encoding="utf-8"))
     assert "alice2::my-skill" in updated
@@ -654,12 +651,10 @@ def test_owner_migration_failure_rolls_back_auth_rename(monkeypatch, tmp_path):
     endpoint = _route(ar.setup_auth_routes(am), "rename_user")
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(
-            endpoint(
-                "alice",
-                SimpleNamespace(username="alice2"),
-                _request(tmp_path, token=admin_token),
-            )
+        endpoint(
+            "alice",
+            SimpleNamespace(username="alice2"),
+            _request(tmp_path, token=admin_token),
         )
 
     assert exc.value.status_code == 500
@@ -682,12 +677,10 @@ def test_self_rename_owner_migration_failure_rolls_back_auth_session(monkeypatch
     endpoint = _route(ar.setup_auth_routes(am), "rename_user")
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(
-            endpoint(
-                "admin",
-                SimpleNamespace(username="chief"),
-                _request(tmp_path, token=admin_token),
-            )
+        endpoint(
+            "admin",
+            SimpleNamespace(username="chief"),
+            _request(tmp_path, token=admin_token),
         )
 
     assert exc.value.status_code == 500
@@ -745,7 +738,7 @@ def test_rejected_rename_does_not_mutate_files(monkeypatch, tmp_path):
     endpoint = _route(ar.setup_auth_routes(am), "rename_user")
 
     with pytest.raises(Exception):
-        asyncio.run(endpoint("alice", SimpleNamespace(username="api"), _request(tmp_path)))
+        endpoint("alice", SimpleNamespace(username="api"), _request(tmp_path))
 
     assert json.loads(rp.read_text())["owner"] == "alice", "research owner mutated after rejected rename"
     assert json.loads(mem.read_text())[0]["owner"] == "alice", "memory owner mutated after rejected rename"

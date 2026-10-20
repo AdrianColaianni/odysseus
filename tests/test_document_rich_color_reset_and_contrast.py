@@ -1,24 +1,7 @@
 """Rich text color reset, palette grouping, contrast, and undo coverage."""
 
-import json
-import subprocess
-from pathlib import Path
-from tests.helpers.stylesheets import app_css
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-STYLE = app_css()
-
-
-def test_color_controls_have_theme_reset_and_split_palettes():
-    assert "forecolor:default" in DOC_JS
-    assert "_applyRichDefaultTextColor" in DOC_JS
-    assert "_applyRichHighlight" in DOC_JS
-    assert "rich-color-palette-grid" in DOC_JS
-    assert ".rich-color-palette-menu" in STYLE
-    assert ".rich-color-palette-label" in STYLE
+from tests.helpers.node import run_node_module
 
 
 def test_rich_colors_follow_theme_and_undo_as_one_edit():
@@ -89,15 +72,7 @@ def test_rich_colors_follow_theme_and_undo_as_one_edit():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
     assert data["palette"] == {"labels": ["Dark", "Light"], "reset": "No highlight"}
     assert data["highlighted"] == {
         "color": "rgb(17, 24, 39)",

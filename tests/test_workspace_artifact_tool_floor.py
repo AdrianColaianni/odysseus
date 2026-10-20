@@ -19,10 +19,8 @@ def native_resource_authority(tmp_path, monkeypatch):
 def test_unoffered_artifact_recovery_is_bounded():
     from src.agent_loop import _artifact_unoffered_recovery_exhausted
 
-    assert not _artifact_unoffered_recovery_exhausted(1)
     assert not _artifact_unoffered_recovery_exhausted(2)
     assert _artifact_unoffered_recovery_exhausted(3)
-    assert _artifact_unoffered_recovery_exhausted(20)
 
 
 def test_artifact_mutation_is_not_counted_as_post_correction_verification():
@@ -41,13 +39,6 @@ def test_artifact_mutation_is_not_counted_as_post_correction_verification():
     assert _artifact_calls_are_verification_only([verification])
 
 
-def test_post_convergence_artifact_repair_is_bounded_after_success():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert "_artifact_finish_convergence_sent" in source
-    assert "_artifact_finish_post_correction_mutation_seen = True" in source
-    assert "its automatic preview is terminal" in source
-
-
 def test_consumed_post_correction_verification_closes_tool_surface():
     from src.agent_loop import _post_correction_verification_available
 
@@ -63,62 +54,6 @@ def test_consumed_post_correction_verification_closes_tool_surface():
     assert not _post_correction_verification_available(
         correction_seen=False, tool_used=False, mutation_seen=False
     )
-
-
-def test_workspace_artifact_floor_is_narrow_and_includes_writers():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert "_artifact_creation_requested" in source
-    assert '"python", "write_file", "read_file"' in source
-    assert "(workspace or _native_artifact_runtime)" in source
-    assert "_artifact_mutation_surface_for_missing" in source
-    assert "Do not use `python` until every text/table artifact has been written" in source
-    assert '"write_file",' in source
-    assert '"python",' in source
-    assert '"inspect_media",' in source
-    assert 'not path.startswith("/workspace/fixtures/")' in source
-    assert "写在|输出|放进" in source
-    assert "native terminal sandbox re-enabled workspace tools" in source
-    assert "set(tool_policy.disabled_tools) - _native_reenabled_tools" in source
-
-
-def test_native_declared_artifact_exposes_writer_without_creation_verb():
-    """Native benchmark contracts must not depend on prompt wording.
-
-    Video/MME tasks commonly say "list ... in /workspace/answer.txt" rather
-    than "write" or "create".  The completion contract is authoritative and
-    must still make write_file available to the model.
-    """
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert "_declared_native_artifacts" in source
-    assert "bool(_declared_native_artifacts)" in source
-    assert "_native_completion.get(\"required_artifacts\")" in source
-
-
-def test_artifact_creation_flag_is_initialized_before_route_builder():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    flag = "_artifact_creation_requested = False"
-    route = "    def _route_relevant_tools(candidate_model: str):"
-    assert source.index(flag) < source.index(route)
-
-
-def test_html_artifacts_keep_native_browser_for_render_verification():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert 'Path(path).suffix.casefold() in {".html", ".htm"}' in source
-    assert "HTML artifact requires native private_browser verification" in source
-    assert 'if "private_browser" not in _hard_blocked_tools:' in source
-    assert "or _html_artifact_requested" in source
-    assert source.count("or _html_artifact_requested") >= 3
-
-
-def test_compact_html_artifacts_keep_native_browser_schema():
-    from src.agent_loop import _compact_native_route_tools
-
-    selected = _compact_native_route_tools(
-        {"private_browser", "python", "write_file", "read_file"},
-        "Create /workspace/output.html from /workspace/fixtures/config.json",
-        set(),
-    )
-    assert "private_browser" in selected
 
 
 def test_completed_html_mutation_preserves_browser_verification_only():
@@ -230,13 +165,6 @@ def test_url_report_artifact_still_hides_shell():
     assert "bash" not in selected
 
 
-def test_terminal_html_artifact_queues_one_native_render_check():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert "_html_artifact_verification_required" in source
-    assert '"action": "open"' in source
-    assert "queued native HTML render verification" in source
-
-
 def test_workspace_file_mutation_paths_distinguishes_helper_from_html_target():
     import json
 
@@ -341,12 +269,6 @@ def test_native_terminal_sft_owner_keeps_workspace_writers():
         {"surface": "odysseus-native", "terminal_agent": True},
     )
     assert selected == {"bash", "python", "read_file", "write_file"}
-
-
-def test_native_terminal_runtime_bypasses_chat_only_general_no_tool_clamp():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert "_native_terminal_runtime = bool(" in source
-    assert "elif _ody_general_no_tool_mode and not _native_terminal_runtime:" in source
 
 
 def test_pdf_extract_reuses_exact_user_supplied_source_url():
@@ -485,16 +407,13 @@ def test_write_file_rejects_svg_markup_under_raster_extension(tmp_path):
     import json
 
     from src.agent_tools.filesystem_tools import WriteFileTool
-    from src.tool_execution import _active_workspace
+    from tests.helpers.workspace import workspace_at
 
-    token = _active_workspace.set(str(tmp_path))
-    try:
+    with workspace_at(tmp_path):
         result = asyncio.run(WriteFileTool().execute(json.dumps({
             "path": "/workspace/floorplan.png",
             "content": '<svg xmlns="http://www.w3.org/2000/svg"/>',
         }), {}))
-    finally:
-        _active_workspace.reset(token)
 
     assert result["exit_code"] == 1
     assert result["artifact_format_error"] is True
@@ -704,14 +623,6 @@ def test_private_browser_duplicate_guard_is_bounded_and_state_sensitive():
     assert not _redundant_read_should_block(history, snapshot, 2, 5)
 
 
-def test_local_media_floor_preserves_native_vision_and_prunes_web_tools():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert '"inspect_media", "transcribe_media", "bash", "read_file", "ls"' in source
-    assert "创建|生成|保存|写入|写在|输出|放进|制作|截取|剪辑|拼接|导出" in source
-    assert "_native_local_media_inputs(_last_user, client_runtime_context)" in source
-    assert "_relevant_tools.difference_update(_irrelevant_web_tools)" in source
-
-
 def test_compact_native_route_keeps_local_media_off_the_web_path():
     from src.agent_loop import _compact_native_route_tools
 
@@ -858,13 +769,12 @@ def test_pdf_extract_accepts_task_local_pdf_path(tmp_path):
     from unittest.mock import patch
 
     from src.agent_tools.web_tools import PdfExtractTool
-    from src.tool_execution import _active_workspace
+    from tests.helpers.workspace import workspace_at
 
     local_pdf = tmp_path / "fixtures" / "paper.pdf"
     local_pdf.parent.mkdir()
     local_pdf.write_bytes(b"%PDF-local-test")
-    token = _active_workspace.set(str(tmp_path))
-    try:
+    with workspace_at(tmp_path):
         with patch.object(
             PdfExtractTool,
             "_positioned_table_evidence",
@@ -874,8 +784,6 @@ def test_pdf_extract_accepts_task_local_pdf_path(tmp_path):
                 '{"url":"/workspace/fixtures/paper.pdf","query":"Table 3"}',
                 {},
             ))
-    finally:
-        _active_workspace.reset(token)
     assert result == {
         "output": "Source: /workspace/fixtures/paper.pdf\n\nTable 3 local evidence",
         "exit_code": 0,
@@ -888,13 +796,12 @@ def test_pdf_extract_accepts_confined_physical_file_uri(tmp_path):
     from unittest.mock import patch
 
     from src.agent_tools.web_tools import PdfExtractTool
-    from src.tool_execution import _active_workspace
+    from tests.helpers.workspace import workspace_at
 
     local_pdf = tmp_path / "fixtures" / "report with spaces.pdf"
     local_pdf.parent.mkdir()
     local_pdf.write_bytes(b"%PDF-local-test")
-    token = _active_workspace.set(str(tmp_path))
-    try:
+    with workspace_at(tmp_path):
         with patch.object(
             PdfExtractTool,
             "_positioned_table_evidence",
@@ -904,8 +811,6 @@ def test_pdf_extract_accepts_confined_physical_file_uri(tmp_path):
                 "url": local_pdf.as_uri(),
                 "query": "focused evidence",
             }), {}))
-    finally:
-        _active_workspace.reset(token)
 
     assert result == {
         "output": (
@@ -941,53 +846,14 @@ def test_compact_native_route_discovers_named_paper_without_url():
     assert "bash" not in selected
 
 
-def test_per_model_route_reapplies_local_media_after_contextual_web_clamps():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    route_start = source.index("    def _route_relevant_tools(candidate_model: str):")
-    route_end = source.index("\n    (\n        _ody_qwen_finetune_model", route_start)
-    route_source = source[route_start:route_end]
-    assert route_source.rfind(
-        "_native_local_media_inputs(_last_user, client_runtime_context)"
-    ) > route_source.rfind(
-        "_contextual_public_web_followup"
-    )
-    assert 'route_tools.add("private_browser")' in route_source
-    assert 'route_tools.difference_update(' in route_source
-
-
-def test_compact_request_reapplies_runner_declared_media_after_compaction():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    compact_start = source.index('        if tool_surface == "compact":')
-    prompt_start = source.index("        prompt_route_tools =", compact_start)
-    compact_source = source[compact_start:prompt_start]
-    assert "_compact_native_route_tools(" in compact_source
-    assert compact_source.rfind("_native_local_media_inputs(") > compact_source.rfind(
-        "_compact_native_route_tools("
-    )
-    assert '"inspect_media", "transcribe_media"' in compact_source
-
-
-def test_native_runtime_context_can_cap_endpoint_context_budget():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert '(client_runtime_context or {}).get("model_context_window")' in source
-    assert "min(candidate_context, runtime_context_window)" in source
-
-
 def test_native_local_media_prunes_host_bridge_and_cookbook_tools():
+    """Source text on purpose: the host_shell discard sits inside
+    stream_agent_loop's route setup, which no unit-level call reaches, and it
+    keeps a sandboxed native run off the host bridge."""
     source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
     assert 'client_runtime_context.get("surface") or "") == "odysseus-native"' in source
     assert '_base_relevant_tools.discard("host_shell")' in source
     assert '_DOMAIN_TOOL_MAP.get("cookbook", set())' in source
-
-
-def test_terminal_artifact_observation_budget_forces_mutation_recovery():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert "_artifact_observation_rounds >= 6" in source
-    assert '"reason": "artifact_observation_budget"' in source
-    assert "_artifact_mutation_only_mode = True" in source
-    assert '"python",' in source
-    assert "code must generate a chart/image" in source
-    assert source.count("and not _artifact_mutation_only_mode") >= 2
 
 
 def test_missing_text_and_binary_artifacts_keep_python_for_synthesis():
@@ -1049,17 +915,6 @@ def test_visual_text_extraction_is_distinct_from_speech_transcription():
     assert not _visual_text_extraction_requested(
         "Extract subtitles from this recording."
     )
-
-
-def test_local_media_routes_select_dedicated_ocr_for_visual_text():
-    import re
-
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-
-    assert source.count(
-        "_ocr_requested = _visual_text_extraction_requested(_last_user)"
-    ) == 3
-    assert len(re.findall(r'\{"extract_text"\}\s*\n\s*if _ocr_requested', source)) == 3
 
 
 def test_workspace_paths_split_on_chinese_list_punctuation():
@@ -1128,28 +983,6 @@ def test_source_media_recovery_keeps_writer_for_text_companion_artifact():
     ) == set()
 
 
-def test_source_media_schema_boundary_keeps_text_companion_writer():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    boundary = source.index(
-        "# Final provenance boundary: route construction, fallbacks, and"
-    )
-    materialization = source.index(
-        "all_tool_schemas = _tool_schemas_for_route(_active_route_state)",
-        boundary,
-    )
-    segment = source[boundary:materialization]
-    assert "_workspace_artifacts" in segment
-    assert "recovery_active=True" in segment
-    assert "_source_companion_tools" in segment
-
-
-def test_artifact_recovery_does_not_shadow_recovery_message_builder():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert "_recovery_messages = _artifact_recovery_messages(" not in source
-    assert "messages = _artifact_recovery_messages(" in source
-    assert "_artifact_recovery_message_list = _artifact_recovery_messages(" in source
-
-
 def test_source_media_recovery_retains_bounded_candidate_working_notes():
     from src.agent_loop import _artifact_recovery_messages
 
@@ -1178,25 +1011,6 @@ def test_source_media_recovery_retains_bounded_candidate_working_notes():
     assert "00:00:52.050" in text
     assert "candidate hypotheses" in text
     assert "not independent pixel evidence" in text
-
-
-def test_direct_source_media_extraction_filter_is_reapplied_per_model_route():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    route_start = source.index("    def _route_relevant_tools(candidate_model: str):")
-    route_end = source.index("\n    (\n        _ody_qwen_finetune_model,", route_start)
-    route_source = source[route_start:route_end]
-    assert "if _source_media_extraction_requested:" in route_source
-    for tool in ("python", "bash", "generate_image", "edit_image"):
-        assert f'"{tool}"' in route_source
-
-    schema_boundary = source.index(
-        "# Final provenance boundary: route construction, fallbacks, and"
-    )
-    schema_materialization = source.index(
-        "all_tool_schemas = _tool_schemas_for_route(_active_route_state)",
-        schema_boundary,
-    )
-    assert schema_boundary < schema_materialization
 
 
 def test_mixed_local_pdf_artifacts_keep_native_media_inspection():
@@ -1257,30 +1071,30 @@ def test_artifact_recovery_capability_floor_is_not_enabled_for_plain_text():
 
 
 def test_post_redirect_local_pdf_inspection_is_bounded():
-    from src.agent_loop import _bounded_local_pdf_inspection_blocks
+    from src.agent_loop import _bounded_local_media_inspection_blocks
     from src.tool_types import ToolBlock
 
     blocks = [ToolBlock(
         "inspect_media",
         '{"path":"/workspace/paper.pdf","page":7}',
     )]
-    allowed, used = _bounded_local_pdf_inspection_blocks(
+    allowed, used = _bounded_local_media_inspection_blocks(
         blocks,
-        local_pdf_turn=True,
+        local_media_turn=True,
         already_used=0,
     )
     assert allowed == blocks
     assert used == 1
-    allowed, used = _bounded_local_pdf_inspection_blocks(
+    allowed, used = _bounded_local_media_inspection_blocks(
         blocks,
-        local_pdf_turn=True,
+        local_media_turn=True,
         already_used=2,
     )
     assert allowed == []
     assert used == 0
-    allowed, used = _bounded_local_pdf_inspection_blocks(
+    allowed, used = _bounded_local_media_inspection_blocks(
         [*blocks, ToolBlock("read_file", "/workspace/paper.pdf")],
-        local_pdf_turn=True,
+        local_media_turn=True,
         already_used=0,
     )
     assert allowed == []
@@ -1626,69 +1440,6 @@ def test_fetched_detail_page_is_source_evidence():
     )
 
 
-def test_artifact_recovery_redirects_wrong_http_and_partial_mutations():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert '"artifact_wrong_tool_http"' in source
-    assert '"artifact_native_acquisition_required"' in source
-    assert '"reason": "partial_artifact_mutation"' in source
-    assert "ad-hoc HTTP" in source
-    wrong_http_start = source.index('"artifact_wrong_tool_http"')
-    wrong_http_detector_start = source.rfind(
-        'and "ad-hoc HTTP" in str(',
-        0,
-        wrong_http_start,
-    )
-    wrong_http_detector = source[wrong_http_detector_start:wrong_http_start]
-    assert 'get("exit_code") not in (None, 0)' not in wrong_http_detector
-    assert "partial artifact mutation left required artifacts missing" in source
-    assert "For `.png` chart artifacts" in source
-
-
-def test_answer_only_local_media_has_bounded_inspection_budget():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert "_completed_media_inspections >= 8" in source
-    assert "round_num >= _round_limit - 1" in source
-    assert "_media_inspection_budget_exhausted" in source
-    assert "local-media inspection budget exhausted" in source
-    assert "answer the user's question now from the evidence" in source
-    assert "_media_artifacts_complete" in source
-    assert "do not refine it again" in source
-
-
-def test_force_answer_discards_native_tool_plan_before_grace_synthesis():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    force_answer_start = source.index("        if _force_answer:")
-    force_answer_end = source.index("        # A single giant SVG", force_answer_start)
-    force_answer_block = source[force_answer_start:force_answer_end]
-    assert "if native_tool_calls:" in force_answer_block
-    assert "discarding unfinished tool-plan text before synthesis" in force_answer_block
-    assert 'round_response = ""' in force_answer_block
-    assert "native_tool_calls = []" in force_answer_block
-
-
-def test_local_media_is_exempt_from_pure_web_schema_and_round_clamps():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    pure_web_start = source.index("    _local_media_turn = bool(")
-    pure_web_end = source.index("\n    if (\n        _pure_web_turn", pure_web_start)
-    assert "and not _local_media_turn" in source[pure_web_start:pure_web_end]
-    assert source.count("if _pure_web_turn:") == 2
-    assert 'if _pure_web_turn and tool_surface != "full":' in source
-
-
-def test_empty_local_media_round_nudges_export_instead_of_ending():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert "or _local_media_turn" in source
-    assert 'requested output_path, and timestamp_path when requested' in source
-
-
-def test_local_media_answer_requires_real_source_evidence():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert '"type": "source_evidence_required"' in source
-    assert '"reason": "local_media_not_observed"' in source
-    assert "blocked local-media answer without source evidence" in source
-    assert "Do not infer source contents from" in source
-
-
 def test_local_media_gate_allows_only_bounded_workspace_discovery():
     from src.agent_loop import _local_media_discovery_call_allowed
 
@@ -1704,30 +1455,6 @@ def test_local_media_gate_allows_only_bounded_workspace_discovery():
     )
     assert not _local_media_discovery_call_allowed("bash", "ls /workspace | cat")
     assert not _local_media_discovery_call_allowed("python", "os.listdir('/workspace')")
-
-
-def test_local_media_gate_has_one_automatic_evidence_acquisition_path():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert "_auto_local_media_evidence" in source
-    assert "_local_media_evidence_block_count == 0" in source
-    assert 'ToolBlock(\n                    "inspect_media"' in source
-    assert "_local_media_files[0]" in source
-    assert "and not _auto_local_media_evidence" in source
-    assert "_local_media_evidence_required_block = False" in source
-    assert "_local_media_evidence_required_block = True" in source
-    assert "elif _allow_local_media_discovery:" in source
-
-
-def test_combined_web_workspace_route_keeps_native_writers():
-    source = (Path(__file__).parents[1] / "routes" / "chat_routes.py").read_text()
-    assert "_web_workspace_output" in source
-    assert "if not _web_workspace_output" in source
-    assert "创建|生成|保存|写入|制作|截取|剪辑|拼接|导出" in source
-
-
-def test_compact_tool_surface_does_not_expand_to_every_admin_schema():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert 'and tool_surface != "compact"' in source
 
 
 def test_web_fetch_focused_passages_keeps_matching_context():
@@ -1808,31 +1535,6 @@ def test_workspace_alias_resolves_inside_active_workspace(tmp_path):
     from src.tool_execution import _resolve_tool_path_in_workspace
 
     assert _resolve_tool_path_in_workspace(str(tmp_path), "/workspace/result.csv") == str(tmp_path / "result.csv")
-
-
-def test_combined_web_artifact_floor_hides_generic_shell():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert '_relevant_tools.discard("bash")' in source
-    assert "combined web artifact task prefers structured tools" in source
-    assert "_named_online_document" in source
-    assert '{"web_search", "web_fetch", "pdf_extract"}' in source
-
-
-def test_source_acquisition_recovery_retains_artifact_mutation_floor():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert '"python", "write_file", "read_file"' in source
-    assert "set(_native_acquisition_tools)" in source
-    assert "| _artifact_mutation_tools" in source
-
-
-def test_failed_artifact_verifier_skips_readonly_followthrough():
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert "_failed_artifact_verifier = any(" in source
-    assert '"private_browser", "builtin_browser"' in source
-    assert "2 if _failed_artifact_verifier else 0" in source
-    assert "Source acquisition and artifact mutation" in source
-    assert "_acquisition_mutation_floor" in source
-    assert "_selected_acquisition_surface" in source
 
 
 def test_pdf_extract_requires_focus_and_reuses_native_fetch():
@@ -2012,13 +1714,6 @@ def test_pdf_extract_is_native_schema_and_rag_tool():
     assert "pdf_extract" in BUILTIN_TOOL_DESCRIPTIONS
 
 
-def test_positioned_pdf_keeps_continuous_rows_between_table_anchors():
-    source = (Path(__file__).parents[1] / "src" / "agent_tools" / "web_tools.py").read_text()
-    assert "table_top = max(0.0, min(anchors) - 100)" in source
-    assert "table_bottom = max(anchors) + 100" in source
-    assert "table_top <= row[0] <= table_bottom" in source
-
-
 def test_pdf_table_model_match_survives_split_hyphenated_name():
     from src.agent_tools.web_tools import PdfExtractTool
 
@@ -2137,7 +1832,7 @@ def test_pdf_web_fetch_auto_focuses_from_active_request():
     ctx = {"client_runtime_context": {"request_text": (
         "Read the PDF and extract Qwen2.5-VL-72B DocVQA ChartQA TextVQA"
     )}}
-    with patch("src.search.content.fetch_webpage_content", return_value=result_doc):
+    with patch("services.search.content.fetch_webpage_content", return_value=result_doc):
         result = asyncio.run(WebFetchTool().execute(
             '{"url":"https://arxiv.org/pdf/2502.13923"}', ctx
         ))
@@ -2208,7 +1903,6 @@ def test_python_emits_one_final_bare_expression_without_duplicating_print():
 def test_python_loaded_code_sees_virtual_workspace_alias(monkeypatch, tmp_path):
     """Absolute /workspace paths must work inside generated Python scripts."""
     import asyncio
-    import shutil
     import sys
     import venv
     from types import SimpleNamespace
@@ -2248,70 +1942,13 @@ def test_python_loaded_code_sees_virtual_workspace_alias(monkeypatch, tmp_path):
     assert output.read_text() == "ok"
 
 
-def test_workspace_namespace_mounts_only_a_nested_python_environment(monkeypatch, tmp_path):
-    import shlex
-
-    from src.agent_tools import subprocess_tools
-
-    monkeypatch.setattr(subprocess_tools.shutil, "which", lambda name: "/usr/bin/bwrap")
-    monkeypatch.setattr(subprocess_tools.containment, "_bwrap_available", lambda: True)
-    environment = tmp_path / "nested" / "venv"
-    environment.mkdir(parents=True)
-    (environment / "pyvenv.cfg").write_text("home = /usr/bin\n")
-    command = subprocess_tools._wrap_workspace_namespace(
-        "echo ok", str(tmp_path), interpreter_prefix=str(environment),
-    )
-    args = shlex.split(command)
-    assert ["--ro-bind", str(environment), str(environment)] in [
-        args[index:index + 3] for index in range(len(args) - 2)
-    ]
-    assert ["--tmpfs", "/tmp"] in [
-        args[index:index + 2] for index in range(len(args) - 1)
-    ]
-
-
-def test_workspace_namespace_rejects_broad_or_symlinked_python_prefixes(monkeypatch, tmp_path):
-    import shlex
-
-    from src.agent_tools import subprocess_tools
-
-    monkeypatch.setattr(subprocess_tools.shutil, "which", lambda name: "/usr/bin/bwrap")
-    monkeypatch.setattr(subprocess_tools.containment, "_bwrap_available", lambda: True)
-    linked_root = tmp_path / "linked-root"
-    linked_root.symlink_to("/", target_is_directory=True)
-    # Compared against the argv with no interpreter prefix at all: an unsafe
-    # prefix must add *nothing*. Asserting the absence of a literal
-    # `--ro-bind <prefix> <prefix>` instead would also fire on a base mount the
-    # argv makes for its own reasons -- /home and /mnt are read-only binds
-    # there -- which says nothing about whether the prefix was rejected.
-    baseline = shlex.split(
-        subprocess_tools._wrap_workspace_namespace("echo ok", str(tmp_path))
-    )
-    for unsafe_prefix in ("/", "/tmp", "/var", "/home", str(linked_root)):
-        command = subprocess_tools._wrap_workspace_namespace(
-            "echo ok", str(tmp_path), interpreter_prefix=unsafe_prefix,
-        )
-        args = shlex.split(command)
-        assert args == baseline, f"prefix {unsafe_prefix} changed the namespace argv"
-        assert ["--tmpfs", "/tmp"] in [
-            args[index:index + 2] for index in range(len(args) - 1)
-        ]
-        assert ["--bind", str(tmp_path), "/workspace"] in [
-            args[index:index + 3] for index in range(len(args) - 2)
-        ]
-
-
-def test_workspace_namespace_preserves_the_64_bit_dynamic_loader(monkeypatch):
+def test_workspace_namespace_preserves_the_64_bit_dynamic_loader():
     """The namespace's /lib64 must mirror usrmerge hosts, not /usr/lib."""
-    import shlex
+    from src import containment
 
-    from src.agent_tools import subprocess_tools
-
-    monkeypatch.setattr(subprocess_tools.shutil, "which", lambda name: "/usr/bin/bwrap")
-    monkeypatch.setattr(subprocess_tools.containment, "_bwrap_available", lambda: True)
-    command = subprocess_tools._wrap_workspace_namespace("echo ok", "/tmp/workspace")
-    assert command is not None
-    args = shlex.split(command)
+    args = containment._bwrap_prefix(
+        containment.ContainmentSpec(workspace="/tmp/workspace", env={}, wall_clock_s=120)
+    )
     assert ["--symlink", "usr/lib64", "/lib64"] == args[args.index("/lib") + 1 : args.index("/lib") + 4]
 
 

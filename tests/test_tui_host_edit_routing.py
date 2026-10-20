@@ -71,7 +71,7 @@ def test_edit_file_rejects_non_boolean_replace_all_without_host_call(monkeypatch
 
     assert desc == "edit_file: invalid arguments"
     assert result == {
-        "error": "edit_file: replace_all must be a boolean",
+        "error": "edit_file: replace_all Input should be a valid boolean",
         "exit_code": 1,
     }
     assert calls == []

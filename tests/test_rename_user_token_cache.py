@@ -13,12 +13,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from tests.helpers.route_call import with_db
 
 
 def _route(router, name):
     for r in router.routes:
         if getattr(getattr(r, "endpoint", None), "__name__", "") == name:
-            return r.endpoint
+            return with_db(r.endpoint)
     raise AssertionError(name)
 
 
@@ -56,21 +57,19 @@ def _request(invalidator):
 
 
 def test_rename_invalidates_token_cache(rename_endpoint):
-    import asyncio
     endpoint, _am = rename_endpoint
     called = {"n": 0}
     req = _request(lambda: called.__setitem__("n", called["n"] + 1))
-    res = asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), req))
+    res = endpoint("alice", SimpleNamespace(username="alice2"), req)
     assert res["ok"] is True and res["username"] == "alice2"
     assert called["n"] == 1, "bearer-token cache was not invalidated on rename"
 
 
 def test_no_invalidator_does_not_crash(rename_endpoint):
-    import asyncio
     endpoint, _am = rename_endpoint
     # app.state without the hook (older wiring) must not break rename.
     req = SimpleNamespace(cookies={"odysseus_session": "t"},
                           app=SimpleNamespace(state=SimpleNamespace()),
                           state=SimpleNamespace(current_user="admin"))
-    res = asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), req))
+    res = endpoint("alice", SimpleNamespace(username="alice2"), req)
     assert res["ok"] is True

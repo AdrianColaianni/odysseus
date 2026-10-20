@@ -281,9 +281,6 @@ def normalized_native_function_argument_error(
             )
     return None
 
-# ---------------------------------------------------------------------------
-# OpenAI-compatible function tool schemas
-# ---------------------------------------------------------------------------
 FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
@@ -1921,10 +1918,6 @@ FUNCTION_TOOL_SCHEMAS = [
     },
 ]
 
-
-# ---------------------------------------------------------------------------
-# Converter: native function call -> ToolBlock
-# ---------------------------------------------------------------------------
 
 def _decode_loose_json_string(value: str) -> str:
     """Decode common JSON string escapes without requiring inner quotes to be escaped."""

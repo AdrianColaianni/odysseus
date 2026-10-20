@@ -5,7 +5,7 @@ import time
 import pytest
 
 from src.deep_research import DeepResearcher
-from src.research_navigator import ResearchPage
+from src.research_navigator import ResearchAction, ResearchPage
 
 
 class _ControlledResearcher(DeepResearcher):
@@ -38,7 +38,8 @@ async def test_search_and_extract_respects_extraction_concurrency():
     researcher = _ControlledResearcher(extraction_concurrency=2, max_urls_per_round=4)
     researcher._start_time = time.time()
 
-    findings = await researcher._search_and_extract(["a", "b"], "question")
+    findings = await researcher._execute_research_actions(
+        [ResearchAction("web_search", {"query": q}) for q in ("a", "b")], "question")
 
     assert len(findings) == 8
     assert researcher.max_active == 2
@@ -49,7 +50,8 @@ async def test_search_and_extract_tracks_all_urls_selected_for_analysis():
     researcher = _ControlledResearcher(extraction_concurrency=2, max_urls_per_round=2)
     researcher._start_time = time.time()
 
-    findings = await researcher._search_and_extract(["a"], "question")
+    findings = await researcher._execute_research_actions(
+        [ResearchAction("web_search", {"query": "a"})], "question")
 
     assert len(findings) == 2
     assert [

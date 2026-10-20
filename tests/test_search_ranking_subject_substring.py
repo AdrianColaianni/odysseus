@@ -1,6 +1,6 @@
 """Regression: snippet and subject-term matching must be word-boundary.
 
-#1473 converted the title and sports-hint matches in ranking.py to word
+#1473 converted the title and sports-hint matches in services_ranking.py to word
 boundaries, but left two raw substring tests behind:
 
   - snippet_score: ``term in snippet.lower()`` — query term "port" hits
@@ -12,16 +12,8 @@ boundaries, but left two raw substring tests behind:
 Both now go through ``_has_word`` (the same ``\\b...\\b`` pattern title_score
 uses), so a short term no longer matches inside an unrelated word.
 
-``rank_search_results`` is exercised on both the services module (the
-/api/search path) and the src re-export shim (the agent web_search path).
 """
-import pytest
-
 import services.search.ranking as services_ranking
-import src.search.ranking as src_ranking
-
-RANK_MODULES = [services_ranking, src_ranking]
-RANK_IDS = ["services", "src"]
 
 
 # --- _has_word helper (defined in the services module) ---------------------
@@ -39,8 +31,7 @@ def test_has_word_matches_standalone_terms():
 
 # --- snippet_score: substring term must not inflate relevance ---------------
 
-@pytest.mark.parametrize("ranking", RANK_MODULES, ids=RANK_IDS)
-def test_snippet_substring_does_not_outrank_a_true_nonmatch(ranking):
+def test_snippet_substring_does_not_outrank_a_true_nonmatch():
     # Non-news query so only snippet relevance differs (no news adjustment).
     query = "port forwarding"
     results = [
@@ -51,7 +42,7 @@ def test_snippet_substring_does_not_outrank_a_true_nonmatch(ranking):
         {"title": "Networking notes", "snippet": "transport and support",
          "url": "https://example.org/b", "age": "1 day"},
     ]
-    ranked = ranking.rank_search_results(query, results)
+    ranked = services_ranking.rank_search_results(query, results)
     # Pre-fix B got a spurious term hit and outranked C; post-fix they have the
     # same (zero) snippet term match, so input order stands and C stays first.
     assert ranked[0]["url"] == "https://example.org/c"
@@ -59,8 +50,7 @@ def test_snippet_substring_does_not_outrank_a_true_nonmatch(ranking):
 
 # --- subject-term off-topic penalty: substring must not suppress it ---------
 
-@pytest.mark.parametrize("ranking", RANK_MODULES, ids=RANK_IDS)
-def test_offtopic_subject_substring_is_still_penalized(ranking):
+def test_offtopic_subject_substring_is_still_penalized():
     # News query with subject term "us". B mentions "us" only inside
     # "business"; A mentions "us" as a standalone word. The snippets are padded
     # past the 200-char length cap and are otherwise identical, so both sides
@@ -81,7 +71,7 @@ def test_offtopic_subject_substring_is_still_penalized(ranking):
         {"title": "Daily roundup", "snippet": "us economy and policy. " + filler,
          "url": "https://example.org/a", "age": "1 day"},
     ]
-    ranked = ranking.rank_search_results(query, results)
+    ranked = services_ranking.rank_search_results(query, results)
     # Pre-fix B escaped the off-topic penalty (substring "us") so the tie kept
     # input order (B on top); post-fix B takes the -1.0 penalty and A rises.
     assert ranked[0]["url"] == "https://example.org/a"

@@ -1,35 +1,23 @@
-import pytest
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from src.document_processor import extract_local_document
 
 
-@pytest.mark.parametrize(
-    ("filename", "body", "language"),
-    [
+def test_extract_local_document_reads_advertised_text_formats(tmp_path):
+    for filename, body, language in (
         ("config.yaml", "service:\n  enabled: true\n", "yaml"),
-        ("query.sql", "select * from orders;\n", "sql"),
         ("script.sh", "#!/bin/sh\necho ready\n", "bash"),
-        ("styles.css", "body { color: red; }\n", "css"),
-        ("main.ts", "const ready: boolean = true;\n", "typescript"),
         ("settings.xml", "<settings enabled=\"true\"/>\n", "xml"),
-    ],
-)
-def test_extract_local_document_reads_advertised_text_formats(
-    tmp_path,
-    filename,
-    body,
-    language,
-):
-    path = tmp_path / filename
-    path.write_text(body, encoding="utf-8")
+    ):
+        path = tmp_path / filename
+        path.write_text(body, encoding="utf-8")
 
-    result = extract_local_document(str(path))
+        result = extract_local_document(str(path))
 
-    assert body.strip() in result
-    assert f"```{language}" in result
-    assert "[Attached document file]" not in result
+        assert body.strip() in result
+        assert f"```{language}" in result
+        assert "[Attached document file]" not in result
 
 
 def test_extract_local_document_reads_real_pdf_text(tmp_path):

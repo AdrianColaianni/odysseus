@@ -21,7 +21,7 @@ def test_single_user_save_preserves_other_users(tmp_path, monkeypatch):
         "alice": {"theme": "light"},
         "bob": {"theme": "paper"},
     }}), encoding="utf-8")
-    monkeypatch.setattr(pr, "PREFS_FILE", str(f))
+    monkeypatch.setattr(pr, "USER_PREFS_FILE", str(f))
 
     # auth disabled: load (first user) -> modify -> save
     current = pr._load_for_user(None)
@@ -38,7 +38,7 @@ def test_single_user_save_preserves_other_users(tmp_path, monkeypatch):
 def test_legacy_flat_store_still_saved_flat(tmp_path, monkeypatch):
     f = tmp_path / "user_prefs.json"
     f.write_text(json.dumps({"theme": "light"}), encoding="utf-8")
-    monkeypatch.setattr(pr, "PREFS_FILE", str(f))
+    monkeypatch.setattr(pr, "USER_PREFS_FILE", str(f))
 
     pr._save_for_user(None, {"theme": "dark"})
     data = json.loads(f.read_text())
@@ -48,7 +48,7 @@ def test_legacy_flat_store_still_saved_flat(tmp_path, monkeypatch):
 def test_named_user_save_unaffected(tmp_path, monkeypatch):
     f = tmp_path / "user_prefs.json"
     f.write_text(json.dumps({"_users": {"alice": {"theme": "light"}}}), encoding="utf-8")
-    monkeypatch.setattr(pr, "PREFS_FILE", str(f))
+    monkeypatch.setattr(pr, "USER_PREFS_FILE", str(f))
 
     pr._save_for_user("bob", {"theme": "dark"})
     data = json.loads(f.read_text())
@@ -65,7 +65,7 @@ def test_auth_disabled_fallback_consent_does_not_mutate_first_named_user(
         "alice": {"theme": "light"},
         "bob": {"theme": "paper"},
     }}), encoding="utf-8")
-    monkeypatch.setattr(pr, "PREFS_FILE", str(f))
+    monkeypatch.setattr(pr, "USER_PREFS_FILE", str(f))
 
     current = pr._load_for_user(None)
     current["foreground_fallback_enabled"] = True
@@ -91,7 +91,7 @@ def test_auth_disabled_save_preserves_named_fallback_consent(tmp_path, monkeypat
             "foreground_model_fallbacks": alice_fallbacks,
         },
     }}), encoding="utf-8")
-    monkeypatch.setattr(pr, "PREFS_FILE", str(f))
+    monkeypatch.setattr(pr, "USER_PREFS_FILE", str(f))
 
     current = pr._load_for_user(None)
     assert "foreground_fallback_enabled" not in current

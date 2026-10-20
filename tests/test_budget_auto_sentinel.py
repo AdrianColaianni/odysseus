@@ -44,9 +44,7 @@ def test_saving_an_unrelated_setting_does_not_re_cap_the_budget(tmp_path, monkey
     assert raw["agent_input_token_budget"] == DEFAULT_BUDGET
     assert raw["search_result_count"] == 9
 
-    # ...yet it must read as AUTO (value == default), not an explicit cap — even
-    # though is_setting_overridden would report True for it now.
-    assert settings.is_setting_overridden("agent_input_token_budget") is True
+    # ...yet it must read as AUTO (value == default), not an explicit cap.
     soft = int(settings.get_setting("agent_input_token_budget", DEFAULT_BUDGET) or 0)
     assert budget_is_explicit(soft) is False
     # And the effective budget scales to the window rather than capping at 6000.

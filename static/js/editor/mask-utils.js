@@ -5,6 +5,8 @@
  * input and return a fresh canvas, with no module-level state.
  */
 
+import { makeCanvas } from './placed-layer.js';
+
 /**
  * Dilate (positive `px`) or erode (negative `px`) a binary alpha mask.
  *
@@ -18,8 +20,7 @@
  */
 export function dilateMask(src, px) {
   const w = src.width, h = src.height;
-  const tmp = document.createElement('canvas');
-  tmp.width = w; tmp.height = h;
+  const tmp = makeCanvas(w, h);
   const ctx = tmp.getContext('2d');
   if (px === 0) {
     ctx.drawImage(src, 0, 0);
@@ -96,8 +97,7 @@ export function applyInpaintFeather(layer, featherPx, edgeShiftPx = 0) {
   // 1) Optional dilate/erode, then optional blur, into a fresh mask.
   let shaped = mask;
   if (edgeShiftPx !== 0) shaped = dilateMask(mask, edgeShiftPx);
-  const softMask = document.createElement('canvas');
-  softMask.width = w; softMask.height = h;
+  const softMask = makeCanvas(w, h);
   const smCtx = softMask.getContext('2d');
   if (featherPx > 0) {
     smCtx.filter = `blur(${featherPx}px)`;

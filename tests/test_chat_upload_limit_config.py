@@ -3,7 +3,6 @@ import io
 import pytest
 from fastapi import HTTPException, UploadFile
 
-from src.chat_helpers import validate_file_upload
 from src.upload_handler import UploadHandler
 from src.upload_limits import (
     DEFAULT_CHAT_UPLOAD_MAX_BYTES,
@@ -40,17 +39,6 @@ def test_read_byte_limit_env_rejects_non_positive(monkeypatch):
 
     with pytest.raises(ValueError, match="greater than 0"):
         read_byte_limit_env("ODYSSEUS_CHAT_UPLOAD_MAX_BYTES", 10)
-
-
-def test_validate_file_upload_uses_configured_chat_limit(monkeypatch):
-    monkeypatch.setenv("ODYSSEUS_CHAT_UPLOAD_MAX_BYTES", "4")
-
-    with pytest.raises(HTTPException) as exc:
-        validate_file_upload(_upload("too-large.txt", b"abcde"))
-
-    assert exc.value.status_code == 400
-    assert exc.value.detail["error"] == "FILE_TOO_LARGE"
-    assert exc.value.detail["message"] == "File size exceeds 4 bytes limit"
 
 
 def test_upload_handler_uses_configured_chat_limit(monkeypatch, tmp_path):

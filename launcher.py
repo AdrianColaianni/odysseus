@@ -135,10 +135,10 @@ if __name__ == "__main__":
     import uvicorn
     # Import the FastAPI app from app.py
     from app import app
+    from src.constants import APP_PORT
 
     bind_host = os.getenv("APP_BIND", "127.0.0.1")
-    bind_port = int(os.getenv("APP_PORT", "7011"))
-    url = f"http://{bind_host}:{bind_port}"
+    url = f"http://{bind_host}:{APP_PORT}"
 
     if getattr(sys, 'frozen', False):
         # Start browser manager thread
@@ -146,4 +146,4 @@ if __name__ == "__main__":
         # Start system tray manager thread
         threading.Thread(target=setup_system_tray, args=(url,), daemon=True).start()
 
-    uvicorn.run(app, host=bind_host, port=bind_port, log_level="info")
+    uvicorn.run(app, host=bind_host, port=APP_PORT, log_level="info")

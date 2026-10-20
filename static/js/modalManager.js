@@ -1,34 +1,11 @@
-/**
- * ModalManager — unified open/minimize/close behavior for tool modals.
- *
- * Goals:
- *  - Tab-down (swipe) and the `_` button MINIMIZE: modal hidden, JS state preserved.
- *  - The ✕ button CLOSES: tears down via the registered closeFn.
- *  - Sidebar/rail click handler: closed → open, minimized → restore, open → minimize.
- *  - Rail icon shows a "minimized" badge when state is held.
- *
- * Usage from a tool module:
- *
- *   import * as Modals from './modalManager.js';
- *
- *   // After building the modal element and adding it to the body:
- *   Modals.register('gallery-modal', {
- *     railBtnId: 'tool-gallery-btn',
- *     restoreFn: () => { ...whatever the tool needs to do when un-hiding... },
- *     closeFn:   () => { ...full teardown — remove modal element etc... },
- *   });
- *
- *   // From the sidebar/rail button click handler:
- *   if (!Modals.toggle('gallery-modal')) {
- *     // No registered modal — build and open it fresh.
- *     openGallery();
- *   }
- */
+// ModalManager: open/minimize/close for tool modals. `_` and swipe-down
+// minimize to a dock chip with state kept; the close button tears down via the
+// registered closeFn; a rail/sidebar click restores a minimized modal.
 
 import { previewZoneAt, clearPreview, snapModalToZone } from './tileManager.js?v=20260910responsivebounds1';
 import { suspendDock, resumeDock, clearRightDock, applyEdgeDock } from './modalSnap.js';
 import { dismissOrRemove } from './escMenuStack.js';
-import { nextToolWindowZ } from './toolWindowZOrder.js';
+import { raiseToolWindow } from './toolWindowZOrder.js';
 
 const _state = new Map(); // id -> { restoreFn, closeFn, railBtnId, isMinimized, restoreMinHeight }
 
@@ -57,29 +34,10 @@ function _applyRememberedDock(id) {
   try { applyEdgeDock(modal, side); } catch (e) { console.warn('apply remembered dock failed', e); }
 }
 
-// Monotonic stacking counter so the most-recently-surfaced tool window always
-// sits on top. Tool modals otherwise carry fixed CSS z-indexes (base .modal
-// = 250, cookbook/theme = 260, …), so restoring one from the dock could leave
-// it BEHIND an already-open tool with a higher static z-index. Start above
-// those statics and bump on every bring-to-front.
-let _modalTopZ = 300;
-function _bringToFront(modal) {
-  if (!modal) return;
-  const z = nextToolWindowZ({
-    exclude: modal,
-    current: getComputedStyle(modal).zIndex,
-    floor: _modalTopZ,
-  });
-  _modalTopZ = Math.max(_modalTopZ, z);
-  modal.style.setProperty('z-index', String(z), 'important');
-}
-
 function _emitModalOpened(id, modal) {
-  try {
-    window.dispatchEvent(new CustomEvent('odysseus:modal-opened', {
-      detail: { id, modal },
-    }));
-  } catch (_) {}
+  window.dispatchEvent(new CustomEvent('odysseus:modal-opened', {
+    detail: { id, modal },
+  }));
 }
 
 function _captureRestoreHeight(modal, state) {
@@ -171,9 +129,8 @@ const _chipPositions = new Map(); // modalId -> { left, top }
 // where the user last parked it instead of snapping back to bottom-center.
 // null means "use the CSS default position".
 let _dockPos = null; // { left, top } | null
-// Snapshot of which ids had a rendered chip after the last _renderDock pass.
-// Lets us detect "a brand-new chip just arrived" so we can re-dock the
-// existing free-positioned chain to absorb the newcomer.
+// Ids that had a rendered chip after the last _renderDock pass, so a new
+// chip can pull the free-positioned chips back into the dock.
 const _renderedChipIds = new Set();
 
 // ── Persistence (mobile dock + free-chip positions) ──
@@ -240,12 +197,11 @@ function _applyDockPos(dock) {
   dock.style.transform = 'none';
 }
 
-// True when `chipRect` is close enough to the dock's current location that
-// dropping a free-dragged chip there should re-attach it to the chain.
+// True when `chipRect` is close enough to the dock that dropping a
+// free-dragged chip there re-docks it.
 function _nearDock(chipRect, dock) {
   const dr = dock.getBoundingClientRect();
-  // Dock may be empty (all chips detached) — fall back to its style position
-  // so the user can still aim at "where the chain lives".
+  // An empty dock has no rect; fall back to its style position.
   let cx, cy;
   if (dr.width > 0 && dr.height > 0) {
     cx = dr.left + dr.width / 2;
@@ -283,12 +239,8 @@ function _renderDock() {
     if (!_dockOrder.includes(id)) _dockOrder.push(id);
   }
 
-  // Capture any custom data-* attributes (e.g. data-tab-num) BEFORE we
-  // remove old chips, so they can be restored on the rebuilt chips.
-  // Without this, external systems that stamp attributes on chips
-  // (like emailLibrary's slot-number badge) see the attribute wiped on
-  // every re-render — most visibly after a chain drag, when chips are
-  // at body level and get swept by the next render.
+  // Carry custom data-* attributes (emailLibrary's data-tab-num badge)
+  // over to the rebuilt chips.
   const oldData = new Map();
   document.querySelectorAll('.minimized-dock-chip').forEach(c => {
     const id = c.dataset.modalId;
@@ -302,11 +254,7 @@ function _renderDock() {
     if (Object.keys(data).length) oldData.set(id, data);
   });
 
-  // Sweep any free-positioned chips currently on <body> first — they'll be
-  // recreated below if still alive, but if _dockOrder ended up empty (e.g.
-  // the chain close-all just finished) we need to clear them here too.
-  // Previously this sweep only ran in the non-empty branch, leaving the
-  // last-rendered chip orphaned on body after the final close.
+  // Sweep free-positioned chips on <body>; live ones are recreated below.
   document.querySelectorAll('body > .minimized-dock-chip').forEach(c => c.remove());
 
   // _dockOrder keeps every alive modal's slot (so order is stable across
@@ -314,11 +262,8 @@ function _renderDock() {
   // in allIds (minimized or persistent).
   const renderIds = _dockOrder.filter(id => allIds.includes(id));
 
-  // If a brand-new chip is joining and the existing chips are already
-  // free-positioned at body level (e.g. previously chain-dropped), the
-  // new chip would land in the dock by itself — visually unlinking the
-  // group. Collapse everyone back into the dock so the chain stays
-  // together as a single group at the new size.
+  // A new chip joining collapses every free-positioned chip back into the
+  // dock so the group stays together.
   const newIds = renderIds.filter(id => !_renderedChipIds.has(id));
   if (newIds.length && _chipPositions.size) {
     _chipPositions.clear();
@@ -497,144 +442,9 @@ function _detachToFreeDrag(chip, dock, chipStartLeft, chipStartTop) {
   chip.classList.add('chip-free-drag');
 }
 
-// ── Chain physics ──
-// When the user drags one chip from a multi-chip dock, the other chips
-// spring-follow it like a snake. Each follower targets its predecessor's
-// position plus a fixed offset (their original spacing), so the chain
-// stretches and bunches naturally as the head moves.
-function _initChainPhysics(grabbedChip, dock, startX, startY) {
-  // Use the canonical _dockOrder so the chain works whether chips are
-  // currently parented to the dock or living free at body level.
-  const chipEls = _dockOrder
-    .map(id => document.querySelector(`.minimized-dock-chip[data-modal-id="${id}"]`))
-    .filter(Boolean);
-  // Fallback to dock children if _dockOrder is somehow empty.
-  const dockChips = chipEls.length >= 2 ? chipEls : [...dock.querySelectorAll('.minimized-dock-chip')];
-  const grabbedIdx = dockChips.indexOf(grabbedChip);
-  if (grabbedIdx < 0 || dockChips.length < 2) return null;
-
-  const links = dockChips.map((c, i) => {
-    const r = c.getBoundingClientRect();
-    return {
-      chip: c, dockIdx: i,
-      width: r.width, height: r.height,
-      origX: r.left, origY: r.top,
-      x: r.left, y: r.top,
-      vx: 0, vy: 0,
-      pred: null,
-    };
-  });
-  // Build a single-line chain ordered outward from the head, alternating
-  // sides so chips closer to the grabbed one come first. Each link's
-  // predecessor is the chip immediately before it in chain order — that
-  // makes the whole chain a single tail rather than a Y where two strands
-  // dangle from the head.
-  const order = [grabbedIdx];
-  let lo = grabbedIdx - 1, hi = grabbedIdx + 1;
-  while (lo >= 0 || hi < links.length) {
-    if (lo >= 0) { order.push(lo); lo--; }
-    if (hi < links.length) { order.push(hi); hi++; }
-  }
-  for (let pos = 1; pos < order.length; pos++) {
-    links[order[pos]].pred = links[order[pos - 1]];
-  }
-
-  // Detach every chip to body so the dock element can't fight our positioning.
-  for (const l of links) {
-    l.chip.style.position = 'fixed';
-    l.chip.style.left = `${l.x}px`;
-    l.chip.style.top = `${l.y}px`;
-    l.chip.style.margin = '0';
-    l.chip.style.transition = 'none';
-    l.chip.style.animation = 'none';
-    l.chip.style.zIndex = (l.dockIdx === grabbedIdx) ? '10001' : '10000';
-    document.body.appendChild(l.chip);
-  }
-  // Hide the now-empty dock element itself so it doesn't show a blank pad.
-  dock.style.opacity = '0';
-
-  const head = links[grabbedIdx];
-  // Use a uniform link spacing — slightly tighter than a chip-width so the
-  // chain looks like a connected strand rather than a sparse row.
-  const linkSpacing = head.width + 2;
-  return {
-    links, grabbedIdx, order,
-    linkSpacing,
-    fingerOffsetX: startX - head.origX,
-    fingerOffsetY: startY - head.origY,
-    targetX: head.origX, targetY: head.origY,
-    // Seed the trail direction with the original layout direction (chips
-    // were arranged left-to-right; chain at rest points right).
-    trailDirX: 1, trailDirY: 0,
-    raf: 0, overTrash: false,
-  };
-}
-
-function _stepChain(state, trashZone, captureRadius) {
-  const HEAD_EASE = 0.85;
-  // Followers use critically-damped easing (direct lerp, no velocity) rather
-  // than spring + damp — springs oscillate when chasing a moving target, and
-  // with a chain of 3+ each link amplifies the wobble.
-  const FOLLOWER_EASE = 0.32;
-  // Trail direction tracks the head's RECENT movement (smoothed). Reversing
-  // direction mid-drag flips the trail; pausing keeps the last orientation.
-  // Seeded with the original horizontal layout in _initChainPhysics so the
-  // chain has a sensible direction even before the first frame.
-  const head = state.links[state.grabbedIdx];
-  const hVx = (state.targetX - head.x) * HEAD_EASE;
-  const hVy = (state.targetY - head.y) * HEAD_EASE;
-  const vMag = Math.hypot(hVx, hVy);
-  // Dead zone — micro-velocities from finger drift don't reorient the trail.
-  // Only intentional, sustained motion updates direction.
-  if (vMag > 2.0) {
-    const nx = -hVx / vMag;
-    const ny = -hVy / vMag;
-    const EASE = 0.12;
-    state.trailDirX += (nx - state.trailDirX) * EASE;
-    state.trailDirY += (ny - state.trailDirY) * EASE;
-  }
-  // Renormalize so spacing stays consistent even mid-rotation.
-  const tMag = Math.hypot(state.trailDirX, state.trailDirY) || 1;
-  const dirX = state.trailDirX / tMag;
-  const dirY = state.trailDirY / tMag;
-  const spacing = state.linkSpacing;
-  for (const i of state.order) {
-    const l = state.links[i];
-    if (i === state.grabbedIdx) {
-      l.x += (state.targetX - l.x) * HEAD_EASE;
-      l.y += (state.targetY - l.y) * HEAD_EASE;
-    } else {
-      const tx = l.pred.x + dirX * spacing;
-      const ty = l.pred.y + dirY * spacing;
-      l.x += (tx - l.x) * FOLLOWER_EASE;
-      l.y += (ty - l.y) * FOLLOWER_EASE;
-    }
-  }
-  for (const l of state.links) {
-    l.chip.style.left = `${l.x}px`;
-    l.chip.style.top = `${l.y}px`;
-  }
-  if (trashZone) {
-    const head = state.links[state.grabbedIdx];
-    const tz = trashZone.getBoundingClientRect();
-    const tzcx = tz.left + tz.width / 2;
-    const tzcy = tz.top + tz.height / 2;
-    const hcx = head.x + head.width / 2;
-    const hcy = head.y + head.height / 2;
-    const dist = Math.hypot(hcx - tzcx, hcy - tzcy);
-    // Trash zone is shown for the whole drag; only .engaged tracks proximity.
-    const inZone = dist < captureRadius;
-    _setTrashZoneProximity(trashZone, dist, captureRadius);
-    if (inZone !== state.overTrash) {
-      state.overTrash = inZone;
-      trashZone.classList.toggle('engaged', inZone);
-    }
-  }
-}
-
 function _wireChipDrag(chip, dock) {
   let startX = 0, startY = 0, dragging = false;
-  let dragMode = null; // 'reorder' | 'move-dock' | 'free' | 'chain'
+  let dragMode = null; // 'reorder' | 'move-dock' | 'free'
   let dockStartLeft = 0, dockStartTop = 0;
   let chipStartLeft = 0, chipStartTop = 0;
   let trashZone = null;
@@ -642,7 +452,6 @@ function _wireChipDrag(chip, dock) {
   let activePointerId = null;
   let longPressTimer = null;
   let longPressVisual = null;
-  let chainState = null;
   let chipSnapZone = null;   // desktop: snap zone under the cursor while dragging a chip
   const CAPTURE_RADIUS = 70;
 
@@ -675,45 +484,11 @@ function _wireChipDrag(chip, dock) {
       trashZone = _ensureTrashZone();
       trashZone.style.setProperty('--trash-zone-scale', '1');
       overTrash = false;
-      // Decide drag mode purely by chip count, not by whether this chip is
-      // currently dock-resident or free. As long as there are 2+ chips, the
-      // chain owns the gesture so the group stays grouped.
-      // Count every currently-rendered chip, whether it lives in the dock
-      // or free-positioned at body level after a chain drop. Counting only
-      // dock children meant a chained-and-released group could no longer
-      // re-activate chain mode on the next drag.
-      const totalChips =
-        dock.querySelectorAll('.minimized-dock-chip').length +
-        document.querySelectorAll('body > .minimized-dock-chip').length;
-      if (totalChips >= 2) {
-        dragMode = 'chain';
-        _positionTrashZoneOpposite(trashZone, chipStartTop, chip.offsetHeight);
-        // Long-press a chained chip to peel it off as a single free puck —
-        // movement before the timer fires cancels and starts chain physics.
-        // Defer the visual pulse so quick taps don't see a scale-up bounce.
-        longPressVisual = setTimeout(() => {
-          longPressVisual = null;
-          chip.classList.add('chip-long-press');
-        }, 180);
-        longPressTimer = setTimeout(() => {
-          longPressTimer = null;
-          if (dragging) return; // chain already engaged
-          dragMode = 'free';
-          chip.classList.remove('chip-long-press');
-          _detachToFreeDrag(chip, dock, chipStartLeft, chipStartTop);
-          _chipPositions.set(chip.dataset.modalId, { left: chipStartLeft, top: chipStartTop });
-          _saveDockState();
-          chip._wasDragging = true;
-          setTimeout(() => { chip._wasDragging = false; }, 350);
-          if (navigator.vibrate) { try { navigator.vibrate(15); } catch {} }
-        }, LONG_PRESS_MS);
-      } else if (isFree) {
-        // Lone free chip — single-puck drag.
+      if (isFree) {
         dragMode = 'free';
         _positionTrashZoneOpposite(trashZone, chipStartTop, chip.offsetHeight);
       } else {
-        // Lone dock chip — keep move-dock so the user can reposition the
-        // dock pad (long-press still promotes to free-drag).
+        // Dock chip drags the whole dock; long-press peels it out as a free puck.
         dragMode = 'move-dock';
         const dr = dock.getBoundingClientRect();
         dockStartLeft = dr.left;
@@ -738,7 +513,7 @@ function _wireChipDrag(chip, dock) {
           // restore/minimize the modal under the finger.
           chip._wasDragging = true;
           setTimeout(() => { chip._wasDragging = false; }, 350);
-          if (navigator.vibrate) { try { navigator.vibrate(15); } catch {} }
+          navigator.vibrate?.(15);
         }, LONG_PRESS_MS);
       }
       document.addEventListener('pointermove', onPointerMove);
@@ -751,8 +526,7 @@ function _wireChipDrag(chip, dock) {
     const chips = [...dock.querySelectorAll('.minimized-dock-chip')];
     const idx = chips.indexOf(chip);
     const isEdge = idx === 0 || idx === chips.length - 1;
-    dragMode = (isEdge && chips.length >= 2) ? 'move-dock' : (chips.length >= 2 ? 'reorder' : 'move-dock');
-    if (chips.length === 1) dragMode = 'move-dock';
+    dragMode = (chips.length >= 2 && !isEdge) ? 'reorder' : 'move-dock';
     if (dragMode === 'move-dock') {
       const dr = dock.getBoundingClientRect();
       dockStartLeft = dr.left;
@@ -767,9 +541,8 @@ function _wireChipDrag(chip, dock) {
   const onPointerMove = (e) => {
     const dx = e.clientX - startX;
     const dy = e.clientY - startY;
-    // Touch fingers drift a few pixels even on a "still" tap, so the touch
-    // threshold is generous — otherwise a tap-to-restore reads as a drag
-    // and the click gets eaten when the chain settles.
+    // Touch fingers drift on a still tap, so the touch threshold is generous
+    // or a tap-to-restore reads as a drag.
     const DRAG_THRESHOLD = (e.pointerType === 'touch' || window.innerWidth <= 768) ? 14 : 5;
     if (!dragging && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
     if (!dragging) {
@@ -783,22 +556,6 @@ function _wireChipDrag(chip, dock) {
         chip.classList.add('dragging');
       } else if (dragMode === 'free') {
         chip.classList.add('chip-free-drag');
-      } else if (dragMode === 'chain') {
-        chainState = _initChainPhysics(chip, dock, startX, startY);
-        if (chainState) {
-          const stepLoop = () => {
-            if (!chainState) return;
-            _stepChain(chainState, trashZone, CAPTURE_RADIUS);
-            overTrash = chainState.overTrash;
-            chainState.raf = requestAnimationFrame(stepLoop);
-          };
-          chainState.raf = requestAnimationFrame(stepLoop);
-        } else {
-          // Init failed for some reason — fall back to move-dock so the
-          // user's gesture isn't dropped on the floor.
-          dragMode = 'move-dock';
-          dock.classList.add('dock-dragging');
-        }
       } else {
         dock.classList.add('dock-dragging');
       }
@@ -808,7 +565,7 @@ function _wireChipDrag(chip, dock) {
     // window + snapping it there (top → maximize/fullscreen, right → right
     // dock). Releasing in the zone commits it (see onPointerUp).
     if (e.pointerType !== 'touch' && window.innerWidth > 768) {
-      const z = previewZoneAt(e.clientX, e.clientY, modal);
+      const z = previewZoneAt(e.clientX, e.clientY, document.getElementById(chip.dataset.modalId));
       // Ignore the bottom zone — the dock lives at the bottom, so horizontal
       // chip reordering must not get hijacked into a bottom-half snap.
       chipSnapZone = (z && z.name !== 'bottom-half') ? z : null;
@@ -818,15 +575,6 @@ function _wireChipDrag(chip, dock) {
         return;  // aiming at a snap zone — suppress reorder/move-dock
       }
       chip.style.opacity = '';
-    }
-
-    if (dragMode === 'chain' && chainState) {
-      // Pointermove just updates the head's target — the RAF loop drives the
-      // actual position update for both head and followers.
-      chainState.targetX = e.clientX - chainState.fingerOffsetX;
-      chainState.targetY = e.clientY - chainState.fingerOffsetY;
-      e.preventDefault && e.preventDefault();
-      return;
     }
 
     if (dragMode === 'free') {
@@ -887,9 +635,8 @@ function _wireChipDrag(chip, dock) {
         }
       }
     } else {
-      // Move-dock: reposition the entire dock element. On touch, the whole
-      // chain also interacts with the trash zone — drop on X to close every
-      // chip in the dock.
+      // Move-dock: reposition the entire dock element. On touch, dropping it
+      // on the trash zone closes every chip in the dock.
       let newLeft = Math.max(8, Math.min(window.innerWidth  - dock.offsetWidth  - 8, dockStartLeft + dx));
       let newTop  = Math.max(8, Math.min(window.innerHeight - dock.offsetHeight - 8, dockStartTop  + dy));
 
@@ -946,66 +693,6 @@ function _wireChipDrag(chip, dock) {
       if (modal) requestAnimationFrame(() => requestAnimationFrame(() => snapModalToZone(modal, zone)));
       return;
     }
-    if (dragMode === 'chain' && chainState) {
-      cancelAnimationFrame(chainState.raf);
-      const state = chainState;
-      chainState = null;
-      if (state.overTrash && dragging) {
-        // Drop on X: animate every link toward the trash zone, then close.
-        const ids = state.links.map(l => l.chip.dataset.modalId);
-        const tz = trashZone ? trashZone.getBoundingClientRect() : null;
-        for (const l of state.links) {
-          if (tz) {
-            const dx = (tz.left + tz.width / 2) - (l.x + l.width / 2);
-            const dy = (tz.top + tz.height / 2) - (l.y + l.height / 2);
-            l.chip.classList.add('chip-trashing');
-            l.chip.style.transition = 'transform 0.32s cubic-bezier(0.45, 0, 0.25, 1), opacity 0.3s ease-in, left 0.32s cubic-bezier(0.45, 0, 0.25, 1), top 0.32s cubic-bezier(0.45, 0, 0.25, 1)';
-            // Whirlpool: spin + shrink so the chip swirls into the X.
-            l.chip.style.transform = 'scale(0.15) rotate(720deg)';
-            l.chip.style.left = `${l.x + dx}px`;
-            l.chip.style.top = `${l.y + dy}px`;
-          }
-          l.chip.style.opacity = '0';
-        }
-        _trashBurst();
-        setTimeout(() => {
-          for (const id of ids) close(id);
-          dock.style.cssText = '';
-          _saveDockState();
-        }, 320);
-      } else if (dragging) {
-        // Released away from X: settle the chain into a tight line in the
-        // last trail direction, then persist each chip's position so they
-        // stay together at drop instead of scattering at their in-motion
-        // physics positions.
-        const tMag = Math.hypot(state.trailDirX, state.trailDirY) || 1;
-        const dirX = state.trailDirX / tMag;
-        const dirY = state.trailDirY / tMag;
-        const spacing = state.linkSpacing;
-        for (const i of state.order) {
-          const l = state.links[i];
-          if (i !== state.grabbedIdx) {
-            l.x = l.pred.x + dirX * spacing;
-            l.y = l.pred.y + dirY * spacing;
-          }
-          const clampedLeft = Math.max(4, Math.min(window.innerWidth - l.width - 4, l.x));
-          const clampedTop  = Math.max(4, Math.min(window.innerHeight - l.height - 4, l.y));
-          _chipPositions.set(l.chip.dataset.modalId, { left: clampedLeft, top: clampedTop });
-        }
-        dock.style.opacity = '';
-        _saveDockState();
-        _renderDock();
-      } else {
-        // Touch without movement: nothing to do (RAF never started, dock
-        // never modified). Let the click handler restore as normal.
-      }
-      if (trashZone) trashZone.classList.remove('visible', 'engaged');
-      overTrash = false;
-      dock.classList.remove('dock-dragging');
-      dragging = false;
-      dragMode = null;
-      return;
-    }
     if (dragMode === 'free') {
       // If the user never actually dragged (just tapped), do nothing here —
       // let the click handler restore the modal as normal. Skipping past
@@ -1033,7 +720,7 @@ function _wireChipDrag(chip, dock) {
       } else {
         // Drop wherever the finger let go — capture the current viewport
         // position. If we land within snap-distance of another floating chip
-        // OR within REDOCK_RADIUS of the chain, magnetically align so chips
+        // OR within REDOCK_RADIUS of the dock, magnetically align so chips
         // collect into a tidy cluster instead of scattering.
         const r = chip.getBoundingClientRect();
         let dropLeft = r.left;
@@ -1069,7 +756,7 @@ function _wireChipDrag(chip, dock) {
             dropLeft = nearest.left;
           }
         } else if (_nearDock(r, dock)) {
-          // Dropped near the dock chain — re-dock.
+          // Dropped near the dock: re-dock.
           _chipPositions.delete(myId);
           chip.style.removeProperty('transform');
           chip.style.removeProperty('z-index');
@@ -1101,7 +788,7 @@ function _wireChipDrag(chip, dock) {
       if (trashZone) trashZone.classList.remove('visible', 'engaged');
       overTrash = false;
     } else if (dragMode === 'move-dock' && dragging && overTrash) {
-      // Dropped the whole chain onto the X — close every chipped modal.
+      // Dropped the whole dock onto the X: close every chipped modal.
       // Only the ids that actually have a rendered chip (i.e. currently
       // minimized or free-positioned); restored open modals are skipped.
       const ids = [...dock.querySelectorAll('.minimized-dock-chip')]
@@ -1180,7 +867,7 @@ export function register(id, { restoreFn, closeFn, railBtnId, sidebarBtnId, labe
     const obs = new MutationObserver(() => {
       const vis = _isVisible();
       if (vis && !_modalEl._mmAutoStackLast) {
-        _bringToFront(_modalEl);
+        raiseToolWindow(_modalEl);
         _applyRememberedDock(id);
         _emitModalOpened(id, _modalEl);
       }
@@ -1191,16 +878,13 @@ export function register(id, { restoreFn, closeFn, railBtnId, sidebarBtnId, labe
     // If it's already visible at register time (e.g. modal opened before
     // register completes), bump it once now too.
     if (_modalEl._mmAutoStackLast) {
-      _bringToFront(_modalEl);
+      raiseToolWindow(_modalEl);
       _applyRememberedDock(id);
       _emitModalOpened(id, _modalEl);
     }
   }
-  // Allow callers to supply their own chip label/icon (path d="..." or
-  // full <svg>...</svg>) so ephemeral things like FX popups can dock
-  // into the same chain without needing an entry in the built-in
-  // _LABELS table. Track the id so `unregister` can drop the entry
-  // and avoid an unbounded-growth leak (v2 review HIGH-3).
+  // Callers may supply their own chip label/icon (path d="..." or full
+  // <svg>); track the id so `unregister` drops the entry again.
   if (label || icon) {
     _LABELS[id] = { label: label || id, icon: icon || '' };
     _customLabelIds.add(id);
@@ -1282,7 +966,7 @@ export function restore(id) {
     // Surface above any already-open tool window — restoring from the dock
     // should bring this tool to the front, not leave it stuck behind one with
     // a higher static z-index.
-    _bringToFront(modal);
+    raiseToolWindow(modal);
     // If the window was edge-docked when minimized, re-apply the dock so the
     // chat nudges back in and the window returns exactly where it was.
     try { resumeDock(modal); } catch (e) { console.warn('resumeDock on restore failed', e); }
@@ -1471,7 +1155,7 @@ function _scanAndWire() {
     injectMinimizeButton(modal, id);
   }
 }
-const _scanTimer = setInterval(_scanAndWire, 1000);
+setInterval(_scanAndWire, 1000);
 // First scan after DOM ready
 if (document.readyState !== 'loading') {
   setTimeout(_scanAndWire, 100);

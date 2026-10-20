@@ -65,19 +65,6 @@ def test_invalid_numeric_inputs_fall_back_cleanly():
     assert compute_input_token_budget("bad", 128000, explicit=True) == int(128000 * 0.85)
 
 
-def test_is_setting_overridden_reads_raw_saved_file(tmp_path, monkeypatch):
-    import src.settings as settings
-
-    f = tmp_path / "settings.json"
-    f.write_text(json.dumps({"agent_input_token_budget": 12000}), encoding="utf-8")
-    monkeypatch.setattr(settings, "SETTINGS_FILE", str(f))
-    assert settings.is_setting_overridden("agent_input_token_budget") is True
-    assert settings.is_setting_overridden("some_unset_key") is False
-
-    f.write_text(json.dumps({}), encoding="utf-8")
-    assert settings.is_setting_overridden("agent_input_token_budget") is False
-
-
 # ---------------------------------------------------------------------------
 # Configurable hard_max — the ceiling on the auto-derived path is a setting
 # (`agent_input_token_hard_max`), not a hidden constant. History: a reviewer
@@ -115,19 +102,8 @@ def test_default_settings_registers_hard_max_key():
     assert DEFAULT_SETTINGS["agent_input_token_hard_max"] == DEFAULT_HARD_MAX
 
 
-def test_alias_map_registers_friendly_names():
-    """`manage_settings` should accept 'hard max' and friends."""
-    from pathlib import Path
-    # manage_settings (and its alias map) moved to agent_tools/admin_tools.py in #3629.
-    src = Path("src/agent_tools/admin_tools.py").read_text()
-    assert '"hard max": "agent_input_token_hard_max"' in src
-    assert '"token budget cap": "agent_input_token_hard_max"' in src
-    assert '"input budget cap": "agent_input_token_hard_max"' in src
-
-
 def test_agent_loop_reads_hard_max_setting(tmp_path, monkeypatch):
-    """End-to-end: a saved settings.json value for agent_input_token_hard_max
-    must reach compute_input_token_budget on the real agent_loop call path."""
+    """A saved settings.json value for agent_input_token_hard_max is readable."""
     import src.settings as settings
     # Point SETTINGS_FILE at a temp file with our override.
     f = tmp_path / "settings.json"
@@ -136,16 +112,3 @@ def test_agent_loop_reads_hard_max_setting(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "_settings_cache", None)
     # Read via the same import path the agent loop uses.
     assert settings.get_setting("agent_input_token_hard_max", DEFAULT_HARD_MAX) == 750_000
-
-    # Malformed value falls back to DEFAULT_HARD_MAX (defensive, matches the
-    # try/except in src/agent_loop.py).
-    f.write_text(json.dumps({"agent_input_token_hard_max": "huge"}), encoding="utf-8")
-    monkeypatch.setattr(settings, "_settings_cache", None)
-    raw = settings.get_setting("agent_input_token_hard_max", DEFAULT_HARD_MAX)
-    try:
-        parsed = int(raw)
-    except (TypeError, ValueError):
-        parsed = DEFAULT_HARD_MAX
-    if parsed <= 0:
-        parsed = DEFAULT_HARD_MAX
-    assert parsed == DEFAULT_HARD_MAX

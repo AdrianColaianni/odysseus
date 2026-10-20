@@ -18,6 +18,7 @@ from sqlalchemy import func
 
 from .database import Session as DbSession, ChatMessage as DbChatMessage, Document as DbDocument, SessionLocal, utcnow_naive
 from .models import Session, ChatMessage
+from .exceptions import InvalidFileUploadError
 from src.attachment_refs import persistable_message_content
 from src.upload_handler import reserve_message_upload_references
 
@@ -252,13 +253,15 @@ class SessionManager:
         """
         session = self.get_session(session_id)
         session.history.append(message)
-        session._history = session.history
         session.message_count = len(session.history)
 
         self._persist_message(session_id, message)
 
     def _persist_message(self, session_id: str, message: ChatMessage):
-        """Persist a single message to the database."""
+        """Persist a single message to the database.
+
+        Raises InvalidFileUploadError when the message references an upload that is gone.
+        """
         db = SessionLocal()
         try:
             db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
@@ -277,7 +280,7 @@ class SessionManager:
                 message.metadata,
             )
             if missing_upload_id:
-                raise ValueError(
+                raise InvalidFileUploadError(
                     f"Referenced upload is no longer available: {missing_upload_id}"
                 )
 
@@ -318,6 +321,9 @@ class SessionManager:
 
             logger.debug(f"Persisted message to session {session_id}")
 
+        except InvalidFileUploadError:
+            db.rollback()
+            raise
         except Exception as e:
             logger.error(f"Error persisting message: {e}")
             db.rollback()
@@ -354,7 +360,6 @@ class SessionManager:
 
             # Update in-memory
             session.history = session.history[:keep_count]
-            session._history = session.history
 
             logger.info(f"Truncated session {session_id} to {keep_count} messages")
             return True
@@ -419,7 +424,6 @@ class SessionManager:
 
             db.commit()
             session.history = list(messages)
-            session._history = session.history
             session.message_count = len(messages)
             logger.info("Replaced session %s history with %d messages", session_id, len(messages))
             return True

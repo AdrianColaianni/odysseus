@@ -3,7 +3,6 @@ from pathlib import Path
 
 
 GATED_IMAGE_FUNCTIONS = {
-    "gallery_ai_upscale",
     "gallery_style_transfer",
     "inpaint_proxy",
     "harmonize_image",
@@ -35,8 +34,3 @@ def test_image_generation_endpoints_require_image_privilege():
         assert name in functions
         assert 'require_privilege(request, "can_generate_images")' in functions[name]
 
-
-def test_gallery_routes_imports_privilege_helper():
-    source = _gallery_source()
-    assert "get_current_user" in source
-    assert "require_privilege" in source

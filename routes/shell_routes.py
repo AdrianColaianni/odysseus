@@ -26,13 +26,11 @@ from src.host_docker_access import (
 )
 from src.optional_deps import prepare_optional_dependency_import
 from src.auth_helpers import _auth_disabled
+from routes._validators import validate_ssh_port
 from src import process_lifecycle
 
-# POSIX-only: `pty`/`fcntl` transitively import `termios`, which does NOT exist
-# on Windows, so importing them unconditionally crashed app startup there
-# (ModuleNotFoundError: termios — issues #140/#92/#63/#149/#150). The PTY code
-# path is only reachable on POSIX; Windows uses pipe streaming + a detached-job
-# fallback for the tmux feature (see _generate_win_detached).
+# `pty`/`fcntl` need `termios`, which Windows lacks; Windows uses pipe
+# streaming and _generate_win_detached instead.
 try:
     import fcntl
     import pty
@@ -127,9 +125,6 @@ logger = logging.getLogger(__name__)
 PTY_SUPPORTED = pty is not None and fcntl is not None and hasattr(os, "setsid")
 
 
-DOCKER_IN_CONTAINER_HINT = HOST_DOCKER_ACCESS_HINT
-
-
 DockerRowStatus = namedtuple("DockerRowStatus", ["applicable", "install_hint"])
 PackageUpdateStatus = namedtuple("PackageUpdateStatus", ["available", "note"])
 
@@ -139,7 +134,7 @@ def _docker_row_status(
 ):
     local_docker_unavailable = not on_remote and in_container and not host_docker_access
     if local_docker_unavailable:
-        return DockerRowStatus(applicable=False, install_hint=DOCKER_IN_CONTAINER_HINT)
+        return DockerRowStatus(applicable=False, install_hint=HOST_DOCKER_ACCESS_HINT)
     return DockerRowStatus(applicable=True, install_hint=default_hint)
 
 
@@ -454,20 +449,20 @@ dist_names={{
     'krea_diffusers':['diffusers','torch'],
     'sam_mask':['transformers','torch'],
     'office_docs':['markitdown','python-docx'],
-	    'psd_tools':['psd-tools'],
-	    'pymupdf':['PyMuPDF'],
-	    'libreoffice':[],
-	    'hf_transfer':['hf-transfer','hf_transfer'],
-	}}
-	bin_names={{
+    'psd_tools':['psd-tools'],
+    'pymupdf':['PyMuPDF'],
+    'libreoffice':[],
+    'hf_transfer':['hf-transfer','hf_transfer'],
+}}
+bin_names={{
     'vllm':['vllm'],
     'llama_cpp':['llama-server'],
     'mflux':['mflux-generate-qwen', 'mflux-generate'],
-	    'mlx_lama_swift':['odysseus-mlx-inpaint', 'mlx-lama-serve'],
-	    'mlx_ddcolor_swift':['odysseus-mlx-colorize', 'mlx-ddcolor-serve'],
-	    'libreoffice':['soffice', 'libreoffice'],
-	    'tmux':['tmux'],
-	}}
+    'mlx_lama_swift':['odysseus-mlx-inpaint', 'mlx-lama-serve'],
+    'mlx_ddcolor_swift':['odysseus-mlx-colorize', 'mlx-ddcolor-serve'],
+    'libreoffice':['soffice', 'libreoffice'],
+    'tmux':['tmux'],
+}}
 
 def add_user_install_bins_to_path():
     candidates = []
@@ -1092,7 +1087,7 @@ async def _generate_tmux(cmd: str, request: Request):
 
 
 async def _generate_win_detached(cmd: str, request: Request):
-    """Windows stand-in for the tmux path (issues #84/#162).
+    """Windows stand-in for the tmux path.
 
     tmux doesn't exist on Windows, so we run the command in a *detached* child
     (DETACHED_PROCESS — survives browser disconnect, same as the tmux session)
@@ -1455,24 +1450,14 @@ def setup_shell_routes() -> APIRouter:
         try:
             user_site = site.getusersitepackages()
             if user_site and os.path.isdir(user_site):
-                # Use addsitedir(), NOT a bare sys.path.append(). When a package
-                # is `pip install --user`'d at runtime (Cookbook → Install) the
-                # long-lived server process started before the user-site existed,
-                # so site never processed it — including its `.pth` hooks. On
-                # Python 3.12+ `distutils` is gone from stdlib and is only
-                # restored by setuptools' `distutils-precedence.pth`, which ships
-                # in user-site. basicsr (a realesrgan dep) does `import distutils`
-                # at import time, so a plain append left the package importable
-                # but `import distutils` failing → realesrgan probed as
-                # not-installed until a full process restart. addsitedir() replays
-                # the `.pth` files so the shim is active.
+                # addsitedir, not sys.path.append: it replays user-site `.pth`
+                # files such as setuptools' distutils shim, which a package
+                # installed after startup (basicsr) needs.
                 site.addsitedir(user_site)
         except Exception:
             pass
-        if ssh_port and str(ssh_port).strip() not in ("", "22"):
-            _port = str(ssh_port).strip()
-            if not _SSH_PORT_RE.match(_port) or not (1 <= int(_port) <= 65535):
-                raise HTTPException(400, "Invalid ssh_port")
+        if ssh_port:
+            validate_ssh_port(str(ssh_port).strip())
         packages = [
             # ── System ── OS binaries, not pip packages
             {
@@ -2094,60 +2079,25 @@ def setup_shell_routes() -> APIRouter:
         raw = body.get("packages") or []
         host = (body.get("remote_host") or "").strip()
         ssh_port = body.get("ssh_port")
-        # Names users can request — must match canonical names used in the
-        # deps catalog's `system_prereqs` field and on the System rows.
-        ALLOWED = {"cmake", "build-essential", "g++", "gcc", "git", "tmux", "make", "libreoffice"}
-        pkgs = [str(p).strip() for p in raw if str(p).strip() in ALLOWED]
+        pkgs = [str(p).strip() for p in raw if str(p).strip() in _PKG_NAMES]
         if not pkgs:
-            return {"ok": False, "error": "no installable packages requested (allowlist: " + ", ".join(sorted(ALLOWED)) + ")"}
-        # Re-map to the right package name per OS. apt/dpkg use the names
-        # as-is; pacman has base-devel for build-essential, etc.
-        def _apt(names): return list(names)
-        def _pacman(names):
-            return ["base-devel" if n == "build-essential" else n for n in names]
-        def _dnf(names):
-            out = []
-            for n in names:
-                if n == "build-essential": out += ["gcc", "gcc-c++", "make"]
-                elif n == "g++": out += ["gcc-c++"]
-                else: out.append(n)
-            return out
-        def _apk(names):
-            out = []
-            for n in names:
-                if n == "build-essential": out.append("build-base")
-                else: out.append(n)
-            return out
-        def _zypper(names):
-            out = []
-            for n in names:
-                if n == "build-essential": out += ["gcc-c++", "make"]
-                elif n == "g++": out.append("gcc-c++")
-                else: out.append(n)
-            return out
-        def _brew(names):
-            out = []
-            for n in names:
-                if n in ("build-essential", "g++", "gcc", "make"):
-                    continue
-                if n == "libreoffice":
-                    out += ["--cask", "libreoffice"]
-                else:
-                    out.append(n)
-            return out
-        # Build a single shell snippet that detects the package manager and
-        # runs the right install. Non-interactive sudo (-n) only — if sudo
-        # asks for a password the script reports it instead of hanging.
-        apt_pkgs = " ".join(shlex.quote(p) for p in _apt(pkgs))
-        pac_pkgs = " ".join(shlex.quote(p) for p in _pacman(pkgs))
-        dnf_pkgs = " ".join(shlex.quote(p) for p in _dnf(pkgs))
-        apk_pkgs = " ".join(shlex.quote(p) for p in _apk(pkgs))
-        zypper_pkgs = " ".join(shlex.quote(p) for p in _zypper(pkgs))
-        brew_pkgs = " ".join(shlex.quote(p) for p in _brew(pkgs))
-        # Error messages go to stderr (>&2) so the route's error field
-        # gets populated. Without the redirect, `echo "ERROR…"` on stdout
-        # left stderr empty and the frontend toast fell through to a
-        # bare "HTTP 200" instead of surfacing the real reason.
+            return {"ok": False, "error": "no installable packages requested (allowlist: " + ", ".join(sorted(_PKG_NAMES)) + ")"}
+
+        def _os_pkgs(os_id: str) -> str:
+            names: list[str] = []
+            for name in pkgs:
+                names += [p for p in _PKG_NAMES[name][os_id] if p not in names]
+            return " ".join(shlex.quote(p) for p in names)
+
+        apt_pkgs = _os_pkgs("debian")
+        pac_pkgs = _os_pkgs("arch")
+        dnf_pkgs = _os_pkgs("fedora")
+        apk_pkgs = _os_pkgs("alpine")
+        zypper_pkgs = _os_pkgs("suse")
+        brew_pkgs = _os_pkgs("macos")
+        # Non-interactive sudo (-n) only, so a password prompt is reported
+        # instead of hanging. Errors go to stderr so the route's error field
+        # carries the reason.
         script = (
             'set -e; '
             'BREW="$(command -v brew 2>/dev/null || true)"; '
@@ -2188,11 +2138,7 @@ def setup_shell_routes() -> APIRouter:
         except asyncio.TimeoutError:
             return {"ok": False, "error": "Install timed out after 180s"}
         ok = (proc.returncode == 0)
-        # Combine stderr + (last lines of stdout) into a single error
-        # blob when ok=False — some package managers print useful failure
-        # context to stdout, and a script that exits via `echo ...; exit N`
-        # without `>&2` would otherwise hand back an empty error string
-        # and force the frontend to show a bare "HTTP 200".
+        # Some package managers print their failure context to stdout only.
         err_txt = err.decode("utf-8", errors="replace").strip()
         out_txt = out.decode("utf-8", errors="replace").strip()
         if not ok:

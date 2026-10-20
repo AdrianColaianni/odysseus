@@ -5,39 +5,33 @@ string. Real provider multimodal blocks follow the durable attachment
 contract: readable text plus stable attachment metadata is persisted, while
 raw inline media bytes are omitted.
 """
-import tempfile
 import uuid
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
 import core.database as cdb
 from core.database import Session as DbSession
 from core.models import ChatMessage
-
-_TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_ENGINE = create_engine(
-    f"sqlite:///{_TMPDB.name}",
-    connect_args={"check_same_thread": False},
-    poolclass=NullPool,
-)
-cdb.Base.metadata.create_all(_ENGINE)
-_TS = sessionmaker(bind=_ENGINE, autoflush=False, autocommit=False)
+from tests.helpers.database import disposable_database
 
 
 @pytest.fixture
-def manager(monkeypatch):
+def factory(tmp_path):
+    with disposable_database(tmp_path) as session_factory:
+        yield session_factory
+
+
+@pytest.fixture
+def manager(monkeypatch, factory):
     import core.session_manager as sm
-    monkeypatch.setattr(sm, "SessionLocal", _TS)
+    monkeypatch.setattr(sm, "SessionLocal", factory)
     mgr = sm.SessionManager.__new__(sm.SessionManager)
     mgr.sessions = {}
     return mgr
 
 
-def _make_session(sid, owner="alice"):
-    db = _TS()
+def _make_session(factory, sid, owner="alice"):
+    db = factory()
     try:
         db.add(DbSession(id=sid, owner=owner, name="chat",
                          endpoint_url="http://x", model="gpt-4o",
@@ -47,9 +41,9 @@ def _make_session(sid, owner="alice"):
         db.close()
 
 
-def test_jsonlike_user_string_not_corrupted(manager):
+def test_jsonlike_user_string_not_corrupted(manager, factory):
     sid = "sess-" + uuid.uuid4().hex[:8]
-    _make_session(sid)
+    _make_session(factory, sid)
     text = '[{"type": "object", "name": "foo"}]'
     msgs = [ChatMessage(role="user", content=text)]
     assert manager.replace_messages(sid, msgs) is True
@@ -61,9 +55,9 @@ def test_jsonlike_user_string_not_corrupted(manager):
     assert reloaded.history[0].content == text
 
 
-def test_real_multimodal_content_persists_reference_without_base64(manager):
+def test_real_multimodal_content_persists_reference_without_base64(manager, factory):
     sid = "sess-" + uuid.uuid4().hex[:8]
-    _make_session(sid)
+    _make_session(factory, sid)
     attachment_id = "a" * 32 + ".png"
     multimodal = [
         {"type": "text", "text": "what is this?"},
@@ -90,15 +84,10 @@ def test_real_multimodal_content_persists_reference_without_base64(manager):
         "size=4 bytes | sha256=sha256-digest]"
     )
 
-    db = _TS()
+    db = factory()
     try:
         stored = db.query(cdb.ChatMessage).filter_by(session_id=sid).one()
         assert stored.content == expected
-        assert "what is this?" in stored.content
-        assert attachment_id in stored.content
-        assert "data:image/png;base64,AAAA" not in stored.content
-        assert "base64" not in stored.content
-        assert "AAAA" not in stored.content
     finally:
         db.close()
 

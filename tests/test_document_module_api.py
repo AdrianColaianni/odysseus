@@ -12,15 +12,7 @@ may be assembled from imports, and a source-shape assertion would pass while
 the export was broken.
 """
 
-import json
-import os
-import subprocess
-from pathlib import Path
-
-from tests.helpers.document_source import document_source
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
+from tests.helpers.node import run_node_module
 
 # Every key on the default export. Consumers reach the editor through this
 # object, so removing one is a breaking change; adding one is not.
@@ -122,16 +114,7 @@ def _module_surface():
       console.log(JSON.stringify(surface));
       await browser.close();
     """
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-        env=os.environ.copy(),
-    )
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout)
+    return run_node_module(script, timeout=120)
 
 
 def test_default_export_surface_is_complete_and_callable():
@@ -162,5 +145,4 @@ def test_window_bridge_is_the_default_export():
     Consumers reach the editor off the global, so it must stay the same object
     as the default export rather than a second, partially wired copy.
     """
-    assert "window.documentModule = documentModule" in DOC_JS
     assert _module_surface()["globalIsSameObject"] is True

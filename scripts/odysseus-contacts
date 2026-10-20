@@ -18,7 +18,6 @@ Subcommands:
 
 
 from __future__ import annotations
-import sys
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
 from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
@@ -28,8 +27,6 @@ quiet_logs()
 import argparse
 import json
 import logging
-import os
-import sys
 from pathlib import Path
 
 def quiet_logs() -> None:
@@ -44,7 +41,7 @@ def quiet_logs() -> None:
 quiet_logs()
 
 try:
-    from routes.contacts_routes import (
+    from routes.contacts.contacts_routes import (
         _get_carddav_config,
         _fetch_contacts,
         _create_contact,

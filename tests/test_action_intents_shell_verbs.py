@@ -9,27 +9,27 @@ not when the user asks how a feature works"). The pattern is now anchored to
 imperative position (start of message, optionally after "please") or to a
 "can/could/would/will you ..." request.
 """
-from src.action_intents import message_needs_tools
+from src.action_intents import classify_tool_intent
 
 
 def test_informational_shell_questions_stay_plain_chat():
-    assert not message_needs_tools("What does the grep command do?")
-    assert not message_needs_tools("How do I tail a log file in production?")
-    assert not message_needs_tools("Is it safe to kill a process with kill -9?")
+    assert not classify_tool_intent("What does the grep command do?").needs_tools
+    assert not classify_tool_intent("How do I tail a log file in production?").needs_tools
+    assert not classify_tool_intent("Is it safe to kill a process with kill -9?").needs_tools
 
 
 def test_incidental_shell_words_stay_plain_chat():
-    assert not message_needs_tools("My cat ate my homework")
-    assert not message_needs_tools("The movie was a real kill joy for everyone")
+    assert not classify_tool_intent("My cat ate my homework").needs_tools
+    assert not classify_tool_intent("The movie was a real kill joy for everyone").needs_tools
 
 
 def test_imperative_shell_commands_still_promote_to_agent():
-    assert message_needs_tools("tail the nginx error log")
-    assert message_needs_tools("restart the media server")
-    assert message_needs_tools("please install docker on the host")
-    assert message_needs_tools("cat /etc/hosts")
+    assert classify_tool_intent("tail the nginx error log").needs_tools
+    assert classify_tool_intent("restart the media server").needs_tools
+    assert classify_tool_intent("please install docker on the host").needs_tools
+    assert classify_tool_intent("cat /etc/hosts").needs_tools
 
 
 def test_can_you_shell_requests_still_promote_to_agent():
-    assert message_needs_tools("can you grep the logs for 500 errors")
-    assert message_needs_tools("could you tail the access log")
+    assert classify_tool_intent("can you grep the logs for 500 errors").needs_tools
+    assert classify_tool_intent("could you tail the access log").needs_tools

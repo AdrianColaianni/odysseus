@@ -94,20 +94,6 @@ def test_llm_call_content_wins_over_reasoning_content(monkeypatch):
 # changed, these tests will fail.
 # ---------------------------------------------------------------------------
 
-import sys
-from unittest.mock import MagicMock
-
-# Mock heavy DB/tool deps before importing agent_loop
-for _mod in [
-    "sqlalchemy", "sqlalchemy.orm", "sqlalchemy.ext",
-    "sqlalchemy.ext.declarative", "sqlalchemy.ext.hybrid",
-    "sqlalchemy.sql", "sqlalchemy.sql.expression",
-    "src.database", "src.agent_tools",
-    "core.models", "core.database",
-]:
-    if _mod not in sys.modules:
-        sys.modules[_mod] = MagicMock()
-
 from src.agent_loop import _empty_response_fallback  # noqa: E402
 
 

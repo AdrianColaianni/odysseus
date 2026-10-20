@@ -1,28 +1,8 @@
-import json
-import shutil
-import subprocess
-from pathlib import Path
-
-import pytest
-
-
-ROOT = Path(__file__).resolve().parents[1]
-pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node binary not on PATH")
-
-
-def _node_eval(source: str):
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", source],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return json.loads(result.stdout)
+from tests.helpers.node import run_node_module
 
 
 def test_censor_pref_falls_back_when_storage_throws():
-    values = _node_eval(
+    values = run_node_module(
         """
         globalThis.localStorage = {
           getItem() { throw new Error('blocked'); }
@@ -36,7 +16,7 @@ def test_censor_pref_falls_back_when_storage_throws():
 
 
 def test_censor_pref_reads_enabled_flag():
-    values = _node_eval(
+    values = run_node_module(
         """
         globalThis.localStorage = {
           getItem(key) { return key === 'odysseus-sensitive-blur' ? 'on' : null; }

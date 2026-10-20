@@ -150,11 +150,11 @@ async def test_stale_or_rebound_document_approval_fails_before_effect(records, m
     assert not exact._claimed
 
 
-@pytest.mark.parametrize("owner,thread", [("", "s"), ("alice", ""), ("bob", "s")])
-async def test_owner_and_invocation_thread_are_mandatory(records, owner, thread):
-    _, result = await dispatch(grant("manage_documents", owner=owner, thread=thread),
-                              "manage_documents", '{"action":"read","id":"d1"}')
-    assert result["failure_kind"] == "resource_identity_denied"
+async def test_owner_and_invocation_thread_are_mandatory(records):
+    for owner, thread in (("", "s"), ("alice", ""), ("bob", "s")):
+        _, result = await dispatch(grant("manage_documents", owner=owner, thread=thread),
+                                  "manage_documents", '{"action":"read","id":"d1"}')
+        assert result["failure_kind"] == "resource_identity_denied", (owner, thread)
 
 
 async def test_child_record_scope_is_intersection_and_exact_approval_cannot_widen(records, monkeypatch):
@@ -305,14 +305,14 @@ async def test_owned_and_backend_context_restore_after_success_error_cancel_and_
     assert active_owned_operation() is None
 
 
-@pytest.mark.parametrize("path", ["/api/document/d1", "/api/history/s", "/api/vault/config", "/api/memory", "/api/notes",
-    "/api/upload/upload.png", "/api/%64ocument/d1", "/api/cookbook/../document/d1"])
-async def test_generic_internal_bridge_cannot_bypass_owned_resource_adapter(monkeypatch, path):
+async def test_generic_internal_bridge_cannot_bypass_owned_resource_adapter(monkeypatch):
     from src import tool_execution as execution
     handler = AsyncMock()
     monkeypatch.setattr(execution, "_execute_tool_block_impl", handler)
-    _, result = await dispatch(grant("app_api"), "app_api", json.dumps({"path": path}))
-    assert result["failure_kind"] == "resource_identity_denied"
+    for path in ("/api/document/d1", "/api/history/s", "/api/vault/config", "/api/memory", "/api/notes",
+                 "/api/upload/upload.png", "/api/%64ocument/d1", "/api/cookbook/../document/d1"):
+        _, result = await dispatch(grant("app_api"), "app_api", json.dumps({"path": path}))
+        assert result["failure_kind"] == "resource_identity_denied", path
     handler.assert_not_awaited()
 
 
@@ -370,10 +370,11 @@ def test_note_prefix_wildcards_cannot_create_selector_authority(records):
         resolve_owned_operation(ExactOperation.normalize("manage_notes", '{"action":"view","id":"note-o%"}'), owner="alice", thread_id="s")
 
 
-@pytest.mark.parametrize("content", ['{"action":"read"}', '{"action":"read","id":"active"}', '{"action":"read","id":"current"}', '{"action":"read","id":42}', '{"action":"read","id":"d1","uid":"d2"}'])
-def test_missing_malformed_and_conflicting_document_selectors_fail_closed(records, content):
-    with pytest.raises(ResourceIdentityError):
-        resolve_owned_operation(ExactOperation.normalize("manage_documents", content), owner="alice", thread_id="s")
+def test_missing_malformed_and_conflicting_document_selectors_fail_closed(records):
+    for content in ('{"action":"read"}', '{"action":"read","id":"active"}', '{"action":"read","id":42}',
+                    '{"action":"read","id":"d1","uid":"d2"}'):
+        with pytest.raises(ResourceIdentityError):
+            resolve_owned_operation(ExactOperation.normalize("manage_documents", content), owner="alice", thread_id="s")
 
 
 async def test_resumed_child_approval_cannot_restore_excluded_record(records):

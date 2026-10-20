@@ -6,48 +6,9 @@ import tempfile
 import zipfile
 from pathlib import Path
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-
-
-def test_rich_docx_converter_maps_editor_structure_instead_of_raw_html():
-    converter = DOC_JS.split("function _docxHexColor", 1)[1].split(
-        "async function exportAsDocx", 1
-    )[0]
-    exporter = DOC_JS.split("async function exportAsDocx", 1)[1].split(
-        "/** Delete the active document", 1
-    )[0]
-
-    for helper in (
-        "_docxImageFallbackRun",
-        "_docxImageWidth",
-        "_docxImagePngData",
-        "_docxPrepareImages",
-        "_docxInlineChildren",
-        "_docxParagraphFromElement",
-        "_docxListBlocks",
-        "_docxTableBlock",
-        "_docxFigureBlocks",
-        "_docxBlocksFromNodes",
-        "_richTextToDocxChildren",
-        "_markdownToDocxChildren",
-    ):
-        assert f"function {helper}" in DOC_JS
-    assert "new docx.ExternalHyperlink" in converter
-    assert "new docx.ImageRun" in converter
-    assert "new docx.PageBreak" in converter
-    assert "new docx.Paragraph({ thematicBreak: true })" in converter
-    assert "new docx.Table(" in converter
-    assert "new docx.TableRow(" in converter
-    assert "new docx.TableCell(" in converter
-    assert "docx.VerticalAlign?.CENTER" in converter
-    assert "docx.HeadingLevel.HEADING_6" in converter
-    assert "_isRichTextLang(lang)" in exporter
-    assert "_richTextToDocxChildren(text, window.docx)" in exporter
-    assert "_markdownToDocxChildren(text, window.docx)" in exporter
 
 
 def test_browser_word_export_contains_native_rich_docx_ooxml():

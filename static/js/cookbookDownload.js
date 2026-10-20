@@ -1,10 +1,5 @@
-// ============================================
-// COOKBOOK DOWNLOAD SUB-MODULE
-// Download tab: SSE streaming, model download,
-// panel rendering, command building
-// ============================================
-
 import uiModule from './ui.js?v=20260916largetoolscroll1';
+import { fetchWithTimeout, _firstGgufSource, _looksLikeGgufRepo } from './cookbook.js';
 import { _diagnose, _showDiagnosis, _clearDiagnosis } from './cookbook-diagnosis.js';
 
 // Shared state/functions injected by init()
@@ -30,17 +25,7 @@ let _renderRunningTab;
 let _loadTasks;
 let _saveTasks;
 
-// Storage keys
-const SERVE_STATE_KEY = 'cookbook-serve-state';
 const _downloadStartsInFlight = new Set();
-
-function _fetchDownloadControlWithTimeout(input, init = {}, timeoutMs = 20000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  return fetch(input, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
-}
-
-// ── Panel field helpers ──
 
 export function _setPanelField(panel, field, value) {
   const input = panel.querySelector(`[data-field="${field}"]`);
@@ -62,18 +47,6 @@ export function _setPanelCheckbox(panel, field, checked) {
     cb.checked = checked;
     cb.dispatchEvent(new Event('change', { bubbles: true }));
   }
-}
-
-// ── Command builder: download ──
-
-function _firstGgufSource(model) {
-  const sources = Array.isArray(model?.gguf_sources) ? model.gguf_sources : [];
-  return sources.find(src => src && src.repo) || null;
-}
-
-function _looksLikeGgufRepo(model) {
-  const haystack = `${model?.quant_repo || ''} ${model?.repo_id || ''} ${model?.path || ''} ${model?.name || ''}`.toLowerCase();
-  return !!model?.is_gguf || haystack.includes('gguf') || haystack.includes('.gguf');
 }
 
 function _ggufDownloadSource(model, backend) {
@@ -210,8 +183,6 @@ except Exception as e:
   return full;
 }
 
-// ── Panel rendering helpers ──
-
 function _getPanelFields(panel) {
   const vals = {};
   panel.querySelectorAll('.hwfit-f').forEach(el => {
@@ -286,7 +257,7 @@ export function _wirePanelEvents(panel, model, backend) {
       const outputText = panel.querySelector('.cookbook-output-pre')?.textContent || '';
       const tmuxMatch = outputText.match(/Started tmux session: (cookbook-[a-f0-9]+)/);
       if (tmuxMatch) {
-        _fetchDownloadControlWithTimeout('/api/shell/exec', {
+        fetchWithTimeout('/api/shell/exec', {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
@@ -364,8 +335,6 @@ function _updatePanelCmd(panel, model, backend) {
   if (_envState.remoteHost) full = _sshCmd(_envState.remoteHost, full, _getPort(_envState.remoteHost));
   pre.textContent = full;
 }
-
-// ── SSE streaming ──
 
 export async function _runPanelCmd(panel, cmd, opts = {}) {
   const outputWrap = panel.querySelector('.cookbook-output-wrap');
@@ -470,8 +439,6 @@ export async function _runPanelCmd(panel, cmd, opts = {}) {
     delete panel._cookbookAbort;
   }
 }
-
-// ── Model download (dedicated endpoint, tmux-backed) ──
 
 export async function _runModelDownload(panel, model, backend, hostOverride) {
   const ggufSource = _ggufDownloadSource(model, backend);
@@ -592,7 +559,7 @@ export async function _runModelDownload(panel, model, backend, hostOverride) {
       const _sshSf = _zh ? `'` : '';
       const _probePrefix = _zh ? 'PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ' : '';
       const _probeCmd = `${_sshPf}${_probePrefix}tmux has-session -t ${zombieCandidate.sessionId} 2>/dev/null${_sshSf}`;
-      const _r = await _fetchDownloadControlWithTimeout('/api/shell/exec', {
+      const _r = await fetchWithTimeout('/api/shell/exec', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ command: _probeCmd, timeout: 5 }),
@@ -635,15 +602,14 @@ export async function _runModelDownload(panel, model, backend, hostOverride) {
   }
   _downloadStartsInFlight.add(startKey);
   try {
-    const res = await _fetchDownloadControlWithTimeout('/api/model/download', {
+    const res = await fetchWithTimeout('/api/model/download', {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
     if (!res.ok) {
-      // Errors carry actionable text (e.g. "tmux is required …"); keep them up
-      // long enough to read, matching the serve path's duration (issue #1355).
+      // Errors carry actionable text; match the serve path's longer duration.
       uiModule.showToast('Download failed: HTTP ' + res.status, 9000);
       return;
     }
@@ -660,8 +626,6 @@ export async function _runModelDownload(panel, model, backend, hostOverride) {
     _downloadStartsInFlight.delete(startKey);
   }
 }
-
-// ── Init ──
 
 export function initDownload(shared) {
   _envState = shared._envState;

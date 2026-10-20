@@ -1,33 +1,7 @@
 """Header-mode preservation across rich-text table structural edits."""
 
-import json
-import subprocess
-from pathlib import Path
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source, function_body
-
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-
-
-def test_table_structure_uses_central_header_mode_normalization():
-    helpers = DOC_JS.split("function _richTableHeaderModes", 1)[1].split(
-        "function _replaceRichTable", 1
-    )[0]
-    append = function_body("_appendRichTableRow")
-    actions = DOC_JS.split("function _applyRichTableAction", 1)[1].split(
-        "function applyMdFormat", 1
-    )[0]
-
-    assert "headerRow:" in helpers
-    assert "headerColumn:" in helpers
-    assert "function _applyRichTableHeaderModes" in DOC_JS
-    assert "const shouldBeHeader = (headerRow && rowIndex === 0) || (headerColumn && columnIndex === 0)" in helpers
-    assert "_applyRichTableHeaderModes(clone, headerModes)" in append
-    assert "_applyRichTableHeaderModes(clone, headerModes)" in actions
-    assert "document.createElement('td')" in actions
-    assert "row.cells[0]?.tagName === 'TH' ? 'th' : 'td'" not in actions
+from tests.helpers.node import run_node_module
 
 
 def test_mobile_structural_edits_preserve_header_modes_and_history():
@@ -120,15 +94,7 @@ def test_mobile_structural_edits_preserve_header_modes_and_history():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
     initial = [["TH", "TH"], ["TD", "TD"]]
     both = [["TH", "TH"], ["TH", "TD"]]
     assert data["initial"] == initial

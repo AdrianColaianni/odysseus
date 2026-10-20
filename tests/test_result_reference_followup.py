@@ -7,10 +7,8 @@ import pytest
 
 from src.clean_agent_preview import conversation
 from src.tool_policy import ToolPolicy
-from src.tool_routing_experiment import MODEL_CHOICE_MODE, select_experiment_inventory
 from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
-from src.turn_contract import (requested_capabilities, resolve_turn_contract,
-                               resolve_full_inventory_contract, result_reference_followup)
+from src.turn_contract import requested_capabilities, resolve_turn_contract, result_reference_followup
 
 
 def search_history(body_size=0):
@@ -30,44 +28,41 @@ def search_history(body_size=0):
     ]
 
 
-@pytest.mark.parametrize('prompt', ['Link more info', 'More information', 'More details about that',
-    'Send the links', 'Please show me the source', 'Open that', 'Read the second result'])
-@pytest.mark.parametrize('mode', ['baseline', MODEL_CHOICE_MODE])
-def test_referential_web_inventory_does_not_offer_files(prompt, mode):
-    history = search_history()
-    capabilities = requested_capabilities(prompt, history)
-    assert capabilities == {'search_browser'}
-    policy = ToolPolicy(disabled_tools=frozenset({'private_browser'}))
-    routed = resolve_turn_contract(capabilities=capabilities, schemas=FUNCTION_TOOL_SCHEMAS, policy=policy)
-    inventory = resolve_full_inventory_contract(schemas=FUNCTION_TOOL_SCHEMAS, policy=policy)
-    result = select_experiment_inventory(inventory, routed, history, mode, user_text=prompt)
-    assert 'web_fetch' in result.offered
-    assert not result.offered & {'read_file', 'bash', 'python', 'private_browser'}
-    assert not result.required
+def test_referential_web_inventory_does_not_offer_files():
+    for prompt in ['Link more info', 'More information', 'More details about that',
+    'Send the links', 'Please show me the source', 'Open that', 'Read the second result']:
+        history = search_history()
+        capabilities = requested_capabilities(prompt, history)
+        assert capabilities == {'search_browser'}
+        policy = ToolPolicy(disabled_tools=frozenset({'private_browser'}))
+        result = resolve_turn_contract(capabilities=capabilities, schemas=FUNCTION_TOOL_SCHEMAS, policy=policy)
+        assert 'web_fetch' in result.offered
+        assert not result.offered & {'read_file', 'bash', 'python', 'private_browser'}
+        assert not result.required
 
 
-@pytest.mark.parametrize('prompt', ['Read /workspace/notes.md', 'Search my email',
-    'Save that link as a note', 'More details about my calendar',
-    'Send the link by email', 'Open that and run a Python script'])
-def test_new_task_is_not_a_source_only_followup(prompt):
-    assert not result_reference_followup(prompt)
+def test_new_task_is_not_a_source_only_followup():
+    for prompt in ['Read /workspace/notes.md', 'Search my email',
+        'Save that link as a note', 'More details about my calendar',
+    'Send the link by email', 'Open that and run a Python script']:
+        assert not result_reference_followup(prompt)
 
 
-@pytest.mark.parametrize('body_size', [0, 30000])
-def test_observed_source_references_survive_trimming(body_size):
-    history = search_history(body_size)
-    original = copy.deepcopy(history)
-    result = conversation(SimpleNamespace(history=history), [{'role': 'user', 'content': 'Link more info'}])
-    context = result[-2]
-    assert context['metadata']['trusted'] is False
-    assert context['metadata']['source'] == 'previous turn source references'
-    assert '[Source: Release guide](https://example.org/release)' in context['content']
-    assert 'https://example.org/details' in context['content']
-    assert len(context['content']) < 2000
-    assert result[-1]['content'] == 'Link more info'
-    assert history == original
-    if body_size:
-        assert not any(m['role'] == 'tool' for m in result)
+def test_observed_source_references_survive_trimming():
+    for body_size in [0, 30000]:
+        history = search_history(body_size)
+        original = copy.deepcopy(history)
+        result = conversation(SimpleNamespace(history=history), [{'role': 'user', 'content': 'Link more info'}])
+        context = result[-2]
+        assert context['metadata']['trusted'] is False
+        assert context['metadata']['source'] == 'previous turn source references'
+        assert '[Source: Release guide](https://example.org/release)' in context['content']
+        assert 'https://example.org/details' in context['content']
+        assert len(context['content']) < 2000
+        assert result[-1]['content'] == 'Link more info'
+        assert history == original
+        if body_size:
+            assert not any(m['role'] == 'tool' for m in result)
 
 
 def test_old_sources_do_not_cross_an_intervening_topic():
@@ -109,10 +104,8 @@ async def test_live_ajax_links_observed_sources_without_local_files(monkeypatch)
     rows = search_history(30000)
     policy = ToolPolicy()
     prompt = 'Link more info'
-    routed = resolve_turn_contract(capabilities=requested_capabilities(prompt, rows),
-                                   schemas=FUNCTION_TOOL_SCHEMAS, policy=policy)
-    inventory = resolve_full_inventory_contract(schemas=FUNCTION_TOOL_SCHEMAS, policy=policy)
-    contract = select_experiment_inventory(inventory, routed, rows, MODEL_CHOICE_MODE, user_text=prompt)
+    contract = resolve_turn_contract(capabilities=requested_capabilities(prompt, rows),
+                                     schemas=FUNCTION_TOOL_SCHEMAS, policy=policy)
     events = [json.loads(chunk[6:]) async for chunk in preview.stream_preview(
         endpoint_url=os.environ['ODYSSEUS_AJAX_TEST_URL'], model='Ajax', headers={},
         turn_contract=contract, messages=[{'role': 'user', 'content': prompt}],

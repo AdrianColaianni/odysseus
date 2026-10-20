@@ -49,16 +49,6 @@ def test_supported_timestamp_formats_parse():
     assert recency_score("2026-01-01 08:30:00", now=now) == 1.0
 
 
-def test_shim_reexports_live_objects():
-    # src.search.ranking is a compatibility shim; it must expose the *same*
-    # objects as the live services module so the two cannot diverge.
-    import src.search.ranking as shim
-
-    assert shim.recency_score is live_ranking.recency_score
-    assert shim.rank_search_results is live_ranking.rank_search_results
-    assert shim._utcnow_naive is live_ranking._utcnow_naive
-
-
 def test_live_rank_path_prefers_newer_result(monkeypatch):
     # Pin "now" so age scoring is deterministic. The two results are identical
     # apart from age, isolating recency as the only differentiator.

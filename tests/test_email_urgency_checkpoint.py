@@ -93,7 +93,7 @@ def _account(account_id):
 
 def _configure_action(monkeypatch, tmp_path, account_ids):
     from core import database
-    from routes import email_helpers
+    from routes.email import email_helpers
     from src import builtin_actions, llm_core, settings, task_endpoint
 
     runtime = {
@@ -147,6 +147,45 @@ def _configure_action(monkeypatch, tmp_path, account_ids):
         ),
     )
     return builtin_actions, runtime
+
+
+def _deliveries(monkeypatch):
+    """Record each reminder body and report a successful browser delivery."""
+    import routes.note.note_routes as note_routes
+
+    deliveries = []
+
+    async def delivered(**kwargs):
+        deliveries.append(kwargs["note_body"])
+        return {
+            "browser_sent": True,
+            "email_sent": False,
+            "ntfy_sent": False,
+            "webhook_sent": False,
+        }
+
+    monkeypatch.setattr(note_routes, "dispatch_reminder", delivered)
+    return deliveries
+
+
+def _state(tmp_path):
+    return json.loads((tmp_path / "email_urgency_state_alice.json").read_text(encoding="utf-8"))
+
+
+def _pause_first_dispatch(monkeypatch, builtin_actions):
+    """Hold the first dispatch transaction until the returned release event is set."""
+    original_transaction = builtin_actions._run_email_urgency_state_transaction
+    paused = asyncio.Event()
+    release = asyncio.Event()
+
+    async def pause_first(state_path, lock_db_path, operation):
+        if operation.__name__ == "_dispatch_and_checkpoint" and not paused.is_set():
+            paused.set()
+            await release.wait()
+        return await original_transaction(state_path, lock_db_path, operation)
+
+    monkeypatch.setattr(builtin_actions, "_run_email_urgency_state_transaction", pause_first)
+    return paused, release
 
 
 def test_company_receipt_is_not_marked_urgent_or_reply_soon():
@@ -473,7 +512,7 @@ async def test_action_dispatch_stays_on_app_loop_and_queues_browser_notification
     monkeypatch,
     tmp_path,
 ):
-    import routes.note_routes as note_routes
+    import routes.note.note_routes as note_routes
     from src import endpoint_resolver, llm_core
     from src.task_scheduler import TaskScheduler
 
@@ -550,7 +589,7 @@ async def test_action_cancellation_rolls_back_without_checkpoint(
     monkeypatch,
     tmp_path,
 ):
-    import routes.note_routes as note_routes
+    import routes.note.note_routes as note_routes
 
     builtin_actions, _runtime = _configure_action(
         monkeypatch, tmp_path, ["acct-a"]
@@ -613,23 +652,10 @@ async def test_first_scan_revalidates_account_deleted_before_registration(
     monkeypatch,
     tmp_path,
 ):
-    import routes.note_routes as note_routes
-
     builtin_actions, runtime = _configure_action(
         monkeypatch, tmp_path, ["acct-a"]
     )
-    deliveries = []
-
-    async def delivered(**kwargs):
-        deliveries.append(kwargs["note_body"])
-        return {
-            "browser_sent": True,
-            "email_sent": False,
-            "ntfy_sent": False,
-            "webhook_sent": False,
-        }
-
-    monkeypatch.setattr(note_routes, "dispatch_reminder", delivered)
+    deliveries = _deliveries(monkeypatch)
     original_transaction = builtin_actions._run_email_urgency_state_transaction
 
     async def delete_before_registration(state_path, lock_db_path, operation):
@@ -649,9 +675,7 @@ async def test_first_scan_revalidates_account_deleted_before_registration(
     with pytest.raises(builtin_actions.TaskNoop):
         await builtin_actions.action_check_email_urgency("alice")
 
-    state = json.loads(
-        (tmp_path / "email_urgency_state_alice.json").read_text(encoding="utf-8")
-    )
+    state = _state(tmp_path)
     assert deliveries == []
     assert state["per_uid"] == {}
     assert state["notified_uids"] == []
@@ -666,49 +690,17 @@ async def test_first_scan_deleted_after_revalidation_is_fenced_by_cleanup_pass(
     monkeypatch,
     tmp_path,
 ):
-    import routes.note_routes as note_routes
-
     builtin_actions, runtime = _configure_action(
         monkeypatch, tmp_path, ["acct-a"]
     )
-    deliveries = []
-
-    async def delivered(**kwargs):
-        deliveries.append(kwargs["note_body"])
-        return {
-            "browser_sent": True,
-            "email_sent": False,
-            "ntfy_sent": False,
-            "webhook_sent": False,
-        }
-
-    monkeypatch.setattr(note_routes, "dispatch_reminder", delivered)
-    original_transaction = builtin_actions._run_email_urgency_state_transaction
-    scanned = asyncio.Event()
-    release_scan = asyncio.Event()
-    paused = False
-
-    async def pause_first_delivery(state_path, lock_db_path, operation):
-        nonlocal paused
-        if operation.__name__ == "_dispatch_and_checkpoint" and not paused:
-            paused = True
-            scanned.set()
-            await release_scan.wait()
-        return await original_transaction(state_path, lock_db_path, operation)
-
-    monkeypatch.setattr(
-        builtin_actions,
-        "_run_email_urgency_state_transaction",
-        pause_first_delivery,
-    )
+    deliveries = _deliveries(monkeypatch)
+    scanned, release_scan = _pause_first_dispatch(monkeypatch, builtin_actions)
 
     stale = asyncio.create_task(
         builtin_actions.action_check_email_urgency("alice")
     )
     await asyncio.wait_for(scanned.wait(), timeout=2)
-    registered = json.loads(
-        (tmp_path / "email_urgency_state_alice.json").read_text(encoding="utf-8")
-    )
+    registered = _state(tmp_path)
     assert registered["account_generations"]["acct-a"] == {
         "checkpoint": 0,
         "complete": 0,
@@ -723,9 +715,7 @@ async def test_first_scan_deleted_after_revalidation_is_fenced_by_cleanup_pass(
     release_scan.set()
     await asyncio.wait_for(stale, timeout=2)
 
-    state = json.loads(
-        (tmp_path / "email_urgency_state_alice.json").read_text(encoding="utf-8")
-    )
+    state = _state(tmp_path)
     assert deliveries == []
     assert state["per_uid"] == {}
     assert state["notified_uids"] == []
@@ -743,23 +733,11 @@ def test_scan_keeps_registration_generation_when_cleanup_precedes_basis(
 ):
     """Cleanup after verification cannot become the stale scan's baseline."""
     from core import database
-    import routes.note_routes as note_routes
 
     builtin_actions, runtime = _configure_action(
         monkeypatch, tmp_path, ["acct-a"]
     )
-    deliveries = []
-
-    async def delivered(**kwargs):
-        deliveries.append(kwargs["note_body"])
-        return {
-            "browser_sent": True,
-            "email_sent": False,
-            "ntfy_sent": False,
-            "webhook_sent": False,
-        }
-
-    monkeypatch.setattr(note_routes, "dispatch_reminder", delivered)
+    deliveries = _deliveries(monkeypatch)
     verified_account_selected = threading.Event()
     release_verified_account = threading.Event()
     stale_query_count = 0
@@ -839,56 +817,24 @@ async def test_payload_empty_tombstone_fences_reenable_redelete_and_can_recover(
     monkeypatch,
     tmp_path,
 ):
-    import routes.note_routes as note_routes
-
     builtin_actions, runtime = _configure_action(
         monkeypatch, tmp_path, ["acct-a"]
     )
-    deliveries = []
-
-    async def delivered(**kwargs):
-        deliveries.append(kwargs["note_body"])
-        return {
-            "browser_sent": True,
-            "email_sent": False,
-            "ntfy_sent": False,
-            "webhook_sent": False,
-        }
-
-    monkeypatch.setattr(note_routes, "dispatch_reminder", delivered)
+    deliveries = _deliveries(monkeypatch)
     await builtin_actions.action_check_email_urgency("alice")
     assert len(deliveries) == 1
 
     runtime["accounts"] = []
     with pytest.raises(builtin_actions.TaskNoop):
         await builtin_actions.action_check_email_urgency("alice")
-    first_tombstone = json.loads(
-        (tmp_path / "email_urgency_state_alice.json").read_text(encoding="utf-8")
-    )
+    first_tombstone = _state(tmp_path)
     assert first_tombstone["per_uid"] == {}
     assert first_tombstone["account_generations"]["acct-a"] == {
         "checkpoint": 2,
         "complete": 1,
     }
 
-    original_transaction = builtin_actions._run_email_urgency_state_transaction
-    scanned = asyncio.Event()
-    release_scan = asyncio.Event()
-    pause_reenabled = True
-
-    async def pause_reenabled_delivery(state_path, lock_db_path, operation):
-        nonlocal pause_reenabled
-        if operation.__name__ == "_dispatch_and_checkpoint" and pause_reenabled:
-            pause_reenabled = False
-            scanned.set()
-            await release_scan.wait()
-        return await original_transaction(state_path, lock_db_path, operation)
-
-    monkeypatch.setattr(
-        builtin_actions,
-        "_run_email_urgency_state_transaction",
-        pause_reenabled_delivery,
-    )
+    scanned, release_scan = _pause_first_dispatch(monkeypatch, builtin_actions)
     deliveries.clear()
     runtime["accounts"] = ["acct-a"]
     stale_reenabled = asyncio.create_task(
@@ -905,9 +851,7 @@ async def test_payload_empty_tombstone_fences_reenable_redelete_and_can_recover(
     release_scan.set()
     await asyncio.wait_for(stale_reenabled, timeout=2)
 
-    fenced = json.loads(
-        (tmp_path / "email_urgency_state_alice.json").read_text(encoding="utf-8")
-    )
+    fenced = _state(tmp_path)
     assert deliveries == []
     assert fenced["per_uid"] == {}
     assert fenced["notified_uids"] == []
@@ -920,9 +864,7 @@ async def test_payload_empty_tombstone_fences_reenable_redelete_and_can_recover(
     # any scan that captured checkpoint 3 before this absence was confirmed.
     with pytest.raises(builtin_actions.TaskNoop):
         await builtin_actions.action_check_email_urgency("alice")
-    repeated = json.loads(
-        (tmp_path / "email_urgency_state_alice.json").read_text(encoding="utf-8")
-    )
+    repeated = _state(tmp_path)
     assert repeated["account_generations"]["acct-a"] == {
         "checkpoint": 4,
         "complete": 1,
@@ -932,9 +874,7 @@ async def test_payload_empty_tombstone_fences_reenable_redelete_and_can_recover(
     # publish fresh payload normally.
     runtime["accounts"] = ["acct-a"]
     await builtin_actions.action_check_email_urgency("alice")
-    recovered = json.loads(
-        (tmp_path / "email_urgency_state_alice.json").read_text(encoding="utf-8")
-    )
+    recovered = _state(tmp_path)
     assert len(deliveries) == 1
     assert set(recovered["per_uid"]) == {"acct-a:1"}
     assert recovered["notified_uids"] == ["acct-a:1"]
@@ -944,89 +884,44 @@ async def test_payload_empty_tombstone_fences_reenable_redelete_and_can_recover(
     }
 
 
-@pytest.mark.parametrize(
-    ("stale_uids", "newer_uids"),
-    [
-        (["1"], ["1", "2"]),
-        (["1", "2"], ["1"]),
-    ],
-    ids=["preserve-newer-addition", "reject-stale-only-delivery"],
-)
 @pytest.mark.asyncio
-async def test_stale_same_account_scan_cannot_override_newer_commit(
-    monkeypatch,
-    tmp_path,
-    stale_uids,
-    newer_uids,
-):
-    import routes.note_routes as note_routes
+async def test_stale_same_account_scan_cannot_override_newer_commit(monkeypatch, tmp_path):
+    # A newer scan's addition is kept, and a stale scan's extra UID is not delivered.
+    for case, (stale_uids, newer_uids) in enumerate(((["1"], ["1", "2"]), (["1", "2"], ["1"]))):
+        case_dir = tmp_path / str(case)
+        case_dir.mkdir()
+        with monkeypatch.context() as patch:
+            builtin_actions, runtime = _configure_action(patch, case_dir, ["acct-a"])
+            runtime["search_uids"]["acct-a"] = stale_uids
+            deliveries = _deliveries(patch)
+            stale_scan_ready, release_stale_scan = _pause_first_dispatch(patch, builtin_actions)
 
-    builtin_actions, runtime = _configure_action(
-        monkeypatch, tmp_path, ["acct-a"]
-    )
-    runtime["search_uids"]["acct-a"] = stale_uids
-    deliveries = []
+            stale = asyncio.create_task(builtin_actions.action_check_email_urgency("alice"))
+            await asyncio.wait_for(stale_scan_ready.wait(), timeout=2)
 
-    async def delivered(**kwargs):
-        deliveries.append(kwargs["note_body"])
-        return {
-            "browser_sent": True,
-            "email_sent": False,
-            "ntfy_sent": False,
-            "webhook_sent": False,
+            runtime["search_uids"]["acct-a"] = newer_uids
+            newer_result = await asyncio.wait_for(
+                builtin_actions.action_check_email_urgency("alice"),
+                timeout=2,
+            )
+            release_stale_scan.set()
+            stale_result = await asyncio.wait_for(stale, timeout=2)
+
+        state = _state(case_dir)
+        assert newer_result[1] is True
+        assert stale_result[1] is True
+        assert len(deliveries) == 1
+        for uid in newer_uids:
+            assert f"uid {uid}" in deliveries[0]
+        for uid in set(stale_uids) - set(newer_uids):
+            assert f"uid {uid}" not in deliveries[0]
+        expected_keys = {f"acct-a:{uid}" for uid in newer_uids}
+        assert set(state["per_uid"]) == expected_keys
+        assert state["notified_uids"] == sorted(expected_keys)
+        assert state["account_generations"]["acct-a"] == {
+            "checkpoint": 1,
+            "complete": 1,
         }
-
-    monkeypatch.setattr(note_routes, "dispatch_reminder", delivered)
-    original_transaction = builtin_actions._run_email_urgency_state_transaction
-    stale_scan_ready = asyncio.Event()
-    release_stale_scan = asyncio.Event()
-    transaction_count = 0
-
-    async def order_transactions(state_path, lock_db_path, operation):
-        nonlocal transaction_count
-        if operation.__name__ == "_dispatch_and_checkpoint":
-            transaction_count += 1
-            if transaction_count == 1:
-                stale_scan_ready.set()
-                await release_stale_scan.wait()
-        return await original_transaction(state_path, lock_db_path, operation)
-
-    monkeypatch.setattr(
-        builtin_actions,
-        "_run_email_urgency_state_transaction",
-        order_transactions,
-    )
-
-    stale = asyncio.create_task(
-        builtin_actions.action_check_email_urgency("alice")
-    )
-    await asyncio.wait_for(stale_scan_ready.wait(), timeout=2)
-
-    runtime["search_uids"]["acct-a"] = newer_uids
-    newer_result = await asyncio.wait_for(
-        builtin_actions.action_check_email_urgency("alice"),
-        timeout=2,
-    )
-    release_stale_scan.set()
-    stale_result = await asyncio.wait_for(stale, timeout=2)
-
-    state = json.loads(
-        (tmp_path / "email_urgency_state_alice.json").read_text(encoding="utf-8")
-    )
-    assert newer_result[1] is True
-    assert stale_result[1] is True
-    assert len(deliveries) == 1
-    for uid in newer_uids:
-        assert f"uid {uid}" in deliveries[0]
-    for uid in set(stale_uids) - set(newer_uids):
-        assert f"uid {uid}" not in deliveries[0]
-    expected_keys = {f"acct-a:{uid}" for uid in newer_uids}
-    assert set(state["per_uid"]) == expected_keys
-    assert state["notified_uids"] == sorted(expected_keys)
-    assert state["account_generations"]["acct-a"] == {
-        "checkpoint": 1,
-        "complete": 1,
-    }
 
 
 @pytest.mark.asyncio
@@ -1034,42 +929,11 @@ async def test_mixed_stale_and_fresh_accounts_exclude_stale_rows_from_delivery(
     monkeypatch,
     tmp_path,
 ):
-    import routes.note_routes as note_routes
-
     builtin_actions, runtime = _configure_action(
         monkeypatch, tmp_path, ["acct-a", "acct-b"]
     )
-    deliveries = []
-
-    async def delivered(**kwargs):
-        deliveries.append(kwargs["note_body"])
-        return {
-            "browser_sent": True,
-            "email_sent": False,
-            "ntfy_sent": False,
-            "webhook_sent": False,
-        }
-
-    monkeypatch.setattr(note_routes, "dispatch_reminder", delivered)
-    original_transaction = builtin_actions._run_email_urgency_state_transaction
-    stale_scan_ready = asyncio.Event()
-    release_stale_scan = asyncio.Event()
-    transaction_count = 0
-
-    async def order_transactions(state_path, lock_db_path, operation):
-        nonlocal transaction_count
-        if operation.__name__ == "_dispatch_and_checkpoint":
-            transaction_count += 1
-            if transaction_count == 1:
-                stale_scan_ready.set()
-                await release_stale_scan.wait()
-        return await original_transaction(state_path, lock_db_path, operation)
-
-    monkeypatch.setattr(
-        builtin_actions,
-        "_run_email_urgency_state_transaction",
-        order_transactions,
-    )
+    deliveries = _deliveries(monkeypatch)
+    stale_scan_ready, release_stale_scan = _pause_first_dispatch(monkeypatch, builtin_actions)
 
     stale = asyncio.create_task(
         builtin_actions.action_check_email_urgency("alice")
@@ -1087,9 +951,7 @@ async def test_mixed_stale_and_fresh_accounts_exclude_stale_rows_from_delivery(
     release_stale_scan.set()
     await asyncio.wait_for(stale, timeout=2)
 
-    state = json.loads(
-        (tmp_path / "email_urgency_state_alice.json").read_text(encoding="utf-8")
-    )
+    state = _state(tmp_path)
     assert len(deliveries) == 2
     assert "acct-a" in deliveries[0]
     assert "acct-b" not in deliveries[0]
@@ -1104,23 +966,10 @@ async def test_account_scoped_actions_merge_disjoint_checkpoints(
     monkeypatch,
     tmp_path,
 ):
-    import routes.note_routes as note_routes
-
     builtin_actions, runtime = _configure_action(
         monkeypatch, tmp_path, ["acct-a"]
     )
-    deliveries = []
-
-    async def delivered(**kwargs):
-        deliveries.append(kwargs["note_body"])
-        return {
-            "browser_sent": True,
-            "email_sent": False,
-            "ntfy_sent": False,
-            "webhook_sent": False,
-        }
-
-    monkeypatch.setattr(note_routes, "dispatch_reminder", delivered)
+    deliveries = _deliveries(monkeypatch)
 
     await builtin_actions.action_check_email_urgency(
         "alice", prompt='{"account_id":"acct-a"}'
@@ -1134,9 +983,7 @@ async def test_account_scoped_actions_merge_disjoint_checkpoints(
         "alice", prompt='{"account_id":"acct-a"}'
     )
 
-    state = json.loads(
-        (tmp_path / "email_urgency_state_alice.json").read_text(encoding="utf-8")
-    )
+    state = _state(tmp_path)
     assert len(deliveries) == 2
     assert "Urgent request for acct-a" in deliveries[0]
     assert "Urgent request for acct-b" in deliveries[1]
@@ -1151,21 +998,11 @@ async def test_full_enumeration_retires_deleted_or_disabled_account(
     monkeypatch,
     tmp_path,
 ):
-    import routes.note_routes as note_routes
-
     builtin_actions, runtime = _configure_action(
         monkeypatch, tmp_path, ["acct-a", "acct-b"]
     )
 
-    async def delivered(**_kwargs):
-        return {
-            "browser_sent": True,
-            "email_sent": False,
-            "ntfy_sent": False,
-            "webhook_sent": False,
-        }
-
-    monkeypatch.setattr(note_routes, "dispatch_reminder", delivered)
+    _deliveries(monkeypatch)
     await builtin_actions.action_check_email_urgency("alice")
 
     # The production query returns only enabled, owner-visible accounts. A
@@ -1174,9 +1011,7 @@ async def test_full_enumeration_retires_deleted_or_disabled_account(
     runtime["accounts"] = ["acct-a"]
     await builtin_actions.action_check_email_urgency("alice")
 
-    state = json.loads(
-        (tmp_path / "email_urgency_state_alice.json").read_text(encoding="utf-8")
-    )
+    state = _state(tmp_path)
     assert set(state["per_uid"]) == {"acct-a:1"}
     assert state["notified_uids"] == ["acct-a:1"]
     assert state["total_unread"] == 1
@@ -1193,22 +1028,13 @@ async def test_zero_enabled_accounts_cleanup_precedes_model_resolution(
     monkeypatch,
     tmp_path,
 ):
-    import routes.note_routes as note_routes
     from src import task_endpoint
 
     builtin_actions, runtime = _configure_action(
         monkeypatch, tmp_path, ["acct-a"]
     )
 
-    async def delivered(**_kwargs):
-        return {
-            "browser_sent": True,
-            "email_sent": False,
-            "ntfy_sent": False,
-            "webhook_sent": False,
-        }
-
-    monkeypatch.setattr(note_routes, "dispatch_reminder", delivered)
+    _deliveries(monkeypatch)
     await builtin_actions.action_check_email_urgency("alice")
     runtime["accounts"] = []
 
@@ -1227,9 +1053,7 @@ async def test_zero_enabled_accounts_cleanup_precedes_model_resolution(
         await builtin_actions.action_check_email_urgency("alice")
     assert model_resolution_owners == ["alice"]
 
-    state = json.loads(
-        (tmp_path / "email_urgency_state_alice.json").read_text(encoding="utf-8")
-    )
+    state = _state(tmp_path)
     assert state["per_uid"] == {}
     assert state["notified_uids"] == []
     assert state["total_unread"] == 0
@@ -1246,21 +1070,11 @@ async def test_scoped_missing_account_retires_only_selected_payload(
     monkeypatch,
     tmp_path,
 ):
-    import routes.note_routes as note_routes
-
     builtin_actions, runtime = _configure_action(
         monkeypatch, tmp_path, ["acct-a", "acct-b"]
     )
 
-    async def delivered(**_kwargs):
-        return {
-            "browser_sent": True,
-            "email_sent": False,
-            "ntfy_sent": False,
-            "webhook_sent": False,
-        }
-
-    monkeypatch.setattr(note_routes, "dispatch_reminder", delivered)
+    _deliveries(monkeypatch)
     await builtin_actions.action_check_email_urgency("alice")
 
     # A production account-id filter returns no row when the selected account
@@ -1273,9 +1087,7 @@ async def test_scoped_missing_account_retires_only_selected_payload(
             prompt='{"account_id":"acct-b"}',
         )
 
-    state = json.loads(
-        (tmp_path / "email_urgency_state_alice.json").read_text(encoding="utf-8")
-    )
+    state = _state(tmp_path)
     assert set(state["per_uid"]) == {"acct-a:1"}
     assert state["notified_uids"] == ["acct-a:1"]
     assert state["total_unread"] == 1
@@ -1291,31 +1103,16 @@ async def test_failed_account_scan_preserves_checkpoint_until_recovery(
     monkeypatch,
     tmp_path,
 ):
-    import routes.note_routes as note_routes
-
     builtin_actions, runtime = _configure_action(
         monkeypatch, tmp_path, ["acct-a", "acct-b"]
     )
-    deliveries = []
-
-    async def delivered(**kwargs):
-        deliveries.append(kwargs["note_body"])
-        return {
-            "browser_sent": True,
-            "email_sent": False,
-            "ntfy_sent": False,
-            "webhook_sent": False,
-        }
-
-    monkeypatch.setattr(note_routes, "dispatch_reminder", delivered)
+    deliveries = _deliveries(monkeypatch)
 
     await builtin_actions.action_check_email_urgency("alice")
     runtime["failures"] = {"acct-b"}
     await builtin_actions.action_check_email_urgency("alice")
 
-    failed_state = json.loads(
-        (tmp_path / "email_urgency_state_alice.json").read_text(encoding="utf-8")
-    )
+    failed_state = _state(tmp_path)
     assert failed_state["notified_uids"] == ["acct-a:1", "acct-b:1"]
     assert set(failed_state["per_uid"]) == {"acct-a:1", "acct-b:1"}
     assert failed_state["total_unread"] == 2
@@ -1339,28 +1136,16 @@ async def test_cached_flags_refresh_prunes_checkpoint_after_message_is_read(
     monkeypatch,
     tmp_path,
 ):
-    import routes.note_routes as note_routes
-
     builtin_actions, runtime = _configure_action(
         monkeypatch, tmp_path, ["acct-a"]
     )
 
-    async def delivered(**_kwargs):
-        return {
-            "browser_sent": True,
-            "email_sent": False,
-            "ntfy_sent": False,
-            "webhook_sent": False,
-        }
-
-    monkeypatch.setattr(note_routes, "dispatch_reminder", delivered)
+    _deliveries(monkeypatch)
     await builtin_actions.action_check_email_urgency("alice")
     runtime["seen_accounts"] = {"acct-a"}
     await builtin_actions.action_check_email_urgency("alice")
 
-    state = json.loads(
-        (tmp_path / "email_urgency_state_alice.json").read_text(encoding="utf-8")
-    )
+    state = _state(tmp_path)
     assert state["notified_uids"] == []
     assert state["per_uid"]["acct-a:1"]["unread"] is False
     assert state["total_unread"] == 0

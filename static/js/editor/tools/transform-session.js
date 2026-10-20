@@ -58,7 +58,9 @@ import {
 } from '../selection-mask.js';
 import {
   clonePlacedData,
+  copyCanvas,
   createPlacedData,
+  makeCanvas,
   frameTransformMatrix,
   renderPlacedLayer,
   transformPlacedData,
@@ -91,14 +93,6 @@ export function createTransformSession({
       const input = pop.querySelector(selector);
       if (input && (force || document.activeElement !== input)) input.value = formatTransformValue(value);
     }
-  }
-
-  function copyCanvas(source) {
-    const canvas = document.createElement('canvas');
-    canvas.width = source.width;
-    canvas.height = source.height;
-    canvas.getContext('2d').drawImage(source, 0, 0);
-    return canvas;
   }
 
   function startTransform() {
@@ -222,7 +216,7 @@ export function createTransformSession({
 
   function closeTransformPopup() {
     if (state.transformPopup) {
-      try { state.transformPopup.remove(); } catch {}
+      state.transformPopup.remove();
       state.transformPopup = null;
     }
   }
@@ -485,9 +479,7 @@ export function createTransformSession({
   }
 
   function renderSnapshot(source, snapshot, geometry) {
-    const canvas = document.createElement('canvas');
-    canvas.width = geometry.width;
-    canvas.height = geometry.height;
+    const canvas = makeCanvas(geometry.width, geometry.height);
     const ctx = canvas.getContext('2d');
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
@@ -608,9 +600,7 @@ export function createTransformSession({
       state.layerOffsets.set(layer.id, geometry.offset);
       for (const maskSnapshot of snapshot.masks) {
         if (maskSnapshot.linked) {
-          const positioned = document.createElement('canvas');
-          positioned.width = snapshot.width;
-          positioned.height = snapshot.height;
+          const positioned = makeCanvas(snapshot.width, snapshot.height);
           positioned.getContext('2d').drawImage(
             maskSnapshot.canvas,
             maskSnapshot.offset.x,

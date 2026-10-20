@@ -39,13 +39,13 @@ from src.constants import (
     UPLOAD_DIR,
 )
 from src.tool_execution import (
-    _active_workspace,
     _resolve_search_root,
     _resolve_tool_path,
     agent_cwd,
     vet_workspace,
 )
 from src.agent_tools.filesystem_tools import GlobTool, GrepTool, LsTool
+from tests.helpers.workspace import workspace_at
 
 APP_STATE_FILES = [
     "sessions.json",   # session token -> username, cleartext
@@ -56,30 +56,15 @@ APP_STATE_FILES = [
 ]
 
 
-@contextmanager
-def workspace_at(path):
-    """Bind an active workspace for the body of a test.
-
-    Set and reset in the same context; a ContextVar token cannot be reset from
-    fixture teardown, which runs in a different one.
-    """
-    token = _active_workspace.set(os.path.realpath(path))
-    try:
-        yield
-    finally:
-        _active_workspace.reset(token)
-
-
 # ── The default roots ────────────────────────────────────────────────
 
-@pytest.mark.parametrize("name", APP_STATE_FILES)
-def test_blocks_app_state_file(name):
-    with pytest.raises(ValueError, match="application state"):
-        _resolve_tool_path(os.path.join(DATA_DIR, name))
+def test_blocks_app_state_file():
+    for name in APP_STATE_FILES:
+        with pytest.raises(ValueError, match="application state"):
+            _resolve_tool_path(os.path.join(DATA_DIR, name))
 
 
-@pytest.mark.parametrize("tool", ["read_file", "write_file", "grep"])
-def test_valid_resource_authority_cannot_open_unknown_state(tmp_path, monkeypatch, tool):
+def test_valid_resource_authority_cannot_open_unknown_state(tmp_path, monkeypatch):
     import json
     from tests.runtime_evidence_helpers import server_authorized_executor
     from src.tool_types import ToolBlock
@@ -90,13 +75,18 @@ def test_valid_resource_authority_cannot_open_unknown_state(tmp_path, monkeypatc
     secret = data / "new-unrecognized-state.dat"
     secret.write_text("UNKNOWN_STATE_SECRET")
     monkeypatch.setattr(execution, "_owner_is_admin", lambda owner: True)
-    content = json.dumps({"path": str(secret), **({"content": "replace"} if tool == "write_file" else {"pattern": "SECRET"} if tool == "grep" else {})})
-    _, result = asyncio.run(server_authorized_executor(execution.execute_tool_block)(
-        ToolBlock(tool, content), workspace=str(tmp_path), owner="admin",
-        security_context=execution.NO_TOOL_SECURITY_CONTEXT,
-    ))
-    assert result["failure_kind"] == "resource_identity_denied"
-    assert secret.read_text() == "UNKNOWN_STATE_SECRET"
+    for tool, extra in (
+        ("read_file", {}),
+        ("write_file", {"content": "replace"}),
+        ("grep", {"pattern": "SECRET"}),
+    ):
+        _, result = asyncio.run(server_authorized_executor(execution.execute_tool_block)(
+            ToolBlock(tool, json.dumps({"path": str(secret), **extra})),
+            workspace=str(tmp_path), owner="admin",
+            security_context=execution.NO_TOOL_SECURITY_CONTEXT,
+        ))
+        assert result["failure_kind"] == "resource_identity_denied", tool
+        assert secret.read_text() == "UNKNOWN_STATE_SECRET"
 
 
 def test_public_upload_carveout_never_reopens_publication_manifest(tmp_path, monkeypatch):
@@ -353,27 +343,25 @@ def test_allows_files_in_the_agent_workspace():
     assert resolved == os.path.realpath(os.path.join(AGENT_WORKSPACE_DIR, "scratch.txt"))
 
 
-@pytest.mark.parametrize("directory, why", [
-    (UPLOAD_DIR,
-     "_uploaded_files_context_message emits path= and tells the model to "
-     "read it with read_file (src/agent_loop.py)"),
-    (MAIL_ATTACHMENTS_DIR,
-     "download_attachment returns the path and its description says to read "
-     "it with read_file (mcp_servers/email_server.py)"),
-    (PERSONAL_DIR,
-     "GET /api/personal returns a path per file and is reachable through the "
-     "app_api tool, which does not block that prefix"),
-    (PERSONAL_UPLOADS_DIR,
-     "indexed into personal docs by routes/personal_routes.py, and listed as "
-     "an absolute path by manage_rag"),
-# The directories live under a per-worker data dir, so they cannot be test ids:
-# xdist requires every worker to collect the same names.
-], ids=["uploads", "mail_attachments", "personal", "personal_uploads"])
-def test_allows_user_content_the_app_hands_to_the_model(directory, why):
+def test_allows_user_content_the_app_hands_to_the_model():
     """Carving these out is not convenience. The app gives the model these
     paths and tells it to read them, so denying them breaks the feature."""
-    target = os.path.join(directory, "example.txt")
-    assert _resolve_tool_path(target) == os.path.realpath(target), why
+    for directory, why in [
+        (UPLOAD_DIR,
+         "_uploaded_files_context_message emits path= and tells the model to "
+         "read it with read_file (src/agent_loop.py)"),
+        (MAIL_ATTACHMENTS_DIR,
+         "download_attachment returns the path and its description says to read "
+         "it with read_file (mcp_servers/email_server.py)"),
+        (PERSONAL_DIR,
+         "GET /api/personal returns a path per file and is reachable through the "
+         "app_api tool, which does not block that prefix"),
+        (PERSONAL_UPLOADS_DIR,
+         "indexed into personal docs by routes/personal_routes.py, and listed as "
+         "an absolute path by manage_rag"),
+    ]:
+        target = os.path.join(directory, "example.txt")
+        assert _resolve_tool_path(target) == os.path.realpath(target), why
 
 
 def test_runbook_is_covered_by_the_personal_docs_carve_out():
@@ -475,39 +463,23 @@ def test_relative_data_dir_preserves_only_canonical_roles(
         current_execution._active_workspace.reset(token)
 
 
-@pytest.mark.parametrize(
-    "bad_kind", ["equal", "ancestor", "root", "empty", "dot", "symlink"]
-)
-def test_invalid_readable_carveout_cannot_cancel_state_deny(
-    tmp_path, monkeypatch, bad_kind
-):
+def test_invalid_readable_carveout_cannot_cancel_state_deny(tmp_path, monkeypatch):
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     readable = _configure_test_data_tree(monkeypatch, data_dir)
-    bad = {
-        "equal": str(data_dir),
-        "ancestor": str(tmp_path),
-        "root": os.path.abspath(os.sep),
-        "empty": "",
-        "dot": ".",
-    }.get(bad_kind)
-    if bad_kind == "symlink":
-        link = tmp_path / "data-link"
-        try:
-            link.symlink_to(data_dir, target_is_directory=True)
-        except OSError:
-            pytest.skip("cannot create symlink")
-        bad = str(link)
+    link = tmp_path / "data-link"
+    link.symlink_to(data_dir, target_is_directory=True)
     current_execution = importlib.import_module("src.tool_execution")
-    monkeypatch.setattr(current_execution, "AGENT_WORKSPACE_DIR", bad)
     secret = data_dir / "settings.json"
     secret.write_text("STATE_SECRET\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="application state"):
-        current_execution._resolve_tool_path(str(secret))
-    with pytest.raises(ValueError, match="default agent workspace"):
-        current_execution._resolve_search_root("")
-    assert os.path.realpath(readable["UPLOAD_DIR"]) in current_execution._tool_path_roots()
+    for bad in (str(data_dir), str(tmp_path), os.path.abspath(os.sep), "", ".", str(link)):
+        monkeypatch.setattr(current_execution, "AGENT_WORKSPACE_DIR", bad)
+        with pytest.raises(ValueError, match="application state"):
+            current_execution._resolve_tool_path(str(secret))
+        with pytest.raises(ValueError, match="default agent workspace"):
+            current_execution._resolve_search_root("")
+        assert os.path.realpath(readable["UPLOAD_DIR"]) in current_execution._tool_path_roots()
 
 
 def test_recursive_glob_and_grep_hide_state_but_keep_readable_descendants(

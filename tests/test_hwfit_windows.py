@@ -85,10 +85,8 @@ def test_remote_windows_probe_uses_encoded_command(monkeypatch):
     from services.hwfit import hardware
 
     calls = []
-    monkeypatch.setattr(hardware, "_remote_host", "user@winpc")
-    monkeypatch.setattr(hardware, "_remote_port", None)
 
-    def fake_run(cmd):
+    def fake_run(cmd, remote=None):
         calls.append(cmd)
         if isinstance(cmd, str) and "EncodedCommand" in cmd:
             return (
@@ -98,7 +96,7 @@ def test_remote_windows_probe_uses_encoded_command(monkeypatch):
         return None
 
     monkeypatch.setattr(hardware, "_run", fake_run)
-    result = hardware._detect_windows()
+    result = hardware._detect_windows(("user@winpc", None))
     assert result is not None
     assert result["total_ram_gb"] == 64
     assert len(calls) == 1
@@ -109,14 +107,14 @@ def test_remote_windows_probe_uses_encoded_command(monkeypatch):
 def test_probe_remote_platform_detects_windows(monkeypatch):
     from services.hwfit import hardware
 
-    monkeypatch.setattr(hardware, "_run", lambda cmd: "Windows_NT\n")
+    monkeypatch.setattr(hardware, "_run", lambda cmd, remote=None: "Windows_NT\n")
     assert hardware._probe_remote_platform() == "windows"
 
 
 def test_probe_remote_platform_detects_darwin(monkeypatch):
     from services.hwfit import hardware
 
-    def fake_run(cmd):
+    def fake_run(cmd, remote=None):
         if cmd == "echo %OS%":
             return "%OS%"
         if cmd == ["uname", "-s"]:

@@ -3,16 +3,16 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { parse } from 'acorn';
-import { createNotesApi } from '../frontend/src/features/notes/infrastructure/http.js';
-import { createNotesState } from '../frontend/src/features/notes/application/state.js';
-import { createNotesWorkflows } from '../frontend/src/features/notes/application/workflows.js';
+import { createNotesApi } from '../static/js/features/notes/infrastructure/http.js';
+import { createNotesState } from '../static/js/features/notes/application/state.js';
+import { createNotesWorkflows } from '../static/js/features/notes/application/workflows.js';
 
 const source = fs.readFileSync(new URL('../static/js/notes.js', import.meta.url), 'utf8');
 const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'module' });
-const implementation = fs.readFileSync(new URL('../frontend/src/features/notes/index.js', import.meta.url), 'utf8');
+const implementation = fs.readFileSync(new URL('../static/js/features/notes/index.js', import.meta.url), 'utf8');
 const implementationAST = parse(implementation, { ecmaVersion: 'latest', sourceType: 'module' });
 function functions(names, ports = {}) {
-  const datesSource = fs.readFileSync(new URL('../frontend/src/features/notes/domain/recurrence.js', import.meta.url), 'utf8').replaceAll('export ', '');
+  const datesSource = fs.readFileSync(new URL('../static/js/features/notes/domain/recurrence.js', import.meta.url), 'utf8').replaceAll('export ', '');
   const context = vm.createContext(ports);
   const datesContext = vm.createContext({ ...ports, clock: { now: () => (ports.Date || Date).now() } });
   vm.runInContext(datesSource, datesContext);

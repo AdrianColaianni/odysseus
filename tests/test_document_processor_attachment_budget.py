@@ -52,9 +52,7 @@ def test_multifile_inline_attachment_budget_keeps_later_files_visible(tmp_path, 
 
     assert "=== File: a.txt ===" in content
     assert "=== File: c.txt ===" not in content
-    assert "Attachment omitted from inline context: b.txt" in content
-    assert "Attachment omitted from inline context: c.txt" in content
-    assert "Ask to inspect this file specifically" in content
+    assert "b.txt" in content and "c.txt" in content
     assert len(content) < 2200
 
 

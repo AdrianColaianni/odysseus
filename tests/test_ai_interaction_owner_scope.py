@@ -1,7 +1,5 @@
 import inspect
 
-import pytest
-
 from src import ai_interaction
 from src.agent_tools import model_interaction_tools
 
@@ -27,7 +25,7 @@ def test_model_listing_and_image_fallback_are_owner_scoped():
     assert "owner_filter(query, ModelEndpoint, owner)" in list_body
     # _resolve_model is offloaded to a worker thread (#4589) but stays owner-scoped.
     assert "asyncio.to_thread(_resolve_model, candidate, owner=owner)" in image_body
-    assert "owner_filter(_img_q, ModelEndpoint, owner)" in image_body
+    assert "owner_filter(query, ModelEndpoint, owner)" in _source(ai_interaction._first_registered_image_model)
     assert "asyncio.to_thread(_resolve_model, model_spec, owner=owner)" in image_body
 
 
@@ -35,11 +33,7 @@ def test_model_listing_and_image_fallback_are_owner_scoped():
 # and no longer route through dispatch_ai_tool; their owner threading is covered
 # by tests/test_model_interaction_registry.py. The remaining model-ish tools
 # still dispatched here:
-@pytest.mark.parametrize("tool,content", [
-    ("pipeline", "gpt-test | summarize this"),
-    ("ui_control", "switch_model gpt-test"),
-])
-async def test_dispatch_passes_owner_to_model_tools(monkeypatch, tool, content):
+async def test_dispatch_passes_owner_to_model_tools(monkeypatch):
     seen = {}
 
     async def capture(name, content, session_id=None, owner=None):
@@ -57,8 +51,9 @@ async def test_dispatch_passes_owner_to_model_tools(monkeypatch, tool, content):
         lambda content, session_id=None, owner=None: capture("ui_control", content, session_id, owner),
     )
 
-    _desc, result = await ai_interaction.dispatch_ai_tool(tool, content, session_id="sid1", owner="alice")
+    for tool, content in [("pipeline", "gpt-test | summarize this"), ("ui_control", "switch_model gpt-test")]:
+        _desc, result = await ai_interaction.dispatch_ai_tool(tool, content, session_id="sid1", owner="alice")
 
-    assert result == {"ok": True}
-    assert seen[tool]["owner"] == "alice"
-    assert seen[tool]["session_id"] == "sid1"
+        assert result == {"ok": True}
+        assert seen[tool]["owner"] == "alice"
+        assert seen[tool]["session_id"] == "sid1"

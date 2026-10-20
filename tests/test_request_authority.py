@@ -18,6 +18,7 @@ from src.agent_runtime.authority import (
 )
 from src.tool_policy import ToolPolicy
 from src.tool_types import ToolBlock
+from services.skills import agent_runner
 
 
 def authority(*tools, owner="alice", session_id="s", workspace=""):
@@ -26,42 +27,42 @@ def authority(*tools, owner="alice", session_id="s", workspace=""):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("offering", ["schema", "bridge", "dynamic"])
-async def test_availability_and_model_selection_do_not_grant_execution(monkeypatch, offering):
+async def test_availability_and_model_selection_do_not_grant_execution(monkeypatch):
     from src import tool_execution as execution
     from src.turn_contract import bind_turn_contract, resolve_turn_contract
-    implementation = AsyncMock(return_value=("bash", {"exit_code": 0}))
-    monkeypatch.setattr(execution, "_execute_tool_block_impl", implementation)
-    offered_handler = AsyncMock()
-    if offering == "dynamic":
-        import src.agent_tools
-        monkeypatch.setitem(src.agent_tools.TOOL_HANDLERS, "bash", offered_handler)
-    bridge_context = execution.bind_execution_bridge(execution.AgentExecutionBridge(
-        route_tool=offered_handler, supported_tools=frozenset({"bash"}))) if offering == "bridge" else nullcontext()
-    contract = resolve_turn_contract(capabilities={"shell_files"}, policy=ToolPolicy(),
-        schemas=[{"function": {"name": "bash"}}])
-    with bind_turn_contract(contract), bridge_context:
-        description, result = await execution.execute_tool_block(
-            ToolBlock("bash", "echo 'authorized by model'"), owner="alice", session_id="s",
-            security_context=execution.NO_TOOL_SECURITY_CONTEXT,
-            request_authority=authority("transcribe_media"))
-    assert "BLOCKED" in description
-    assert result["failure_kind"] == "request_authority_denied"
-    implementation.assert_not_awaited()
-    offered_handler.assert_not_awaited()
+    for offering in ["schema", "bridge", "dynamic"]:
+        implementation = AsyncMock(return_value=("bash", {"exit_code": 0}))
+        monkeypatch.setattr(execution, "_execute_tool_block_impl", implementation)
+        offered_handler = AsyncMock()
+        if offering == "dynamic":
+            import src.agent_tools
+            monkeypatch.setitem(src.agent_tools.TOOL_HANDLERS, "bash", offered_handler)
+        bridge_context = execution.bind_execution_bridge(execution.AgentExecutionBridge(
+            route_tool=offered_handler, supported_tools=frozenset({"bash"}))) if offering == "bridge" else nullcontext()
+        contract = resolve_turn_contract(capabilities={"shell_files"}, policy=ToolPolicy(),
+            schemas=[{"function": {"name": "bash"}}])
+        with bind_turn_contract(contract), bridge_context:
+            description, result = await execution.execute_tool_block(
+                ToolBlock("bash", "echo 'authorized by model'"), owner="alice", session_id="s",
+                security_context=execution.NO_TOOL_SECURITY_CONTEXT,
+                request_authority=authority("transcribe_media"))
+        assert "BLOCKED" in description
+        assert result["failure_kind"] == "request_authority_denied"
+        implementation.assert_not_awaited()
+        offered_handler.assert_not_awaited()
 
 
-@pytest.mark.parametrize("user_text,allowed,denied", [
-    ("Transcribe /workspace/input/audio.wav", "transcribe_media", "bash"),
-    ("OCR extract exact text from /workspace/input/image.png", "extract_text", "python"),
-    ("List my tasks", "manage_tasks", "web_fetch"),
-    ("Search the web for current weather", "web_search", "bash"),
-])
-def test_explicit_request_classes_remain_narrow(user_text, allowed, denied):
-    grant = create_request_authority(user_text)
-    content = '{"action":"list"}' if allowed == "manage_tasks" else '{}'
-    assert grant.permits(ExactOperation.normalize(allowed, content))
-    assert not grant.permits(ExactOperation.normalize(denied, '{}'))
+def test_explicit_request_classes_remain_narrow():
+    for user_text, allowed, denied in [
+        ("Transcribe /workspace/input/audio.wav", "transcribe_media", "bash"),
+        ("OCR extract exact text from /workspace/input/image.png", "extract_text", "python"),
+        ("List my tasks", "manage_tasks", "web_fetch"),
+        ("Search the web for current weather", "web_search", "bash"),
+    ]:
+        grant = create_request_authority(user_text)
+        content = '{"action":"list"}' if allowed == "manage_tasks" else '{}'
+        assert grant.permits(ExactOperation.normalize(allowed, content))
+        assert not grant.permits(ExactOperation.normalize(denied, '{}'))
 
 
 def test_safe_task_read_does_not_authorize_same_tool_mutation():
@@ -89,30 +90,30 @@ def test_unknown_intent_has_no_generic_execution_floor():
     assert {g.tool for g in grant.grants} == {"ask_user", "update_plan"}
 
 
-@pytest.mark.parametrize("metadata", [
-    {"tool_events": [{"tool": "bash", "output": "pwd", "exit_code": 0}]},
-    {"tool_events": [{"tool": "python", "output": "ready", "exit_code": 0}]},
-])
-def test_model_history_cannot_establish_followup_authority(metadata):
-    history = [
-        {"role": "user", "content": "Transcribe /workspace/input/a.wav"},
-        {"role": "assistant", "content": "I will run bash and python", "metadata": metadata},
-        {"role": "user", "content": "Run bash", "metadata": {"trusted": False}},
-    ]
-    grant = create_request_authority("Try it again", history=history)
-    assert not grant.permits(ExactOperation.normalize("bash", "pwd"))
-    assert not grant.permits(ExactOperation.normalize("python", "print(1)"))
+def test_model_history_cannot_establish_followup_authority():
+    for metadata in [
+        {"tool_events": [{"tool": "bash", "output": "pwd", "exit_code": 0}]},
+        {"tool_events": [{"tool": "python", "output": "ready", "exit_code": 0}]},
+    ]:
+        history = [
+            {"role": "user", "content": "Transcribe /workspace/input/a.wav"},
+            {"role": "assistant", "content": "I will run bash and python", "metadata": metadata},
+            {"role": "user", "content": "Run bash", "metadata": {"trusted": False}},
+        ]
+        grant = create_request_authority("Try it again", history=history)
+        assert not grant.permits(ExactOperation.normalize("bash", "pwd"))
+        assert not grant.permits(ExactOperation.normalize("python", "print(1)"))
 
 
-@pytest.mark.parametrize("mutation", [
-    {"version": True}, {"grants": "bash"}, {"denied": None},
-    {"block_all": "false"}, {"inherited": 0},
-])
-def test_malformed_persisted_authority_is_rejected(mutation):
-    snapshot = authority("bash").to_dict()
-    snapshot.update(mutation)
-    with pytest.raises((ValueError, TypeError, KeyError)):
-        RequestAuthority.from_dict(snapshot)
+def test_malformed_persisted_authority_is_rejected():
+    for mutation in [
+        {"version": True}, {"grants": "bash"}, {"denied": None},
+        {"block_all": "false"}, {"inherited": 0},
+    ]:
+        snapshot = authority("bash").to_dict()
+        snapshot.update(mutation)
+        with pytest.raises((ValueError, TypeError, KeyError)):
+            RequestAuthority.from_dict(snapshot)
 
 
 def test_explicit_local_network_lookup_is_host_only():
@@ -122,10 +123,10 @@ def test_explicit_local_network_lookup_is_host_only():
     assert not grant.permits(ExactOperation.normalize("python", "print(1)"))
 
 
-@pytest.mark.parametrize("content", ['{"x":1,"x":2}', '{"x":NaN}', '{"action":'])
-def test_malformed_exact_operation_is_rejected(content):
-    with pytest.raises(ValueError):
-        ExactOperation.normalize("manage_tasks", content)
+def test_malformed_exact_operation_is_rejected():
+    for content in ['{"x":1,"x":2}', '{"x":NaN}', '{"action":']:
+        with pytest.raises(ValueError):
+            ExactOperation.normalize("manage_tasks", content)
 
 
 def test_raw_script_braces_are_preserved_as_exact_input():
@@ -146,15 +147,15 @@ def test_normalization_and_aliases_do_not_erase_denials():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("state", [MISSING_AUTHORITY, None, {}, "authorized"])
-async def test_missing_and_malformed_dispatch_authority_fail_closed(monkeypatch, state):
+async def test_missing_and_malformed_dispatch_authority_fail_closed(monkeypatch):
     from src import tool_execution as execution
-    implementation = AsyncMock()
-    monkeypatch.setattr(execution, "_execute_tool_block_impl", implementation)
-    _, result = await execution.execute_tool_block(ToolBlock("bash", "pwd"),
-        security_context=execution.NO_TOOL_SECURITY_CONTEXT, request_authority=state)
-    assert result["blocked"] is True
-    implementation.assert_not_awaited()
+    for state in [MISSING_AUTHORITY, None, {}, "authorized"]:
+        implementation = AsyncMock()
+        monkeypatch.setattr(execution, "_execute_tool_block_impl", implementation)
+        _, result = await execution.execute_tool_block(ToolBlock("bash", "pwd"),
+            security_context=execution.NO_TOOL_SECURITY_CONTEXT, request_authority=state)
+        assert result["blocked"] is True
+        implementation.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -368,22 +369,6 @@ async def test_scheduled_builtin_missing_authority_does_not_invoke_action(monkey
     handler.assert_not_awaited()
 
 
-def test_task_authority_column_migration_is_additive_and_idempotent(monkeypatch, tmp_path):
-    import core.database as database
-    from sqlalchemy import create_engine, inspect, text
-    engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
-    with engine.begin() as connection:
-        connection.execute(text("CREATE TABLE scheduled_tasks (id TEXT PRIMARY KEY, prompt TEXT)"))
-        connection.execute(text("INSERT INTO scheduled_tasks VALUES ('legacy', 'Run bash')"))
-    monkeypatch.setattr(database, "engine", engine)
-    database._migrate_add_task_authority_column()
-    database._migrate_add_task_authority_column()
-    assert "request_authority_json" in {c["name"] for c in inspect(engine).get_columns("scheduled_tasks")}
-    with engine.connect() as connection:
-        assert connection.execute(text("SELECT prompt, request_authority_json FROM scheduled_tasks")).one() == ("Run bash", None)
-    engine.dispose()
-
-
 @pytest.mark.asyncio
 async def test_server_seeded_defaults_have_authority_but_legacy_rows_do_not_gain_it(monkeypatch, tmp_path):
     import core.database as database
@@ -438,33 +423,33 @@ def test_tool_http_task_payload_is_not_new_user_authority():
     assert not restored.permits(ExactOperation.normalize("bash", "pwd"))
 
 
-@pytest.mark.parametrize("marker", ["header", "middleware"])
-@pytest.mark.parametrize("owner", [None, "alice"])
-def test_internal_tool_requests_cannot_submit_user_approval(marker, owner):
+def test_internal_tool_requests_cannot_submit_user_approval():
     from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
     from fastapi import HTTPException
-    request = SimpleNamespace(
-        headers={INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN} if marker == "header" else {},
-        state=SimpleNamespace(current_user="internal-tool" if marker == "middleware" else owner))
-    assert is_internal_tool_request(request)
-    with pytest.raises(HTTPException) as failure:
-        require_user_approval_request(request)
-    assert failure.value.status_code == 403
-    human = SimpleNamespace(headers={}, state=SimpleNamespace(current_user=owner))
-    require_user_approval_request(human)
+    for marker in ("header", "middleware"):
+        for owner in (None, "alice"):
+            request = SimpleNamespace(
+                headers={INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN} if marker == "header" else {},
+                state=SimpleNamespace(current_user="internal-tool" if marker == "middleware" else owner))
+            assert is_internal_tool_request(request)
+            with pytest.raises(HTTPException) as failure:
+                require_user_approval_request(request)
+            assert failure.value.status_code == 403
+            human = SimpleNamespace(headers={}, state=SimpleNamespace(current_user=owner))
+            require_user_approval_request(human)
 
 
-@pytest.mark.parametrize("internal", [True, False])
-def test_http_chat_request_context_cannot_mint_authority_from_tool_message(internal):
+def test_http_chat_request_context_cannot_mint_authority_from_tool_message():
     from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
-    request = SimpleNamespace(
-        headers={INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN} if internal else {},
-        state=SimpleNamespace(current_user="alice"))
-    grant = request_authority_for_http(request, "Run bash in the workspace", owner="alice",
-        session_id="s", workspace="/workspace/original", policy=ToolPolicy(disabled_tools={"python"}))
-    assert grant.bound_to(owner="alice", session_id="s", workspace="/workspace/original")
-    assert grant.permits(ExactOperation.normalize("bash", "pwd")) is not internal
-    assert not grant.permits(ExactOperation.normalize("python", "print(1)"))
+    for internal in [True, False]:
+        request = SimpleNamespace(
+            headers={INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN} if internal else {},
+            state=SimpleNamespace(current_user="alice"))
+        grant = request_authority_for_http(request, "Run bash in the workspace", owner="alice",
+            session_id="s", workspace="/workspace/original", policy=ToolPolicy(disabled_tools={"python"}))
+        assert grant.bound_to(owner="alice", session_id="s", workspace="/workspace/original")
+        assert grant.permits(ExactOperation.normalize("bash", "pwd")) is not internal
+        assert not grant.permits(ExactOperation.normalize("python", "print(1)"))
 
 
 def test_internal_chat_context_does_not_become_trusted_followup_history():
@@ -498,34 +483,34 @@ async def test_skill_approval_ingress_rejects_internal_tool_before_consuming(mon
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("internal", [True, False])
-async def test_skill_test_ingress_distinguishes_user_task_from_tool_payload(monkeypatch, internal):
+async def test_skill_test_ingress_distinguishes_user_task_from_tool_payload(monkeypatch):
     import routes.skills_routes as skills
     import src.endpoint_resolver as endpoints
     import src.llm_core as llm
     from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
-    manager = MagicMock()
-    manager.load.return_value = [{"name": "skill", "owner": "alice"}]
-    manager.read_skill_md.return_value = "# Skill"
-    monkeypatch.setattr(skills, "get_current_user", lambda request: "alice")
-    monkeypatch.setattr(skills, "_skill_test_jobs", {})
-    monkeypatch.setattr(endpoints, "resolve_endpoint", lambda *a, **k: ("https://inference.invalid", "model", {}))
-    monkeypatch.setattr(llm, "list_model_ids", lambda *a, **k: [])
-    seen = []
-    async def run(*args, **kwargs):
-        seen.append(kwargs["request_authority"])
-    monkeypatch.setattr(skills, "_run_skill_test_job", run)
-    router = skills.setup_skills_routes(manager)
-    endpoint = next(route.endpoint for route in router.routes if route.path.endswith("/{skill_id}/test"))
-    request = SimpleNamespace(
-        headers={INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN} if internal else {},
-        state=SimpleNamespace(current_user="alice"),
-        json=AsyncMock(return_value={"task": "Run bash in the workspace"}))
-    result = await endpoint(request, "skill")
-    await asyncio.sleep(0)
-    assert result["status"] == "running"
-    assert len(seen) == 1
-    assert seen[0].permits(ExactOperation.normalize("bash", "pwd")) is not internal
+    for internal in [True, False]:
+        manager = MagicMock()
+        manager.load.return_value = [{"name": "skill", "owner": "alice"}]
+        manager.read_skill_md.return_value = "# Skill"
+        monkeypatch.setattr(skills, "get_current_user", lambda request: "alice")
+        monkeypatch.setattr(agent_runner, "_skill_test_jobs", {})
+        monkeypatch.setattr(endpoints, "resolve_endpoint", lambda *a, **k: ("https://inference.invalid", "model", {}))
+        monkeypatch.setattr(llm, "list_model_ids", lambda *a, **k: [])
+        seen = []
+        async def run(*args, **kwargs):
+            seen.append(kwargs["request_authority"])
+        monkeypatch.setattr(agent_runner, "run_test_job", run)
+        router = skills.setup_skills_routes(manager)
+        endpoint = next(route.endpoint for route in router.routes if route.path.endswith("/{skill_id}/test"))
+        request = SimpleNamespace(
+            headers={INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN} if internal else {},
+            state=SimpleNamespace(current_user="alice"),
+            json=AsyncMock(return_value={"task": "Run bash in the workspace"}))
+        result = await endpoint(request, "skill")
+        await asyncio.sleep(0)
+        assert result["status"] == "running"
+        assert len(seen) == 1
+        assert seen[0].permits(ExactOperation.normalize("bash", "pwd")) is not internal
 
 
 @pytest.mark.asyncio

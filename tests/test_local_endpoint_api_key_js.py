@@ -12,16 +12,13 @@ source and run them under node with mocked DOM/FormData/fetch, asserting the
 outgoing form data contains `api_key` exactly when the key field is filled.
 """
 import json
-import shutil
-import subprocess
 from pathlib import Path
 
-import pytest
+from tests.helpers.node import run_node_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _ADMIN_JS = _REPO / "static" / "js" / "admin.js"
 _INDEX_HTML = _REPO / "static" / "index.html"
-_HAS_NODE = shutil.which("node") is not None
 
 
 def _extract_handler_body(src: str, marker: str) -> str:
@@ -86,12 +83,7 @@ run().then(() => console.log(JSON.stringify(appended)))
 
 def _run_handler(body: str, fields: dict) -> list:
     js = _HARNESS.format(fields=json.dumps(fields), body=body)
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, cwd=str(_REPO), timeout=30,
-    )
-    assert proc.returncode == 0, f"node failed: {proc.stderr}\n---\n{js}"
-    return json.loads(proc.stdout.strip())
+    return run_node_module(js)
 
 
 def _handler(marker: str) -> str:
@@ -112,21 +104,16 @@ def test_local_form_has_api_key_input():
     assert 'type="password"' in tag, f"local API key must be a password input: {tag}"
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
-@pytest.mark.parametrize("marker", [_TEST_MARKER, _ADD_MARKER])
-def test_api_key_sent_when_filled(marker):
-    fields = {"adm-epLocalUrl": "http://localhost:8002/v1",
-              "adm-epLocalApiKey": "sk-secret", "adm-epLocalType": "llm"}
-    appended = dict(_run_handler(_handler(marker), fields))
-    assert appended.get("base_url") == "http://localhost:8002/v1"
-    assert appended.get("api_key") == "sk-secret", f"api_key not sent: {appended}"
+def test_api_key_sent_only_when_filled():
+    # Both the Test and the Add handler build the outgoing form.
+    for marker in (_TEST_MARKER, _ADD_MARKER):
+        fields = {"adm-epLocalUrl": "http://localhost:8002/v1",
+                  "adm-epLocalApiKey": "sk-secret", "adm-epLocalType": "llm"}
+        appended = dict(_run_handler(_handler(marker), fields))
+        assert appended.get("base_url") == "http://localhost:8002/v1"
+        assert appended.get("api_key") == "sk-secret", f"api_key not sent: {appended}"
 
-
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
-@pytest.mark.parametrize("marker", [_TEST_MARKER, _ADD_MARKER])
-def test_api_key_omitted_when_blank(marker):
-    fields = {"adm-epLocalUrl": "http://localhost:8002/v1",
-              "adm-epLocalApiKey": "", "adm-epLocalType": "llm"}
-    keys = [k for k, _ in _run_handler(_handler(marker), fields)]
-    assert "base_url" in keys
-    assert "api_key" not in keys, "blank key must not be appended (avoids empty Bearer)"
+        fields["adm-epLocalApiKey"] = ""
+        keys = [k for k, _ in _run_handler(_handler(marker), fields)]
+        assert "base_url" in keys
+        assert "api_key" not in keys, "blank key must not be appended (avoids empty Bearer)"

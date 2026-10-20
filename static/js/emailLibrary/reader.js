@@ -12,9 +12,9 @@
 import spinnerModule from '../spinner.js';
 import * as Modals from '../modalManager.js';
 import { clampWindowLeft } from '../modalSnap.js';
-import { showToast } from '../ui.js?v=20260916largetoolscroll1';
+import { esc, showError, showToast } from '../ui.js?v=20260916largetoolscroll1';
 import { state } from './state.js';
-import { _esc, _extractName, _renderEmailSummaryError } from './utils.js';
+import { _extractName, _renderEmailSummaryError } from './utils.js';
 import { _aiReplyIcon, _handleAiReplyButton, _hasMultipleRecipients } from './aiReply.js';
 import {
   _buildAttsHtmlFor,
@@ -49,6 +49,7 @@ import {
   _wireRecipientChips,
 } from './index.js';
 import { _showReaderMoreMenu } from './menus.js';
+import { jsonRequest } from '../shared/http.js';
 
 const API_BASE = window.location.origin;
 
@@ -74,13 +75,6 @@ function _allocReaderSlot(modalId) {
 }
 function _freeReaderSlot(modalId) {
   _emailReaderSlots.delete(modalId);
-}
-
-// JS-driven gate: sets [data-email-tabs="N"] on <body> so CSS can show
-// the per-chip number badge only when 2+ tabs exist.
-function _syncEmailTabsCount() {
-  const tabs = document.querySelectorAll('.minimized-dock-chip[data-modal-id^="email-view-"]');
-  document.body.dataset.emailTabs = String(tabs.length);
 }
 
 // Recompute the email menu chip's tab-count whenever the dock contents
@@ -159,7 +153,7 @@ export async function _openEmailAsTab(em, folder) {
     <div class="modal-content doclib-modal-content email-reader-tab-content" style="background:var(--bg);width:min(720px, 92vw);display:flex;flex-direction:column;">
       <div class="modal-header">
         <h4 style="display:flex;align-items:center;gap:6px;min-width:0;flex:1;">
-          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:8px;">${_esc(em.subject || '(no subject)')}</span>
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:8px;">${esc(em.subject || '(no subject)')}</span>
         </h4>
         <button class="minimize-btn" type="button" title="Minimize">_</button>
         <button class="close-btn" type="button" title="Close">&#x2716;</button>
@@ -402,7 +396,7 @@ export async function _openEmailWindow(em, folder) {
       <div class="modal-header">
         <h4 style="display:flex;align-items:center;gap:6px;min-width:0;flex:1;">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
-          <span class="email-window-subject" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(em.subject || '(no subject)')}</span>
+          <span class="email-window-subject" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(em.subject || '(no subject)')}</span>
         </h4>
         <button class="close-btn" type="button" title="Close">&#x2716;</button>
       </div>
@@ -449,7 +443,7 @@ export async function _openEmailWindow(em, folder) {
     const res = await fetch(`${API_BASE}/api/email/read/${em.uid}?folder=${encodeURIComponent(useFolder)}${_acct()}`);
     let data = await res.json();
     if (data.error) {
-      bodyEl.innerHTML = `<div style="color:var(--red,#e55);padding:16px;">${_esc(data.error)}</div>`;
+      bodyEl.innerHTML = `<div style="color:var(--red,#e55);padding:16px;">${esc(data.error)}</div>`;
       return;
     }
     data = _normalizeEmailStateFlags({ ...em, ...data });
@@ -540,7 +534,7 @@ export async function _openEmailWindow(em, folder) {
       try { _showReaderMoreMenu(em, modal, bodyEl, ev.currentTarget, data); } catch {}
     });
   } catch (err) {
-    bodyEl.innerHTML = `<div style="color:var(--red,#e55);padding:16px;">Failed to load: ${_esc(String(err))}</div>`;
+    bodyEl.innerHTML = `<div style="color:var(--red,#e55);padding:16px;">Failed to load: ${esc(String(err))}</div>`;
   }
 }
 
@@ -632,21 +626,17 @@ async function _generateSummary(reader, data, btn) {
 
   if (btn) btn.disabled = true;
   try {
-    const res = await fetch(`${API_BASE}/api/email/summarize`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        body: data.body,
-        subject: data.subject,
-        from: `${data.from_name} <${data.from_address}>`,
-        // Send identifiers so the backend can fetch the raw message and
-        // pull attachment text for the summary (PDFs, invoices, etc.).
-        uid: data.uid || '',
-        folder: state._libFolder || 'INBOX',
-        message_id: data.message_id || '',
-        account_id: data.account_id || '',
-      }),
-    });
+    const res = await fetch(`${API_BASE}/api/email/summarize`, jsonRequest('POST', {
+      body: data.body,
+      subject: data.subject,
+      from: `${data.from_name} <${data.from_address}>`,
+      // Send identifiers so the backend can fetch the raw message and
+      // pull attachment text for the summary (PDFs, invoices, etc.).
+      uid: data.uid || '',
+      folder: state._libFolder || 'INBOX',
+      message_id: data.message_id || '',
+      account_id: data.account_id || '',
+    }));
     const result = await res.json();
     sp.destroy();
     content.innerHTML = '';
@@ -663,7 +653,7 @@ async function _generateSummary(reader, data, btn) {
   } catch (e) {
     sp.destroy();
     _renderEmailSummaryError(content, null);
-    if (uiModule) uiModule.showError?.('Failed to summarize');
+    showError('Failed to summarize');
   } finally {
     if (btn) btn.disabled = false;
   }

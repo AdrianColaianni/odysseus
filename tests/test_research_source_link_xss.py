@@ -12,8 +12,8 @@ def test_document_library_research_preview_whitelists_source_hrefs():
     assert "function _safeResearchHref(raw)" in src
     assert "parsed.protocol === 'http:' || parsed.protocol === 'https:'" in src
     assert "const url = _safeResearchHref(src.url);" in src
-    assert 'href="${_esc(url)}"' not in src
-    assert "Failed to load: ${_esc(e.message)}" in src
+    assert 'href="${uiModule.esc(url)}"' not in src
+    assert "Failed to load: ${uiModule.esc(e.message)}" in src
     assert "Failed to load: ${e.message}" not in src
 
 

@@ -19,8 +19,6 @@ from src.upload_handler import UploadHandler
 logger = logging.getLogger(__name__)
 
 
-# ---- Request schemas ----
-
 class DocumentCreate(BaseModel):
     session_id: Optional[str] = None
     title: str = "Untitled"
@@ -37,8 +35,6 @@ class DocumentPatch(BaseModel):
     language: Optional[str] = None
     session_id: Optional[str] = None  # link/unlink document to a session
 
-
-# ---- Helpers ----
 
 def _doc_to_dict(doc: Document) -> Dict[str, Any]:
     return {
@@ -96,6 +92,13 @@ def _verify_doc_owner(db, doc: Document, user: str):
         raise HTTPException(404, "Document not found")
 
 
+def _get_owned_document(db, doc_id: str, user: Optional[str]) -> Document:
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    _verify_doc_owner(db, doc, user)
+    return doc
+
 def _owner_session_filter(q, user):
     """Restrict a documents query to those owned by `user`.
 
@@ -113,7 +116,6 @@ def _owner_session_filter(q, user):
             return q
         return q.filter(False)
     return q.filter(Document.owner == user)
-
 
 
 def _slug(name: str) -> str:

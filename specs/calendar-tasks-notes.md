@@ -18,7 +18,7 @@ This spec covers calendar, reminders, tasks, assistant runs, and notes in:
 - scoped Codex wrappers in `routes/codex_routes.py`;
 - database models `CalendarCal`, `CalendarEvent`, `ScheduledTask`, `TaskRun`, `Note`, and `CrewMember`;
 - direct DB CLIs `scripts/odysseus-calendar`, `scripts/odysseus-notes`, and `scripts/odysseus-tasks`;
-- frontend modules `static/js/calendar.js`, `static/js/calendar/*`, `static/js/tasks.js`, the `static/js/notes.js` compatibility facade and maintained `frontend/src/features/notes/` graph deployed under `static/js/features/notes/`, and `static/js/assistant.js`;
+- frontend modules `static/js/calendar.js`, `static/js/calendar/*`, `static/js/tasks.js`, the `static/js/notes.js` compatibility facade and the `static/js/features/notes/` graph, and `static/js/assistant.js`;
 - tests covering calendar routes/utilities, CalDAV, recurrence, timezone handling, scheduler behavior, task webhooks, notes CLI/tool behavior, and task CLI behavior.
 
 ## Calendar

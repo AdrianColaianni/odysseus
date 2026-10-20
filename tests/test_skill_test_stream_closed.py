@@ -10,7 +10,8 @@ import asyncio
 import json
 from contextvars import ContextVar
 
-import routes.skills_routes as skills_routes
+from services.skills import agent_runner
+from services.skills.dependencies import default_dependencies
 
 _BOUND: ContextVar = ContextVar("skill_test_bound", default=None)
 
@@ -37,15 +38,15 @@ async def test_paused_skill_test_closes_the_agent_stream_in_its_own_task(monkeyp
               {"delta": "never reached"}]
     monkeypatch.setattr("src.agent_loop.stream_agent_loop", _fake_stream(events, closed))
     key = ("alice", "demo")
-    skills_routes._skill_test_jobs[key] = {"log": [], "status": "running"}
+    agent_runner._skill_test_jobs[key] = {"log": [], "status": "running"}
     try:
-        await skills_routes._run_skill_test_job(
+        await default_dependencies().run_test_job(
             key, "demo", "# skill", "task", "http://model.test", "m", {}, "alice")
-        job = skills_routes._skill_test_jobs[key]
+        job = agent_runner._skill_test_jobs[key]
         assert job["status"] == "awaiting_approval"
         assert closed == [asyncio.current_task()]
     finally:
-        skills_routes._skill_test_jobs.pop(key, None)
+        agent_runner._skill_test_jobs.pop(key, None)
 
 
 async def test_audit_arm_closes_the_agent_stream_when_it_stops_for_approval(monkeypatch):
@@ -54,7 +55,7 @@ async def test_audit_arm_closes_the_agent_stream_when_it_stops_for_approval(monk
               {"delta": "never reached"}]
     monkeypatch.setattr("src.agent_loop.stream_agent_loop", _fake_stream(events, closed))
 
-    _, _, approval = await skills_routes._run_skill_audit_arm(
+    _, _, approval = await agent_runner.run_audit_arm(
         [{"role": "user", "content": "task"}], "http://model.test", "m", {}, "alice")
 
     assert approval == _APPROVAL

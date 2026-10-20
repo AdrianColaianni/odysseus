@@ -38,7 +38,6 @@ export function wireAIToolsMisc({
   flatten, saveState, fitZoom, composite, createLayer, renderLayerPanel,
   spinnerModule, uiModule, openAdjustmentLayer,
 }) {
-  // ── Harmonize sliders — Color match + Seam fix ──
   const harmColorPrev = document.getElementById('ge-harmonize-color-preview');
   const harmSeamPrev = document.getElementById('ge-harmonize-seam-preview');
   document.getElementById('ge-harmonize-color')?.addEventListener('input', (e) => {
@@ -74,7 +73,6 @@ export function wireAIToolsMisc({
     applyImageTool('/api/image/harmonize', payload, 'Harmonized', document.getElementById('ge-harmonize-run'));
   });
 
-  // ── Canvas upscale (bicubic) ──
   function canvasUpscale(factor) {
     saveState(`Upscale ${factor}×`);
     const newW = state.imgWidth * factor;
@@ -101,7 +99,6 @@ export function wireAIToolsMisc({
   document.getElementById('ge-upscale-2x')?.addEventListener('click', () => canvasUpscale(2));
   document.getElementById('ge-upscale-4x')?.addEventListener('click', () => canvasUpscale(4));
 
-  // ── AI upscale (Real-ESRGAN, no diffusion server required) ──
   document.getElementById('ge-upscale-ai')?.addEventListener('click', async () => {
     const btn = document.getElementById('ge-upscale-ai');
     const origHTML = btn.innerHTML;
@@ -161,7 +158,6 @@ export function wireAIToolsMisc({
     }
   });
 
-  // ── Style transfer ──
   document.getElementById('ge-style-strength')?.addEventListener('input', (e) => {
     document.getElementById('ge-style-strength-label').textContent = (parseInt(e.target.value) / 100).toFixed(2);
   });
@@ -209,7 +205,6 @@ export function wireAIToolsMisc({
     }
   });
 
-  // ── Add empty layer (used by the layer-panel header button + the
   // Ctrl+Alt+J keyboard shortcut). Returned so keyboard-shortcuts.js
   // can call it through the same path. ──
   function addEmptyLayer() {

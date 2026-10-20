@@ -9,8 +9,6 @@
 """
 
 import asyncio
-import json
-import os
 import re
 import shutil
 import socket
@@ -21,9 +19,9 @@ import urllib.parse
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
+from tests.helpers.routes import route_endpoint
 
 
 # -- 1. MCP attachment extraction -------------------------------------------
@@ -414,7 +412,7 @@ def test_single_user_mode_allows_lan_mail_servers(monkeypatch):
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
 def test_non_admin_cannot_probe_loopback_through_the_connection_test(monkeypatch, host):
-    import routes.email_routes as email_routes
+    import routes.email.email_routes as email_routes
     import src.tool_security as tool_security
 
     for key in ("EMAIL_ALLOW_PRIVATE_IPS", "EMAIL_BLOCK_PRIVATE_IPS"):
@@ -435,15 +433,11 @@ def test_non_admin_cannot_probe_loopback_through_the_connection_test(monkeypatch
 # -- 3. /accounts/test blocking I/O stays off the event loop -----------------------
 
 def _accounts_test_endpoint(email_routes):
-    router = email_routes.setup_email_routes()
-    return next(
-        r.endpoint for r in router.routes
-        if r.path == "/api/email/accounts/test" and "POST" in getattr(r, "methods", set())
-    )
+    return route_endpoint(email_routes.setup_email_routes(), "/api/email/accounts/test", "POST")
 
 
 def test_connection_test_does_not_block_the_event_loop(monkeypatch):
-    import routes.email_routes as email_routes
+    import routes.email.email_routes as email_routes
 
     def _slow_open(host, port, **kwargs):
         time.sleep(1.0)  # a mail server that never answers within the timeout
@@ -484,7 +478,7 @@ def test_connection_test_does_not_block_the_event_loop(monkeypatch):
 
 
 def test_connection_test_keeps_its_authentication_dependency():
-    import routes.email_routes as email_routes
+    import routes.email.email_routes as email_routes
     from routes.email.email_routes import require_user
 
     router = email_routes.setup_email_routes()
@@ -524,7 +518,7 @@ def _csp_app():
     async def _control():
         return HTMLResponse("<html><body><script>document.body.dataset.ran='1'</script></body></html>")
 
-    app.include_router(setup_search_routes(SimpleNamespace()))
+    app.include_router(setup_search_routes())
     return app
 
 

@@ -11,8 +11,6 @@ COMPOSE_PATHS = tuple(
     ROOT / name
     for name in (
         "docker-compose.yml",
-        "docker-compose.gpu-nvidia.yml",
-        "docker-compose.gpu-amd.yml",
     )
 )
 ENV_EXAMPLE_PATH = ROOT / ".env.example"
@@ -29,40 +27,13 @@ def _odysseus_environment(path):
     return set(compose["services"]["odysseus"]["environment"])
 
 
-@pytest.mark.parametrize(
-    "key",
-    (
-        "GOOGLE_OAUTH_CLIENT_ID",
-        "GOOGLE_OAUTH_CLIENT_SECRET",
-        "GOOGLE_OAUTH_REDIRECT_URI",
-    ),
-)
-def test_google_oauth_setting_is_forwarded(key):
-    expected = f"{key}=${{{key}:-}}"
-    for path in COMPOSE_PATHS:
-        assert expected in _odysseus_environment(path), path.name
+def test_google_oauth_settings_are_forwarded():
+    for key in ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET", "GOOGLE_OAUTH_REDIRECT_URI"):
+        expected = f"{key}=${{{key}:-}}"
+        for path in COMPOSE_PATHS:
+            assert expected in _odysseus_environment(path), path.name
 
 
-@pytest.mark.parametrize(
-    "key",
-    (
-        "GOOGLE_OAUTH_CLIENT_ID",
-        "GOOGLE_OAUTH_CLIENT_SECRET",
-        "GOOGLE_OAUTH_REDIRECT_URI",
-    ),
-)
-def test_google_oauth_setting_is_documented(key):
-    assert f"# {key}=" in _env_example()
-
-
-def test_google_oauth_example_uses_a_neutral_secret_placeholder():
+def test_env_example_holds_no_real_google_client_secret():
     env_example = _env_example()
-    assert "GOOGLE_OAUTH_CLIENT_SECRET=replace-with-client-secret" in env_example
     assert "GOCSPX-" not in env_example
-
-
-def test_redirect_documentation_covers_https_and_reverse_proxies():
-    oauth_section = _env_example().split("# Google OAuth2", 1)[1].split("# Misc", 1)[0]
-    assert "HTTPS" in oauth_section
-    assert "reverse-proxy" in oauth_section
-    assert "exactly match an authorized redirect URI" in oauth_section

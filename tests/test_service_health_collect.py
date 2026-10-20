@@ -1,5 +1,4 @@
 """Tests for rollup logic, aggregate collection, and shared utility helpers (_safe_url, _classify_error)."""
-import pytest
 
 from src import service_health as sh
 
@@ -49,20 +48,20 @@ def test_collect_service_health_shape(monkeypatch):
 
 # ── _safe_url: strip userinfo / query / fragment ──
 
-@pytest.mark.parametrize("raw,expected", [
-    ("http://user:pass@host:8080/path?api_key=secret#frag", "http://host:8080/path"),
-    ("https://admin:hunter2@searx.example.com/", "https://searx.example.com"),
-    ("http://ntfy.local:80?token=abc", "http://ntfy.local:80"),
-    ("host:8080", "host:8080"),
-    ("", ""),
-    (None, ""),
-])
-def test_safe_url_strips_secrets(raw, expected):
-    out = sh._safe_url(raw)
-    assert out == expected
-    for bad in ("pass", "secret", "hunter2", "abc", "token", "@"):
-        if raw and bad in raw and bad not in expected:
-            assert bad not in out
+def test_safe_url_strips_secrets():
+    for raw, expected in (
+        ("http://user:pass@host:8080/path?api_key=secret#frag", "http://host:8080/path"),
+        ("https://admin:hunter2@searx.example.com/", "https://searx.example.com"),
+        ("http://ntfy.local:80?token=abc", "http://ntfy.local:80"),
+        ("host:8080", "host:8080"),
+        ("", ""),
+        (None, ""),
+    ):
+        out = sh._safe_url(raw)
+        assert out == expected
+        for bad in ("pass", "secret", "hunter2", "abc", "token", "@"):
+            if raw and bad in raw and bad not in expected:
+                assert bad not in out
 
 
 # ── _classify_error: controlled categories, never raw text ──

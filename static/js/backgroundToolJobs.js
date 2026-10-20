@@ -106,7 +106,7 @@ export function startBackgroundToolJobs({ getSessionId, addMessage, base = '' })
     if (inFlight || !sid || document.hidden || window.__odysseusSessionReadyId !== sid) return;
     inFlight = true;
     try {
-      const response = await fetch(`${base}/api/research/chat-jobs/${encodeURIComponent(sid)}`, { credentials: 'same-origin' });
+      const response = await fetch(`${base}/api/research/chat-jobs/${encodeURIComponent(sid)}`);
       if (!response.ok) return;
       const { jobs = [] } = await response.json();
       if (getSessionId() !== sid || window.__odysseusSessionReadyId !== sid) return;

@@ -1,5 +1,3 @@
-# src/app_helpers.py
-import base64
 import logging
 import os
 
@@ -7,23 +5,8 @@ from fastapi import HTTPException
 from fastapi.responses import HTMLResponse
 from starlette.requests import Request
 
-from src.path_confinement import is_inside
 
 logger = logging.getLogger(__name__)
-
-def read_if_exists(path: str) -> str:
-    """Read file if it exists, return empty string otherwise."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except Exception:
-        return ""
-
-def file_to_data_url(path: str, mime: str) -> str:
-    """Convert file to data URL."""
-    with open(path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode("ascii")
-    return f"data:{mime};base64,{b64}"
 
 def abs_join(base_dir: str, rel: str) -> str:
     """Join paths and return absolute path."""
@@ -50,7 +33,3 @@ def serve_html_with_nonce(request: Request, file_path: str) -> HTMLResponse:
     html = html.replace("{{CSP_NONCE}}", nonce)
     return HTMLResponse(html)
 
-
-def inside_base_dir(base_dir: str, path: str) -> bool:
-    """Check if path is inside base directory."""
-    return is_inside(base_dir, path)

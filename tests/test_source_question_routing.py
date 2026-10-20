@@ -29,11 +29,14 @@ def test_structured_message_identifiers_require_successful_evidence(failed, uid)
     assert email_identifier_error('read_email', {'uid': '99'}, history=history)
 
 
-@pytest.mark.parametrize('prompt', ['Look email, when is my dhl arriving',
-    'Look through my inbox for the delivery date', 'Look at my notes for the address'])
-def test_look_in_named_source_does_not_fall_back_to_files(prompt):
+def test_look_in_named_source_does_not_fall_back_to_files():
     from src.turn_contract import _clause_capabilities
-    assert _clause_capabilities(prompt) == ({'notes'} if 'notes' in prompt else {'email'})
+    for prompt in (
+        'Look email, when is my dhl arriving',
+        'Look through my inbox for the delivery date',
+        'Look at my notes for the address',
+    ):
+        assert _clause_capabilities(prompt) == ({'notes'} if 'notes' in prompt else {'email'})
 
 
 def test_read_scope_only_narrows_existing_tools():
@@ -43,18 +46,18 @@ def test_read_scope_only_narrows_existing_tools():
     assert scope_email_tools([], intent) == []
 
 
-@pytest.mark.parametrize('disabled', [False, True])
-def test_search_inventory_keeps_permission_filtered_read_continuation(disabled):
+def test_search_inventory_keeps_permission_filtered_read_continuation():
     from src.turn_contract import resolve_turn_contract
-    tools = [schema(n) for n in ['search_emails', 'read_email', 'download_attachment',
-                                  'list_email_accounts', 'send_email', 'bash']]
-    policy = ToolPolicy(disabled_tools=frozenset({'read_email'}) if disabled else frozenset())
-    contract = resolve_turn_contract(capabilities={'email'}, schemas=tools, policy=policy,
-                                     selected_tools={'search_emails'})
-    assert ('read_email' in contract.offered) is not disabled
-    assert 'download_attachment' in contract.offered
-    assert 'send_email' not in contract.offered
-    assert 'bash' not in contract.offered
+    for disabled in (False, True):
+        tools = [schema(n) for n in ['search_emails', 'read_email', 'download_attachment',
+                                      'list_email_accounts', 'send_email', 'bash']]
+        policy = ToolPolicy(disabled_tools=frozenset({'read_email'}) if disabled else frozenset())
+        contract = resolve_turn_contract(capabilities={'email'}, schemas=tools, policy=policy,
+                                         selected_tools={'search_emails'})
+        assert ('read_email' in contract.offered) is not disabled
+        assert 'download_attachment' in contract.offered
+        assert 'send_email' not in contract.offered
+        assert 'bash' not in contract.offered
 
 
 @pytest.mark.asyncio

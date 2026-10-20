@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from core.database import Base, ModelEndpoint, ProviderAuthSession
 import routes.chatgpt_subscription_routes as csr
+from tests.helpers.routes import route_endpoint
 
 
 def _mem_db(monkeypatch):
@@ -374,10 +375,7 @@ def _delete_route(monkeypatch, TestSessionLocal):
     monkeypatch.setattr(ai_interaction, "get_session_manager", lambda: None)
 
     router = mr.setup_model_routes(model_discovery=None)
-    for route in router.routes:
-        if getattr(route, "path", "") == "/api/model-endpoints/{ep_id}" and "DELETE" in getattr(route, "methods", set()):
-            return route.endpoint
-    raise AssertionError("DELETE /api/model-endpoints/{ep_id} not found")
+    return route_endpoint(router, "/api/model-endpoints/{ep_id}", "DELETE")
 
 
 def test_delete_endpoint_route_revokes_orphaned_provider_auth(monkeypatch):
@@ -498,10 +496,7 @@ def test_manual_model_refresh_uses_the_endpoints_own_auth_session(monkeypatch):
     monkeypatch.setattr(mr, "_probe_endpoint", fake_probe)
 
     router = mr.setup_model_routes(model_discovery=None)
-    list_models = next(
-        r.endpoint for r in router.routes
-        if getattr(r, "path", "") == "/api/model-endpoints/{ep_id}/models" and "GET" in getattr(r, "methods", set())
-    )
+    list_models = route_endpoint(router, "/api/model-endpoints/{ep_id}/models", "GET")
 
     class _Resp:
         headers = {}

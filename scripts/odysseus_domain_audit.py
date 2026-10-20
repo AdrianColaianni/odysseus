@@ -336,7 +336,7 @@ def _seed_fixtures(owner: str, marker: str, domain: str, session_id: str | None 
         db.close()
     if domain == "memory":
         from services.memory.memory import MemoryManager
-        manager = MemoryManager(str(ROOT / "data"))
+        manager = MemoryManager(str(ROOT / "data" / "memory.json"))
         entries = manager.load_all()
         if not any(str(e.get("text")) == f"audit marker {marker}" for e in entries if isinstance(e, dict)):
             entries.append(manager.add_entry(f"audit marker {marker}", source="domain-audit", category="fact", owner=owner))
@@ -367,7 +367,7 @@ def _cleanup_fixtures(owner: str, marker: str, domain: str) -> None:
         db.close()
     if domain == "memory":
         from services.memory.memory import MemoryManager
-        manager = MemoryManager(str(ROOT / "data"))
+        manager = MemoryManager(str(ROOT / "data" / "memory.json"))
         manager.save([e for e in manager.load_all() if not (isinstance(e, dict) and marker in str(e.get("text", "")))])
     if domain == "skills":
         from services.memory.skills import SkillsManager

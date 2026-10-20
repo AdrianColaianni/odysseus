@@ -7,10 +7,10 @@ returned a 500 HTML page, and the UI reported a misleading JSON.parse error
 from res.json().
 """
 import asyncio
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import routes.backup_routes as br
+from tests.helpers.routes import route_endpoint
 
 
 class _Req:
@@ -22,7 +22,6 @@ class _Req:
 
 
 def _setup(monkeypatch, skills_manager):
-    monkeypatch.setattr(br, "require_admin", lambda request: None)
     monkeypatch.setattr(br, "get_current_user", lambda request: "alice")
 
     mem = MagicMock()
@@ -34,11 +33,7 @@ def _setup(monkeypatch, skills_manager):
     presets.save.return_value = True
 
     router = br.setup_backup_routes(mem, presets, skills_manager)
-    endpoint = None
-    for r in router.routes:
-        if r.path == "/api/import" and "POST" in getattr(r, "methods", set()):
-            endpoint = r.endpoint
-    assert endpoint is not None
+    endpoint = route_endpoint(router, "/api/import", "POST")
     return endpoint
 
 

@@ -5,41 +5,46 @@ import pytest
 from src.turn_contract import _routing_email_scope, requested_capabilities, selected_tools_for_request
 
 
-@pytest.mark.parametrize('folder', ['Archive', 'Receipts', '"Sent Items"', 'Finance/2026'])
-@pytest.mark.parametrize('account', ['work@example.com', 'bills+tax@sub.example.org'])
-def test_mailbox_location_is_not_a_filesystem_or_browser_operation(folder, account):
-    lookup = f'Find and read the latest email about the design review. Use the {folder} folder on {account}.'
-    assert selected_tools_for_request(lookup) == {'search_emails', 'read_email'}
-    assert requested_capabilities(lookup) == {'email'}
-    question = f'Any update on the design review in my email? Read the newest message. Use the {folder} folder on {account}.'
-    assert requested_capabilities(question) == {'email'}
+def test_mailbox_location_is_not_a_filesystem_or_browser_operation():
+    for folder in (
+        'Archive',
+        'Receipts',
+        '"Sent Items"',
+        'Finance/2026',
+    ):
+        for account in ('work@example.com', 'bills+tax@sub.example.org'):
+            lookup = f'Find and read the latest email about the design review. Use the {folder} folder on {account}.'
+            assert selected_tools_for_request(lookup) == {'search_emails', 'read_email'}
+            assert requested_capabilities(lookup) == {'email'}
+            question = f'Any update on the design review in my email? Read the newest message. Use the {folder} folder on {account}.'
+            assert requested_capabilities(question) == {'email'}
 
 
-@pytest.mark.parametrize('prompt', [
-    'Read my email. Create a folder in /workspace for the report.',
-    'Search my email. Use the Archive folder and run a Python script.',
-    'Use the Archive folder on server.example.com.',
-    'Archive the email from Morgan.',
-])
-def test_independent_actions_are_not_removed(prompt):
-    assert _routing_email_scope(prompt) == prompt
+def test_independent_actions_are_not_removed():
+    for prompt in (
+        'Read my email. Create a folder in /workspace for the report.',
+        'Search my email. Use the Archive folder and run a Python script.',
+        'Use the Archive folder on server.example.com.',
+        'Archive the email from Morgan.',
+    ):
+        assert _routing_email_scope(prompt) == prompt
 
 
-@pytest.mark.parametrize('prompt', [
-    'What time did Morgan send the latest email about the design review?',
-    'When was the newest email from Morgan received?',
-    'Find the last email regarding the contract review.',
-])
-def test_concrete_email_reference_beats_generic_latest_review_heuristics(prompt):
-    assert requested_capabilities(prompt) == {'email'}
+def test_concrete_email_reference_beats_generic_latest_review_heuristics():
+    for prompt in (
+        'What time did Morgan send the latest email about the design review?',
+        'When was the newest email from Morgan received?',
+        'Find the last email regarding the contract review.',
+    ):
+        assert requested_capabilities(prompt) == {'email'}
 
 
-@pytest.mark.parametrize('prompt', [
-    'Find reviews of the latest email clients.',
-    'What are the latest events in Kyiv?',
-])
-def test_public_topics_are_not_mailbox_references(prompt):
-    assert requested_capabilities(prompt) == {'search_browser'}
+def test_public_topics_are_not_mailbox_references():
+    for prompt in (
+        'Find reviews of the latest email clients.',
+        'What are the latest events in Kyiv?',
+    ):
+        assert requested_capabilities(prompt) == {'search_browser'}
 
 
 @pytest.mark.asyncio

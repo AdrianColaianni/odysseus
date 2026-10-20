@@ -12,10 +12,10 @@
 
 import spinnerModule from '../spinner.js';
 import { emailApiUrl } from '../emailShared.js';
-import { showToast, styledConfirm } from '../ui.js?v=20260916largetoolscroll1';
+import { esc, showToast, styledConfirm } from '../ui.js?v=20260916largetoolscroll1';
 import { state } from './state.js';
-import { _esc } from './utils.js';
 import { _libCacheWriteBack, _renderGrid, isOpen, refreshEmailLibrary } from './index.js';
+import { jsonRequest } from '../shared/http.js';
 
 function _unsubscribeMethodLabel(method) {
   if (!method) return 'No unsubscribe method';
@@ -336,7 +336,7 @@ function _markUnsubscribeCardDone(modal, idx, label = 'Unsubscribed') {
   card.classList.add('is-unsubscribed');
   if (!card.querySelector('.email-unsub-done-badge')) {
     const badgeHost = card.querySelector('.email-unsub-subject-line') || card.querySelector('.email-unsub-card-top');
-    badgeHost?.insertAdjacentHTML('beforeend', `<span class="email-tag email-unsub-done-badge">${_UNSUB_CHECK_ICON}<span>${_esc(label)}</span></span>`);
+    badgeHost?.insertAdjacentHTML('beforeend', `<span class="email-tag email-unsub-done-badge">${_UNSUB_CHECK_ICON}<span>${esc(label)}</span></span>`);
   }
   card.querySelectorAll('.email-unsub-link-btn, .email-unsub-agent-btn, .email-unsub-send-btn, .email-unsub-done-btn, .email-unsub-ignore-btn').forEach(el => {
     if (el.tagName === 'A') {
@@ -554,17 +554,12 @@ async function _runUnsubscribeCleanup(modal, candidates, action, btn) {
   try {
     const r = await fetch(emailApiUrl('/api/email/unsubscribe/cleanup', {
       account_id: state._libAccountId || undefined,
-    }), {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action,
-        uids,
-        folder: state._libFolder || 'INBOX',
-        account_id: state._libAccountId || '',
-      }),
-    });
+    }), jsonRequest('POST', {
+      action,
+      uids,
+      folder: state._libFolder || 'INBOX',
+      account_id: state._libAccountId || '',
+    }));
     const d = await r.json().catch(() => ({}));
     if (!d.success) throw new Error(d.error || 'Cleanup failed');
     const removed = new Set(uids.map(uid => String(uid)));
@@ -654,8 +649,8 @@ function _showUnsubscribeCleanupPrompt(modal, candidates, options = {}) {
     return `
       <div style="display:flex;gap:8px;align-items:center;min-width:0;">
         <div style="min-width:0;flex:1;">
-          <div style="font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${_esc(c.subject || '(no subject)')}</div>
-          <div style="font-size:11px;color:color-mix(in srgb,var(--fg) 62%,transparent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${_esc(c.from_name || c.from_address || '')} · ${_esc(c.from_address || '')}</div>
+          <div style="font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(c.subject || '(no subject)')}</div>
+          <div style="font-size:11px;color:color-mix(in srgb,var(--fg) 62%,transparent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(c.from_name || c.from_address || '')} · ${esc(c.from_address || '')}</div>
         </div>
         ${uids.length > 1 ? `<span class="email-tag">x${uids.length}</span>` : ''}
       </div>`;
@@ -665,7 +660,7 @@ function _showUnsubscribeCleanupPrompt(modal, candidates, options = {}) {
   box.style.cssText = 'border:1px solid color-mix(in srgb,var(--accent,var(--red)) 35%,var(--border));border-radius:8px;padding:10px;background:color-mix(in srgb,var(--accent,var(--red)) 8%,transparent);display:flex;flex-direction:column;gap:8px;';
   box.innerHTML = `
     <div style="display:flex;gap:8px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;">
-      <div style="font-size:12px;font-weight:700;">${_esc(heading)}</div>
+      <div style="font-size:12px;font-weight:700;">${esc(heading)}</div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;">
         <button type="button" class="memory-toolbar-btn email-unsub-clean-spam" style="display:inline-flex;align-items:center;gap:4px;">${_UNSUB_CHECK_ICON}<span>Mark as spam</span></button>
         <button type="button" class="memory-toolbar-btn email-unsub-clean-junk-delete" style="display:inline-flex;align-items:center;gap:4px;color:var(--red);">${_UNSUB_TRASH_ICON}<span>Spam + delete</span></button>
@@ -711,7 +706,7 @@ function _showUnsubscribeScanFurtherPrompt(modal, anchor, heading) {
   const box = document.createElement('div');
   box.className = 'email-unsub-followup';
   box.style.cssText = 'border:1px solid color-mix(in srgb,var(--accent,var(--red)) 35%,var(--border));border-radius:8px;padding:10px;background:color-mix(in srgb,var(--accent,var(--red)) 8%,transparent);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;';
-  box.innerHTML = `<span style="font-size:12px;font-weight:700;">${_esc(heading)}</span><button type="button" class="memory-toolbar-btn email-unsub-scan-further">Scan further</button>`;
+  box.innerHTML = `<span style="font-size:12px;font-weight:700;">${esc(heading)}</span><button type="button" class="memory-toolbar-btn email-unsub-scan-further">Scan further</button>`;
   const body = modal.querySelector('.modal-body');
   const list = modal.querySelector('.email-unsub-list');
   body?.insertBefore(box, list || null);
@@ -807,7 +802,7 @@ export async function _openUnsubscribeReviewModal(anchor, options = {}) {
           </h4>
         </div>
         <div class="modal-body" style="display:flex;flex-direction:column;gap:10px;max-height:min(72vh,620px);overflow:auto;">
-        <div class="email-unsub-status" style="font-size:10.5px;color:color-mix(in srgb,var(--fg) 68%,transparent);">Scanning ${_esc(scanFolderLabel)} headers…</div>
+        <div class="email-unsub-status" style="font-size:10.5px;color:color-mix(in srgb,var(--fg) 68%,transparent);">Scanning ${esc(scanFolderLabel)} headers…</div>
         <div class="email-unsub-actions" style="display:none;gap:7px;justify-content:flex-end;align-items:center;flex-wrap:wrap;">
           <span class="email-unsub-panel-status" aria-live="polite"></span>
           <button type="button" class="memory-toolbar-btn email-unsub-rescan-btn" style="display:inline-flex;align-items:center;gap:4px;">${_UNSUB_REFRESH_ICON}<span>Rescan</span></button>
@@ -916,7 +911,7 @@ export async function _openUnsubscribeReviewModal(anchor, options = {}) {
     listEl.style.display = candidates.length ? 'flex' : 'none';
     listEl.innerHTML = candidates.map((c, idx) => {
       const method = c.recommended_method || null;
-      const reasons = (c.reasons || []).map(r => `<span class="email-tag">${_esc(r)}</span>`).join('');
+      const reasons = (c.reasons || []).map(r => `<span class="email-tag">${esc(r)}</span>`).join('');
       const urlMethod = (c.methods || []).find(m => m.kind === 'url');
       const duplicateCount = Number(c.duplicate_count || 1);
       const duplicateBadge = duplicateCount > 1 ? `<span class="email-tag email-unsub-duplicate-badge">x${duplicateCount}</span>` : '';
@@ -929,9 +924,9 @@ export async function _openUnsubscribeReviewModal(anchor, options = {}) {
           <div class="email-unsub-card-top" style="display:flex;gap:8px;align-items:center;padding-right:0;">
             <div class="email-unsub-card-summary" style="min-width:0;flex:1;">
               <div class="email-unsub-subject-line" style="display:flex;align-items:center;gap:6px;min-width:0;">
-                <div style="font-weight:700;font-size:13px;min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${_esc(c.subject || '(no subject)')}</div>
+                <div style="font-weight:700;font-size:13px;min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(c.subject || '(no subject)')}</div>
               </div>
-              <div class="email-unsub-card-subtitle" style="font-size:11px;color:color-mix(in srgb,var(--fg) 62%,transparent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${_esc(c.from_name || c.from_address || '')} · ${_esc(c.from_address || '')}</div>
+              <div class="email-unsub-card-subtitle" style="font-size:11px;color:color-mix(in srgb,var(--fg) 62%,transparent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(c.from_name || c.from_address || '')} · ${esc(c.from_address || '')}</div>
             </div>
             <button type="button" class="email-unsub-card-toggle" data-idx="${idx}" aria-expanded="false" aria-controls="email-unsub-details-${idx}" title="Show unsubscribe details" aria-label="Show unsubscribe details">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>
@@ -939,7 +934,7 @@ export async function _openUnsubscribeReviewModal(anchor, options = {}) {
           </div>
           <div id="email-unsub-details-${idx}" class="email-unsub-card-details" hidden>
             <div class="email-unsub-detail-head" style="display:flex;gap:7px;align-items:center;flex-wrap:wrap;">
-              <span class="email-tag email-tag-spam" style="flex:0 0 auto;">score ${_esc(c.score || 0)}</span>
+              <span class="email-tag email-tag-spam" style="flex:0 0 auto;">score ${esc(c.score || 0)}</span>
               ${duplicateBadge}
               <span style="flex:1 1 auto;min-width:8px;"></span>
               <button type="button" class="memory-toolbar-btn email-unsub-done-btn" data-idx="${idx}" title="${deleteTitle}" aria-label="${deleteLabel} unsubscribe emails">${_UNSUB_TRASH_ICON}<span>${deleteLabel}</span></button>
@@ -947,9 +942,9 @@ export async function _openUnsubscribeReviewModal(anchor, options = {}) {
             </div>
             <div class="email-unsub-reasons" style="display:flex;flex-wrap:wrap;gap:4px;">${reasons}</div>
             <div class="email-unsub-actions-row" style="display:flex;gap:7px;align-items:center;justify-content:flex-end;flex-wrap:wrap;">
-              ${c.can_execute ? `<button type="button" class="memory-toolbar-btn email-unsub-send-btn" data-idx="${idx}" style="display:inline-flex;align-items:center;gap:4px;">${_UNSUB_EMAIL_ICON}<span>${_esc(_unsubscribeMethodLabel(method))}</span></button>` : ''}
+              ${c.can_execute ? `<button type="button" class="memory-toolbar-btn email-unsub-send-btn" data-idx="${idx}" style="display:inline-flex;align-items:center;gap:4px;">${_UNSUB_EMAIL_ICON}<span>${esc(_unsubscribeMethodLabel(method))}</span></button>` : ''}
               ${urlMethod ? `<button type="button" class="memory-toolbar-btn email-unsub-agent-btn" data-idx="${idx}" style="display:inline-flex;align-items:center;gap:6px;"><svg class="email-unsub-agent-icon email-unsub-accent-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg><span>Agent Unsubscribe</span></button>` : ''}
-              ${urlMethod ? `<a class="memory-toolbar-btn email-unsub-link-btn" href="${_esc(urlMethod.target)}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;display:inline-flex;align-items:center;gap:4px;">${_UNSUB_EXTERNAL_ICON}<span>Link Unsubscribe</span></a>` : ''}
+              ${urlMethod ? `<a class="memory-toolbar-btn email-unsub-link-btn" href="${esc(urlMethod.target)}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;display:inline-flex;align-items:center;gap:4px;">${_UNSUB_EXTERNAL_ICON}<span>Link Unsubscribe</span></a>` : ''}
             </div>
           </div>
         </div>`;
@@ -1026,18 +1021,13 @@ export async function _openUnsubscribeReviewModal(anchor, options = {}) {
             restoreBusy?.setLabel?.(`Unsubscribing ${sent + failed + 1}/${safeCandidates.length}`);
             const r = await fetch(emailApiUrl('/api/email/unsubscribe/execute', {
               account_id: state._libAccountId || undefined,
-            }), {
-              method: 'POST',
-              credentials: 'same-origin',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                uid: c.uid,
-                folder: c.folder || state._libFolder || 'INBOX',
-                account_id: state._libAccountId || '',
-                method_index: 0,
-                move_to_spam: false,
-              }),
-            });
+            }), jsonRequest('POST', {
+              uid: c.uid,
+              folder: c.folder || state._libFolder || 'INBOX',
+              account_id: state._libAccountId || '',
+              method_index: 0,
+              move_to_spam: false,
+            }));
             const d = await r.json().catch(() => ({}));
             if (!d.success) throw new Error(d.error || 'Unsubscribe failed');
             sent += 1;
@@ -1178,18 +1168,13 @@ export async function _openUnsubscribeReviewModal(anchor, options = {}) {
         try {
           const r = await fetch(emailApiUrl('/api/email/unsubscribe/execute', {
             account_id: state._libAccountId || undefined,
-          }), {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              uid: c.uid,
-              folder: c.folder || state._libFolder || 'INBOX',
-              account_id: state._libAccountId || '',
-              method_index: 0,
-              move_to_spam: false,
-            }),
-          });
+          }), jsonRequest('POST', {
+            uid: c.uid,
+            folder: c.folder || state._libFolder || 'INBOX',
+            account_id: state._libAccountId || '',
+            method_index: 0,
+            move_to_spam: false,
+          }));
             const d = await r.json().catch(() => ({}));
             if (!d.success) throw new Error(d.error || 'Unsubscribe failed');
             btn.innerHTML = `${_UNSUB_CHECK_ICON}<span>Sent</span>`;
@@ -1210,7 +1195,7 @@ export async function _openUnsubscribeReviewModal(anchor, options = {}) {
         } catch (err) {
           console.error(err);
           btn.disabled = false;
-          btn.innerHTML = `${_UNSUB_EMAIL_ICON}<span>${_esc(_unsubscribeMethodLabel(c.recommended_method))}</span>`;
+          btn.innerHTML = `${_UNSUB_EMAIL_ICON}<span>${esc(_unsubscribeMethodLabel(c.recommended_method))}</span>`;
           btn.style.display = 'inline-flex';
           btn.style.alignItems = 'center';
           btn.style.gap = '4px';

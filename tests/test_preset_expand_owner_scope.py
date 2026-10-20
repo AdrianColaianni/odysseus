@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from routes.preset_routes import setup_preset_routes
+from tests.helpers.routes import route_endpoint
 
 
 class _FakeRequest:
@@ -25,10 +26,7 @@ class _FakeRequest:
 
 def _expand_endpoint():
     router = setup_preset_routes(MagicMock())
-    for route in router.routes:
-        if getattr(route, "path", "") == "/api/presets/expand" and "POST" in getattr(route, "methods", set()):
-            return route.endpoint
-    raise AssertionError("POST /api/presets/expand route not registered")
+    return route_endpoint(router, "/api/presets/expand", "POST")
 
 
 def _patch_model_pipeline(monkeypatch):

@@ -1,7 +1,6 @@
 import json
-import subprocess
-import textwrap
 from pathlib import Path
+from tests.helpers.node import run_node_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,19 +8,8 @@ ENGINE = (ROOT / "static/js/editor/brush-engine.js").as_uri()
 PRESETS = (ROOT / "static/js/editor/brush-presets.js").as_uri()
 
 
-def run_node(body: str):
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", textwrap.dedent(body)],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
-
-
 def test_sampler_emits_even_spacing_and_flushes_endpoint():
-    data = run_node(
+    data = run_node_module(
         f"""
         import {{ createBrushSampler }} from {json.dumps(ENGINE)};
         const samples = [];
@@ -42,7 +30,7 @@ def test_sampler_emits_even_spacing_and_flushes_endpoint():
 
 
 def test_pressure_mapping_is_independent_and_mouse_falls_back_to_full():
-    data = run_node(
+    data = run_node_module(
         f"""
         import {{ normalisePressure, pressureValue }} from {json.dumps(ENGINE)};
         console.log(JSON.stringify({{
@@ -56,7 +44,7 @@ def test_pressure_mapping_is_independent_and_mouse_falls_back_to_full():
 
 
 def test_custom_presets_roundtrip_without_mutating_built_ins():
-    data = run_node(
+    data = run_node_module(
         f"""
         import {{ loadBrushPresets, saveCustomBrushPresets, captureBrushPreset, applyBrushPreset }} from {json.dumps(PRESETS)};
         const values = new Map();

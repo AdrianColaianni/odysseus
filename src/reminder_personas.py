@@ -1,15 +1,8 @@
-"""Server-side mirror of the built-in characters used for reminder synthesis.
+"""Server-side mirror of the built-in characters in static/js/presets.js (PROMPT_TEMPLATES, isCharacter:true).
 
-The frontend ships these in static/js/presets.js (PROMPT_TEMPLATES with
-isCharacter:true). The Reminders → AI Synthesis card writes only the
-persona ID into settings; the synthesis route in note_routes.py needs
-the full prompt text to bias the utility model's voice. Keeping a small
-local mirror avoids having the client send the prompt over the wire on
-every reminder fire.
-
-If the user picks a custom character (id == "custom") we fall back to
-the warm-neutral baseline — custom prompts live in browser localStorage
-and aren't visible to the server.
+Reminder synthesis in note_routes.py needs the prompt text but settings hold
+only the persona id. A "custom" id falls back to the neutral baseline, since
+custom prompts live in browser localStorage.
 """
 
 PERSONAS = {

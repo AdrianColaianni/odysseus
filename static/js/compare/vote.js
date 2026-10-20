@@ -126,19 +126,16 @@ function _saveVote(winnerIdx) {
   if (votes.length > VOTES_MAX) votes.splice(0, votes.length - VOTES_MAX);
   Storage.setJSON(VOTES_STORAGE_KEY, votes);
 
-  // Fire-and-forget POST to backend
-  try {
-    fetch(`${state.API_BASE}/api/compare/record`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        prompt: state._lastPrompt,
-        models: modelNames,
-        winner: winner,
-        is_blind: state._blindMode,
-      }),
-    }).catch(() => {});   // silently ignore errors
-  } catch (_) {}
+  fetch(`${state.API_BASE}/api/compare/record`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      prompt: state._lastPrompt,
+      models: modelNames,
+      winner: winner,
+      is_blind: state._blindMode,
+    }),
+  }).catch((e) => console.warn('Compare vote save failed:', e));
 }
 
 /** Reveal model names in pane headers. Highlights winner if one was picked. */
@@ -223,4 +220,4 @@ function handleVote(winnerIdx) {
   }
 }
 
-export { _saveVote, handleVote, buildVoteBar, addFinishBadge, spawnConfetti, registerCompareActions };
+export { handleVote, buildVoteBar, addFinishBadge, registerCompareActions };

@@ -207,136 +207,96 @@ class McpManager:
             self._generation += 1
             return False
 
+    async def _open_session(self, server_id: str, name: str, transport_name: str, stack, streams, **meta) -> int:
+        """Initialize a session on already-entered streams, list its tools and register it.
+
+        Closes ``stack`` when anything fails before registration. Returns the tool count.
+        """
+        from mcp import ClientSession
+
+        try:
+            read_stream, write_stream = streams[0], streams[1]
+            session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+            await session.initialize()
+            tools_result = await session.list_tools()
+        except BaseException:
+            await stack.aclose()
+            raise
+        tools = [
+            {
+                "name": tool.name,
+                "description": tool.description or "",
+                "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
+                # readOnlyHint / destructiveHint drive plan-mode read-only gating;
+                # mcp_tool_is_readonly() falls back to the name when absent.
+                "annotations": getattr(tool, "annotations", None),
+            }
+            for tool in tools_result.tools
+        ]
+        self._sessions[server_id] = session
+        self._register_resource_connection(server_id, session)
+        self._stacks[server_id] = stack
+        self._tools[server_id] = tools
+        self._connections[server_id] = {
+            "status": "connected",
+            "name": name,
+            "transport": transport_name,
+            "tool_count": len(tools),
+            **meta,
+        }
+        logger.info(f"MCP server connected: {name} ({server_id}) - {len(tools)} tools via {transport_name}")
+        return len(tools)
+
     async def _connect_stdio(self, server_id: str, name: str, command: str, args: List[str], env: Dict[str, str]) -> bool:
         """Connect to an MCP server via stdio transport."""
         try:
-            from mcp import ClientSession, StdioServerParameters
+            from mcp import StdioServerParameters
             from mcp.client.stdio import stdio_client
             from contextlib import AsyncExitStack
-
-            server_params = StdioServerParameters(
-                command=command,
-                args=args,
-                env={**os.environ, **env} if env else None,
-            )
-
-            stack = AsyncExitStack()
-            registered = False
-
-            try:
-                transport = await stack.enter_async_context(stdio_client(server_params))
-                read_stream, write_stream = transport
-                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-
-                await session.initialize()
-                tools_result = await session.list_tools()
-
-                tools = []
-                for tool in tools_result.tools:
-                    tools.append({
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
-                        # MCP tool annotations (readOnlyHint / destructiveHint) drive
-                        # plan-mode read-only gating. Absent on many servers, so we
-                        # fall back to a name heuristic in mcp_tool_is_readonly().
-                        "annotations": getattr(tool, "annotations", None),
-                    })
-
-                # Extract identity hints from env vars (e.g. email address, API name)
-                # so tool descriptions can distinguish between multiple instances of
-                # the same MCP server (e.g. two email accounts).
-                identity_hints = []
-                for k, v in (env or {}).items():
-                    k_lower = k.lower()
-                    if any(x in k_lower for x in ["email_address", "account", "user", "username"]):
-                        identity_hints.append(v)
-                identity = ", ".join(identity_hints) if identity_hints else ""
-
-                self._sessions[server_id] = session
-                self._register_resource_connection(server_id, session)
-                self._stacks[server_id] = stack
-                self._tools[server_id] = tools
-                self._connections[server_id] = {
-                    "status": "connected",
-                    "name": name,
-                    "transport": "stdio",
-                    "tool_count": len(tools),
-                    "identity": identity,
-                }
-
-                registered = True
-
-            finally:
-                if not registered:
-                    await stack.aclose()
-
-            logger.info(f"MCP server connected: {name} ({server_id}) - {len(tools)} tools via stdio")
-            return True
-
         except ImportError:
-            logger.warning("MCP package not installed. Install with: pip install mcp")
-            self._connections[server_id] = {
-                "status": "error",
-                "error": "mcp package not installed",
-                "name": name,
-            }
-            return False
+            return self._mcp_missing(server_id, name)
+
+        server_params = StdioServerParameters(
+            command=command,
+            args=args,
+            env={**os.environ, **env} if env else None,
+        )
+        # Identity hints (e.g. an email address) let tool descriptions tell two
+        # instances of the same server apart.
+        identity = ", ".join(
+            v for k, v in (env or {}).items()
+            if any(x in k.lower() for x in ["email_address", "account", "user", "username"])
+        )
+        stack = AsyncExitStack()
+        try:
+            streams = await stack.enter_async_context(stdio_client(server_params))
+        except BaseException:
+            await stack.aclose()
+            raise
+        await self._open_session(server_id, name, "stdio", stack, streams, identity=identity)
+        return True
 
     async def _connect_sse(self, server_id: str, name: str, url: str) -> bool:
         """Connect to an MCP server via SSE transport."""
         try:
-            from mcp import ClientSession
             from mcp.client.sse import sse_client
             from contextlib import AsyncExitStack
-
-            stack = AsyncExitStack()
-            registered = False
-
-            try:
-                transport = await stack.enter_async_context(sse_client(url))
-                read_stream, write_stream = transport
-                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-
-                await session.initialize()
-                tools_result = await session.list_tools()
-
-                tools = []
-                for tool in tools_result.tools:
-                    tools.append({
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "input_schema": tool.inputSchema if hasattr(tool, 'inputSchema') else {},
-                        # MCP tool annotations (readOnlyHint / destructiveHint) drive
-                        # plan-mode read-only gating. Absent on many servers, so we
-                        # fall back to a name heuristic in mcp_tool_is_readonly().
-                        "annotations": getattr(tool, 'annotations', None),
-                    })
-
-                self._sessions[server_id] = session
-                self._register_resource_connection(server_id, session)
-                self._stacks[server_id] = stack
-                self._tools[server_id] = tools
-                self._connections[server_id] = {
-                    "status": "connected",
-                    "name": name,
-                    "transport": "sse",
-                    "tool_count": len(tools),
-                }
-
-                registered = True
-
-                logger.info(f"MCP server connected: {name} ({server_id}) - {len(tools)} tools via SSE")
-                return True
-
-            finally:
-                if not registered:
-                    await stack.aclose()
-
         except ImportError:
-            logger.warning("MCP package not installed. Install with: pip install mcp")
-            self._connections[server_id] = {"status": "error", "error": "mcp package not installed", "name": name}
-            return False
+            return self._mcp_missing(server_id, name)
+
+        stack = AsyncExitStack()
+        try:
+            streams = await stack.enter_async_context(sse_client(url))
+        except BaseException:
+            await stack.aclose()
+            raise
+        await self._open_session(server_id, name, "sse", stack, streams)
+        return True
+
+    def _mcp_missing(self, server_id: str, name: str) -> bool:
+        logger.warning("MCP package not installed. Install with: pip install mcp")
+        self._connections[server_id] = {"status": "error", "error": "mcp package not installed", "name": name}
+        return False
 
     async def _start_http_connect(self, server_id: str, name: str, url: str, wait: float = 8.0) -> bool:
         """Begin a Streamable HTTP connect in the background. Returns within
@@ -368,54 +328,34 @@ class McpManager:
     async def _connect_http(self, server_id: str, name: str, url: str) -> bool:
         """Connect to a Streamable HTTP MCP server (with automatic OAuth)."""
         try:
-            from mcp import ClientSession
             from mcp.client.streamable_http import streamablehttp_client
             from contextlib import AsyncExitStack
             from src.mcp_oauth import build_provider, clear_auth_url
+        except ImportError:
+            return self._mcp_missing(server_id, name)
 
-            def _on_redirect(auth_url):
-                # Publish needs_auth the moment the URL is known, independent of
-                # how long discovery/DCR took (may exceed the bounded start wait).
-                self._connections[server_id] = {
-                    "status": "needs_auth", "name": name, "transport": "http",
-                    "auth_url": auth_url,
-                }
+        def _on_redirect(auth_url):
+            # Publish needs_auth the moment the URL is known, independent of
+            # how long discovery/DCR took (may exceed the bounded start wait).
+            self._connections[server_id] = {
+                "status": "needs_auth", "name": name, "transport": "http",
+                "auth_url": auth_url,
+            }
 
+        try:
             provider = build_provider(server_id, url, on_redirect=_on_redirect)
             stack = AsyncExitStack()
-            transport = await stack.enter_async_context(streamablehttp_client(url, auth=provider))
-            read_stream, write_stream, _get_session_id = transport
-            session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-            await session.initialize()
-
-            tools_result = await session.list_tools()
-            tools = []
-            for tool in tools_result.tools:
-                tools.append({
-                    "name": tool.name,
-                    "description": tool.description or "",
-                    "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
-                })
-
-            self._sessions[server_id] = session
-            self._register_resource_connection(server_id, session)
-            self._stacks[server_id] = stack
-            self._tools[server_id] = tools
-            self._connections[server_id] = {
-                "status": "connected", "name": name, "transport": "http",
-                "tool_count": len(tools),
-            }
+            try:
+                streams = await stack.enter_async_context(streamablehttp_client(url, auth=provider))
+            except BaseException:
+                await stack.aclose()
+                raise
+            await self._open_session(server_id, name, "http", stack, streams)
             clear_auth_url(server_id)
-            # Tools changed (this can complete after connect_server already
-            # returned, via the background OAuth flow), so bump the generation
-            # to invalidate the tool-prompt cache.
+            # This can complete after connect_server already returned (background
+            # OAuth flow), so bump the generation to invalidate the tool-prompt cache.
             self._generation += 1
-            logger.info(f"MCP server connected: {name} ({server_id}) - {len(tools)} tools via http")
             return True
-        except ImportError:
-            logger.warning("MCP package not installed. Install with: pip install mcp")
-            self._connections[server_id] = {"status": "error", "error": "mcp package not installed", "name": name}
-            return False
         except Exception as e:
             logger.error(f"Failed to connect HTTP MCP server {name} ({server_id}): {e}")
             self._connections[server_id] = {"status": "error", "error": str(e), "name": name}
@@ -772,10 +712,6 @@ class McpManager:
     def get_server_status(self, server_id: str) -> Dict:
         """Get connection status for a server."""
         return self._connections.get(server_id, {"status": "disconnected"})
-
-    def get_all_statuses(self) -> Dict[str, Dict]:
-        """Get connection statuses for all servers."""
-        return dict(self._connections)
 
     _cached_prompt_desc = None
     _cached_prompt_desc_key = None

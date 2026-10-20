@@ -5,8 +5,6 @@ import asyncio
 import tempfile
 import pytest
 
-os.environ.setdefault("DATABASE_URL", "sqlite:////tmp/test_code_nav.db")
-
 from src.tool_execution import _direct_fallback
 
 

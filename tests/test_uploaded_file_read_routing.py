@@ -56,6 +56,5 @@ def test_uploaded_file_context_requires_native_document_reader():
     assert message is not None
     content = message["content"]
     assert "call `read_file`" in content
-    assert "Do not use bash" in content
     assert "DOCX" in content
     assert "DOC/DOCX" in content

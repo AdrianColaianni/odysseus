@@ -11,7 +11,6 @@ import tempfile
 import uuid
 from datetime import datetime, timedelta
 
-import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool

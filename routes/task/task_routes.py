@@ -7,10 +7,11 @@ import uuid
 from datetime import datetime
 from typing import Optional, Dict, Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Depends
+from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
-from core.database import SessionLocal, ScheduledTask, TaskRun, NotificationLog
+from core.database import SessionLocal, ScheduledTask, TaskRun, NotificationLog, get_db
 from core.constants import internal_api_base
 from src.auth_helpers import get_current_user
 from src.constants import DATA_DIR, EMAIL_URGENCY_CACHE_DIR
@@ -307,9 +308,6 @@ def _resolve_run_endpoint(db, task: ScheduledTask, run: TaskRun) -> str:
 def setup_task_routes(task_scheduler) -> APIRouter:
     router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
-    def _owner(request: Request):
-        return get_current_user(request)
-
     async def _generate_task_name(prompt: str, owner: Optional[str] = None) -> str:
         """Use LLM to generate a short task name from the prompt."""
         try:
@@ -350,7 +348,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
     @router.get("")
     async def list_tasks(request: Request, status: Optional[str] = None,
                          include_last_run: bool = False):
-        user = _owner(request)
+        user = get_current_user(request)
         if user:
             await task_scheduler.ensure_defaults(user)
         else:
@@ -381,7 +379,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
 
     @router.get("/onboarding")
     async def get_tasks_onboarding(request: Request):
-        user = _owner(request)
+        user = get_current_user(request)
         prefs = _load_for_user(user) or {}
         return {
             "opened": bool(prefs.get("tasks_opened")),
@@ -390,7 +388,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
 
     @router.post("/onboarding")
     async def update_tasks_onboarding(request: Request, body: dict):
-        user = _owner(request)
+        user = get_current_user(request)
         prefs = _load_for_user(user) or {}
         prefs["tasks_opened"] = True
         enable = bool(body.get("enabled"))
@@ -430,10 +428,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 db.close()
         return {"ok": True, "opened": True, "enabled": bool(prefs.get("tasks_enabled")), "resumed": resumed}
 
-    # Actions that execute shell/SSH commands or cross into admin-only
-    # Cookbook serving surfaces — restricted to admins.
-    # Non-admin users cannot create tasks with these action types via the
-    # API. See review CRIT-C.
+    # Actions that run shell/SSH commands or reach admin-only Cookbook serving.
     _ADMIN_ONLY_ACTIONS = ADMIN_ONLY_TASK_ACTIONS
 
     def _is_admin(user: str | None) -> bool:
@@ -458,8 +453,8 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         return target.id
 
     @router.post("")
-    async def create_task(request: Request, req: TaskCreate):
-        user = _owner(request)
+    async def create_task(request: Request, req: TaskCreate, db: Session = Depends(get_db)):
+        user = get_current_user(request)
 
         # Validate
         if req.task_type in ("llm", "research") and not req.prompt:
@@ -517,107 +512,99 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             webhook_token = secrets.token_urlsafe(32)
 
         task_id = str(uuid.uuid4())
-        db = SessionLocal()
-        try:
-            then_task_id = _validate_then_task_id(db, req.then_task_id, user)
-            endpoint_url = None
-            if req.endpoint_url:
-                try:
-                    endpoint_url = resolve_owner_registered_endpoint_url(db, req.endpoint_url, user)
-                except ValueError as exc:
-                    raise HTTPException(400, str(exc)) from exc
-            notifications_enabled = (
-                False if req.task_type == "action" and req.notifications_enabled is None
-                else bool(req.notifications_enabled) if req.notifications_enabled is not None
-                else True
-            )
-            # Validate chained task belongs to same owner
-            if req.then_task_id:
-                chain_target = db.query(ScheduledTask).filter(
-                    ScheduledTask.id == req.then_task_id
-                ).first()
-                if not chain_target:
-                    raise HTTPException(400, "Chained task not found")
-                if chain_target.owner != user:
-                    raise HTTPException(403, "Cannot chain to another user's task")
-            task = ScheduledTask(
-                id=task_id,
-                owner=user,
-                name=name,
-                prompt=req.prompt,
-                request_authority_json=_seal_request_task_authority(
-                    request, req.prompt, req.task_type, req.action, user),
-                task_type=req.task_type,
-                action=req.action,
-                schedule=req.schedule,
-                scheduled_time=req.scheduled_time,
-                scheduled_day=req.scheduled_day,
-                scheduled_date=sched_date,
-                cron_expression=req.cron_expression,
-                trigger_type=req.trigger_type,
-                trigger_event=req.trigger_event,
-                trigger_count=req.trigger_count,
-                trigger_counter=0,
-                next_run=next_run,
-                status="active" if (req.trigger_type in ("event", "webhook") or next_run) else "completed",
-                output_target=req.output_target,
-                model=req.model or None,
-                endpoint_url=endpoint_url,
-                then_task_id=then_task_id,
-                webhook_token=webhook_token,
-                notifications_enabled=notifications_enabled,
-                character_id=(req.character_id or None),
-            )
-            db.add(task)
-            db.commit()
-            db.refresh(task)
-            return _task_to_dict(task)
-        finally:
-            db.close()
+        then_task_id = _validate_then_task_id(db, req.then_task_id, user)
+        endpoint_url = None
+        if req.endpoint_url:
+            try:
+                endpoint_url = resolve_owner_registered_endpoint_url(db, req.endpoint_url, user)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        notifications_enabled = (
+            False if req.task_type == "action" and req.notifications_enabled is None
+            else bool(req.notifications_enabled) if req.notifications_enabled is not None
+            else True
+        )
+        # Validate chained task belongs to same owner
+        if req.then_task_id:
+            chain_target = db.query(ScheduledTask).filter(
+                ScheduledTask.id == req.then_task_id
+            ).first()
+            if not chain_target:
+                raise HTTPException(400, "Chained task not found")
+            if chain_target.owner != user:
+                raise HTTPException(403, "Cannot chain to another user's task")
+        task = ScheduledTask(
+            id=task_id,
+            owner=user,
+            name=name,
+            prompt=req.prompt,
+            request_authority_json=_seal_request_task_authority(
+                request, req.prompt, req.task_type, req.action, user),
+            task_type=req.task_type,
+            action=req.action,
+            schedule=req.schedule,
+            scheduled_time=req.scheduled_time,
+            scheduled_day=req.scheduled_day,
+            scheduled_date=sched_date,
+            cron_expression=req.cron_expression,
+            trigger_type=req.trigger_type,
+            trigger_event=req.trigger_event,
+            trigger_count=req.trigger_count,
+            trigger_counter=0,
+            next_run=next_run,
+            status="active" if (req.trigger_type in ("event", "webhook") or next_run) else "completed",
+            output_target=req.output_target,
+            model=req.model or None,
+            endpoint_url=endpoint_url,
+            then_task_id=then_task_id,
+            webhook_token=webhook_token,
+            notifications_enabled=notifications_enabled,
+            character_id=(req.character_id or None),
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+        return _task_to_dict(task)
 
     @router.get("/notifications")
     async def get_notifications(request: Request):
         """Return and clear pending task-run notifications for the
         current user. Anonymous callers get nothing (prevents
         cross-tenant drain — see review CRIT-B)."""
-        user = _owner(request)
+        user = get_current_user(request)
         if not user:
             return {"notifications": []}
         notes = task_scheduler.pop_notifications(owner=user)
         return {"notifications": notes}
 
     @router.get("/notification-logs")
-    async def get_notification_logs(request: Request, limit: int = 200):
+    def get_notification_logs(request: Request, limit: int = 200, db: Session = Depends(get_db)):
         """Return persisted task notifications without consuming them."""
-        user = _owner(request)
+        user = get_current_user(request)
         if not user:
             return {"notifications": []}
         limit = max(1, min(int(limit or 200), 1000))
-        db = SessionLocal()
-        try:
-            rows = (db.query(NotificationLog)
-                    .filter(NotificationLog.owner == user)
-                    .order_by(NotificationLog.timestamp.desc())
-                    .limit(limit)
-                    .all())
-            return {"notifications": [
-                {
-                    "id": row.id,
-                    "task_name": row.task_name,
-                    "task_id": row.task_id,
-                    "status": row.status,
-                    "body": row.body,
-                    "timestamp": row.timestamp.isoformat() + "Z" if row.timestamp else None,
-                }
-                for row in rows
-            ]}
-        finally:
-            db.close()
+        rows = (db.query(NotificationLog)
+                .filter(NotificationLog.owner == user)
+                .order_by(NotificationLog.timestamp.desc())
+                .limit(limit)
+                .all())
+        return {"notifications": [
+            {
+                "id": row.id,
+                "task_name": row.task_name,
+                "task_id": row.task_id,
+                "status": row.status,
+                "body": row.body,
+                "timestamp": row.timestamp.isoformat() + "Z" if row.timestamp else None,
+            }
+            for row in rows
+        ]}
 
     @router.post("/notification-logs")
-    async def create_notification_log(request: Request):
+    async def create_notification_log(request: Request, db: Session = Depends(get_db)):
         """Persist an in-app toast so Settings can show notification history."""
-        user = _owner(request)
+        user = get_current_user(request)
         if not user:
             raise HTTPException(401, "Authentication required")
         body = await request.json()
@@ -630,27 +617,19 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             status="error" if body.get("status") == "error" else "success",
             body=message,
         )
-        db = SessionLocal()
-        try:
-            db.add(row); db.commit()
-            return {"success": True}
-        finally:
-            db.close()
+        db.add(row); db.commit()
+        return {"success": True}
 
     @router.post("/{task_id}/clear-cache")
-    async def clear_task_cache(request: Request, task_id: str):
+    def clear_task_cache(request: Request, task_id: str, db: Session = Depends(get_db)):
         """Clear derived cache for one built-in task."""
-        user = _owner(request)
-        db = SessionLocal()
-        try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-            if not task:
-                raise HTTPException(404, "Task not found")
-            if user and task.owner != user:
-                raise HTTPException(403, "Access denied")
-            action = task.action or ""
-        finally:
-            db.close()
+        user = get_current_user(request)
+        task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+        if not task:
+            raise HTTPException(404, "Task not found")
+        if user and task.owner != user:
+            raise HTTPException(403, "Access denied")
+        action = task.action or ""
 
         cache_tables = {
             "summarize_emails": ("email_summaries",),
@@ -666,7 +645,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
 
         import sqlite3
         from pathlib import Path
-        from routes.email_helpers import SCHEDULED_DB, OWNER_SCOPED_EMAIL_CACHE_TABLES, _email_cache_owner_clause
+        from routes.email.email_helpers import SCHEDULED_DB, OWNER_SCOPED_EMAIL_CACHE_TABLES, _email_cache_owner_clause
 
         cleared = {}
         conn = sqlite3.connect(SCHEDULED_DB)
@@ -718,349 +697,304 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         return {"ok": True, "action": action, "cleared": cleared, "files": removed_files}
 
     @router.get("/{task_id}")
-    async def get_task(request: Request, task_id: str):
-        user = _owner(request)
-        db = SessionLocal()
-        try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-            if not task:
-                raise HTTPException(404, "Task not found")
-            if user and task.owner != user:
-                raise HTTPException(403, "Access denied")
-            return _task_to_dict(task)
-        finally:
-            db.close()
+    def get_task(request: Request, task_id: str, db: Session = Depends(get_db)):
+        user = get_current_user(request)
+        task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+        if not task:
+            raise HTTPException(404, "Task not found")
+        if user and task.owner != user:
+            raise HTTPException(403, "Access denied")
+        return _task_to_dict(task)
 
     @router.put("/{task_id}")
-    async def update_task(request: Request, task_id: str, req: TaskUpdate):
-        user = _owner(request)
-        db = SessionLocal()
-        try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-            if not task:
-                raise HTTPException(404, "Task not found")
-            if user and task.owner != user:
-                raise HTTPException(403, "Access denied")
+    def update_task(request: Request, task_id: str, req: TaskUpdate, db: Session = Depends(get_db)):
+        user = get_current_user(request)
+        task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+        if not task:
+            raise HTTPException(404, "Task not found")
+        if user and task.owner != user:
+            raise HTTPException(403, "Access denied")
 
-            next_task_type = req.task_type if req.task_type is not None else task.task_type
-            next_action = req.action if req.action is not None else task.action
-            _require_admin_for_task_action(user, next_task_type, next_action)
+        next_task_type = req.task_type if req.task_type is not None else task.task_type
+        next_action = req.action if req.action is not None else task.action
+        _require_admin_for_task_action(user, next_task_type, next_action)
 
-            if req.name is not None:
-                task.name = req.name
-            if req.prompt is not None:
-                task.prompt = req.prompt
-            if req.task_type is not None:
-                task.task_type = req.task_type
-            if req.action is not None:
-                task.action = req.action
-            if any(value is not None for value in (req.prompt, req.task_type, req.action)):
-                task.request_authority_json = _seal_request_task_authority(
-                    request, task.prompt, task.task_type, task.action, user)
-            if req.output_target is not None:
-                task.output_target = req.output_target
-            if req.model is not None:
-                task.model = req.model or None
-            if req.endpoint_url is not None:
-                try:
-                    # An empty override restores the existing default-model workflow.
-                    task.endpoint_url = (
-                        resolve_owner_registered_endpoint_url(db, req.endpoint_url, user)
-                        if req.endpoint_url else None
-                    )
-                except ValueError as exc:
-                    raise HTTPException(400, str(exc)) from exc
-            if req.trigger_type is not None:
-                # Generate webhook token when switching to webhook trigger
-                if req.trigger_type == "webhook" and not task.webhook_token:
-                    task.webhook_token = secrets.token_urlsafe(32)
-                task.trigger_type = req.trigger_type
-            if req.trigger_event is not None:
-                task.trigger_event = req.trigger_event
-            if req.trigger_count is not None:
-                task.trigger_count = req.trigger_count
-            if req.then_task_id is not None:
-                task.then_task_id = _validate_then_task_id(db, req.then_task_id, user, current_task_id=task.id)
-            if req.notifications_enabled is not None:
-                task.notifications_enabled = bool(req.notifications_enabled)
-            if req.character_id is not None:
-                # Empty string clears the persona; non-empty stores the id.
-                task.character_id = req.character_id or None
-            if req.cron_expression is not None:
-                if req.cron_expression:
-                    try:
-                        from croniter import croniter
-                        croniter(req.cron_expression)
-                    except Exception:
-                        raise HTTPException(400, "Invalid cron expression")
-                task.cron_expression = req.cron_expression or None
-
-            # Recompute next_run if schedule changed
-            schedule_changed = False
-            if req.schedule is not None:
-                task.schedule = req.schedule
-                schedule_changed = True
-            if req.scheduled_time is not None:
-                task.scheduled_time = req.scheduled_time
-                schedule_changed = True
-            if req.scheduled_day is not None:
-                task.scheduled_day = req.scheduled_day
-                schedule_changed = True
-            if req.scheduled_date is not None:
-                try:
-                    task.scheduled_date = datetime.fromisoformat(
-                        req.scheduled_date.replace("Z", "+00:00")
-                    ).replace(tzinfo=None)
-                except ValueError:
-                    raise HTTPException(400, "Invalid scheduled_date format")
-                schedule_changed = True
-
-            if req.cron_expression is not None:
-                schedule_changed = True
-
-            if schedule_changed and task.status == "active" and (task.trigger_type or "schedule") == "schedule":
-                task.next_run = compute_next_run(
-                    task.schedule, task.scheduled_time,
-                    task.scheduled_day, task.scheduled_date,
-                    cron_expression=task.cron_expression,
+        if req.name is not None:
+            task.name = req.name
+        if req.prompt is not None:
+            task.prompt = req.prompt
+        if req.task_type is not None:
+            task.task_type = req.task_type
+        if req.action is not None:
+            task.action = req.action
+        if any(value is not None for value in (req.prompt, req.task_type, req.action)):
+            task.request_authority_json = _seal_request_task_authority(
+                request, task.prompt, task.task_type, task.action, user)
+        if req.output_target is not None:
+            task.output_target = req.output_target
+        if req.model is not None:
+            task.model = req.model or None
+        if req.endpoint_url is not None:
+            try:
+                # An empty override restores the existing default-model workflow.
+                task.endpoint_url = (
+                    resolve_owner_registered_endpoint_url(db, req.endpoint_url, user)
+                    if req.endpoint_url else None
                 )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        if req.trigger_type is not None:
+            # Generate webhook token when switching to webhook trigger
+            if req.trigger_type == "webhook" and not task.webhook_token:
+                task.webhook_token = secrets.token_urlsafe(32)
+            task.trigger_type = req.trigger_type
+        if req.trigger_event is not None:
+            task.trigger_event = req.trigger_event
+        if req.trigger_count is not None:
+            task.trigger_count = req.trigger_count
+        if req.then_task_id is not None:
+            task.then_task_id = _validate_then_task_id(db, req.then_task_id, user, current_task_id=task.id)
+        if req.notifications_enabled is not None:
+            task.notifications_enabled = bool(req.notifications_enabled)
+        if req.character_id is not None:
+            # Empty string clears the persona; non-empty stores the id.
+            task.character_id = req.character_id or None
+        if req.cron_expression is not None:
+            if req.cron_expression:
+                try:
+                    from croniter import croniter
+                    croniter(req.cron_expression)
+                except Exception:
+                    raise HTTPException(400, "Invalid cron expression")
+            task.cron_expression = req.cron_expression or None
 
-            db.commit()
-            db.refresh(task)
-            return _task_to_dict(task)
-        finally:
-            db.close()
+        # Recompute next_run if schedule changed
+        schedule_changed = False
+        if req.schedule is not None:
+            task.schedule = req.schedule
+            schedule_changed = True
+        if req.scheduled_time is not None:
+            task.scheduled_time = req.scheduled_time
+            schedule_changed = True
+        if req.scheduled_day is not None:
+            task.scheduled_day = req.scheduled_day
+            schedule_changed = True
+        if req.scheduled_date is not None:
+            try:
+                task.scheduled_date = datetime.fromisoformat(
+                    req.scheduled_date.replace("Z", "+00:00")
+                ).replace(tzinfo=None)
+            except ValueError:
+                raise HTTPException(400, "Invalid scheduled_date format")
+            schedule_changed = True
+
+        if req.cron_expression is not None:
+            schedule_changed = True
+
+        if schedule_changed and task.status == "active" and (task.trigger_type or "schedule") == "schedule":
+            task.next_run = compute_next_run(
+                task.schedule, task.scheduled_time,
+                task.scheduled_day, task.scheduled_date,
+                cron_expression=task.cron_expression,
+            )
+
+        db.commit()
+        db.refresh(task)
+        return _task_to_dict(task)
 
     @router.delete("/{task_id}")
-    async def delete_task(request: Request, task_id: str):
-        user = _owner(request)
-        db = SessionLocal()
-        try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-            if not task:
-                raise HTTPException(404, "Task not found")
-            if user and task.owner != user:
-                raise HTTPException(403, "Access denied")
-            # Cascade: cookbook_serve tasks may have a linked calendar
-            # event (created via the "Create event in calendar" toggle
-            # in the schedule modal). If so, delete the calendar event
-            # too so the calendar doesn't end up holding a phantom event
-            # for a task that no longer exists.
-            _maybe_cascade_calendar_event(task)
-            db.delete(task)
-            db.commit()
-            return {"ok": True}
-        finally:
-            db.close()
+    def delete_task(request: Request, task_id: str, db: Session = Depends(get_db)):
+        user = get_current_user(request)
+        task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+        if not task:
+            raise HTTPException(404, "Task not found")
+        if user and task.owner != user:
+            raise HTTPException(403, "Access denied")
+        # Cascade: cookbook_serve tasks may have a linked calendar
+        # event (created via the "Create event in calendar" toggle
+        # in the schedule modal). If so, delete the calendar event
+        # too so the calendar doesn't end up holding a phantom event
+        # for a task that no longer exists.
+        _maybe_cascade_calendar_event(task)
+        db.delete(task)
+        db.commit()
+        return {"ok": True}
 
     @router.post("/{task_id}/pause")
-    async def pause_task(request: Request, task_id: str):
-        user = _owner(request)
-        db = SessionLocal()
-        try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-            if not task:
-                raise HTTPException(404, "Task not found")
-            if user and task.owner != user:
-                raise HTTPException(403, "Access denied")
-            task.status = "paused"
-            db.commit()
-            return {"ok": True, "status": "paused"}
-        finally:
-            db.close()
+    def pause_task(request: Request, task_id: str, db: Session = Depends(get_db)):
+        user = get_current_user(request)
+        task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+        if not task:
+            raise HTTPException(404, "Task not found")
+        if user and task.owner != user:
+            raise HTTPException(403, "Access denied")
+        task.status = "paused"
+        db.commit()
+        return {"ok": True, "status": "paused"}
 
     @router.post("/{task_id}/resume")
-    async def resume_task(request: Request, task_id: str):
-        user = _owner(request)
-        db = SessionLocal()
-        try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-            if not task:
-                raise HTTPException(404, "Task not found")
-            if user and task.owner != user:
-                raise HTTPException(403, "Access denied")
-            _require_admin_for_task_action(user, task.task_type, task.action)
-            task.status = "active"
-            if (task.trigger_type or "schedule") == "schedule":
-                task.next_run = compute_next_run(
-                    task.schedule, task.scheduled_time,
-                    task.scheduled_day, task.scheduled_date,
-                    cron_expression=task.cron_expression,
-                )
-            db.commit()
-            return {"ok": True, "status": "active", "next_run": task.next_run.isoformat() + "Z" if task.next_run else None}
-        finally:
-            db.close()
+    def resume_task(request: Request, task_id: str, db: Session = Depends(get_db)):
+        user = get_current_user(request)
+        task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+        if not task:
+            raise HTTPException(404, "Task not found")
+        if user and task.owner != user:
+            raise HTTPException(403, "Access denied")
+        _require_admin_for_task_action(user, task.task_type, task.action)
+        task.status = "active"
+        if (task.trigger_type or "schedule") == "schedule":
+            task.next_run = compute_next_run(
+                task.schedule, task.scheduled_time,
+                task.scheduled_day, task.scheduled_date,
+                cron_expression=task.cron_expression,
+            )
+        db.commit()
+        return {"ok": True, "status": "active", "next_run": task.next_run.isoformat() + "Z" if task.next_run else None}
 
     @router.post("/{task_id}/revert")
-    async def revert_task(request: Request, task_id: str):
+    def revert_task(request: Request, task_id: str, db: Session = Depends(get_db)):
         """Reset a built-in (housekeeping) task to its default config."""
-        user = _owner(request)
-        db = SessionLocal()
-        try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-            if not task:
-                raise HTTPException(404, "Task not found")
-            if user and task.owner != user:
-                raise HTTPException(403, "Access denied")
-            defs = HOUSEKEEPING_DEFAULTS.get(task.action) if task.action else None
-            if not defs:
-                raise HTTPException(400, "Not a built-in task")
-            task.name = defs["name"]
-            task.schedule = defs["schedule"]
-            task.scheduled_time = defs["scheduled_time"]
-            task.scheduled_day = None
-            task.scheduled_date = None
-            task.cron_expression = defs["cron_expression"]
-            task.trigger_type = defs.get("trigger_type", "schedule")
-            task.trigger_event = defs.get("trigger_event")
-            task.trigger_count = defs.get("trigger_count")
-            task.trigger_counter = 0
-            task.prompt = None
-            task.model = None
-            task.endpoint_url = None
-            task.status = "paused" if defs.get("ship_paused") else "active"
-            task.next_run = None
-            if task.trigger_type == "schedule":
-                task.next_run = compute_next_run(
-                    defs["schedule"], defs["scheduled_time"], None, None,
-                    cron_expression=defs["cron_expression"],
-                )
-            db.commit()
-            db.refresh(task)
-            return {"ok": True, "task": _task_to_dict(task)}
-        finally:
-            db.close()
+        user = get_current_user(request)
+        task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+        if not task:
+            raise HTTPException(404, "Task not found")
+        if user and task.owner != user:
+            raise HTTPException(403, "Access denied")
+        defs = HOUSEKEEPING_DEFAULTS.get(task.action) if task.action else None
+        if not defs:
+            raise HTTPException(400, "Not a built-in task")
+        task.name = defs["name"]
+        task.schedule = defs["schedule"]
+        task.scheduled_time = defs["scheduled_time"]
+        task.scheduled_day = None
+        task.scheduled_date = None
+        task.cron_expression = defs["cron_expression"]
+        task.trigger_type = defs.get("trigger_type", "schedule")
+        task.trigger_event = defs.get("trigger_event")
+        task.trigger_count = defs.get("trigger_count")
+        task.trigger_counter = 0
+        task.prompt = None
+        task.model = None
+        task.endpoint_url = None
+        task.status = "paused" if defs.get("ship_paused") else "active"
+        task.next_run = None
+        if task.trigger_type == "schedule":
+            task.next_run = compute_next_run(
+                defs["schedule"], defs["scheduled_time"], None, None,
+                cron_expression=defs["cron_expression"],
+            )
+        db.commit()
+        db.refresh(task)
+        return {"ok": True, "task": _task_to_dict(task)}
 
     @router.post("/{task_id}/run")
-    async def run_task_now(request: Request, task_id: str, force: bool = False):
-        user = _owner(request)
-        db = SessionLocal()
-        try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-            if not task:
-                raise HTTPException(404, "Task not found")
-            if user and task.owner != user:
-                raise HTTPException(403, "Access denied")
-            _require_admin_for_task_action(user, task.task_type, task.action)
-        finally:
-            db.close()
+    async def run_task_now(request: Request, task_id: str, force: bool = False, db: Session = Depends(get_db)):
+        user = get_current_user(request)
+        task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+        if not task:
+            raise HTTPException(404, "Task not found")
+        if user and task.owner != user:
+            raise HTTPException(403, "Access denied")
+        _require_admin_for_task_action(user, task.task_type, task.action)
         started = await task_scheduler.run_task_now(task_id, force=force)
         if not started:
             raise HTTPException(409, "Task is already running")
         return {"ok": True, "message": "Task triggered" + (" in parallel" if force else "")}
 
     @router.post("/{task_id}/stop")
-    async def stop_task_now(request: Request, task_id: str):
-        user = _owner(request)
-        db = SessionLocal()
-        try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-            if not task:
-                raise HTTPException(404, "Task not found")
-            if user and task.owner != user:
-                raise HTTPException(403, "Access denied")
-        finally:
-            db.close()
+    async def stop_task_now(request: Request, task_id: str, db: Session = Depends(get_db)):
+        user = get_current_user(request)
+        task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+        if not task:
+            raise HTTPException(404, "Task not found")
+        if user and task.owner != user:
+            raise HTTPException(403, "Access denied")
         stopped = await task_scheduler.stop_task(task_id)
         if not stopped:
             raise HTTPException(404, "Task is not running")
         return {"ok": True, "message": "Task stopped"}
 
     @router.get("/runs/recent")
-    async def list_recent_runs(request: Request, limit: int = 50, max_result_chars: int = 6000):
+    def list_recent_runs(request: Request, limit: int = 50, max_result_chars: int = 6000, db: Session = Depends(get_db)):
         """Recent task runs across ALL tasks for this owner. Drives the Activity view."""
-        user = _owner(request)
+        user = get_current_user(request)
         limit = max(1, min(limit, 200))
         max_result_chars = max(500, min(max_result_chars, 20000))
-        db = SessionLocal()
-        try:
-            q = db.query(TaskRun, ScheduledTask).join(
-                ScheduledTask, TaskRun.task_id == ScheduledTask.id
-            )
-            if user:
-                # Strict owner scope — was previously OR'ing in `owner IS NULL`
-                # rows for "legacy single-user" back-compat, but that leaks any
-                # legacy/migrated task's full result text to every authenticated
-                # user. _migrate_assign_legacy_owner runs on startup to claim
-                # legacy rows for the admin, so the OR-NULL path is no longer
-                # needed for any sane deploy.
-                q = q.filter(ScheduledTask.owner == user)
-            # Pull a little extra before de-duping. When auth is bypassed on a
-            # local browser session, legacy/default tasks from multiple owners
-            # can be visible together; the built-in urgent-email scanner then
-            # produces several identical "no email accounts configured" rows in
-            # the same minute. Keep the task records intact, but collapse those
-            # duplicate Activity rows for display.
-            rows = q.order_by(TaskRun.started_at.desc()).limit(limit * 3).all()
-            deduped = []
-            seen_urgency_rows = set()
-            for r, t in rows:
-                if (t.action or "") == "check_email_urgency":
-                    ts = r.started_at.replace(second=0, microsecond=0) if r.started_at else None
-                    text = (r.result or r.error or "").strip()
-                    key = (ts, r.status or "", text)
-                    if key in seen_urgency_rows:
-                        continue
-                    seen_urgency_rows.add(key)
-                deduped.append((r, t))
-                if len(deduped) >= limit:
-                    break
+        q = db.query(TaskRun, ScheduledTask).join(
+            ScheduledTask, TaskRun.task_id == ScheduledTask.id
+        )
+        if user:
+            # No `owner IS NULL` rows: _migrate_assign_legacy_owner claims them
+            # for the admin at startup.
+            q = q.filter(ScheduledTask.owner == user)
+        # Pull a little extra before de-duping. When auth is bypassed on a
+        # local browser session, legacy/default tasks from multiple owners
+        # can be visible together; the built-in urgent-email scanner then
+        # produces several identical "no email accounts configured" rows in
+        # the same minute. Keep the task records intact, but collapse those
+        # duplicate Activity rows for display.
+        rows = q.order_by(TaskRun.started_at.desc()).limit(limit * 3).all()
+        deduped = []
+        seen_urgency_rows = set()
+        for r, t in rows:
+            if (t.action or "") == "check_email_urgency":
+                ts = r.started_at.replace(second=0, microsecond=0) if r.started_at else None
+                text = (r.result or r.error or "").strip()
+                key = (ts, r.status or "", text)
+                if key in seen_urgency_rows:
+                    continue
+                seen_urgency_rows.add(key)
+            deduped.append((r, t))
+            if len(deduped) >= limit:
+                break
 
-            def _clip_run(r: TaskRun) -> dict:
-                d = _run_to_dict(r)
-                for key in ("result", "error"):
-                    val = d.get(key)
-                    if isinstance(val, str) and len(val) > max_result_chars:
-                        d[key] = val[:max_result_chars].rstrip() + "\n\n[Activity preview truncated]"
-                return d
+        def _clip_run(r: TaskRun) -> dict:
+            d = _run_to_dict(r)
+            for key in ("result", "error"):
+                val = d.get(key)
+                if isinstance(val, str) and len(val) > max_result_chars:
+                    d[key] = val[:max_result_chars].rstrip() + "\n\n[Activity preview truncated]"
+            return d
 
-            return {
-                "has_more": len(rows) > len(deduped),
-                "runs": [
-                    {
-                        **_clip_run(r),
-                        "task_name": _display_task_name(t),
-                        "task_type": t.task_type or "llm",
-                        "action": t.action,
-                        # Model + endpoint the task ran on, so the Activity
-                        # view's "Open in chat" can reuse the same model.
-                        "model": r.model or t.model or "",
-                        "endpoint_url": _resolve_run_endpoint(db, t, r),
-                        "session_id": t.session_id or "",
-                        "research_id": _run_research_id(t),
-                        # Where the task delivered its result — the Activity tab
-                        # uses this to filter notification rows in/out.
-                        "output_target": t.output_target or "session",
-                    }
-                    for r, t in deduped
-                ]
-            }
-        finally:
-            db.close()
+        return {
+            "has_more": len(rows) > len(deduped),
+            "runs": [
+                {
+                    **_clip_run(r),
+                    "task_name": _display_task_name(t),
+                    "task_type": t.task_type or "llm",
+                    "action": t.action,
+                    # Model + endpoint the task ran on, so the Activity
+                    # view's "Open in chat" can reuse the same model.
+                    "model": r.model or t.model or "",
+                    "endpoint_url": _resolve_run_endpoint(db, t, r),
+                    "session_id": t.session_id or "",
+                    "research_id": _run_research_id(t),
+                    # Where the task delivered its result — the Activity tab
+                    # uses this to filter notification rows in/out.
+                    "output_target": t.output_target or "session",
+                }
+                for r, t in deduped
+            ]
+        }
 
     @router.get("/{task_id}/runs")
-    async def list_runs(request: Request, task_id: str, limit: int = 20, offset: int = 0):
-        user = _owner(request)
-        db = SessionLocal()
-        try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-            if not task:
-                raise HTTPException(404, "Task not found")
-            if user and task.owner != user:
-                raise HTTPException(403, "Access denied")
-            runs = db.query(TaskRun).filter(TaskRun.task_id == task_id)\
-                .order_by(TaskRun.started_at.desc())\
-                .offset(offset).limit(limit).all()
-            total = db.query(TaskRun).filter(TaskRun.task_id == task_id).count()
-            return {"runs": [_run_to_dict(r) for r in runs], "total": total}
-        finally:
-            db.close()
+    def list_runs(request: Request, task_id: str, limit: int = 20, offset: int = 0, db: Session = Depends(get_db)):
+        user = get_current_user(request)
+        task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+        if not task:
+            raise HTTPException(404, "Task not found")
+        if user and task.owner != user:
+            raise HTTPException(403, "Access denied")
+        runs = db.query(TaskRun).filter(TaskRun.task_id == task_id)\
+            .order_by(TaskRun.started_at.desc())\
+            .offset(offset).limit(limit).all()
+        total = db.query(TaskRun).filter(TaskRun.task_id == task_id).count()
+        return {"runs": [_run_to_dict(r) for r in runs], "total": total}
 
     @router.get("/meta/output-targets")
     async def list_output_targets(request: Request):
         """List available output targets — only delivery/send tools, not all MCP tools."""
-        _owner(request)
         targets = [
             {"value": "session", "label": "Session", "description": "Save result to a chat session"},
             {"value": "notification", "label": "Notification", "description": "Push a browser notification with the result (also saved to the session for history)"},
@@ -1098,7 +1032,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
     @router.get("/meta/actions")
     async def list_actions(request: Request):
         """List available built-in actions."""
-        user = _owner(request)
+        user = get_current_user(request)
         from src.builtin_actions import BUILTIN_ACTION_INFO
         return {"actions": [
             {"name": name, "description": desc}
@@ -1109,7 +1043,6 @@ def setup_task_routes(task_scheduler) -> APIRouter:
     @router.get("/meta/events")
     async def list_events(request: Request):
         """List available event triggers."""
-        _owner(request)
         return {"events": [
             {"name": "session_created", "description": "Fires when a new chat session is created"},
             {"name": "message_sent", "description": "Fires when a user sends a message"},
@@ -1121,49 +1054,28 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         ]}
 
     @router.post("/{task_id}/webhook/{token}")
-    async def webhook_trigger(task_id: str, token: str):
+    async def webhook_trigger(task_id: str, token: str, db: Session = Depends(get_db)):
         """Unauthenticated endpoint — the token IS the auth."""
-        db = SessionLocal()
-        try:
-            task = db.query(ScheduledTask).filter(
-                ScheduledTask.id == task_id,
-                ScheduledTask.webhook_token == token,
-                ScheduledTask.status == "active",
-            ).first()
-            if not task:
-                raise HTTPException(404, "Not found")
-            if (
-                is_admin_only_task_action(task.task_type, task.action)
-                and not owner_has_admin_task_privileges(task.owner)
-            ):
-                task.status = "paused"
-                task.next_run = None
-                db.commit()
-                raise HTTPException(403, f"Action '{task.action}' requires admin privileges")
-        finally:
-            db.close()
+        task = db.query(ScheduledTask).filter(
+            ScheduledTask.id == task_id,
+            ScheduledTask.webhook_token == token,
+            ScheduledTask.status == "active",
+        ).first()
+        if not task:
+            raise HTTPException(404, "Not found")
+        if (
+            is_admin_only_task_action(task.task_type, task.action)
+            and not owner_has_admin_task_privileges(task.owner)
+        ):
+            task.status = "paused"
+            task.next_run = None
+            db.commit()
+            raise HTTPException(403, f"Action '{task.action}' requires admin privileges")
         started = await task_scheduler.run_task_now(task_id)
         if not started:
             raise HTTPException(409, "Task is already running")
         return {"ok": True, "message": "Task triggered via webhook"}
 
-    @router.post("/{task_id}/webhook-regenerate")
-    async def regenerate_webhook(request: Request, task_id: str):
-        user = _owner(request)
-        db = SessionLocal()
-        try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-            if not task:
-                raise HTTPException(404, "Task not found")
-            if user and task.owner != user:
-                raise HTTPException(403, "Access denied")
-            task.webhook_token = secrets.token_urlsafe(32)
-            db.commit()
-            return {"ok": True, "webhook_token": task.webhook_token}
-        finally:
-            db.close()
-
-    # --- PARSE NATURAL LANGUAGE → TASK DRAFT (AI) ---
     @router.post("/parse")
     async def parse_task(request: Request) -> Dict[str, Any]:
         """Turn a free-form description ("every weekday at 7am research the top
@@ -1172,15 +1084,15 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         saves it, so a misread schedule never goes live unreviewed."""
         from src.endpoint_resolver import resolve_endpoint
         from src.llm_core import llm_call_async
-        from src.text_helpers import strip_think as _strip_think
-        import json as _json, re as _re
+        from src.text_helpers import extract_llm_json
+        import re as _re
         from datetime import datetime as _dt
 
         body = await request.json()
         desc = (body.get("description") or "").strip()
         if not desc:
             return {"success": False, "message": "Nothing to parse"}
-        user = _owner(request)
+        user = get_current_user(request)
 
         now = _dt.now()
         # Give the model the current date/time + weekday so relative phrasing
@@ -1218,14 +1130,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                           {"role": "user", "content": desc[:1000]}],
                 temperature=0.2, max_tokens=400, headers=headers, timeout=45,
             )
-            text = _strip_think(raw or "", prose=False, prompt_echo=False).strip()
-            if text.startswith("```"):
-                text = text.strip("`")
-                if text.lower().startswith("json"):
-                    text = text[4:].lstrip()
-            # Pull the first {...} block in case the model added stray text.
-            m = _re.search(r"\{.*\}", text, _re.S)
-            draft = _json.loads(m.group(0) if m else text)
+            draft = extract_llm_json(raw)
             if not isinstance(draft, dict):
                 raise ValueError("not an object")
             # Whitelist + light validation so the frontend gets clean fields.

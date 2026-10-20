@@ -1,27 +1,7 @@
 """Browser coverage for explicit Ctrl/Cmd+S document saves."""
 
-import json
-import subprocess
-from pathlib import Path
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source
-
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-
-
-def test_save_shortcut_uses_manual_version_path_and_cancels_autosave():
-    section = DOC_JS.split("pane.addEventListener('keydown'", 1)[1].split(
-        "// Delete (or Backspace)", 1
-    )[0]
-    assert "mod && key === 's'" in section
-    assert "e.preventDefault()" in section
-    assert "clearTimeout(_autoSaveDebounce)" in section
-    assert "clearTimeout(_emailRichbodySaveDebounce)" in section
-    assert "forceVersion: doc?.language !== 'email'" in section
-    assert "status.title = `${meta.title} (Ctrl+S)`" in DOC_JS
-    assert 'class="doc-save-button-label">Saved</span>' in DOC_JS
+from tests.helpers.node import run_node_module
 
 
 def test_ctrl_s_saves_rich_text_immediately_once_and_updates_status():
@@ -74,15 +54,7 @@ def test_ctrl_s_saves_rich_text_immediately_once_and_updates_status():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
     assert data["dirty"] == "dirty"
     assert data["saved"] == "saved"
     assert data["badge"] == "v2"

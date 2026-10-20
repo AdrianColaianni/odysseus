@@ -609,29 +609,7 @@ class AuthManager:
         return token
 
     def validate_token(self, token: Optional[str]) -> bool:
-        if not token:
-            return False
-        expired = False
-        deleted_user = False
-        with self._sessions_lock:
-            session = self._sessions.get(token)
-            if session is None:
-                return False
-            if time.time() > session["expiry"]:
-                self._sessions.pop(token, None)
-                expired = True
-            else:
-                # SECURITY: if the user record has since been removed (admin
-                # deleted them while their cookie was still valid), drop the
-                # session so the next request kicks them out instead of
-                # silently authenticating against a non-existent account.
-                if session.get("username") not in self.users:
-                    self._sessions.pop(token, None)
-                    deleted_user = True
-        if expired or deleted_user:
-            self._save_sessions()
-            return False
-        return True
+        return self.get_username_for_token(token) is not None
 
     def get_username_for_token(self, token: Optional[str]) -> Optional[str]:
         """Return the username associated with a valid token."""
@@ -648,7 +626,8 @@ class AuthManager:
                 expired = True
             else:
                 _u = session["username"]
-                # SECURITY: orphan check — same rationale as validate_token.
+                # SECURITY: a user deleted while their cookie was still valid
+                # loses the session here instead of authenticating as nobody.
                 if _u not in self.users:
                     self._sessions.pop(token, None)
                     deleted_user = True

@@ -1,18 +1,17 @@
-# routes/session_routes.py
 import re
 import html
-import json
 import uuid
 import time
 from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, Form, HTTPException, Response, Request, Depends, Query
+from sqlalchemy.orm import Session
 import logging
 
 from core.session_manager import SessionManager
 from core.models import ChatMessage
 from src.request_models import SessionResponse
-from core.database import Session as DbSession, SessionLocal, Document, GalleryImage, utcnow_naive
+from core.database import Session as DbSession, SessionLocal, Document, GalleryImage, utcnow_naive, get_db
 from src.auth_helpers import (
     effective_user,
     _auth_disabled,
@@ -24,6 +23,7 @@ from src.session_image_cleanup import _generated_image_path_for_cleanup, session
 from src.session_actions import is_session_recently_active
 from src.upload_handler import reserve_message_upload_references
 from src.tool_approval_scopes import sanitize_client_message_metadata
+from src.text_helpers import extract_llm_json
 
 
 def _sanitize_export_filename(name: str) -> str:
@@ -33,9 +33,7 @@ def _sanitize_export_filename(name: str) -> str:
     return name[:128]
 
 
-# Blind-compare helper sessions are created with this name prefix. Their real
-# model must never surface in the session list / sidebar — otherwise a blind
-# comparison can be de-anonymized before the user votes (issue #1285).
+# Blind-compare helper sessions carry this prefix; their model must stay hidden until the vote.
 COMPARE_SESSION_PREFIX = "[CMP] "
 
 
@@ -43,7 +41,7 @@ def _public_model(name: str, model: str) -> str:
     """Blank out the real model of blind-compare helper sessions so the
     session list can't be used to map a neutral pane label ("Model A") back
     to its model. The Compare UI tracks models client-side, so hiding it here
-    costs the sidebar nothing. See issue #1285."""
+    costs the sidebar nothing."""
     if (name or "").startswith(COMPARE_SESSION_PREFIX):
         return ""
     return model
@@ -352,11 +350,9 @@ def _is_hidden_session_name(name: str | None) -> bool:
 def _pick_endpoint_for_sort(owner=None):
     """Pick model endpoint for auto-sort LLM call — uses utility endpoint setting, falls back to default."""
     from src.endpoint_resolver import resolve_endpoint
-    # Try utility endpoint first (what the user configured for background tasks)
     url, model, headers = resolve_endpoint("utility", owner=owner)
     if url and model:
         return url, model, headers
-    # Fall back to task endpoint
     try:
         from src.task_endpoint import resolve_task_endpoint
         url, model, headers = resolve_task_endpoint(owner=owner)
@@ -364,7 +360,6 @@ def _pick_endpoint_for_sort(owner=None):
             return url, model, headers
     except Exception:
         pass
-    # Fall back to default
     url, model, headers = resolve_endpoint("default", owner=owner)
     if url and model:
         return url, model, headers
@@ -381,22 +376,13 @@ def setup_session_routes(
 
     REQUEST_TIMEOUT = config.get("REQUEST_TIMEOUT", 20)
     SESSION_MODEL_VALIDATION_TIMEOUT = min(float(REQUEST_TIMEOUT or 20), 3.0)
-    OPENAI_API_KEY = config.get("OPENAI_API_KEY")
-    SESSIONS_FILE = config.get("SESSIONS_FILE")
     
     @router.get("/sessions")
     def list_sessions(request: Request):
         user = effective_user(request)
         active_incognito_id = str(request.query_params.get("active_incognito_id") or "").strip()
-        # Lazy purge: incognito sessions are ephemeral by design — wipe leftovers
-        # from the DB and session_manager so they vanish on the next page refresh.
-        # BUT: skip sessions that were created within the last 10 minutes.
-        # Without that guard, the purge nukes the active "Nobody" session on the
-        # very first /api/sessions call after creation, killing the in-flight
-        # chat. The frontend's own _cleanupIncognitoSessions handler knows which
-        # session is current and won't delete the live one — this server-side
-        # purge exists only to catch ghosts the frontend missed (tab close,
-        # crash). Only clean up rows old enough to be definitely orphaned.
+        # Purge incognito leftovers the frontend missed (tab close, crash). Rows
+        # under 10 minutes old are skipped so the live incognito chat survives.
         try:
             from datetime import timedelta as _td
             _cutoff = utcnow_naive() - _td(minutes=10)
@@ -572,10 +558,8 @@ def setup_session_routes(
             validation_headers = build_headers(effective_api_key, endpoint_base_url or endpoint_url)
 
         if skip_val:
-            # skip_validation = trust the caller and do NOT probe /v1/models.
-            # Used for custom endpoints AND for bare placeholder sessions with no
-            # model at all (e.g. an email reply draft just needs a session to live
-            # in). Probing here was 400-ing those with "Cannot reach /v1/models".
+            # Custom endpoints and model-less placeholder sessions (an email reply
+            # draft) skip the /v1/models probe.
             pass
         elif not model_to_use:
             from src.llm_core import list_model_ids
@@ -631,7 +615,6 @@ def setup_session_routes(
             cwd=cwd or None,
             endpoint_id=endpoint_id.strip() if endpoint_id else None,
         )
-        # Set auth headers for custom API-key endpoints
         resolved_key = request_api_key
         resolved_base = endpoint_url
         if not resolved_key and endpoint_api_key:
@@ -642,12 +625,10 @@ def setup_session_routes(
             from src.endpoint_resolver import build_headers
             session.headers = build_headers(resolved_key, resolved_base)
             _persist_session_headers(sid, session.headers)
-        # Fire webhook (sync-safe)
         if webhook_manager:
             webhook_manager.fire_and_forget("session.created", {
                 "session_id": sid, "name": session.name, "model": model_to_use,
             })
-        # Fire event for automation tasks
         from src.event_bus import fire_event
         fire_event("session_created", user)
         return SessionResponse(
@@ -675,7 +656,6 @@ def setup_session_routes(
         if name is not None:
             session_manager.update_session_name(sid, name)
             result["name"] = name
-        # Update folder assignment
         if folder is not None:
             db = SessionLocal()
             try:
@@ -746,7 +726,6 @@ def setup_session_routes(
                 meta = get_chatgpt_model_metadata(model)
                 if not meta or current_effort not in [lvl.lower() for lvl in meta.get("supported_reasoning_levels", [])]:
                     session.thinking_mode = "off"
-            # Persist to DB
             db = SessionLocal()
             try:
                 db_session = db.query(DbSession).filter(DbSession.id == sid).first()
@@ -808,44 +787,41 @@ def setup_session_routes(
     @router.post("/sessions/bulk-delete")
     async def bulk_delete_sessions(request: Request):
         """Delete multiple sessions (for compare cleanup via sendBeacon)."""
-        from core.database import ChatMessage as _CM
         try:
             body = await request.json()
             ids = body.get("ids", [])
         except Exception:
             ids = []
+        if not isinstance(ids, list):
+            ids = []
         deleted_count = 0
+        db = SessionLocal()
+        try:
+            starred = {
+                row.id for row in db.query(DbSession.id)
+                .filter(DbSession.id.in_(ids), DbSession.is_important.is_(True))
+            }
+        finally:
+            db.close()
         for sid in ids:
+            if sid in starred:
+                continue
             try:
                 _verify_session_owner(request, sid, session_manager)
-                
-                # Enforce "starred" protection consistent with single-session delete
-                db = SessionLocal()
-                try:
-                    db_sess = db.query(DbSession).filter(DbSession.id == sid).first()
-                    if db_sess and db_sess.is_important:
-                        continue
-                finally:
-                    db.close()
-
                 if session_manager.delete_session(sid):
                     from routes.chat_helpers import remove_session_sft_trace_rows
                     remove_session_sft_trace_rows(effective_user(request), sid)
                     deleted_count += 1
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Bulk delete skipped session %s: %s", sid, e)
         return {"deleted": deleted_count}
 
     @router.get("/session/{sid}/deletion-info")
-    def session_deletion_info(request: Request, sid: str):
+    def session_deletion_info(request: Request, sid: str, db: Session = Depends(get_db)):
         _verify_session_owner(request, sid, session_manager)
         from src.session_image_cleanup import session_gallery_images
-        db = SessionLocal()
-        try:
-            count = session_gallery_images(db, sid).filter(GalleryImage.is_active.is_(True)).count()
-            return {"image_count": count}
-        finally:
-            db.close()
+        count = session_gallery_images(db, sid).filter(GalleryImage.is_active.is_(True)).count()
+        return {"image_count": count}
 
     @router.delete("/session/{sid}")
     def delete_session(request: Request, sid: str, delete_images: bool = False):
@@ -864,7 +840,6 @@ def setup_session_routes(
             finally:
                 db.close()
 
-            # Delete the session and all its messages
             if (session_manager.delete_session(sid, delete_images=True) if delete_images
                     else session_manager.delete_session(sid)):
                 from routes.chat_helpers import remove_session_sft_trace_rows
@@ -885,12 +860,11 @@ def setup_session_routes(
             )
     
     @router.delete("/sessions/all")
-    def delete_all_sessions(request: Request, delete_images: bool = False):
+    def delete_all_sessions(request: Request, delete_images: bool = False, db: Session = Depends(get_db)):
         """Admin only: permanently delete ALL sessions and their messages."""
         from core.middleware import require_admin
         require_admin(request)
 
-        db = SessionLocal()
         try:
             from core.database import ChatMessage as DbChatMessage
             session_ids = [row[0] for row in db.query(DbSession.id).all()]
@@ -937,18 +911,14 @@ def setup_session_routes(
             db.rollback()
             logger.error(f"Error deleting all sessions: {e}")
             raise HTTPException(500, "Failed to delete sessions")
-        finally:
-            db.close()
 
     @router.post("/session/{sid}/archive")
     def archive_session(request: Request, sid: str):
         """Archive a session, keeping its data but removing it from active sessions."""
         _verify_session_owner(request, sid)
         try:
-            # First check if session exists
             session_manager.get_session(sid)
             
-            # Archive the session
             db = SessionLocal()
             try:
                 db_session = db.query(DbSession).filter(DbSession.id == sid).first()
@@ -979,10 +949,9 @@ def setup_session_routes(
             raise HTTPException(404, f"Session '{sid}' not found")
     
     @router.post("/session/{sid}/unarchive")
-    def unarchive_session(request: Request, sid: str):
+    def unarchive_session(request: Request, sid: str, db: Session = Depends(get_db)):
         """Restore an archived session back to the active session list."""
         _verify_session_owner(request, sid)
-        db = SessionLocal()
         try:
             db_session = db.query(DbSession).filter(DbSession.id == sid).first()
             if not db_session:
@@ -1005,53 +974,43 @@ def setup_session_routes(
             db.rollback()
             logger.error(f"Error unarchiving session {sid}: {e}")
             raise HTTPException(500, "Failed to unarchive session")
-        finally:
-            db.close()
 
     @router.get("/sessions/archived")
-    def list_archived_sessions(request: Request, search: str = "", offset: int = 0, limit: int = 20, sort: str = "recent", model: str = ""):
+    def list_archived_sessions(request: Request, search: str = "", offset: int = 0, limit: int = 20, sort: str = "recent", model: str = "", db: Session = Depends(get_db)):
         """List archived sessions for the archive browser."""
         user = effective_user(request)
-        db = SessionLocal()
-        try:
-            q = db.query(DbSession).filter(DbSession.archived == True)
-            if not user:
-                raise HTTPException(403, "Authentication required")
-            q = q.filter(DbSession.owner == user)
-            if search:
-                safe_search = search.replace('%', r'\%').replace('_', r'\_')
-                q = q.filter(DbSession.name.ilike(f"%{safe_search}%", escape='\\'))
-            if model:
-                # Contains match (mirrors the name filter above). The old
-                # f"%{model}" was a SUFFIX-only match, so filtering by "gpt-4"
-                # dropped "gpt-4o" and over-matched on shared suffixes; it also
-                # left LIKE wildcards in the user value unescaped.
-                safe_model = model.replace('%', r'\%').replace('_', r'\_')
-                q = q.filter(DbSession.model.ilike(f"%{safe_model}%", escape='\\'))
-            total = q.count()
-            sort_map = {
-                "recent": DbSession.updated_at.desc(),
-                "oldest": DbSession.updated_at.asc(),
-                "most-messages": DbSession.message_count.desc().nulls_last(),
-                "alpha": DbSession.name.asc(),
-            }
-            order = sort_map.get(sort, DbSession.updated_at.desc())
-            rows = q.order_by(order).offset(offset).limit(limit).all()
-            sessions = []
-            for s in rows:
-                sessions.append({
-                    "id": s.id,
-                    "name": s.name,
-                    "model": s.model,
-                    "thinking_mode": s.thinking_mode or "off",
-                    "message_count": s.message_count or 0,
-                    "created_at": s.created_at.isoformat() if s.created_at else None,
-                    "updated_at": s.updated_at.isoformat() if s.updated_at else None,
-                    "is_important": s.is_important,
-                })
-            return {"sessions": sessions, "total": total}
-        finally:
-            db.close()
+        q = db.query(DbSession).filter(DbSession.archived == True)
+        if not user:
+            raise HTTPException(403, "Authentication required")
+        q = q.filter(DbSession.owner == user)
+        if search:
+            safe_search = search.replace('%', r'\%').replace('_', r'\_')
+            q = q.filter(DbSession.name.ilike(f"%{safe_search}%", escape='\\'))
+        if model:
+            safe_model = model.replace('%', r'\%').replace('_', r'\_')
+            q = q.filter(DbSession.model.ilike(f"%{safe_model}%", escape='\\'))
+        total = q.count()
+        sort_map = {
+            "recent": DbSession.updated_at.desc(),
+            "oldest": DbSession.updated_at.asc(),
+            "most-messages": DbSession.message_count.desc().nulls_last(),
+            "alpha": DbSession.name.asc(),
+        }
+        order = sort_map.get(sort, DbSession.updated_at.desc())
+        rows = q.order_by(order).offset(offset).limit(limit).all()
+        sessions = []
+        for s in rows:
+            sessions.append({
+                "id": s.id,
+                "name": s.name,
+                "model": s.model,
+                "thinking_mode": s.thinking_mode or "off",
+                "message_count": s.message_count or 0,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+                "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+                "is_important": s.is_important,
+            })
+        return {"sessions": sessions, "total": total}
 
     @router.get("/session/{sid}/export")
     def export_session(request: Request, sid: str, fmt: str = "md", filename: str = ""):
@@ -1122,7 +1081,6 @@ def setup_session_routes(
                 headers={"Content-Disposition": f"attachment; filename={out_name}"},
             )
 
-        # Default: markdown
         markdown_lines = []
         markdown_lines.append(f"# Conversation: {session.name}")
         markdown_lines.append(f"*Exported on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
@@ -1143,50 +1101,13 @@ def setup_session_routes(
             headers={"Content-Disposition": f"attachment; filename={out_name}"},
         )
     
-    @router.post("/sessions/save")
-    def sessions_save_now(request: Request):
-        user = effective_user(request)
-        if not user:
-            raise HTTPException(401, "Not authenticated")
-        session_manager.save_sessions()
-        return {"ok": True, "path": SESSIONS_FILE}
-    
-    @router.post("/session/openai")
-    def create_session_openai(
-        request: Request,
-        name: str = Form("New Chat (OpenAI)"),
-        model: str = Form("gpt-4o"),
-        rag: str = Form(None)
-    ):
-        if is_delegated_credential(request):
-            raise HTTPException(403, "This session type requires an interactive session")
-        if not OPENAI_API_KEY:
-            raise HTTPException(400, "Server missing OPENAI_API_KEY")
-        sid = str(uuid.uuid4())
-        user = effective_user(request)
-        session = session_manager.create_session(
-            session_id=sid,
-            name="",
-            endpoint_url="https://api.openai.com/v1/chat/completions",
-            model=model,
-            rag=str(rag).lower() == "true",
-            owner=user,
-        )
-        session.headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
-        session_manager.save_sessions()
-        from src.event_bus import fire_event
-        fire_event("session_created", user)
-        return {"id": sid, "name": "", "model": model}
-    
     @router.post("/session/{session_id}/important")
-    async def mark_session_important(request: Request, session_id: str, important: bool = Form(True)):
+    def mark_session_important(request: Request, session_id: str, important: bool = Form(True)):
         """Mark a session as important to protect it from automatic cleanup."""
         _verify_session_owner(request, session_id)
         try:
-            # Validate session exists
             session_manager.get_session(session_id)
 
-            # Update in database
             db = SessionLocal()
             try:
                 db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
@@ -1229,8 +1150,7 @@ def setup_session_routes(
         if len(history) < 6:
             raise HTTPException(400, "Not enough messages to compact")
 
-        # Keep a small recent tail verbatim. The prior half-chat/20-message
-        # tail made manual compaction look like it did nothing on normal chats.
+        # Keep a small recent tail verbatim.
         recent_keep = min(8, max(4, len(history) // 4))
         older = history[:-recent_keep]
         recent = history[-recent_keep:]
@@ -1349,9 +1269,6 @@ def setup_session_routes(
                 rows_q = rows_q.filter(DbSession.owner == user)
             rows = rows_q.limit(2000).all()
             folder_map = {r.id: r.folder for r in rows}
-            # Precompute per-session message counts in TWO aggregate queries
-            # instead of 1–3 queries PER session — with many chats the per-row
-            # loop was doing thousands of round-trips and blowing the timeout.
             from sqlalchemy import func as _sa_func
             _counts = dict(db.query(DbMsg.session_id, _sa_func.count(DbMsg.id)).group_by(DbMsg.session_id).all())
             _asst_counts = dict(
@@ -1490,45 +1407,14 @@ def setup_session_routes(
 
         try:
             logger.info(f"Auto-sort: using model={model} at {url}")
-            # 16384 (was 4096): with many chats the folder JSON is large, and a
-            # reasoning model spends tokens thinking first — 4096 truncated the
-            # JSON mid-output, so it never parsed ("invalid JSON for auto-sort").
+            # A reasoning model thinks before the large folder JSON; a smaller cap truncates it.
             raw = llm_call(url, model, [{"role": "user", "content": prompt}],
                            temperature=0.3, max_tokens=16384, headers=headers, timeout=120,
                            reasoning_effort=effort_for_call(url, model, user))
             logger.info(f"Auto-sort raw response ({len(raw)} chars): {raw[:300]}")
-            # Extract JSON from response — handle markdown fences, leading text,
-            # reasoning-model <think> blocks, and trailing commas.
-            text = raw.strip()
-            # Reasoning models emit <think>…</think> (often containing { } that
-            # would derail the brace scan) before the answer — drop it first.
-            text = re.sub(r'<think(?:ing)?>[\s\S]*?</think(?:ing)?>', '', text, flags=re.I).strip()
-
-            def _loads_lenient(s):
-                """Parse JSON, retrying once with trailing commas stripped."""
-                if not s:
-                    return None
-                for cand in (s, re.sub(r',(\s*[}\]])', r'\1', s)):
-                    try:
-                        return json.loads(cand)
-                    except json.JSONDecodeError:
-                        continue
-                return None
-
-            result = _loads_lenient(text)
-            # Markdown code fence
-            if result is None:
-                fence_match = re.search(r'```(?:json)?\s*\n?([\s\S]*?)```', text)
-                if fence_match:
-                    result = _loads_lenient(fence_match.group(1).strip())
-            # First { … last } block
-            if result is None:
-                brace_start = text.find('{')
-                brace_end = text.rfind('}')
-                if brace_start >= 0 and brace_end > brace_start:
-                    result = _loads_lenient(text[brace_start:brace_end + 1])
-            if result is None:
-                logger.error(f"Auto-sort: could not parse JSON from: {text[:500]}")
+            result = extract_llm_json(raw)
+            if not isinstance(result, dict):
+                logger.error(f"Auto-sort: could not parse JSON from: {raw[:500]}")
                 raise HTTPException(502, "AI returned invalid JSON for auto-sort — the model may not follow JSON instructions; try a different utility model in Settings.")
         except HTTPException:
             raise
@@ -1545,17 +1431,14 @@ def setup_session_routes(
         assignments = {}
         for folder_name, ids in folders.items():
             for sid_or_prefix in ids:
-                # Match by full ID or prefix
                 full_id = None
                 if sid_or_prefix in id_prefix_map.values():
                     full_id = sid_or_prefix
                 else:
-                    # Try prefix match
                     prefix = sid_or_prefix.rstrip(".").rstrip(" ")
                     if prefix in id_prefix_map:
                         full_id = id_prefix_map[prefix]
                     else:
-                        # Fuzzy prefix match
                         for p, fid in id_prefix_map.items():
                             if fid.startswith(prefix) or prefix.startswith(p):
                                 full_id = fid
@@ -1563,21 +1446,16 @@ def setup_session_routes(
                 if full_id:
                     assignments[full_id] = folder_name
 
-        # Apply folder assignments
         updated = 0
         db = SessionLocal()
         try:
-            for sid, folder_name in assignments.items():
-                db_session_q = db.query(DbSession).filter(DbSession.id == sid)
-                if user:
-                    db_session_q = db_session_q.filter(DbSession.owner == user)
-                elif not single_user_mode:
-                    db_session_q = db_session_q.filter(DbSession.owner == user)
-                db_session = db_session_q.first()
-                if db_session:
-                    db_session.folder = folder_name
-                    db_session.updated_at = utcnow_naive()
-                    updated += 1
+            rows_q = db.query(DbSession).filter(DbSession.id.in_(list(assignments)))
+            if user or not single_user_mode:
+                rows_q = rows_q.filter(DbSession.owner == user)
+            for db_session in rows_q:
+                db_session.folder = assignments[db_session.id]
+                db_session.updated_at = utcnow_naive()
+                updated += 1
             db.commit()
         except Exception as e:
             db.rollback()

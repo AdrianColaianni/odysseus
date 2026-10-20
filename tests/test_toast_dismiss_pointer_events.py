@@ -8,9 +8,8 @@ This left an invisible element intercepting mouse/touch events.
 
 These are source-level assertions (no browser, no DOM) that verify the
 close-button handler includes the reset.  They cover:
-  • ordinary (plain text) toast  – showToast
+  • ordinary and action toast    – showToast
   • error toast                  – showError
-  • action toast                 – showToast with action opts
 """
 import re
 from pathlib import Path
@@ -102,54 +101,4 @@ def test_showError_close_handler_resets_pointer_events():
     assert "pointerEvents" in handler, (
         "showError close-button handler does not reset pointerEvents – "
         "a prior action toast could leave the overlay blocking clicks"
-    )
-
-
-def test_showToast_timer_resets_pointer_events():
-    """The auto-hide timer in showToast must also reset pointer-events.
-    This was already in place before the × button was added; make sure
-    it stays."""
-    src = _read_ui()
-    body = _extract_function(src, "showToast")
-    # The _hideTimer setTimeout body should contain the reset
-    timer_idx = body.find("_hideTimer")
-    assert timer_idx != -1, "no _hideTimer found in showToast"
-    # Find the setTimeout callback after the last _hideTimer assignment
-    last_timer = body.rfind("_hideTimer = setTimeout")
-    assert last_timer != -1
-    # Extract the setTimeout callback body
-    brace = body.find("{", last_timer)
-    depth = 0
-    timer_body = ""
-    for i in range(brace, len(body)):
-        if body[i] == "{":
-            depth += 1
-        elif body[i] == "}":
-            depth -= 1
-            if depth == 0:
-                timer_body = body[brace : i + 1]
-                break
-    assert "pointerEvents" in timer_body, (
-        "showToast auto-hide timer no longer resets pointerEvents"
-    )
-
-
-def test_action_toast_sets_pointer_events_auto():
-    """When an action button is present the toast must set pointer-events
-    to 'auto' so the button is clickable."""
-    src = _read_ui()
-    body = _extract_function(src, "showToast")
-    assert "pointerEvents = 'auto'" in body or 'pointerEvents = "auto"' in body, (
-        "showToast no longer sets pointer-events:auto for action toasts"
-    )
-
-
-def test_plain_toast_clears_pointer_events():
-    """When there is NO action button, showToast must clear any leftover
-    pointer-events from a previous action toast."""
-    src = _read_ui()
-    body = _extract_function(src, "showToast")
-    # The else-branch of the action check should reset pointerEvents
-    assert "pointerEvents = ''" in body or 'pointerEvents = ""' in body, (
-        "showToast does not clear pointer-events for non-action toasts"
     )

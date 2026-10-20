@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from tests.helpers.routes import route_endpoint
 
 
 class _AuthManager:
@@ -52,7 +53,7 @@ class _Db:
 
 
 def _endpoint(monkeypatch, note=None):
-    import routes.note_routes as note_routes
+    import routes.note.note_routes as note_routes
 
     calls = []
     db = _Db(note)
@@ -65,10 +66,7 @@ def _endpoint(monkeypatch, note=None):
     monkeypatch.setattr(note_routes, "dispatch_reminder", fake_dispatch_reminder)
 
     router = note_routes.setup_note_routes()
-    endpoint = next(
-        route.endpoint for route in router.routes
-        if route.path == "/api/notes/fire-reminder" and "POST" in route.methods
-    )
+    endpoint = route_endpoint(router, "/api/notes/fire-reminder", "POST")
     return endpoint, calls, db
 
 

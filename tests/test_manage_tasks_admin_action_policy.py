@@ -89,15 +89,15 @@ def _count(owner):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action_name", sorted(policy_mod.ADMIN_ONLY_TASK_ACTIONS))
-async def test_create_admin_only_action_denied_for_non_admin(privileges, action_name):
+async def test_create_admin_only_action_denied_for_non_admin(privileges):
     before = _count("alice")
-    out = await do_manage_tasks(json.dumps({
-        "action": "create", "task_type": "action", "action_name": action_name,
-        "name": "pwn", "schedule": "daily", "scheduled_time": "09:00",
-    }), owner="alice")
-    assert out["exit_code"] == 1, out
-    assert "requires admin privileges" in out["error"]
+    for action_name in sorted(policy_mod.ADMIN_ONLY_TASK_ACTIONS):
+        out = await do_manage_tasks(json.dumps({
+            "action": "create", "task_type": "action", "action_name": action_name,
+            "name": "pwn", "schedule": "daily", "scheduled_time": "09:00",
+        }), owner="alice")
+        assert out["exit_code"] == 1, (action_name, out)
+        assert "requires admin privileges" in out["error"]
     assert _count("alice") == before
 
 

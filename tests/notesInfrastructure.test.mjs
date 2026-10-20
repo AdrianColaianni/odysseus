@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createNotesApi } from '../frontend/src/features/notes/infrastructure/http.js';
-import { createNotesPersistence, REMINDER_FIRED_KEY } from '../frontend/src/features/notes/infrastructure/storage.js';
+import { createNotesApi } from '../static/js/features/notes/infrastructure/http.js';
+import { createNotesPersistence, REMINDER_FIRED_KEY } from '../static/js/features/notes/infrastructure/storage.js';
 
 test('list, reorder, upload, reminder and agent transports retain exact requests', async () => {
   const calls = [], result = { ok: false, status: 403 };

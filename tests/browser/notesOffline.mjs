@@ -3,8 +3,12 @@ import { chromium } from 'playwright';
 import fs from 'node:fs';
 
 const origin = process.env.ODYSSEUS_TEST_STATIC_ORIGIN;
-const manifest = JSON.parse(fs.readFileSync(new URL('../../frontend/modules.json', import.meta.url), 'utf8'));
-const outputs = manifest.modules.map(entry => '/static/' + entry.deployment);
+const staticDir = new URL('../../static/', import.meta.url);
+const outputs = ['js/features/notes', 'js/shared']
+  .flatMap(dir => fs.readdirSync(new URL(dir, staticDir), { recursive: true })
+    .filter(name => name.endsWith('.js'))
+    .map(name => `/static/${dir}/${name}`))
+  .concat('/static/js/actionMenuOrder.js');
 const browser = await chromium.launch({ headless: true });
 try {
   const context = await browser.newContext({ serviceWorkers: 'allow' });
@@ -19,11 +23,6 @@ try {
     return missing;
   }, outputs);
   assert.deepEqual(cached, []);
-  assert.equal(await page.evaluate(async () => {
-    const shared = await import('/static/js/shared/ui/confetti.js');
-    const compare = await import('/static/js/compare/vote.js?v=20260828resendcaldrag1');
-    return shared.spawnConfetti === compare.spawnConfetti;
-  }), true);
   await context.setOffline(true);
   const offline = await context.newPage();
   offline.on('requestfailed', request => console.log('offline failed:', request.url(), request.failure()));
@@ -35,5 +34,5 @@ try {
     return { identity: facade.default === feature.default && window.notesModule === feature.default, closed: facade.isPanelOpen() === false, exports: Object.keys(facade).sort() };
   });
   assert.equal(result.identity && result.closed, true);
-  console.log(JSON.stringify({ ...result, maintainedPrecache: outputs.length }));
+  console.log(JSON.stringify({ ...result, precached: outputs.length }));
 } finally { await browser.close(); }

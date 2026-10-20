@@ -1,28 +1,8 @@
-import json
-import shutil
-import subprocess
-from pathlib import Path
-
-import pytest
-
-
-ROOT = Path(__file__).resolve().parents[1]
-pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node binary not on PATH")
-
-
-def _node_eval(source: str):
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", source],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return json.loads(result.stdout)
+from tests.helpers.node import run_node_module
 
 
 def test_calendar_date_helpers_ignore_non_string_inputs():
-    values = _node_eval(
+    values = run_node_module(
         """
         import { _addDays, _shiftDT, _localDateOf } from './static/js/calendar/utils.js';
         console.log(JSON.stringify({
@@ -47,7 +27,7 @@ def test_calendar_date_helpers_ignore_non_string_inputs():
 
 
 def test_calendar_date_helpers_keep_valid_strings():
-    values = _node_eval(
+    values = run_node_module(
         """
         import { _addDays, _shiftDT, _localDateOf } from './static/js/calendar/utils.js';
         console.log(JSON.stringify({

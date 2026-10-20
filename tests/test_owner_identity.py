@@ -22,68 +22,14 @@ def test_effective_storage_owner_matrix(monkeypatch):
         assert effective_storage_owner(sentinel) is None
 
 
-def test_storage_owner_for_request_uses_api_token_owner(monkeypatch):
-    from src.auth_helpers import storage_owner_for_request
-
-    monkeypatch.delenv("AUTH_ENABLED", raising=False)
-    request = SimpleNamespace(
-        state=SimpleNamespace(
-            current_user="api",
-            api_token=True,
-            api_token_owner="alice",
-        )
-    )
-
-    assert storage_owner_for_request(request) == "alice"
-
-
-@pytest.mark.parametrize("sentinel", ["api", "demo", "system", "internal-tool"])
-def test_storage_owner_for_request_rejects_request_sentinel(monkeypatch, sentinel):
-    from src.auth_helpers import storage_owner_for_request
-
-    monkeypatch.delenv("AUTH_ENABLED", raising=False)
-    request = SimpleNamespace(
-        state=SimpleNamespace(
-            current_user=sentinel,
-            api_token=sentinel == "api",
-            api_token_owner=None,
-        )
-    )
-
-    assert storage_owner_for_request(request) is None
-
-
-def test_storage_owner_for_request_uses_default_local_when_auth_disabled(monkeypatch):
-    from src.auth_helpers import storage_owner_for_request
-    from src.owner_identity import DEFAULT_LOCAL_OWNER
-
-    monkeypatch.setenv("AUTH_ENABLED", "false")
-    request = SimpleNamespace(state=SimpleNamespace(current_user=None))
-
-    assert storage_owner_for_request(request) == DEFAULT_LOCAL_OWNER
-
-
-@pytest.mark.parametrize(
-    "value,expected",
-    [
-        (None, False),
-        ("", False),
-        ("true", False),
-        ("0", False),
-        ("false", True),
-        ("FALSE", True),
-        (" false ", True),
-    ],
-)
-def test_auth_disabled_parser_is_centralized(monkeypatch, value, expected):
+def test_auth_disabled_parser_is_centralized(monkeypatch):
     from src.owner_identity import auth_disabled
 
-    if value is None:
-        monkeypatch.delenv("AUTH_ENABLED", raising=False)
-    else:
+    monkeypatch.delenv("AUTH_ENABLED", raising=False)
+    assert auth_disabled() is False
+    for value, expected in (("", False), ("0", False), ("true", False), (" FALSE ", True)):
         monkeypatch.setenv("AUTH_ENABLED", value)
-
-    assert auth_disabled() is expected
+        assert auth_disabled() is expected, value
 
 
 def test_default_local_owner_is_reserved_auth_name_but_valid_storage_owner():
@@ -92,11 +38,24 @@ def test_default_local_owner_is_reserved_auth_name_but_valid_storage_owner():
         REQUEST_SENTINEL_OWNERS,
         RESERVED_AUTH_USERNAMES,
         effective_storage_owner,
-        is_default_local_owner,
     )
 
     assert DEFAULT_LOCAL_OWNER in RESERVED_AUTH_USERNAMES
     assert DEFAULT_LOCAL_OWNER not in REQUEST_SENTINEL_OWNERS
     assert effective_storage_owner(DEFAULT_LOCAL_OWNER, auth_is_disabled=False) == DEFAULT_LOCAL_OWNER
     assert effective_storage_owner(DEFAULT_LOCAL_OWNER, auth_is_disabled=True) == DEFAULT_LOCAL_OWNER
-    assert is_default_local_owner(f" {DEFAULT_LOCAL_OWNER.upper()} ")
+
+
+def test_get_owned_or_404_hides_other_owners_and_gates_anonymous_on_request():
+    from fastapi import HTTPException
+    from src.auth_helpers import get_owned_or_404
+
+    row = SimpleNamespace(owner="alice")
+    db = SimpleNamespace(get=lambda model, row_id: row if row_id == "r1" else None)
+
+    assert get_owned_or_404(db, object, "r1", "alice") is row
+    assert get_owned_or_404(db, object, "r1", None) is row
+    for row_id, owner, allow_anonymous in (("missing", "alice", True), ("r1", "bob", True), ("r1", None, False)):
+        with pytest.raises(HTTPException) as exc:
+            get_owned_or_404(db, object, row_id, owner, allow_anonymous=allow_anonymous)
+        assert exc.value.status_code == 404

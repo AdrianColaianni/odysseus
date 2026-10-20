@@ -17,11 +17,13 @@ from tests.helpers.import_state import clear_fake_database_modules
 
 clear_fake_database_modules()
 
-import routes.document_routes as droutes
+import routes.document.document_routes as droutes
 from core.database import Document
 from core.database import Session as DbSession
-from routes.document_helpers import DocumentPatch
-from routes.document_helpers import _owner_session_filter
+from routes.document.document_helpers import DocumentPatch
+from routes.document.document_helpers import _owner_session_filter
+from tests.helpers.route_call import with_db
+from tests.helpers.routes import route_endpoint
 
 
 @pytest.fixture(autouse=True)
@@ -38,10 +40,7 @@ def _req(user="alice"):
 
 def _endpoint(method, path):
     router = droutes.setup_document_routes(MagicMock(), None)
-    for route in router.routes:
-        if getattr(route, "path", None) == path and method in getattr(route, "methods", set()):
-            return route.endpoint
-    raise RuntimeError(f"{method} {path} not found")
+    return with_db(route_endpoint(router, path, method))
 
 
 def _bind_test_db():
@@ -129,7 +128,7 @@ async def test_list_documents_filters_foreign_docs_in_visible_session():
         finally:
             db.close()
 
-        rows = await list_documents(_req("alice"), alice_session)
+        rows = list_documents(_req("alice"), alice_session)
         ids = {row["id"] for row in rows}
 
         assert alice_doc in ids

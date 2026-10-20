@@ -1,5 +1,7 @@
 /** Retained text-layer model and raster-cache renderer. */
 
+import { makeCanvas } from './placed-layer.js';
+
 export const DEFAULT_TEXT_DATA = Object.freeze({
   content: 'Text',
   fontFamily: 'Arial',
@@ -116,9 +118,7 @@ function baseTextCanvas(text) {
   const lineHeightPx = text.fontSize * text.lineHeight;
   const contentHeight = Math.max(1, lines.length * lineHeightPx);
   const frameHeight = text.frameHeight > 0 ? Math.max(contentHeight, text.frameHeight) : contentHeight;
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.ceil(contentWidth + padding * 2));
-  canvas.height = Math.max(1, Math.ceil(frameHeight + padding * 2));
+  const canvas = makeCanvas(Math.max(1, Math.ceil(contentWidth + padding * 2)), Math.max(1, Math.ceil(frameHeight + padding * 2)));
   const ctx = canvas.getContext('2d');
   ctx.font = fontString(text);
   ctx.textBaseline = 'top';
@@ -152,9 +152,7 @@ export function renderTextLayer(layer) {
   const sin = Math.abs(Math.sin(radians));
   const width = Math.max(1, Math.ceil(scaledWidth * cos + scaledHeight * sin));
   const height = Math.max(1, Math.ceil(scaledWidth * sin + scaledHeight * cos));
-  const rendered = document.createElement('canvas');
-  rendered.width = width;
-  rendered.height = height;
+  const rendered = makeCanvas(width, height);
   const ctx = rendered.getContext('2d');
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';

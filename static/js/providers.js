@@ -23,10 +23,6 @@ const _PROVIDERS = [
   [/openrouter|open router/i,
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.5"/><circle cx="19" cy="6" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M7.5 12h4.5c2 0 2.5-6 4.5-6"/><path d="M12 12c2 0 2.5 6 4.5 6"/></svg>'],
 
-  // Ollama / Ollama Cloud
-  [/ollama/i,
-    '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7.4 10.2a4.8 4.8 0 0 1 9.1-1.9 4.1 4.1 0 0 1 1 .1A4.8 4.8 0 0 1 17 18H7.4a3.9 3.9 0 0 1 0-7.8Zm0 2a1.9 1.9 0 0 0 0 3.8H17a2.8 2.8 0 0 0 .2-5.6 2.7 2.7 0 0 0-1.3.2l-.9.4-.4-.9a2.8 2.8 0 0 0-5.4 1.1v1H7.4Z"/></svg>'],
-
   // Anthropic — Claude (official Simple Icons)
   [/anthropic|claude/i,
     '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z"/></svg>'],

@@ -392,9 +392,8 @@ export function createEditor({
     const _saveBtnEl0 = form.querySelector('.note-form-save');
     _saveBtnEl0.addEventListener('mousedown', (e) => e.preventDefault());
     _saveBtnEl0.addEventListener('click', async () => {
-      // Guard against spam-clicks: the drawing save AWAITS a canvas upload before
-      // the optimistic re-render removes the form, so without this a slow upload
-      // let repeated clicks create duplicate notes.
+      // The drawing save awaits an upload before the re-render removes the form,
+      // so repeated clicks would create duplicate notes.
       const _saveBtn = form.querySelector('.note-form-save');
       if (_saveBtn._saving) return;
       // Mobile: when an existing note is opened and closed without edits, the

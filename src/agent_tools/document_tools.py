@@ -1,4 +1,5 @@
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
 import hashlib
 import html
 import difflib
@@ -1064,9 +1065,22 @@ class SuggestDocumentTool:
             db.close()
 
 
-# ---------------------------------------------------------------------------
-# Document management tool (delete, list, organize)
-# ---------------------------------------------------------------------------
+def _relative_age(ts) -> str:
+    """'just now', '5m ago', '3d ago' or a date, for a naive-UTC or aware timestamp."""
+    if not ts:
+        return 'never'
+    try:
+        now = datetime.now(timezone.utc)
+        diff = (now - ts if ts.tzinfo is not None else now.replace(tzinfo=None) - ts).total_seconds()
+    except Exception:
+        return 'unknown'
+    if diff < 60: return 'just now'
+    if diff < 3600: return f'{int(diff / 60)}m ago'
+    if diff < 86400: return f'{int(diff / 3600)}h ago'
+    if diff < 86400 * 7: return f'{int(diff / 86400)}d ago'
+    return ts.strftime('%Y-%m-%d')
+
+
 class ManageDocumentTool:
     async def execute(self, content: str, ctx: dict) -> Dict:
         """Manage documents: list, read/view/open, delete, tidy.
@@ -1076,7 +1090,6 @@ class ManageDocumentTool:
         so the user can click straight from chat to open the editor.
         """
         from core.database import SessionLocal, Document
-        from datetime import datetime, timezone
 
         owner = ctx.get("owner")
 
@@ -1091,20 +1104,6 @@ class ManageDocumentTool:
             if not args.get("search"):
                 args["search"] = args.get("text") or args.get("query") or args.get("title")
         db = SessionLocal()
-
-        def _rel(ts):
-            if not ts:
-                return 'never'
-            try:
-                now = datetime.now(timezone.utc) if ts.tzinfo is not None else datetime.utcnow()
-                diff = (now - ts).total_seconds()
-            except Exception:
-                return 'unknown'
-            if diff < 60: return 'just now'
-            if diff < 3600: return f'{int(diff / 60)}m ago'
-            if diff < 86400: return f'{int(diff / 3600)}h ago'
-            if diff < 86400 * 7: return f'{int(diff / 86400)}d ago'
-            return ts.strftime('%Y-%m-%d')
 
         try:
             if action == "list":
@@ -1147,7 +1146,7 @@ class ManageDocumentTool:
                     ts = getattr(d, 'updated_at', None) or getattr(d, 'created_at', None)
                     marker = " ← most recent" if i == 0 else ""
                     lines.append(
-                        f"- [{d.title}](#document-{d.id}) — {lang}, {size} chars, updated {_rel(ts)}{marker}"
+                        f"- [{d.title}](#document-{d.id}) — {lang}, {size} chars, updated {_relative_age(ts)}{marker}"
                     )
                     items.append({"id": d.id, "title": d.title, "language": lang, "size": size})
                 header = f"Found {len(docs)} document(s), sorted most-recent first. Click a title to open:"

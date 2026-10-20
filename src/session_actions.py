@@ -1,14 +1,12 @@
-"""
-session_actions.py
+"""Session actions shared by REST routes and the task scheduler / builtin actions."""
 
-Reusable session actions that can be called from both REST routes
-and the task scheduler / builtin actions system.
-"""
-
+import asyncio
 import json
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
+
+from core.database import utcnow_naive
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +24,6 @@ _FRESH_EMPTY_SESSION_GRACE = timedelta(minutes=10)
 _FRESH_SESSION_GRACE = _FRESH_EMPTY_SESSION_GRACE
 
 
-def _utcnow_naive() -> datetime:
-    """Return naive UTC for existing session DateTime columns."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
 def _as_naive_utc(value):
     if value is None:
         return None
@@ -41,7 +34,7 @@ def _as_naive_utc(value):
 
 def is_session_recently_active(row, now=None, grace=_FRESH_SESSION_GRACE) -> bool:
     """Return True while a new or active session is too fresh to auto-delete."""
-    now = _as_naive_utc(now) or _utcnow_naive()
+    now = _as_naive_utc(now) or utcnow_naive()
     for attr in ("last_message_at", "last_accessed", "updated_at", "created_at"):
         value = _as_naive_utc(getattr(row, attr, None))
         if not value:
@@ -53,25 +46,12 @@ def is_session_recently_active(row, now=None, grace=_FRESH_SESSION_GRACE) -> boo
     return False
 
 
-async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bool = True) -> str:
-    """Run session cleanup + (optional) AI folder sort for the given owner.
-
-    Args:
-        owner: user whose sessions to process
-        skip_llm: when True, do only Phase 1 (delete empty/throwaway sessions);
-            skip Phase 2 (AI folder assignment). Used by the built-in daily
-            background sweep so it never burns LLM tokens.
-        delete_throwaway: when False, only empty/incognito sessions are deleted.
-
-    Returns a human-readable summary of what was done.
-    """
+def _delete_throwaway_sessions(owner: str, delete_throwaway: bool):
+    """Phase 1: delete empty/throwaway sessions. Returns (deleted_empty, deleted_throwaway, remaining)."""
     from core.database import SessionLocal, Session as DbSession, ChatMessage as DbMsg
-    from src.llm_core import llm_call_async
-    from src.task_endpoint import resolve_task_endpoint
 
     db = SessionLocal()
     try:
-        # ── Phase 1: Delete empty/throwaway sessions ──
         deleted_empty = 0
         deleted_throwaway = 0
 
@@ -80,12 +60,12 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
             *([DbSession.owner == owner] if owner else []),
         ).all()
 
-        cleanup_now = _utcnow_naive()
+        cleanup_now = utcnow_naive()
         for row in rows:
             if getattr(row, 'is_important', False):
                 continue
-            created_at = _as_naive_utc(row.created_at or row.updated_at) or _utcnow_naive()
-            is_fresh = (_utcnow_naive() - created_at) < _FRESH_EMPTY_SESSION_GRACE
+            created_at = _as_naive_utc(row.created_at or row.updated_at) or utcnow_naive()
+            is_fresh = (utcnow_naive() - created_at) < _FRESH_EMPTY_SESSION_GRACE
             if (row.name or "").strip() == "Incognito":
                 deleted_throwaway += 1
                 db.delete(row)
@@ -140,7 +120,6 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
             db.commit()
             logger.info(f"Auto-sort: deleted {deleted_empty} empty + {deleted_throwaway} throwaway sessions")
 
-        # ── Phase 2: AI folder assignment ──
         remaining = db.query(DbSession).filter(
             DbSession.archived == False,
             *([DbSession.owner == owner] if owner else []),
@@ -156,71 +135,19 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
                 "current_folder": row.folder,
             })
 
-        if len(session_list) < 2:
-            return f"Cleaned {deleted_empty + deleted_throwaway} sessions. Too few remaining to sort."
+        return deleted_empty, deleted_throwaway, session_list
+    finally:
+        db.close()
 
-        # Background built-in sweep skips folder-sort to stay pure infra.
-        if skip_llm:
-            return f"Cleaned {deleted_empty + deleted_throwaway} sessions (folder sort skipped)."
 
-        url, model, headers = resolve_task_endpoint(owner=owner or None)
-        if not url:
-            return f"Cleaned {deleted_empty + deleted_throwaway} sessions. No model endpoint available for sorting."
+def _apply_folders(session_list: list, folders: dict) -> int:
+    """Phase 2 write: move each matched session into its folder. Returns the count moved."""
+    from core.database import SessionLocal, Session as DbSession
 
-        names_text = "\n".join(f'  "{s["id"][:8]}": "{s["name"]}"' for s in session_list)
-        prompt = (
-            "You are a session organizer. Group these chat sessions into folders by topic.\n\n"
-            "Rules:\n"
-            "- Be aggressive about grouping — put EVERY session in a folder\n"
-            "- Use short folder names (2-4 words max)\n"
-            "- Use the 8-char ID prefixes exactly as given\n"
-            "- Output ONLY raw JSON, no markdown fences, no explanation\n\n"
-            "Required JSON format:\n"
-            '{"folders": {"Folder Name": ["id_prefix1", "id_prefix2"], "Other Folder": ["id_prefix3"]}}\n\n'
-            f"Sessions (id_prefix: name):\n{{\n{names_text}\n}}"
-        )
-
-        try:
-            # 16384 (was 4096): large folder JSON + reasoning-model thinking
-            # overflowed 4096 and truncated the JSON, so it never parsed.
-            raw = await llm_call_async(url, model, [{"role": "user", "content": prompt}],
-                                       temperature=0.3, max_tokens=16384, headers=headers, timeout=120)
-        except Exception as e:
-            logger.warning(f"Auto-sort LLM call failed: {e}")
-            return f"Cleaned {deleted_empty + deleted_throwaway} sessions. Folder sort skipped (model unreachable)."
-
-        # Parse JSON from response
-        text = raw.strip()
-        result = None
-        try:
-            result = json.loads(text)
-        except json.JSONDecodeError:
-            pass
-        if result is None:
-            fence_match = re.search(r'```(?:json)?\s*\n?([\s\S]*?)```', text)
-            if fence_match:
-                try:
-                    result = json.loads(fence_match.group(1).strip())
-                except json.JSONDecodeError:
-                    pass
-        if result is None:
-            brace_start = text.find('{')
-            brace_end = text.rfind('}')
-            if brace_start >= 0 and brace_end > brace_start:
-                try:
-                    result = json.loads(text[brace_start:brace_end + 1])
-                except json.JSONDecodeError:
-                    pass
-        if result is None:
-            return f"Cleaned {deleted_empty + deleted_throwaway} sessions. AI returned unparseable response."
-
-        folders = result.get("folders", {})
-        if not folders:
-            return f"Cleaned {deleted_empty + deleted_throwaway} sessions. No folder groupings found."
-
-        # Apply assignments
-        id_prefix_map = {s["id"][:8]: s["id"] for s in session_list}
-        updated = 0
+    id_prefix_map = {s["id"][:8]: s["id"] for s in session_list}
+    updated = 0
+    db = SessionLocal()
+    try:
         for folder_name, ids in folders.items():
             for sid_or_prefix in ids:
                 full_id = None
@@ -239,12 +166,96 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
                     db_sess = db.query(DbSession).filter(DbSession.id == full_id).first()
                     if db_sess:
                         db_sess.folder = folder_name
-                        db_sess.updated_at = _utcnow_naive()
+                        db_sess.updated_at = utcnow_naive()
                         updated += 1
         db.commit()
-
-        folder_summary = ", ".join(f"{k} ({len(v)})" for k, v in folders.items())
-        return f"Deleted {deleted_empty} empty + {deleted_throwaway} throwaway. Sorted {updated} sessions into: {folder_summary}"
-
+        return updated
     finally:
         db.close()
+
+
+async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bool = True) -> str:
+    """Run session cleanup + (optional) AI folder sort for the given owner.
+
+    Args:
+        owner: user whose sessions to process
+        skip_llm: when True, do only Phase 1 (delete empty/throwaway sessions);
+            skip Phase 2 (AI folder assignment). Used by the built-in daily
+            background sweep so it never burns LLM tokens.
+        delete_throwaway: when False, only empty/incognito sessions are deleted.
+
+    Returns a human-readable summary of what was done.
+    """
+    from src.llm_core import llm_call_async
+    from src.task_endpoint import resolve_task_endpoint
+
+    deleted_empty, deleted_throwaway, session_list = await asyncio.to_thread(
+        _delete_throwaway_sessions, owner, delete_throwaway
+    )
+
+    if len(session_list) < 2:
+        return f"Cleaned {deleted_empty + deleted_throwaway} sessions. Too few remaining to sort."
+
+    # Background built-in sweep skips folder-sort to stay pure infra.
+    if skip_llm:
+        return f"Cleaned {deleted_empty + deleted_throwaway} sessions (folder sort skipped)."
+
+    url, model, headers = await asyncio.to_thread(resolve_task_endpoint, owner=owner or None)
+    if not url:
+        return f"Cleaned {deleted_empty + deleted_throwaway} sessions. No model endpoint available for sorting."
+
+    names_text = "\n".join(f'  "{s["id"][:8]}": "{s["name"]}"' for s in session_list)
+    prompt = (
+        "You are a session organizer. Group these chat sessions into folders by topic.\n\n"
+        "Rules:\n"
+        "- Be aggressive about grouping — put EVERY session in a folder\n"
+        "- Use short folder names (2-4 words max)\n"
+        "- Use the 8-char ID prefixes exactly as given\n"
+        "- Output ONLY raw JSON, no markdown fences, no explanation\n\n"
+        "Required JSON format:\n"
+        '{"folders": {"Folder Name": ["id_prefix1", "id_prefix2"], "Other Folder": ["id_prefix3"]}}\n\n'
+        f"Sessions (id_prefix: name):\n{{\n{names_text}\n}}"
+    )
+
+    try:
+        # 16384 (was 4096): large folder JSON + reasoning-model thinking
+        # overflowed 4096 and truncated the JSON, so it never parsed.
+        raw = await llm_call_async(url, model, [{"role": "user", "content": prompt}],
+                                   temperature=0.3, max_tokens=16384, headers=headers, timeout=120)
+    except Exception as e:
+        logger.warning(f"Auto-sort LLM call failed: {e}")
+        return f"Cleaned {deleted_empty + deleted_throwaway} sessions. Folder sort skipped (model unreachable)."
+
+    # Parse JSON from response
+    text = raw.strip()
+    result = None
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    if result is None:
+        fence_match = re.search(r'```(?:json)?\s*\n?([\s\S]*?)```', text)
+        if fence_match:
+            try:
+                result = json.loads(fence_match.group(1).strip())
+            except json.JSONDecodeError:
+                pass
+    if result is None:
+        brace_start = text.find('{')
+        brace_end = text.rfind('}')
+        if brace_start >= 0 and brace_end > brace_start:
+            try:
+                result = json.loads(text[brace_start:brace_end + 1])
+            except json.JSONDecodeError:
+                pass
+    if result is None:
+        return f"Cleaned {deleted_empty + deleted_throwaway} sessions. AI returned unparseable response."
+
+    folders = result.get("folders", {})
+    if not folders:
+        return f"Cleaned {deleted_empty + deleted_throwaway} sessions. No folder groupings found."
+
+    updated = await asyncio.to_thread(_apply_folders, session_list, folders)
+
+    folder_summary = ", ".join(f"{k} ({len(v)})" for k, v in folders.items())
+    return f"Deleted {deleted_empty} empty + {deleted_throwaway} throwaway. Sorted {updated} sessions into: {folder_summary}"

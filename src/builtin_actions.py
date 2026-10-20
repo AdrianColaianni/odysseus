@@ -14,9 +14,8 @@ from datetime import datetime
 from typing import Tuple
 
 from src.auth_helpers import owner_filter
-from core.platform_compat import IS_WINDOWS, find_bash
 from core.constants import internal_api_base
-from src.constants import DATA_DIR, DEEP_RESEARCH_DIR, TIDY_CALENDAR_STATE_FILE, EMAIL_URGENCY_CACHE_DIR, COOKBOOK_STATE_FILE
+from src.constants import DATA_DIR, DEEP_RESEARCH_DIR, EMAIL_URGENCY_CACHE_DIR, COOKBOOK_STATE_FILE
 from src.interactive_gate import wait_for_interactive_quiet
 
 logger = logging.getLogger(__name__)
@@ -591,11 +590,10 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
         import json
         import re
         from difflib import SequenceMatcher
-        from src.constants import DATA_DIR
         from src.llm_core import llm_call_async_with_fallback
         from src.memory import MemoryManager
 
-        manager = MemoryManager(DATA_DIR)
+        manager = MemoryManager()
         all_memories = manager.load_all()
 
         _owner_clean = (owner or "").strip()
@@ -874,10 +872,10 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
-# Registry: action name -> async function(owner, **kwargs) -> (result_str, success_bool)
+_LOCAL_HOSTS = ("", "localhost", "127.0.0.1", "local")
 
 
-async def _run_subprocess(argv, *, shell: bool = False, timeout: int = 120, label: str = "Command") -> Tuple[str, bool]:
+async def _run_subprocess(command: str, *, timeout: int = 120, remote: bool = False) -> Tuple[str, bool]:
     """Scheduled local work consumes the request's sealed launch ceiling."""
     from src.agent_runtime.authority import active_request_authority, ExactOperation
     from src.agent_runtime.process_resources import resolve_process_operation, bind_process_operation
@@ -886,9 +884,8 @@ async def _run_subprocess(argv, *, shell: bool = False, timeout: int = 120, labe
     authority = active_request_authority()
     if authority is None:
         return "Scheduled process launch has no server authority.", False
-    if isinstance(argv, list) and argv and argv[0] == "ssh":
+    if remote:
         return "Remote scheduled workload requires an exact external backend binding.", False
-    command = argv[-1] if isinstance(argv, list) else argv
     operation = ExactOperation.normalize("bash", command)
     if not authority.permits(operation):
         return "Scheduled launch differs from the sealed operation.", False
@@ -903,40 +900,25 @@ async def _run_subprocess(argv, *, shell: bool = False, timeout: int = 120, labe
 
 
 async def action_ssh_command(owner: str, command: str = "", host: str = "localhost", **kwargs) -> Tuple[str, bool]:
-    """Run a shell command locally or on a remote host via SSH."""
+    """Run a shell command on this host; remote hosts are refused."""
     if not command:
         return "No command specified", False
-    if host in ("localhost", "127.0.0.1", "local"):
-        if IS_WINDOWS:
-            bash = find_bash()
-            if bash:
-                return await _run_subprocess([bash, "-c", command], timeout=120, label="Command")
-            return await _run_subprocess(command, shell=True, timeout=120, label="Command")
-        return await _run_subprocess(["bash", "-c", command], timeout=120, label="Command")
-    return await _run_subprocess(
-        ["ssh", "-o", "ConnectTimeout=10", host, command], timeout=120, label="Command",
-    )
+    return await _run_subprocess(command, timeout=120, remote=host not in _LOCAL_HOSTS)
 
 
 async def action_run_script(owner: str, script: str = "", host: str = "", **kwargs) -> Tuple[str, bool]:
-    """Run a script locally, or via SSH when a host is configured."""
+    """Run a script on this host; a remote host or ODYSSEUS_SCRIPT_HOST is refused."""
     if not script:
         return "No script specified", False
     target_host = (host or os.getenv("ODYSSEUS_SCRIPT_HOST", "localhost")).strip()
-    if target_host in ("", "localhost", "127.0.0.1", "local"):
-        if IS_WINDOWS and find_bash():
-            return await _run_subprocess([find_bash(), "-c", script], timeout=300, label="Script")
-        return await _run_subprocess(script, shell=True, timeout=300, label="Script")
-    return await _run_subprocess(["ssh", target_host, script], timeout=300, label="Script")
+    return await _run_subprocess(script, timeout=300, remote=target_host not in _LOCAL_HOSTS)
 
 
 async def action_run_local(owner: str, script: str = "", **kwargs) -> Tuple[str, bool]:
     """Run a script locally (no SSH)."""
     if not script:
         return "No script specified", False
-    if IS_WINDOWS and find_bash():
-        return await _run_subprocess([find_bash(), "-c", script], timeout=300, label="Script")
-    return await _run_subprocess(script, shell=True, timeout=300, label="Script")
+    return await _run_subprocess(script, timeout=300)
 
 
 async def action_tidy_research(owner: str, **kwargs) -> Tuple[str, bool]:
@@ -981,110 +963,6 @@ async def action_tidy_research(owner: str, **kwargs) -> Tuple[str, bool]:
         return f"Removed {len(removed)} broken research file(s) of {len(files)}", True
     except Exception as e:
         logger.error(f"tidy_research action failed: {e}")
-        return str(e), False
-
-
-async def action_tidy_calendar(owner: str, **kwargs) -> Tuple[str, bool]:
-    """Find duplicate calendar events (same title + start time) and DELETE the dups,
-    keeping the oldest (first-seen) instance.
-
-    Incremental: remembers the newest `created_at` already scanned in
-    data/tidy_calendar_state.json. If no events have been added since then,
-    short-circuits. Otherwise only events newer than the watermark are candidates
-    for deletion, but they're checked against the FULL existing set so a new
-    duplicate of an old event still gets caught.
-    """
-    try:
-        import json
-        from pathlib import Path
-        from core.database import SessionLocal, CalendarEvent
-        from sqlalchemy import func
-
-        STATE_FILE = Path(TIDY_CALENDAR_STATE_FILE)
-        last_watermark = None
-        try:
-            if STATE_FILE.exists():
-                saved = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-                if saved.get("last_created_at"):
-                    last_watermark = datetime.fromisoformat(saved["last_created_at"])
-        except Exception:
-            last_watermark = None
-
-        db = SessionLocal()
-        try:
-            newest = db.query(func.max(CalendarEvent.created_at)).scalar()
-            db.query(CalendarEvent).count()
-
-            # Short-circuit: nothing new since last run
-            if last_watermark is not None and newest is not None and newest <= last_watermark:
-                raise TaskNoop(f"no new events since watermark {last_watermark.strftime('%Y-%m-%d %H:%M')}")
-
-            events = db.query(CalendarEvent).order_by(CalendarEvent.dtstart).all()
-            # Build full seen-set from events at or before the watermark (known-clean).
-            # Events after the watermark are candidates for deletion.
-            seen = {}
-            candidates = []
-            no_title = 0
-            for e in events:
-                title = (e.summary or "").strip()
-                if not title:
-                    no_title += 1
-                    continue
-                if last_watermark is None or (e.created_at and e.created_at <= last_watermark):
-                    # Known-clean region: first occurrence wins
-                    key = (title.lower(), e.dtstart)
-                    if key not in seen:
-                        seen[key] = e
-                    # If a dup exists in the known-clean region (first run, or imported later
-                    # with the same created_at), still remove it — fall through to candidate check.
-                    else:
-                        candidates.append(e)
-                else:
-                    candidates.append(e)
-
-            removed = []
-            for e in candidates:
-                title = (e.summary or "").strip()
-                key = (title.lower(), e.dtstart)
-                if key in seen:
-                    when = e.dtstart.strftime('%Y-%m-%d %H:%M') if e.dtstart else '?'
-                    removed.append(f"{title} @ {when}")
-                    db.delete(e)
-                else:
-                    seen[key] = e
-
-            if removed:
-                db.commit()
-
-            # Persist the new watermark (newest created_at among events that survive)
-            try:
-                STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-                if newest is not None:
-                    STATE_FILE.write_text(json.dumps({
-                        "last_created_at": newest.isoformat(),
-                        "last_run_at": datetime.utcnow().isoformat(),
-                        "scanned": len(events),
-                        "removed": len(removed),
-                    }, indent=2), encoding="utf-8")
-            except Exception as se:
-                logger.warning(f"tidy_calendar watermark save failed: {se}")
-
-            new_since = len(candidates)
-            parts = [f"Scanned {len(events)} event(s), {new_since} new since last run"]
-            if removed:
-                preview = "; ".join(removed[:5])
-                if len(removed) > 5:
-                    preview += f" (+{len(removed) - 5} more)"
-                parts.append(f"removed {len(removed)} duplicate(s): {preview}")
-            if no_title:
-                parts.append(f"{no_title} untitled (kept)")
-            if not removed and not no_title:
-                parts.append("no duplicates")
-            return " · ".join(parts), True
-        finally:
-            db.close()
-    except Exception as e:
-        logger.error(f"tidy_calendar action failed: {e}")
         return str(e), False
 
 
@@ -1148,7 +1026,7 @@ def _email_task_account_id(kwargs) -> str | None:
 async def action_summarize_emails(owner: str, **kwargs) -> Tuple[str, bool]:
     """Run one pass of email summary background processing."""
     try:
-        from routes.email_pollers import _run_auto_summarize_once
+        from routes.email.email_pollers import _run_auto_summarize_once
         result = await _run_auto_summarize_once(
             do_summary=True,
             do_reply=False,
@@ -1169,7 +1047,7 @@ async def action_summarize_emails(owner: str, **kwargs) -> Tuple[str, bool]:
 async def action_draft_email_replies(owner: str, **kwargs) -> Tuple[str, bool]:
     """Run one pass of AI reply drafting."""
     try:
-        from routes.email_pollers import _run_auto_summarize_once
+        from routes.email.email_pollers import _run_auto_summarize_once
         result = await _run_auto_summarize_once(
             do_summary=False,
             do_reply=True,
@@ -1204,7 +1082,7 @@ async def action_email_auto_translate(owner: str, **kwargs) -> Tuple[str, bool]:
         from datetime import datetime as _dt, timedelta as _td
 
         from core.database import EmailAccount as _EA, SessionLocal as _SL
-        from routes.email_helpers import (
+        from routes.email.email_helpers import (
             SCHEDULED_DB,
             _decode_header,
             _email_cache_owner_clause,
@@ -1683,17 +1561,12 @@ async def action_classify_events(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
-async def action_ping_events(owner: str, **kwargs) -> Tuple[str, bool]:
-    """Calendar event reminders are now dispatched by Notes."""
-    raise TaskNoop("calendar event reminders are handled by Notes")
-
-
 async def action_extract_email_events(owner: str, **kwargs) -> Tuple[str, bool]:
     """Scan recent emails for booking confirmations / meetings / events
     and auto-add them to the calendar."""
     import asyncio as _aio
     try:
-        from routes.email_pollers import _run_auto_summarize_once
+        from routes.email.email_pollers import _run_auto_summarize_once
         account_id = _email_task_account_id(kwargs)
         attempts = [
             ("3d window, 3 emails", 3, 3, 240),
@@ -1763,7 +1636,7 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
         import email as _email_mod
         import asyncio as _aio
         from datetime import datetime as _dt, timedelta as _td
-        from routes.email_helpers import _email_cache_owner_clause, _imap_connect, SCHEDULED_DB
+        from routes.email.email_helpers import _email_cache_owner_clause, _imap_connect, SCHEDULED_DB
         from src.llm_core import llm_call_async_with_fallback
 
         # 1. Pull recent UIDs + From headers cheaply (header-only fetch).
@@ -1965,7 +1838,7 @@ async def action_daily_brief(owner: str, **kwargs) -> Tuple[str, bool]:
         import json as _json
 
         from core.database import SessionLocal, CalendarEvent, CalendarCal, Note
-        from routes.email_helpers import _imap_connect, _decode_header
+        from routes.email.email_helpers import _imap_connect, _decode_header
 
         # ----- Calendar: today's events -----
         today = _dt.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1997,14 +1870,12 @@ async def action_daily_brief(owner: str, **kwargs) -> Tuple[str, bool]:
         finally:
             db.close()
 
-        # ----- Email: unread count + top 5 inbox subjects (best-effort) -----
-        # Direct IMAP: cheaper than the full _list_emails_sync helper and
-        # avoids the module/import coupling that broke this once already.
+        # Direct IMAP: cheaper than the full _list_emails_sync helper.
         unread_count = 0
         recent_subjects: list[tuple[str, str]] = []
         try:
             import email as _email
-            conn = _imap_connect(None)
+            conn = _imap_connect(None, owner=owner)
             try:
                 conn.select("INBOX", readonly=True)
                 status, data = conn.uid("SEARCH", None, "UNSEEN")
@@ -2094,7 +1965,8 @@ async def action_test_skills(owner: str, **kwargs) -> Tuple[str, bool]:
     try:
         from services.memory.skills import SkillsManager
         from src.constants import DATA_DIR
-        from routes.skills_routes import _run_skill_test_once, _skill_test_task
+        from services.skills.dependencies import default_dependencies
+        from services.skills.prompts import _skill_test_task
 
         # #3 SCOPE GUARD: refuse to run on a None/empty owner — otherwise
         # `sm.load(owner=None)` returns every user's skills and we'd cross-
@@ -2166,7 +2038,7 @@ async def action_test_skills(owner: str, **kwargs) -> Tuple[str, bool]:
                 continue
             task = _skill_test_task(skill)
             try:
-                transcript, verdict = await _run_skill_test_once(md, task, url, model, headers, owner)
+                transcript, verdict = await default_dependencies().run_test_once(md, task, url, model, headers, owner)
                 v = (verdict or {}).get("verdict") or "unknown"
                 tally[v] += 1
                 summary = (verdict or {}).get("summary") or ""
@@ -2224,9 +2096,9 @@ async def action_audit_skills(owner: str, **kwargs) -> Tuple[str, bool]:
     try:
         from services.memory.skills import SkillsManager
         from src.constants import DATA_DIR
-        from routes.skills_routes import (
-            _resolve_audit_models, _run_audit_all_job, _skill_audit_jobs,
-        )
+        from services.skills.audit_workflow import _skill_audit_jobs
+        from services.skills.dependencies import default_dependencies
+        from services.skills.model_selection import resolve_audit_models as _resolve_audit_models
 
         if not owner:
             return "audit_skills requires an owner — refusing to run without scope.", False
@@ -2278,7 +2150,7 @@ async def action_audit_skills(owner: str, **kwargs) -> Tuple[str, bool]:
             ],
             "started": _time.time(), "cancel": False,
         }
-        await _run_audit_all_job(key, sm, names, url, model, headers, teacher, owner, workload="background")
+        await default_dependencies().run_batch(key, sm, names, url, model, headers, teacher, owner, workload="background")
         job = _skill_audit_jobs.get(key, {})
         if job.get("unavailable"):
             raise TaskDeferred("Skill audit model unavailable; retrying later", delay_seconds=20 * 60)
@@ -2305,7 +2177,6 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
     """
     try:
         import json as _json
-        import time as _time
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
         from pathlib import Path as _P
         from core.database import SessionLocal as _SL, Note as _N
@@ -2316,8 +2187,8 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
         delivery_key = f"{channel}_sent" if external_channel else "browser_sent"
 
         # Per-owner state file so cache-pruning doesn't cross-delete other
-        # users' entries (review C4). Legacy path kept as fallback so a
-        # single-user install (empty owner) doesn't lose its history.
+        # users' entries. Legacy path kept as fallback so a single-user
+        # install (empty owner) doesn't lose its history.
         _owner_slug = "".join(c if (c.isalnum() or c in "-_.@") else "_" for c in (owner or "default"))
         STATE = _P(DATA_DIR) / f"note_pings_{_owner_slug}.json"
         STATE.parent.mkdir(parents=True, exist_ok=True)
@@ -2421,7 +2292,7 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
                         pass
                 body = "\n\n".join(p for p in body_parts if p) or title
                 try:
-                    from routes.note_routes import dispatch_reminder
+                    from routes.note.note_routes import dispatch_reminder
                     result = await dispatch_reminder(
                         title=title, note_body=body, note_id=n.id,
                         owner=n.owner or owner or "",
@@ -2484,14 +2355,12 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
         import json as _json
         import email as _email_mod
         import asyncio as _aio
-        import os as _os
         import re as _re
         import time as _time
-        import httpx
         from datetime import datetime as _dt, timedelta as _td
         from pathlib import Path as _P
         from core.database import SessionLocal as _SL, EmailAccount as _EA
-        from routes.email_helpers import _imap_connect, _decode_header
+        from routes.email.email_helpers import _imap_connect, _decode_header
         from src.llm_core import llm_call_async_with_fallback
 
         # Per-owner state file so multi-user runs don't clobber each other's
@@ -2677,7 +2546,7 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                 """Sync IMAP work runs in a thread."""
                 results = []
                 scan_complete = True
-                conn = _imap_connect(account.id)
+                conn = _imap_connect(account.id, owner=owner)
                 try:
                     select_status, _select_data = conn.select("INBOX", readonly=True)
                     if select_status != "OK":
@@ -2845,8 +2714,6 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                 )
                 # Keep deterministic handling for clearly categorized mail,
                 # but let ambiguous messages reach the configured task model.
-                # The unconditional continue here previously made the LLM
-                # classifier below unreachable for every email.
                 if verdict.get("tags") or verdict.get("reason") != "categorized by email metadata":
                     cache.setdefault("uids", {})[item["uid"]] = verdict
                     per_uid_scores[key] = verdict
@@ -2987,7 +2854,7 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
         # classified items; message_id lives on the cached verdict so this is cheap.
         try:
             import sqlite3 as _sql3
-            from routes.email_helpers import SCHEDULED_DB, _init_scheduled_db
+            from routes.email.email_helpers import SCHEDULED_DB, _init_scheduled_db
             from datetime import datetime as _dt2
             _init_scheduled_db()
             _conn = _sql3.connect(SCHEDULED_DB)
@@ -3124,7 +2991,7 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
         async def _dispatch_urgency_reminder(reminder_keys):
             # Call dispatch_reminder directly: a scheduler has no browser
             # session cookie with which to call the HTTP endpoint.
-            from routes.note_routes import dispatch_reminder
+            from routes.note.note_routes import dispatch_reminder
             title, body = _urgency_reminder_payload(reminder_keys)
             return await dispatch_reminder(
                 title=title,
@@ -3313,10 +3180,8 @@ async def action_cookbook_serve(
     import time as _time
     import httpx
     from pathlib import Path
-    from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
     from core.atomic_io import atomic_write_json
 
-    headers = {INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN}
     try:
         cfg = json.loads(command or "{}")
     except Exception:
@@ -3550,8 +3415,6 @@ BUILTIN_ACTIONS = {
     "email_auto_translate": action_email_auto_translate,
     "extract_email_events": action_extract_email_events,
     "classify_events": action_classify_events,
-    # ping_events removed from the user-facing registry. Calendar reminders
-    # are represented as Notes, so note pings are the single dispatch path.
     "daily_brief": action_daily_brief,
     "learn_sender_signatures": action_learn_sender_signatures,
     "ssh_command": action_ssh_command,
@@ -3569,7 +3432,7 @@ BUILTIN_ACTION_INFO = {
     "tidy_sessions": "Clean up empty chat sessions and auto-sort into folders",
     "tidy_documents": "Remove junk/empty documents",
     "consolidate_memory": "Remove duplicate memories",
-    "tidy_research": "Remove orphaned research files (sessions that were deleted)",
+    "tidy_research": "Remove broken (empty or unparseable) research files",
     "summarize_emails": "Pre-generate AI summaries for new inbox emails",
     "draft_email_replies": "Pre-draft AI reply suggestions for new inbox emails",
     "email_auto_translate": "Detect foreign-language emails and cache translated text for the email reader",
@@ -3577,8 +3440,8 @@ BUILTIN_ACTION_INFO = {
     "classify_events": "Tag upcoming events with importance (low/normal/high/critical) and type (work/health/travel/etc.); colors them too",
     "daily_brief": "Build a morning digest: today's calendar, unread email count + top senders, active todos",
     "learn_sender_signatures": "LLM learns each sender's signature from 3+ of their recent emails; cached per address so future renders fold sigs reliably without heuristics",
-    "ssh_command": "Run a shell command on a local or remote host",
-    "run_script": "Run a script locally or on ODYSSEUS_SCRIPT_HOST",
+    "ssh_command": "Run a shell command on this host",
+    "run_script": "Run a script on this host",
     "test_skills": "Run the per-skill Test on every skill: agent run + LLM judge → records verdict on the skill (pass/needs_work/fail/inconclusive). Advisory only — never rewrites or demotes anything.",
     "audit_skills": "Audit unaudited skills after enough new skills are added: test, narrow metadata, self-edit/retry, optional teacher rewrite, tag duplicates/trivial skills, and publish/draft using the auto-approve threshold.",
     "check_email_urgency": "Scan unread emails hourly, tag urgent/reply-soon/newsletter/marketing/spam, and send a reminder when a new email needs a fast reply.",

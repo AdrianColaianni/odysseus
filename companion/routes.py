@@ -1,20 +1,7 @@
-"""Companion bridge — /api/companion/*.
+"""Companion bridge: /api/companion/*.
 
-A thin, additive layer so a LAN client (e.g. a phone) can discover what a server
-offers and pair to it, without duplicating any LLM logic.
-
-Auth is enforced globally by AuthMiddleware (app.py), so reaching a handler here
-means the caller is authenticated by either a cookie session or a Bearer `ody_`
-API token. Ping/info accept either credential type, models requires a chat-
-scoped API token for bearer callers, and the pairing endpoints are admin-cookie
-only.
-
-Pairing CSRF posture: minting happens ONLY on POST. The session cookie is
-SameSite=Lax (routes/auth_routes.py), which a browser does not send on a
-cross-site POST, so an admin's cookie can't be used by a malicious page to mint
-a token -- the same protection the existing POST /api/tokens relies on. Minting
-on a GET would be unsafe (Lax cookies ride top-level GET navigations), so GET
-/pair only renders a form.
+Pairing mints only on POST: the SameSite=Lax session cookie rides top-level GET
+navigations but not cross-site POSTs, so GET /pair only renders a form.
 """
 
 import html
@@ -23,60 +10,16 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from core.middleware import require_admin
-from src.auth_helpers import _auth_disabled, get_current_user
+from routes.api_token_routes import mint_api_token
+from src.auth_helpers import _auth_disabled, effective_user, get_current_user, require_api_token_scope
+from src.constants import APP_PORT
 
 from companion import pairing as _pairing
 
 
-def token_owner(request: Request) -> str | None:
-    """The real owner to attribute a request to, for read-scoping.
-
-    Cookie sessions resolve to the logged-in username via get_current_user.
-    Bearer-token callers come through as the sandboxed pseudo-user "api"; their
-    real owner is stamped on request.state.api_token_owner by the auth
-    middleware. Returns None when no owner can be resolved.
-    """
-    if getattr(request.state, "api_token", False):
-        return getattr(request.state, "api_token_owner", None)
-    return get_current_user(request)
-
-
 def owner_can_see(row_owner, owner) -> bool:
-    """Owner-scope rule for read endpoints.
-
-    A caller sees a row when it is their own, or when it is a legacy null-owner
-    ("shared") row. A caller must NEVER see another owner's row. Mirrors the
-    `owner_filter` rule used elsewhere, expressed as a pure predicate so it can
-    be tested directly and used as a defensive in-Python check alongside the
-    SQL filter.
-    """
+    """A caller sees its own rows and legacy null-owner rows, never another owner's."""
     return row_owner is None or row_owner == owner
-
-
-def require_models_scope(request: Request) -> None:
-    """Require the companion chat scope for bearer-token model inventory."""
-    if not getattr(request.state, "api_token", False):
-        return
-    scopes = getattr(request.state, "api_token_scopes", None) or []
-    if isinstance(scopes, str):
-        scopes = [scope.strip() for scope in scopes.split(",")]
-    scope_set = {str(scope).strip() for scope in scopes if str(scope).strip()}
-    if _pairing.COMPANION_SCOPE not in scope_set:
-        raise HTTPException(403, "API token requires chat scope")
-
-
-def mint_pairing_token(owner: str, invalidate=None) -> tuple[str, str]:
-    """Mint a pairing token AND invalidate the auth middleware's in-memory token
-    cache, so the new token is accepted on the very next request without a server
-    restart. Returns (token_id, raw_token); the raw token is shown once.
-
-    `invalidate` is the app's request.app.state.invalidate_token_cache callable
-    (passed in so this stays a pure, testable unit).
-    """
-    token_id, raw_token = _pairing.mint_token(owner)
-    if callable(invalidate):
-        invalidate()
-    return token_id, raw_token
 
 
 def setup_companion_routes() -> APIRouter:
@@ -102,28 +45,23 @@ def setup_companion_routes() -> APIRouter:
         return {
             "name": "odysseus",
             "version": APP_VERSION,
-            "owner": token_owner(request),
+            "owner": effective_user(request),
             "capabilities": {"chat": True, "streaming": True},
         }
 
     @router.get("/models")
     def models(request: Request):
-        """LLM model endpoints the CALLER can use.
+        """LLM endpoints the caller can use, never api_key material.
 
-        The stock /api/models route scopes to get_current_user, which for a
-        bearer token is the sandboxed pseudo-user "api" (owns nothing). Here we
-        scope to the token's real owner instead, plus legacy null-owner shared
-        rows -- the same rule as owner_filter. Explicit auth-disabled mode keeps
-        the stock route's single-user all-endpoints view. Read-only; never
-        returns api_key material.
+        The stock /api/models scopes a bearer caller to the pseudo-user "api",
+        which owns nothing, so this scopes to the token's real owner instead.
         """
-        require_models_scope(request)
+        owner = require_api_token_scope(request, _pairing.COMPANION_SCOPE)
         import json as _json
 
         from core.database import SessionLocal, ModelEndpoint
         from src.endpoint_resolver import build_chat_url
 
-        owner = token_owner(request)
         single_user_mode = (
             owner is None
             and not getattr(request.state, "api_token", False)
@@ -204,9 +142,8 @@ def setup_companion_routes() -> APIRouter:
             configured_origin = _pairing.configured_companion_origin()
         except ValueError as exc:
             raise HTTPException(500, str(exc)) from None
-        owner = get_current_user(request)
-        invalidate = getattr(request.app.state, "invalidate_token_cache", None)
-        token_id, raw_token = mint_pairing_token(owner, invalidate)
+        token_id, raw_token = mint_api_token(get_current_user(request), "companion", _pairing.COMPANION_SCOPE)
+        request.app.state.invalidate_token_cache()
 
         if configured_origin:
             host, port = configured_origin
@@ -214,7 +151,7 @@ def setup_companion_routes() -> APIRouter:
         else:
             hosts = _pairing.lan_ip_candidates()
             host = hosts[0] if hosts else "127.0.0.1"
-            port = request.url.port or _pairing.default_port()
+            port = request.url.port or APP_PORT
         payload = _pairing.pairing_payload(host, port, raw_token)
         qr = _pairing.pairing_qr_png_data_uri(payload)
         qr_ok = bool(qr and qr.startswith("data:image/png;base64,"))

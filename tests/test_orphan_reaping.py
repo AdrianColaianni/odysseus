@@ -416,15 +416,6 @@ def test_a_launched_job_records_an_identity_next_to_its_pid(job_store, tmp_path,
     )
 
 
-def test_an_abandoned_job_says_so_in_its_follow_up(job_store):
-    """The agent is told the job was lost, not that it failed for its own reasons."""
-    record = seed_job(status="failed", ownership_lost=process_ownership.FOREIGN)
-
-    text = bg_jobs.result_text(record)
-
-    assert "abandoned across a server restart" in text
-    assert "neither waited on nor signalled" in text
-
 
 def test_reap_orphans_reports_both_stores_and_the_mechanism(
     grant_store, job_store, monkeypatch

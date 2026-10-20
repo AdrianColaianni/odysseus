@@ -6,7 +6,6 @@ leaves the file truncated or empty — the user loses every saved preset. The
 save now goes through core.atomic_io.atomic_write_json (tmp file + os.replace),
 which the rest of the codebase already uses for JSON state files.
 """
-import inspect
 import json
 
 from src.preset_manager import PresetManager
@@ -16,14 +15,8 @@ class _Unserializable:
     """json.dump cannot serialize this — stands in for a mid-write failure."""
 
 
-def test_save_uses_atomic_write_json():
-    src = inspect.getsource(PresetManager.save)
-    assert "atomic_write_json" in src, "save() must persist via atomic_write_json"
-    assert "open(" not in src, "save() must not write presets.json with a plain open('w')"
-
-
 def test_failed_save_does_not_truncate_existing_file(tmp_path):
-    mgr = PresetManager(str(tmp_path))
+    mgr = PresetManager(str(tmp_path / "presets.json"))
     assert mgr.save({"custom": {"name": "keep"}}) is True
     before = (tmp_path / "presets.json").read_text(encoding="utf-8")
 
@@ -36,15 +29,15 @@ def test_failed_save_does_not_truncate_existing_file(tmp_path):
 
 
 def test_save_round_trip(tmp_path):
-    mgr = PresetManager(str(tmp_path))
+    mgr = PresetManager(str(tmp_path / "presets.json"))
     assert mgr.save({"custom": {"name": "X", "temperature": 0.5}}) is True
 
-    reloaded = PresetManager(str(tmp_path))
+    reloaded = PresetManager(str(tmp_path / "presets.json"))
     assert reloaded.presets["custom"]["name"] == "X"
 
 
 def test_custom_persona_memory_follows_persona_lifecycle(tmp_path):
-    mgr = PresetManager(str(tmp_path))
+    mgr = PresetManager(str(tmp_path / "presets.json"))
     assert mgr.save({
         "custom": {
             "name": "Old",

@@ -38,7 +38,7 @@ def _install_chat_helpers_stubs(monkeypatch):
         "core.models",
         "core.database",
         "routes.prefs_routes",
-        "routes.research_routes",
+        "routes.research.research_routes",
         "src.llm_core",
         "src.context_compactor",
         "src.model_context",
@@ -83,6 +83,7 @@ def _build_context_harness(monkeypatch, chat_helpers, history):
     monkeypatch.setattr(chat_helpers, "normalize_model_id", lambda endpoint_url, model, **kwargs: None)
     monkeypatch.setattr(chat_helpers, "maybe_compact", fake_maybe_compact)
     monkeypatch.setattr(chat_helpers, "trim_for_context", lambda messages, context_length: messages)
+    monkeypatch.setattr(chat_helpers, "estimate_tokens", lambda messages: len(messages))
 
     sess = SimpleNamespace(
         endpoint_url="http://192.168.1.50:1234/v1",
@@ -110,9 +111,8 @@ def _build_context_harness(monkeypatch, chat_helpers, history):
     return sess, request, chat_handler, chat_processor
 
 
-def _consolidated_system_text(messages):
-    """Mirror llm_core's "consolidate system messages into one" step so the
-    test asserts on exactly what gets sent over the wire."""
+def _system_text(messages):
+    """Every system message's text, so identical text means an identical cached prefix."""
     return "\n\n".join(m.get("content") or "" for m in messages if m.get("role") == "system")
 
 
@@ -153,8 +153,8 @@ async def test_static_system_prefix_is_byte_identical_across_turns(monkeypatch):
         message="And tomorrow?", session_id="session-A",
     )
 
-    sys1 = _consolidated_system_text(ctx1.messages)
-    sys2 = _consolidated_system_text(ctx2.messages)
+    sys1 = _system_text(ctx1.messages)
+    sys2 = _system_text(ctx2.messages)
 
     # The static system prefix is byte-identical even though the wall clock
     # advanced between the two turns and the conversation grew.
@@ -211,8 +211,8 @@ async def test_changed_instructions_do_change_the_system_prefix(monkeypatch):
         message="hi again", session_id="session-B",
     )
 
-    sys1 = _consolidated_system_text(ctx1.messages)
-    sys2 = _consolidated_system_text(ctx2.messages)
+    sys1 = _system_text(ctx1.messages)
+    sys2 = _system_text(ctx2.messages)
     assert sys1 != sys2
     assert "NEW INSTRUCTION" in sys2 and "NEW INSTRUCTION" not in sys1
 

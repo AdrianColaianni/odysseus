@@ -1,4 +1,3 @@
-# src/chat_handler.py
 """Handler for chat endpoint operations."""
 import os
 import asyncio
@@ -8,7 +7,6 @@ from typing import Dict, List, Optional, Any
 from fastapi import HTTPException
 
 from src.constants import (
-    MAX_CONTEXT_MESSAGES,
     DEFAULT_TEMPERATURE,
     DEFAULT_MAX_TOKENS,
     UPLOAD_DIR,
@@ -116,10 +114,6 @@ class ChatHandler:
 
         logger.info(f"Preset {preset_id}: temp={temperature}, max_tokens={max_tokens}")
         return temperature, max_tokens, preset_system_prompt, character_name, persona_memory, persona_memory_schema
-
-    def enhance_message_if_needed(self, message: str) -> str:
-        """CoT enhancement disabled — modern models reason natively."""
-        return message
 
     # ------------------------------------------------------------------
     # Preprocessing — shared between /api/chat and /api/chat_stream
@@ -266,7 +260,9 @@ class ChatHandler:
                             except Exception:
                                 vl_desc = None
                         if not vl_desc:
-                            vl_result = analyze_image_with_vl_result(file_info["path"], owner=owner)
+                            vl_result = await asyncio.to_thread(
+                                analyze_image_with_vl_result, file_info["path"], owner=owner
+                            )
                             vl_desc = vl_result.get("text", "")
                             vl_model = vl_result.get("model", "")
                             if vl_desc and not vl_desc.startswith("["):
@@ -327,10 +323,6 @@ class ChatHandler:
         if not session.name:
             derived = " ".join(message.split()[:5])
             session.name = "Chat: " + derived if derived else "Chat"
-
-    def trim_history_if_needed(self, session):
-        if len(session.history) > MAX_CONTEXT_MESSAGES:
-            session.history = session.history[-MAX_CONTEXT_MESSAGES:]
 
     async def handle_memory_command(self, session, message: str) -> Optional[str]:
         """Process inline memory commands. Returns response string or None."""

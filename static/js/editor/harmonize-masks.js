@@ -20,6 +20,8 @@
  * @typedef {{ visible: boolean, id: string, canvas: HTMLCanvasElement, offset: {x: number, y: number} }} HarmLayer
  */
 
+import { makeCanvas } from './placed-layer.js';
+
 /**
  * Build a binary alpha mask = the UNION of every non-base visible
  * layer's pixels. Returns null when fewer than 2 visible layers exist
@@ -36,8 +38,7 @@ export function layerUnionAlpha(w, h, layers) {
   const visible = layers.filter(l => l.visible);
   if (visible.length < 2) return null;
   const bgId = visible[0].id;
-  const alphaCanvas = document.createElement('canvas');
-  alphaCanvas.width = w; alphaCanvas.height = h;
+  const alphaCanvas = makeCanvas(w, h);
   const actx = alphaCanvas.getContext('2d');
   let hasFg = false;
   for (const layer of visible) {
@@ -48,8 +49,7 @@ export function layerUnionAlpha(w, h, layers) {
   }
   if (!hasFg) return null;
   const src = actx.getImageData(0, 0, w, h);
-  const bin = document.createElement('canvas');
-  bin.width = w; bin.height = h;
+  const bin = makeCanvas(w, h);
   const bctx = bin.getContext('2d');
   const binImg = bctx.createImageData(w, h);
   let any = false;
@@ -73,8 +73,7 @@ export function layerUnionAlpha(w, h, layers) {
 export function seamMask(w, h, layers, featherPx = 12) {
   const bin = layerUnionAlpha(w, h, layers);
   if (!bin) return null;
-  const blur = document.createElement('canvas');
-  blur.width = w; blur.height = h;
+  const blur = makeCanvas(w, h);
   const blctx = blur.getContext('2d');
   blctx.filter = `blur(${featherPx}px)`;
   blctx.drawImage(bin, 0, 0);
@@ -90,8 +89,7 @@ export function seamMask(w, h, layers, featherPx = 12) {
     mask.data[i + 3] = 255;
   }
   blctx.putImageData(mask, 0, 0);
-  const soft = document.createElement('canvas');
-  soft.width = w; soft.height = h;
+  const soft = makeCanvas(w, h);
   const sctx = soft.getContext('2d');
   sctx.filter = `blur(${Math.max(2, Math.floor(featherPx / 4))}px)`;
   sctx.drawImage(blur, 0, 0);
@@ -107,8 +105,7 @@ export function seamMask(w, h, layers, featherPx = 12) {
 export function layerBodyMask(w, h, layers, featherPx = 12) {
   const bin = layerUnionAlpha(w, h, layers);
   if (!bin) return null;
-  const soft = document.createElement('canvas');
-  soft.width = w; soft.height = h;
+  const soft = makeCanvas(w, h);
   const sctx = soft.getContext('2d');
   sctx.filter = `blur(${featherPx}px)`;
   sctx.drawImage(bin, 0, 0);

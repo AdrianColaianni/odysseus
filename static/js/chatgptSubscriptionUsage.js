@@ -30,7 +30,7 @@ function _defaultEsc(text) {
     .replace(/'/g, '&#39;');
 }
 
-export function formatDuration(totalSeconds) {
+function _formatDuration(totalSeconds) {
   const secs = _num(totalSeconds);
   if (secs === null) return '';
   if (secs <= 0) return 'now';
@@ -50,10 +50,10 @@ export function formatResetIn(resetsAt, nowSeconds) {
   if (now === null) return '';
   const delta = at - now;
   if (delta <= 0) return 'resets now';
-  return `resets in ${formatDuration(delta)}`;
+  return `resets in ${_formatDuration(delta)}`;
 }
 
-export function formatPercent(value) {
+function _formatPercent(value) {
   const n = _clampPercent(value);
   if (n === null) return '';
   const rounded = Math.round(n);
@@ -83,8 +83,8 @@ function _windowViewModel(win, nowSeconds) {
     name: typeof win.name === 'string' && win.name ? win.name : 'LIMIT',
     usedPercent: used,
     remainingPercent: remaining,
-    usedLabel: used === null ? 'usage unknown' : `${formatPercent(used)} used`,
-    remainingLabel: remaining === null ? '' : `${formatPercent(remaining)} remaining`,
+    usedLabel: used === null ? 'usage unknown' : `${_formatPercent(used)} used`,
+    remainingLabel: remaining === null ? '' : `${_formatPercent(remaining)} remaining`,
     windowMinutes,
     resetsAt,
     resetLabel: formatResetIn(resetsAt, nowSeconds),
@@ -237,14 +237,3 @@ export function accountTitle(ep) {
   if (ep.account_label) return `ChatGPT · ${ep.account_label}`;
   return ep.name || 'ChatGPT Subscription';
 }
-
-export default {
-  buildUsageViewModel,
-  renderUsageCardHtml,
-  formatResetIn,
-  formatDuration,
-  formatPercent,
-  planDisplayName,
-  isChatgptSubscriptionEndpoint,
-  accountTitle,
-};

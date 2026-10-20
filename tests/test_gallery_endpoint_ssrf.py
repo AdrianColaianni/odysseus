@@ -1,44 +1,63 @@
-"""Regression: the gallery image-edit proxies must validate a client-supplied
-``_endpoint`` through ``check_outbound_url`` before fetching it server-side.
+"""The gallery image-edit proxies must never fetch a client-supplied ``_endpoint``.
 
-``POST /api/image/harmonize`` and ``POST /api/image/inpaint`` accept an
-``_endpoint`` field in the request body and then issue outbound httpx POSTs to
-it. With no validation this is a server-side request forgery primitive: a caller
-can point ``_endpoint`` at ``http://169.254.169.254/`` (cloud instance metadata)
-or at internal/loopback services the server can reach but the caller cannot.
-
-The analogous user-supplied endpoint in ``routes/embedding_routes.py`` already
-goes through ``check_outbound_url``; these two routes were missing the same
-guard. This test pins the guard in place and confirms the validator rejects the
-metadata range.
+``POST /api/image/harmonize`` and ``POST /api/image/inpaint`` take an
+``_endpoint`` in the body. It must pass the outbound URL check and match a
+registered endpoint, so a caller cannot aim the server at cloud metadata or an
+unregistered host.
 """
-import ast
-from pathlib import Path
+import asyncio
 
-SRC = Path(__file__).resolve().parent.parent / "routes" / "gallery" / "gallery_routes.py"
+import httpx
+import pytest
+from fastapi import HTTPException
 
-
-def _function_source(src_text: str, func_name: str) -> str:
-    tree = ast.parse(src_text)
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
-            return ast.get_source_segment(src_text, node)
-    raise AssertionError(f"{func_name} not found in {SRC}")
+import routes.gallery.gallery_routes as gallery
+from tests.helpers.routes import route_endpoint
 
 
-def test_endpoint_validated_before_fetch():
-    src = SRC.read_text()
-    for func in ("harmonize_image", "inpaint_proxy"):
-        body = _function_source(src, func)
-        assert "check_outbound_url" in body, (
-            f"{func} must validate the client-supplied _endpoint via "
-            "check_outbound_url before issuing an outbound request"
-        )
+class _Request:
+    def __init__(self, body):
+        self._body = body
+
+    async def json(self):
+        return dict(self._body)
 
 
-def test_url_safety_blocks_metadata_endpoint():
-    # The guard is only as strong as the checker: confirm the link-local cloud
-    # metadata address is rejected even with private IPs otherwise allowed.
-    from src.url_safety import check_outbound_url
-    ok, _ = check_outbound_url("http://169.254.169.254/latest/meta-data")
-    assert ok is False
+class _Db:
+    def close(self):
+        pass
+
+
+@pytest.fixture
+def proxies(monkeypatch):
+    monkeypatch.setattr(gallery, "require_privilege", lambda *args: "alice")
+    monkeypatch.setattr(gallery, "SessionLocal", _Db)
+
+    def no_outbound(**kwargs):
+        raise AssertionError("outbound request made for a rejected endpoint")
+
+    monkeypatch.setattr(httpx, "AsyncClient", no_outbound)
+    router = gallery.setup_gallery_routes()
+    return [
+        route_endpoint(router, "/api/image/inpaint", "POST"),
+        route_endpoint(router, "/api/image/harmonize", "POST"),
+    ]
+
+
+def _status(endpoint, base):
+    body = {"_endpoint": base, "_model": "m", "image": "aGk=", "mask": "aGk=", "prompt": "p"}
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(endpoint(_Request(body)))
+    return exc.value.status_code
+
+
+def test_proxies_reject_metadata_endpoint_before_any_fetch(proxies):
+    for endpoint in proxies:
+        assert _status(endpoint, "http://169.254.169.254/latest/meta-data") == 400
+
+
+def test_proxies_reject_unregistered_endpoint(proxies, monkeypatch):
+    monkeypatch.setattr("src.url_safety.check_outbound_url", lambda *args, **kwargs: (True, ""))
+    monkeypatch.setattr(gallery, "_visible_image_endpoint_for_base", lambda *args: None)
+    for endpoint in proxies:
+        assert _status(endpoint, "https://unregistered.test/v1") == 403

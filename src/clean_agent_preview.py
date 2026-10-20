@@ -3,18 +3,15 @@ import asyncio
 import copy
 import calendar as month_calendar
 import base64
-import importlib.util
 import io
 import json
 import logging
 import os
 import re
-import sys
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from functools import lru_cache
 from pathlib import Path
 
 import httpx
@@ -41,7 +38,7 @@ from src.text_scanning import (
 from src.turn_contract import (
     _REQUEST_PREFIX,
     calendar_retiming_request,
-    FAMILY_TOOLS, broad_web_briefing_request, required_read_operation_for_request,
+    FAMILY_TOOLS, broad_web_briefing_request,
     targets_bound_editor_request, inline_text_transformation, editor_request_instructions,
     _bound_editor_requests_web_verification, scheduled_automation_request, creation_container_tool,
 )
@@ -52,8 +49,8 @@ from src.model_profiles import (
     uses_odysseus_progressive_thinking,
 )
 
-ENDPOINT_ID = 'cleanv3'
 MODE = COMPACT_PREVIEW_MODE
+logger = logging.getLogger(__name__)
 
 
 class ProviderStreamError(Exception):
@@ -147,25 +144,17 @@ def _public_preview_tool_error(exc, *, execution_attempted=False):
     return _PUBLIC_PREVIEW_TOOL_ERRORS.get(detail, 'The tool call could not be validated. Check its arguments and retry.')
 
 
-# Native unattended workspaces routinely require several inspections followed
-# by several artifact writes.  The interactive preview keeps its six-call
-# limit below; this larger budget applies only after server-side validation of
-# a confined native workspace. Duplicate-call suppression still bounds loops.
+# Native workspace jobs inspect and write many times; applies only to a server-validated confined workspace.
 NATIVE_TOOL_CALL_LIMIT = 32
 NATIVE_ROUND_LIMIT = 64
-# Interactive turns still have duplicate-call and round guards, but legitimate
-# multi-step work should not be cut off after only a handful of executions.
-# Keep browser workflows proportionally larger because navigation, inspection,
-# and interaction are separate observable actions.
+# Browser work gets more because navigation, inspection, and interaction are separate actions.
 INTERACTIVE_TOOL_CALL_LIMIT = 18
 INTERACTIVE_BROWSER_TOOL_CALL_LIMIT = 30
 # "Unlimited" as a comparable int: every call site tests `calls < limit`, so a
 # sentinel avoids threading an Optional through the whole preview loop.
 UNLIMITED_TOOL_CALL_LIMIT = 1_000_000
 INTERACTIVE_ROUND_LIMIT = 8
-# Multi-record research tasks routinely need several search/fetch/inspection
-# pairs before an artifact can be grounded. Preserve twelve calls for writing,
-# verification, and final recovery within the bounded 32-call native budget.
+# Leaves twelve of the 32 native calls for writing, verification, and recovery.
 NATIVE_ARTIFACT_RESEARCH_LIMIT = 20
 SAME_TARGET_WRITE_LIMIT = 3
 ARTIFACT_RESEARCH_TOOLS = frozenset({
@@ -210,14 +199,9 @@ PREVIEW_TOOLS = (
     READ_TOOLS | SAFE_WRITE_TOOLS | EXPLICIT_EXECUTE_TOOLS | SAFE_UI_TOOLS
     | BROKERED_JOB_TOOLS | CONTRACT_REQUIRED_TOOLS | CONTRACT_CORE_TOOLS
 )
-# Keep a small recovery-capable surface on every interactive compact agent
-# turn. Routing still adds domain tools, while policy and action guards remain
-# authoritative for execution. Use the same definition as contract resolution.
+# Same definition as contract resolution.
 INTERACTIVE_CORE_TOOLS = CONTRACT_CORE_TOOLS
-# The interactive compact-v5 surface above stays unchanged. These tools are
-# added only for a server-validated ``odysseus-native`` request with an active,
-# confined workspace. This lets the model-specific clean runtime serve native
-# media/artifact tasks without granting the WebUI arbitrary filesystem access.
+# Added only for a server-validated ``odysseus-native`` request with a confined workspace.
 NATIVE_WORKSPACE_READ_TOOLS = frozenset({
     'inspect_media', 'extract_text', 'transcribe_media', 'read_file', 'ls', 'get_workspace',
     'pdf_extract', 'glob', 'grep',
@@ -246,9 +230,7 @@ SAFE_ACTIONS = {
         'open', 'read', 'snapshot', 'find', 'evaluate', 'click', 'fill', 'press',
         'scroll', 'wait', 'screenshot', 'close', 'session_info',
     }),
-    # These UI effects are reversible. A model switch is additionally bound
-    # below to explicit user wording; keep toggle mutation, mode changes, and
-    # email-draft actions outside this subset.
+    # Reversible effects only; a model switch is also bound to explicit user wording below.
     'ui_control': frozenset({
         'open_panel', 'set_theme', 'create_theme', 'get_theme', 'get_toggles',
         'switch_model',
@@ -295,9 +277,7 @@ def provider_compatible_tool_choice_request(request, model):
             selected = [s for s in request.get('tools', [])
                         if s.get('function', {}).get('name') == name]
             if len(selected) == 1:
-                # Ajax's forced decoder emits incomplete optional payloads
-                # (and named choice can emit scalar/repeated-number arguments).
-                # Keep the selected schema; validate completion in the harness.
+                # Ajax's forced decoder emits incomplete payloads; the harness validates completion instead.
                 return {**request, 'tools': selected, 'tool_choice': 'auto'}
         if choice == 'required':
             return {**request, 'tool_choice': 'auto'}
@@ -322,11 +302,7 @@ def provider_compatible_tool_choice_request(request, model):
         and len(request.get('tools') or []) == 1
         and ('qwen' in model_name or model_name.startswith('odysseus-'))
     ):
-        # Raw-policy capture accepts a named tool constraint (and records that
-        # turn as excluded from policy loss), but deliberately rejects the
-        # distribution-wide ``required`` mode. Search recovery narrows the
-        # schema to one tool before reaching this boundary, so preserving that
-        # exact name has the same runtime intent without a transport failure.
+        # Raw-policy capture rejects ``required``; search recovery already narrowed to one tool, so name it.
         compatible = dict(request)
         name = request['tools'][0]['function']['name']
         compatible['tool_choice'] = {
@@ -379,9 +355,7 @@ def preview_tool_result_text(result, tool, args):
                            'Suggestions are queued for review.',
         }
     if result.get('error') or result.get('exit_code') not in (None, 0):
-        # A nonempty stdout is not proof of success. This text is also the
-        # model's saved tool message; SSE-only status cannot inform follow-ups.
-        # Put the status first so a long output cannot truncate it away.
+        # This text is the model's saved tool message; status first so truncation cannot drop it.
         output = {'exit_code': result.get('exit_code', 1), 'error': result.get('error'), **result}
     elif (canonical(tool) == 'manage_skills' and args.get('action') in {'list', 'index'}
             and not result.get('error') and not result.get('output')
@@ -393,9 +367,7 @@ def preview_tool_result_text(result, tool, args):
         and not result.get('error')
         and isinstance(result.get('results'), str)
     ):
-        # Keep the row-oriented payload parseable. JSON-encoding hundreds of
-        # entries before the observation cap can cut inside a quoted string,
-        # leaving neither the model nor canonical renderer usable evidence.
+        # JSON-encoding hundreds of rows lets the observation cap cut inside a quoted string.
         output = result['results']
     output = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
     if canonical(tool) == 'web_search' and not result.get('error') and result.get('exit_code') in (None, 0):
@@ -658,12 +630,7 @@ def private_browser_state_transition(args, current_url=None, result=None):
         failure_text = '\n'.join(
             str(result.get(key) or '') for key in ('error', 'output', 'stderr')
         )
-        # Unknown/stale refs and hit-test failures are rejected before any
-        # browser interaction, so they cannot create a fresh DOM generation.
-        # Keeping the revision stable is important: otherwise an identical
-        # covered click receives a fresh repeat signature on every round and
-        # can consume the entire turn budget. Other interaction errors may
-        # occur after a click/fill changed state and remain observable.
+        # These rejections happen before any interaction, so the DOM revision must not advance.
         if result.get('blocked') or re.search(
             r'\b(?:unknown\s+ref|covered\s+by\b|input\s+would\s+land\s+on)\b',
             failure_text,
@@ -726,74 +693,57 @@ def email_account_backend_unavailable(result):
     )
 
 
+_ITEM_COUNT_WORDS = {
+    'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+    'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+}
+_ITEM_COUNT = r'(\d+|one|two|three|four|five|six|seven|eight|nine|ten)'
+# Scanned in order; group 1 of each pattern is the count.
+_ITEM_LIMIT_PATTERNS = tuple(re.compile(pattern, re.I) for pattern in (
+    r'\b(?:at\s+most|up\s+to|no\s+more\s+than|'
+    r'cap(?:\s+(?:it|them|the\s+(?:answer|list)))?\s+at|'
+    r'max(?:imum)?(?:\s+of)?|(?:i\s+)?only(?:\s+(?:need|want|show))?'
+    r'(?:\s+(?:the\s+)?first)?|need\s+only|just(?:\s+(?:the\s+)?first)?|'
+    r'limit(?:ed)?\s+to|trim(?:\s+it|\s+them|\s+the\s+list)?\s+to|return|show|list)\s+' + _ITEM_COUNT + r'\b',
+    r'\b' + _ITEM_COUNT + r'\s+(?:short\s+)?(?:titles?|items?|results?|entries?|names?|things?)?'
+    r'(?:\s*(?:and|\+|with)\s+(?:their\s+)?(?:status(?:es)?|states?|times?))?\s*'
+    r'(?:at\s+most|max(?:imum)?|only|tops?)\b'
+    r'(?:\s*,\s*(?:no\s+edits?|read[- ]only))?',
+    r'\b(?:titles?|items?|results?|entries?|names?|ones?|things?)\s*[,;:-]?\s*'
+    + _ITEM_COUNT + r'\s*(?:at\s+most|max(?:imum)?|only|tops?)\b',
+    r'\b' + _ITEM_COUNT + r'\s+short\s+(?:ones?|items?|entries?|bits?)\b',
+    r'\b' + _ITEM_COUNT + r'\s+is\s+(?:fine|enough|plenty)\b',
+    r'\b(?:first|same)\s+' + _ITEM_COUNT
+    + r'(?:\s+(?:short\s+)?(?:titles?|items?|results?|entries?|names?|ones?|bits?))?\b',
+    r'\b(?:like\s+)?' + _ITEM_COUNT + r'\s+(?:titles?|items?|results?|entries?|names?|ones?|bits?|things?)'
+    r'(?:\s*(?:and|\+)\s+(?:their\s+)?(?:status(?:es)?|states?))?'
+    r'(?:\s*(?:\+|and)\s+(?:whether|if)\b[^.!?]*)?[.!?]*\s*$',
+))
+_A_FEW_ITEMS = re.compile(
+    r'\b(?:(?:only|just)\s+a|first|top)\s+(?:few|couple)\b|\b(?:just\s+)?(?:list|show)(?:\s+me)?\s+a\s+few\b', re.I,
+)
+# Weaker cues, tried only after "a few" did not match.
+_LATE_ITEM_LIMIT_PATTERNS = (
+    re.compile(
+        r'\b(?:keep\s+it\s+to|(?:maybe\s+)?(?:first|top)|(?:the\s+)?next|same)\s+' + _ITEM_COUNT + r'\b', re.I,
+    ),
+    re.compile(r'[,;]\s*' + _ITEM_COUNT + r'[.!?]*\s*$', re.I),
+)
+
+
 def requested_item_limit(user_text, *, default, maximum=50):
     """Resolve an explicit user-facing result cap for canonical renderers."""
     text = str(user_text or '')
-    number_words = {
-        'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
-        'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
-    }
-    count = r'(\d+|one|two|three|four|five|six|seven|eight|nine|ten)'
-    match = re.search(
-        r'\b(?:at\s+most|up\s+to|no\s+more\s+than|'
-        r'cap(?:\s+(?:it|them|the\s+(?:answer|list)))?\s+at|'
-        r'max(?:imum)?(?:\s+of)?|(?:i\s+)?only(?:\s+(?:need|want|show))?'
-        r'(?:\s+(?:the\s+)?first)?|need\s+only|just(?:\s+(?:the\s+)?first)?|'
-        r'limit(?:ed)?\s+to|trim(?:\s+it|\s+them|\s+the\s+list)?\s+to|return|show|list)\s+' + count + r'\b',
-        text, re.IGNORECASE,
+    match = next((found for pattern in _ITEM_LIMIT_PATTERNS if (found := pattern.search(text))), None)
+    if not match and _A_FEW_ITEMS.search(text):
+        return min(maximum, 3)
+    match = match or next(
+        (found for pattern in _LATE_ITEM_LIMIT_PATTERNS if (found := pattern.search(text))), None,
     )
-    if not match:
-        match = re.search(
-            r'\b' + count + r'\s+(?:short\s+)?(?:titles?|items?|results?|entries?|names?|things?)?'
-            r'(?:\s*(?:and|\+|with)\s+(?:their\s+)?(?:status(?:es)?|states?|times?))?\s*'
-            r'(?:at\s+most|max(?:imum)?|only|tops?)\b'
-            r'(?:\s*,\s*(?:no\s+edits?|read[- ]only))?',
-            text, re.IGNORECASE,
-        )
-    if not match:
-        match = re.search(
-            r'\b(?:titles?|items?|results?|entries?|names?|ones?|things?)\s*[,;:-]?\s*'
-            + count + r'\s*(?:at\s+most|max(?:imum)?|only|tops?)\b',
-            text, re.IGNORECASE,
-        )
-    if not match:
-        match = re.search(
-            r'\b' + count + r'\s+short\s+(?:ones?|items?|entries?|bits?)\b',
-            text, re.IGNORECASE,
-        )
-    if not match:
-        match = re.search(
-            r'\b' + count + r'\s+is\s+(?:fine|enough|plenty)\b',
-            text, re.IGNORECASE,
-        )
-    if not match:
-        match = re.search(
-            r'\b(?:first|same)\s+' + count
-            + r'(?:\s+(?:short\s+)?(?:titles?|items?|results?|entries?|names?|ones?|bits?))?\b',
-            text, re.IGNORECASE,
-        )
-    if not match:
-        match = re.search(
-            r'\b(?:like\s+)?' + count + r'\s+(?:titles?|items?|results?|entries?|names?|ones?|bits?|things?)'
-            r'(?:\s*(?:and|\+)\s+(?:their\s+)?(?:status(?:es)?|states?))?'
-            r'(?:\s*(?:\+|and)\s+(?:whether|if)\b[^.!?]*)?[.!?]*\s*$',
-            text, re.IGNORECASE,
-        )
-    if not match and re.search(r'\b(?:(?:only|just)\s+a|first|top)\s+(?:few|couple)\b', text, re.I):
-        return min(maximum, 3)
-    if not match and re.search(r'\b(?:just\s+)?(?:list|show)(?:\s+me)?\s+a\s+few\b', text, re.I):
-        return min(maximum, 3)
-    if not match:
-        match = re.search(
-            r'\b(?:keep\s+it\s+to|(?:maybe\s+)?(?:first|top)|(?:the\s+)?next|same)\s+'
-            + count + r'\b', text, re.I,
-        )
-    if not match:
-        match = re.search(r'[,;]\s*' + count + r'[.!?]*\s*$', text, re.I)
     if not match:
         return default
     token = match.group(1).casefold()
-    value = int(token) if token.isdigit() else number_words[token]
+    value = int(token) if token.isdigit() else _ITEM_COUNT_WORDS[token]
     return max(0, min(maximum, value))
 
 
@@ -846,7 +796,7 @@ def _partial_json_string_field(raw, field):
         candidate = fragment[:len(fragment) - trim] if trim else fragment
         try:
             value = json.loads('"' + candidate + '"')
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError):
             continue
         return value if isinstance(value, str) else ''
     return ''
@@ -876,9 +826,7 @@ def malformed_write_handoff_target(arguments, required_artifacts=(), user_text='
     candidates = tuple(required_artifacts or ())
     recovered = _partial_json_string_field(arguments, 'path')
     sole_required = str(candidates[0] or '').strip() if len(candidates) == 1 else ''
-    # A runner may require a directory containing several outputs.  It is not
-    # itself a writable file target, so prefer the concrete descendant path in
-    # the malformed call.  Exact required files remain authoritative.
+    # A required directory is not a writable file; prefer the concrete descendant path.
     target = (
         sole_required
         if sole_required and Path(sole_required).suffix
@@ -900,27 +848,6 @@ _PAGE_LISTING_WORDS = ("stories", "articles", "posts", "headlines", "pages")
 
 def _listing_allowed(char):
     return char == " " or char in ".:/-" or char == "_" or char.isalnum()
-
-
-def _allowed_then_space(value):
-    """Whether value can be class+ followed by whitespace+, without retries."""
-    if len(value) < 2:
-        return False
-    first_disallowed = next((i for i, char in enumerate(value) if not _listing_allowed(char)), len(value))
-    if first_disallowed < len(value):
-        return first_disallowed > 0 and all(char.isspace() for char in value[first_disallowed:])
-    return value[-1].isspace()
-
-
-def _space_then_allowed(value):
-    """Whether value can be whitespace+ followed by the listing class+."""
-    if len(value) < 2:
-        return False
-    first_nonspace = next((i for i, char in enumerate(value) if not char.isspace()), len(value))
-    if first_nonspace < len(value):
-        return first_nonspace > 0 and all(_listing_allowed(char) for char in value[first_nonspace:])
-    trailing_spaces = len(value) - len(value.rstrip(" "))
-    return trailing_spaces > 0 and (len(value) > trailing_spaces or trailing_spaces >= 2)
 
 
 def _page_listing_request(user_text):
@@ -1010,7 +937,7 @@ def calendar_terminal_response(raw, *, user_text='', max_items=8):
     payload = raw
     try:
         decoded = json.loads(raw) if isinstance(raw, str) else raw
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         decoded = None
     if isinstance(decoded, dict):
         payload = decoded.get('response') or decoded.get('results') or decoded.get('output') or raw
@@ -1042,7 +969,7 @@ def documents_terminal_response(raw, *, user_text='', max_items=8):
     payload = raw
     try:
         decoded = json.loads(raw) if isinstance(raw, str) else raw
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         decoded = None
     if isinstance(decoded, dict):
         payload = decoded.get('response') or decoded.get('results') or decoded.get('output') or raw
@@ -1054,12 +981,7 @@ def documents_terminal_response(raw, *, user_text='', max_items=8):
 
 def shell_listing_terminal_response(raw, *, user_text=''):
     """Return successful read-only listing evidence when prose omits the rows."""
-    # Bare words such as "list every move" or "list the findings" describe
-    # the shape of the eventual answer; they do not ask for shell stdout. The
-    # old broad matcher made an intermediate ``ls`` (for example, after video
-    # frame extraction) terminate the whole agent turn as "Workspace items".
-    # Only let the shell own rendering when the user explicitly requested a
-    # filesystem/directory listing.
+    # "list the findings" describes the answer; the shell renders only an explicit directory listing.
     if not re.search(
         r'\b(?:list|show|display|name)\b[^\n]{0,48}'
         r'\b(?:files?|folders?|director(?:y|ies)|workspace items?|paths?|filenames?)\b'
@@ -1073,7 +995,7 @@ def shell_listing_terminal_response(raw, *, user_text=''):
     payload = raw
     try:
         decoded = json.loads(raw) if isinstance(raw, str) else raw
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         decoded = None
     if isinstance(decoded, dict):
         payload = decoded.get('output') or decoded.get('stdout') or decoded.get('results') or ''
@@ -1092,7 +1014,7 @@ def shell_output_terminal_response(raw, *, maximum=4000):
     payload = raw
     try:
         decoded = json.loads(raw) if isinstance(raw, str) else raw
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         decoded = None
     if isinstance(decoded, dict):
         payload = decoded.get('output') or decoded.get('stdout') or ''
@@ -1178,7 +1100,7 @@ def memory_terminal_response(raw, *, user_text='', max_items=20):
     payload = raw
     try:
         decoded = json.loads(raw) if isinstance(raw, str) else raw
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         decoded = None
     if isinstance(decoded, dict):
         payload = decoded.get('results') or decoded.get('output') or decoded.get('response') or raw
@@ -1193,7 +1115,7 @@ def tasks_terminal_response(raw, *, user_text='', max_items=20):
     payload = raw
     try:
         decoded = json.loads(raw) if isinstance(raw, str) else raw
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         decoded = None
     if isinstance(decoded, dict):
         payload = decoded.get('response') or decoded.get('results') or decoded.get('output') or raw
@@ -1283,7 +1205,7 @@ def skills_terminal_response(raw, *, user_text='', max_items=20):
     if isinstance(raw, str):
         try:
             decoded = json.loads(raw)
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError):
             decoded = None
         if isinstance(decoded, dict):
             payload = decoded
@@ -1335,6 +1257,18 @@ def skills_terminal_response(raw, *, user_text='', max_items=20):
     if remaining:
         output.append(f'- ...and {remaining} more skills.')
     return '\n'.join(output)
+
+
+# tool: (list actions, renderer, default item limit). Rendered rows keep the
+# stable entity links a second model round would paraphrase away.
+_TERMINAL_LIST_RENDERERS = {
+    'manage_calendar': ({'list', 'list_events'}, calendar_terminal_response, 8),
+    'manage_notes': ({'list', 'search', 'find'}, notes_terminal_response, 20),
+    'manage_documents': ({'list'}, documents_terminal_response, 8),
+    'manage_memory': ({'list'}, memory_terminal_response, 20),
+    'manage_tasks': ({'list'}, tasks_terminal_response, 20),
+    'manage_skills': ({'list', 'index', 'search', 'find'}, skills_terminal_response, 20),
+}
 
 
 def cookbook_servers_terminal_response(raw, *, user_text='', max_items=12):
@@ -1440,9 +1374,7 @@ def prior_short_answer_for_no_tool_summary(user_text, history):
         if message.get('role') != 'assistant' or message.get('_harness_control'):
             continue
         content = str(message.get('content') or '').strip()
-        # Reusing is valid only when the prior answer already satisfies the
-        # requested one-line form. Multi-line digests still need a new model
-        # synthesis; replaying them verbatim creates a stale-render illusion.
+        # Only a one-line prior answer can be reused; a digest needs a new synthesis.
         if content and len(content) <= 500 and '\n' not in content:
             return content
     return ''
@@ -1517,7 +1449,7 @@ def prior_collection_repeat_answer(user_text, history):
                 function = call.get('function') or {}
                 try:
                     args = json.loads(function.get('arguments') or '{}')
-                except (TypeError, ValueError, json.JSONDecodeError):
+                except (TypeError, ValueError):
                     args = {}
                 calls[call.get('id')] = (canonical(function.get('name', '')), args)
             continue
@@ -1533,7 +1465,7 @@ def prior_collection_repeat_answer(user_text, history):
         raw = str(message.get('content') or '')
         try:
             decoded = json.loads(raw)
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError):
             decoded = None
         if isinstance(decoded, dict) and (
             decoded.get('error') or decoded.get('exit_code') not in (None, 0)
@@ -1545,13 +1477,10 @@ def prior_collection_repeat_answer(user_text, history):
     name, raw = candidates[-1]
     try:
         decoded = json.loads(raw)
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         decoded = None
     if decoded is None and name == 'list_sessions' and isinstance(raw, str):
-        # Large session inventories are intentionally clipped before they are
-        # persisted into model history, which can leave the surrounding JSON
-        # string unterminated. Recover only the already-returned display text;
-        # never infer or regenerate missing rows.
+        # Clipped inventories can leave the JSON string unterminated; recover only the returned text.
         prefix = re.match(r'\s*\{\s*"(?:results|response|output)"\s*:\s*"', raw)
         if prefix:
             encoded = raw[prefix.end():].split('\n[Tool result truncated at ', 1)[0]
@@ -1559,16 +1488,13 @@ def prior_collection_repeat_answer(user_text, history):
                 encoded = encoded[:-1]
             try:
                 decoded = {'results': json.loads('"' + encoded + '"')}
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except (TypeError, ValueError):
                 decoded = None
     payload = (
         decoded.get('results') or decoded.get('response') or decoded.get('output') or raw
         if isinstance(decoded, dict) else raw
     )
-    # Clean-v3 persists the exact bounded rows shown to the user as tool
-    # evidence.  If that canonical linked form is already present, preserve
-    # those rows directly rather than feeding them back through a parser for
-    # the backend's different raw syntax.
+    # Rows already in canonical linked form are kept as is.
     if re.search(r'#(?:note|memory|event|task|session)-', str(payload), re.I):
         visible = str(payload).split('<!-- ody-more-', 1)[0].rstrip()
         lines = visible.splitlines()
@@ -1629,7 +1555,7 @@ def prior_failed_operation_answer(user_text, history):
         raw = str(message.get('content') or '')
         try:
             decoded = json.loads(raw)
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError):
             decoded = None
         failed = isinstance(decoded, dict) and (
             decoded.get('error') or decoded.get('exit_code') not in (None, 0)
@@ -2065,9 +1991,7 @@ def artifact_completion_tool_schemas(offered_schemas, required_artifacts):
                     )
         return bound
     if Path(target).suffix.lower() in _NON_TEXT_ARTIFACT_SUFFIXES:
-        # ``write_file`` deliberately accepts UTF-8 text only. Keeping it in
-        # a binary artifact completion round lets a forced writer choice trap
-        # the model in an impossible retry loop even when Python is offered.
+        # write_file takes UTF-8 text only, so it cannot complete a binary artifact.
         bound = []
         for source in offered_schemas:
             if canonical((source.get('function') or {}).get('name')) == 'write_file':
@@ -2110,10 +2034,7 @@ def required_artifact_completion_tool_choice(required_artifacts, offered_schemas
         (schema.get('function') or {}).get('name')
         for schema in offered_schemas
     }
-    # A required directory commonly contains several files and needs a
-    # programmatic extractor.  Native Python avoids shell-quoting failures and
-    # one enormous multi-file write_file payload.  If Python is unavailable,
-    # require any offered tool rather than forcing the text writer.
+    # A required directory needs a programmatic extractor; without Python, require any offered tool.
     if len(targets) == 1 and not Path(targets[0]).suffix:
         name = offered.get('python')
         return (
@@ -2156,7 +2077,7 @@ def protocol_safe_tool_calls(calls):
         try:
             if not isinstance(json.loads(arguments), dict):
                 call.setdefault('function', {})['arguments'] = '{}'
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError):
             call.setdefault('function', {})['arguments'] = '{}'
     return safe_calls
 
@@ -2180,7 +2101,7 @@ def expand_concatenated_write_calls(calls, *, max_calls=16):
             continue
         try:
             json.loads(raw)
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError):
             pass
         else:
             expanded.append(call)
@@ -2200,16 +2121,11 @@ def expand_concatenated_write_calls(calls, *, max_calls=16):
                 items.append(item)
                 if len(items) > max_calls:
                     raise ValueError('too many concatenated write calls')
-        except (TypeError, ValueError, json.JSONDecodeError):
-            # Qwen's native parser can leave one complete, grounded writer
-            # object followed by textual <tool_call> blocks in the same
-            # argument.  Execute only that leading writer.  The trailing calls
-            # may depend on reads that have not run yet, so they stay inert and
-            # the next model round can propose them normally with fresh
-            # evidence.
+        except (TypeError, ValueError):
+            # Qwen's parser can leave textual <tool_call> blocks after one complete writer; run only the writer.
             try:
                 leading, end = decoder.raw_decode(raw)
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except (TypeError, ValueError):
                 leading, end = None, 0
             tail = raw[end:].strip() if end else ''
             markup_openers = tail.count('<tool_call>')
@@ -2217,9 +2133,7 @@ def expand_concatenated_write_calls(calls, *, max_calls=16):
             bounded_markup = (
                 tail.startswith('<tool_call>')
                 and 1 <= markup_openers <= 32
-                # A provider may truncate the last textual call at its output
-                # limit.  It remains inert; only the complete leading JSON
-                # writer is recovered.
+                # The last textual call may be truncated at the output limit.
                 and markup_closers in {markup_openers, markup_openers - 1}
                 and not strip_tool_blocks(
                     tail,
@@ -2294,7 +2208,7 @@ def artifact_body_matches_target(body, target):
     if suffix == '.json':
         try:
             json.loads(candidate)
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError):
             return False
     return True
 
@@ -2350,45 +2264,14 @@ def authorized_write_families(user_text):
     return frozenset(families)
 
 
-def canonical_tools_for_mode(tools, mode):
-    return copy.deepcopy(tools)
-
-
-@lru_cache(maxsize=1)
-def contract_builder():
-    root = Path(os.environ.get(
-        'ODYSSEUS_TOOL_CONTRACT_ROOT',
-        str(Path(__file__).resolve().parents[1] / "scripts"),
-    )).resolve()
-    contract_path = root / 'eval_alltools_unseen_compare.py'
-    if contract_path.is_file():
-        # Load the original promotion protocol, not the description-stripping UI helper.
-        sys.path.insert(0, str(root))
-        try:
-            spec = importlib.util.spec_from_file_location(
-                'odysseus_preview_v3_contract', contract_path
-            )
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            return module.tools_for_mode
-        finally:
-            if str(root) in sys.path:
-                sys.path.remove(str(root))
-    return canonical_tools_for_mode
-
-
 def compact_schemas(schemas, *, model=None):
     # The evaluator's short email names and live MCP aliases share the same
     # contract; keep live dispatch names intact.
-    compact = contract_builder()(copy.deepcopy(schemas), 'compact_contract_v5')
+    compact = copy.deepcopy(schemas)
     if re.match(r'^ajax(?:$|[-_])', model_id_leaf(model)):
         compact = [schema for schema in compact
                    if canonical(schema['function']['name']) != 'ask_user']
-    # Description dropout makes edit_document's legacy free-form ``command``
-    # field indistinguishable from a verb/action hint.  Small models then emit
-    # values such as {"command":"replace"}, which cannot identify either side
-    # of the edit.  The structured edits form is lossless and already supported
-    # by the canonical converter, so expose exactly that form in compact v5.
+    # Without descriptions small models fill the free-form ``command`` with verbs; expose only structured edits.
     for schema in compact:
         function = schema.get('function') or {}
         parameters = function.get('parameters') or {}
@@ -2564,9 +2447,7 @@ def compact_schemas(schemas, *, model=None):
             if 'path' in properties:
                 properties['path']['description'] = 'Use the supplied odysseus://attachment/ID reference in chat; native sessions can use /workspace/image.png.'
         elif function.get('name') == 'inspect_media':
-            # These semantics cannot be inferred from compact JSON shapes.
-            # Without them models mistake ``query`` for semantic video search
-            # and repeat the same sparse inspection on temporal tasks.
+            # Models otherwise read ``query`` as semantic video search.
             function['description'] = (
                 'Inspect local image, video, SVG, or PDF pixels. For video, '
                 'query only labels returned visuals; it does not locate or '
@@ -2599,10 +2480,7 @@ def compact_schemas(schemas, *, model=None):
                 if isinstance(properties.get(name), dict):
                     properties[name]['description'] = description
             if isinstance(properties.get('frames'), dict):
-                # Qwen's endpoint accepts three images. inspect_media packs at
-                # most eight observations per native contact sheet, so 24 is
-                # the largest lossless one-call overview. Larger values create
-                # extra sheets that this runtime must repack and shrink.
+                # Three images of eight frames each: 24 is the largest lossless one-call overview.
                 properties['frames']['maximum'] = 24
         elif function.get('name') == 'pdf_extract':
             function['description'] = (
@@ -2698,9 +2576,7 @@ def compact_schemas(schemas, *, model=None):
 def normalize_preview_entity_anchor_args(name, args):
     """Decode UI anchor syntax at the transport boundary in every mode."""
     args = dict(args or {})
-    # Canonical renderers expose stable clickable anchors. Small models may
-    # copy the whole href back into an identifier field on a follow-up. The
-    # anchor prefix is presentation syntax, not part of the server-owned ID.
+    # Small models copy the whole anchor href back into the identifier field.
     anchor_identifier = {
         'manage_notes': ('id', '#note-'),
         'manage_calendar': ('uid', '#event-'),
@@ -2748,18 +2624,13 @@ def normalize_preview_function_args(name, args, *, user_text=''):
     if canonical(name) == 'list_sessions':
         session_filter = str(args.get('filter') or '').strip().casefold()
         if session_filter in {'', 'all', 'all sessions', 'all_sessions', 'no_filter', '*'}:
-            # The optional field is a literal title filter, not an enum. Small
-            # models sometimes invent an all-items sentinel for an unfiltered
-            # list; passing it through silently returns the wrong empty list.
+            # A literal title filter; small models invent an all-items sentinel.
             args.pop('filter', None)
     if canonical(name) == 'manage_notes':
         action = str(args.get('action') or '').strip().replace('-', '_').casefold()
         if action == 'list':
             request = str(user_text or '').casefold()
-            # The notes backend interprets title/query/content on ``list`` as
-            # an implicit search. Remove model-invented filters from a plain
-            # collection repeat, while retaining filters grounded verbatim in
-            # the user's current request.
+            # The notes backend treats these fields on ``list`` as a search; keep only those quoted from the request.
             for key in ('title', 'query', 'search', 'text', 'content'):
                 value = re.sub(r'\s+', ' ', str(args.get(key) or '').strip().casefold())
                 if value and value not in request:
@@ -2780,17 +2651,13 @@ def normalize_preview_function_args(name, args, *, user_text=''):
             r'\b(?:reference|ref|supporting\s+file|sub[- ]?file|path|readme|\.md)\b',
             str(user_text or ''), re.I,
         ):
-            # A request to explain/walk through the skill itself targets its
-            # SKILL.md body. ``view_ref`` requires an evidenced supporting path;
-            # invented paths such as references/details.md are not aliases.
+            # Explaining the skill targets SKILL.md; ``view_ref`` needs an evidenced path.
             args['action'] = 'view'
             args.pop('path', None)
     if canonical(name) == 'manage_calendar':
         action = str(args.get('action') or '').replace('-', '_').casefold()
         if action in {'list', 'list_events'}:
-            # The list schema shares fields with event creation. If a small
-            # model puts the requested filter in ``summary``, preserve its
-            # meaning as the list query instead of silently ignoring it.
+            # Small models put the list filter in ``summary``.
             if args.get('summary') and not args.get('query'):
                 args['query'] = args['summary']
             args.pop('summary', None)
@@ -2837,9 +2704,7 @@ def normalize_preview_function_args(name, args, *, user_text=''):
         and str(normalized.get('sampling') or '').casefold() == 'overview'
         and normalized.get('frames') is None
     ):
-        # The clean Qwen endpoint accepts three images and inspect_media packs
-        # eight observations per native sheet. Avoid the tool's broader
-        # default, which would require lossy second-stage sheet packing.
+        # Three images of eight frames each; the tool default would need lossy repacking.
         normalized['frames'] = 24
 
     return tool_type, normalized
@@ -2863,21 +2728,6 @@ def normalize_preview_call_args(name, args, *, user_text='', model_choice_experi
     if model_choice_experiment:
         return normalize_native_function_args(name, args)
     return normalize_preview_function_args(name, args, user_text=user_text)
-
-
-def private_browser_dom_batch(args):
-    """Return whether a browser batch is the automatic open+DOM snapshot."""
-    if str((args or {}).get('action') or '').casefold() != 'batch':
-        return False
-    commands = (args or {}).get('commands')
-    return bool(
-        isinstance(commands, list)
-        and len(commands) == 2
-        and isinstance(commands[0], list)
-        and commands[0]
-        and str(commands[0][0]).casefold() == 'open'
-        and commands[1] == ['snapshot']
-    )
 
 
 def scope_preview_contract(preview_contract, routed_contract, active_capabilities,
@@ -2906,11 +2756,7 @@ def scope_preview_contract(preview_contract, routed_contract, active_capabilitie
         and not {canonical(name) for name in FAMILY_TOOLS[family]} & offered_canonical
     }
     unavailable = set(getattr(routed_contract, 'unavailable', ()) or ()) | missing_active
-    # One unavailable capability must not erase independent executable
-    # families from a compound request.  Keep the fail-closed behavior when
-    # nothing routed is available, but preserve the intersection below when
-    # (for example) local workspace tools remain usable while a personal-data
-    # or admin family is disabled by the runtime.
+    # One unavailable family must not erase the others; fail closed only when none is available.
     if unavailable and not available_requested:
         return replace(
             preview_contract,
@@ -3130,9 +2976,7 @@ def required_active_editor_tool_choice(*, active_editor_target, suggestion_targe
     """Bind an explicit active-editor action to its sole typed output channel."""
     if calls or not active_editor_target or not offered:
         return None
-    # A direct mutation of the visible editor cannot be satisfied by prose.
-    # When both targeted and whole-document writers are available, require a
-    # tool call while leaving the model free to choose the appropriate writer.
+    # Prose cannot satisfy a direct edit of the visible editor.
     if len(offered) > 1:
         names = {canonical(schema['function']['name']) for schema in offered}
         if names <= {'edit_document', 'update_document'}:
@@ -3162,9 +3006,7 @@ def sealed_read_arguments(turn_contract, name, args, *, calls=0, user_text='', h
         return args
     sealed = dict(operation.args)
     if canonical(name) == 'manage_calendar' and sealed.get('action') == 'list_events':
-        # Relative date resolution belongs to the model/system-time context.
-        # Preserve only declared read filters; the sealed operation still
-        # prevents mutation or a sibling-tool switch.
+        # The model resolves relative dates; keep only declared read filters.
         for key in ('start', 'end', 'query', 'calendar'):
             if key not in sealed and isinstance(args.get(key), str):
                 sealed[key] = args[key]
@@ -3223,45 +3065,48 @@ def _email_identifiers_from_text(text):
     return found
 
 
+def _paired_tool_results(messages):
+    """Yield (function, content, decoded) for each tool message answering an earlier call."""
+    calls = {}
+    for message in messages or ():
+        if not isinstance(message, dict):
+            continue
+        if message.get('role') == 'assistant':
+            for call in message.get('tool_calls') or ():
+                calls[call.get('id')] = call.get('function') or {}
+        elif message.get('role') == 'tool' and message.get('tool_call_id') in calls:
+            content = str(message.get('content') or '')
+            try:
+                decoded = json.loads(content)
+            except (TypeError, ValueError):
+                decoded = None
+            yield calls[message['tool_call_id']], content, decoded
+
+
+def _decoded_result_failed(decoded):
+    return isinstance(decoded, dict) and bool(decoded.get('error') or decoded.get('exit_code') not in (None, 0))
+
+
 def _successful_email_identifiers(history):
     """Collect IDs from active-email context and successful email tool results."""
     known = {'uid': set(), 'message_id': set()}
-    calls = {}
-    for message in history or ():
-        if not isinstance(message, dict):
+    sources = [
+        message.get('content') for message in history or ()
+        if isinstance(message, dict) and message.get('role') == 'system'
+        and 'Message UID:' in str(message.get('content') or '')
+    ]
+    for function, content, decoded in _paired_tool_results(history):
+        if (canonical(function.get('name', '')) not in {'list_emails', 'search_emails', 'read_email'}
+                or _decoded_result_failed(decoded)):
             continue
-        if message.get('role') == 'system' and 'Message UID:' in str(message.get('content') or ''):
-            extracted = _email_identifiers_from_text(message.get('content'))
-            known['uid'].update(extracted['uid'])
-            known['message_id'].update(extracted['message_id'])
-        if message.get('role') == 'assistant':
-            for call in message.get('tool_calls') or ():
-                calls[call.get('id')] = canonical((call.get('function') or {}).get('name', ''))
-            continue
-        call_id = message.get('tool_call_id')
-        if message.get('role') != 'tool' or calls.get(call_id) not in {
-            'list_emails', 'search_emails', 'read_email',
-        }:
-            continue
-        content = str(message.get('content') or '')
-        try:
-            decoded = json.loads(content)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            decoded = None
-        if isinstance(decoded, dict) and (
-            decoded.get('error') or decoded.get('exit_code') not in (None, 0)
-        ):
-            continue
-        # Email MCP results are JSON envelopes whose stdout contains the
-        # human-readable UID/message-id rows. Parsing the encoded envelope
-        # directly turns ``UID: 104\nAccount:`` into one bogus identifier.
-        payload = content
-        if isinstance(decoded, dict):
-            payload = (
-                decoded.get('stdout') or decoded.get('output')
-                or decoded.get('response') or decoded.get('results') or content
-            )
-        extracted = _email_identifiers_from_text(payload)
+        # Parsing the JSON envelope itself would read ``UID: 104\nAccount:`` as one identifier.
+        sources.append(
+            decoded.get('stdout') or decoded.get('output') or decoded.get('response')
+            or decoded.get('results') or content
+            if isinstance(decoded, dict) else content
+        )
+    for source in sources:
+        extracted = _email_identifiers_from_text(source)
         known['uid'].update(extracted['uid'])
         known['message_id'].update(extracted['message_id'])
     return known
@@ -3328,34 +3173,14 @@ def email_identifier_error(name, args, *, user_text='', history=()):
 
 def _latest_successful_tool_arguments(history, tool_name):
     """Return arguments from the latest matching call with successful evidence."""
-    calls = {}
     latest = None
-    wanted = canonical(tool_name)
-    for message in history or ():
-        if not isinstance(message, dict):
+    for function, _content, decoded in _paired_tool_results(history):
+        if canonical(function.get('name', '')) != canonical(tool_name) or _decoded_result_failed(decoded):
             continue
-        if message.get('role') == 'assistant':
-            for call in message.get('tool_calls') or ():
-                function = call.get('function') or {}
-                try:
-                    arguments = json.loads(function.get('arguments') or '{}')
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    continue
-                calls[call.get('id')] = (canonical(function.get('name', '')), arguments)
-            continue
-        call = calls.get(message.get('tool_call_id'))
-        if message.get('role') != 'tool' or call is None or call[0] != wanted:
-            continue
-        content = str(message.get('content') or '')
         try:
-            decoded = json.loads(content)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            decoded = None
-        if isinstance(decoded, dict) and (
-            decoded.get('error') or decoded.get('exit_code') not in (None, 0)
-        ):
+            latest = json.loads(function.get('arguments') or '{}')
+        except (TypeError, ValueError):
             continue
-        latest = call[1]
     return latest
 
 
@@ -3372,7 +3197,7 @@ def _latest_tool_arguments(history, tool_name):
                 continue
             try:
                 latest = json.loads(function.get('arguments') or '{}')
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except (TypeError, ValueError):
                 continue
     return latest
 
@@ -3422,9 +3247,7 @@ def inherit_referential_read_arguments(name, args, *, user_text='', history=()):
         text,
         re.I,
     ):
-        # A pure referential repeat inherits the complete prior scope. Model
-        # guesses such as a title query or today's date are not new user
-        # constraints and must not silently replace the earlier event set.
+        # A pure repeat keeps the prior scope; model-guessed filters are not user constraints.
         return dict(previous)
     inherited = dict(args)
     for key in ('start', 'end', 'calendar', 'calendar_id', 'query'):
@@ -3456,24 +3279,21 @@ def recent_successful_write_families(history_session):
     turn = (metadata or {}).get('clean_v3_turn')
     if not isinstance(turn, list):
         return frozenset()
-    calls = {}
     successful = set()
-    for message in turn:
-        if message.get('role') == 'assistant':
-            for call in message.get('tool_calls') or []:
-                calls[call.get('id')] = call.get('function') or {}
-        elif message.get('role') == 'tool' and message.get('tool_call_id') in calls:
-            function = calls[message['tool_call_id']]
-            try:
-                args = json.loads(function.get('arguments') or '{}')
-                result = json.loads(message.get('content') or '{}')
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
-            capability = capabilities_for_action(function.get('name') or '', json.dumps(args))
-            family = tool_family(function.get('name') or '')
-            if (family and ToolEffect.WRITE_PRIVATE in capability.effects
-                    and result.get('exit_code', 0) == 0 and not result.get('error')):
-                successful.add(family)
+    for function, content, result in _paired_tool_results(turn):
+        try:
+            args = json.loads(function.get('arguments') or '{}')
+        except (TypeError, ValueError):
+            continue
+        if not content:
+            result = {}
+        if not isinstance(result, dict):
+            continue
+        capability = capabilities_for_action(function.get('name') or '', json.dumps(args))
+        family = tool_family(function.get('name') or '')
+        if (family and ToolEffect.WRITE_PRIVATE in capability.effects
+                and result.get('exit_code', 0) == 0 and not result.get('error')):
+            successful.add(family)
     return frozenset(successful)
 
 
@@ -3497,18 +3317,11 @@ def evaluate_preview_call(name, args, user_text='', *, allow_execute_code=False,
                           turn_authorized_families=frozenset(),
                           contract_required_tools=frozenset(),
                           allow_native_workspace=False,
-                          model_choice_private_tools=frozenset(),
-                          experiment_fixture_ids=frozenset(),
-                          experiment_skip_action_gate=False,
                           external_runtime_tools=frozenset()):
     """Return a sanitized, reasoned policy decision for one proposed call."""
     bare = canonical(name)
     family = tool_family(name)
     contract_required = bare in {canonical(tool) for tool in contract_required_tools}
-    offered_private_action = bare in (model_choice_private_tools & SAFE_WRITE_TOOLS)
-    fixture_delete = (bare == 'manage_notes' and args.get('action') == 'delete'
-                      and bool(experiment_fixture_ids)
-                      and (experiment_skip_action_gate or mutation_action_requested(user_text)))
     capability = capabilities_for_action(name, json.dumps(args))
     effects = tuple(sorted(effect.value for effect in capability.effects))
 
@@ -3521,9 +3334,7 @@ def evaluate_preview_call(name, args, user_text='', *, allow_execute_code=False,
     if bare not in runtime_tools:
         return decision(False, 'tool_not_in_model_runtime')
     if bare in {canonical(tool) for tool in external_runtime_tools}:
-        # A server-validated native caller supplied both this schema and its
-        # confined execution bridge. Argument/target rejection belongs in
-        # that executor so the model receives a recoverable tool error.
+        # The native caller supplied this schema and its confined executor, which rejects bad targets.
         return decision(True, 'allowed_external_runtime_contract')
     if bare == 'extract_text' and not allow_native_workspace and not re.fullmatch(
         r'odysseus://attachment/[A-Za-z0-9_-]+(?:\.[A-Za-z0-9]+)?', str(args.get('path') or '')
@@ -3561,7 +3372,7 @@ def evaluate_preview_call(name, args, user_text='', *, allow_execute_code=False,
                 or (contract_required and bare == 'create_document' and standalone_code_request(user_text))
             )
         )
-        if family not in authorized and not contextual_revision and not contract_scoped_mutation and not fixture_delete and not offered_private_action:
+        if family not in authorized and not contextual_revision and not contract_scoped_mutation:
             return decision(False, 'write_family_not_authorized')
     executable_here = (
         bare in EXPLICIT_EXECUTE_TOOLS
@@ -3578,19 +3389,12 @@ def evaluate_preview_call(name, args, user_text='', *, allow_execute_code=False,
     allowed_effects = set(ALLOWED_EFFECTS)
     if bare == 'ask_user':
         allowed_effects.add(ToolEffect.USER_INTERACTION)
-    # web_fetch is an intentionally brokered public reader. Its capability
-    # carries NETWORK_EGRESS as well as BROKERED_NETWORK_READ because the
-    # backend opens a supplied URL; the URL/tool policy remains the sandbox.
-    # Keeping NETWORK_EGRESS globally blocked while offering web_fetch made
-    # ordinary search -> "tell me more" continuations fail at preflight.
+    # web_fetch carries NETWORK_EGRESS because it opens a URL; the URL policy is its sandbox.
     if bare == 'web_fetch' and ToolEffect.BROKERED_NETWORK_READ in capability.effects:
         blocked_effects.remove(ToolEffect.NETWORK_EGRESS)
         allowed_effects.add(ToolEffect.NETWORK_EGRESS)
     if bare == 'download_attachment':
-        # Reading mailbox attachments materializes a backend-selected cache
-        # file. It is also needed when the attachment is discovered during a
-        # lookup, not only when the original request explicitly named it.
-        # No caller-selected filesystem destination or general write access.
+        # Attachment reads write a backend-chosen cache file, never a caller-chosen path.
         allowed_effects.add(ToolEffect.WRITE_WORKSPACE)
     if bare in BROKERED_JOB_TOOLS:
         # A permission-filtered research job uses the existing internal job
@@ -3608,10 +3412,7 @@ def evaluate_preview_call(name, args, user_text='', *, allow_execute_code=False,
             '/api/gallery/library',
         }
     ):
-        # app_api is conservatively classified as an admin tool because most
-        # of its surface can mutate product state. These two contract-sealed
-        # hardware inventory reads are GET-only and cannot inherit another
-        # path or method from model output.
+        # These two contract-sealed hardware reads are GET-only.
         blocked_effects.remove(ToolEffect.ADMIN_CHANGE)
         allowed_effects.add(ToolEffect.ADMIN_CHANGE)
     if contract_required and bare in {'edit_image', 'generate_image'}:
@@ -3625,9 +3426,7 @@ def evaluate_preview_call(name, args, user_text='', *, allow_execute_code=False,
         and family in turn_authorized_families
         and (bare == 'download_model' or mutation_action_requested(user_text))
     ):
-        # Cookbook lifecycle operations are executed by the existing bounded
-        # server broker. They remain unavailable unless the immutable turn
-        # contract selected this exact operation from an explicit request.
+        # Only when the turn contract selected this exact operation.
         blocked_effects.remove(ToolEffect.ADMIN_CHANGE)
         allowed_effects.add(ToolEffect.ADMIN_CHANGE)
     if contract_required and bare in {'send_to_session', 'chat_with_model', 'pipeline', 'ask_teacher'}:
@@ -3651,11 +3450,9 @@ def evaluate_preview_call(name, args, user_text='', *, allow_execute_code=False,
         allowed_effects.add(ToolEffect.UI_SIDE_EFFECT)
     explicit_scoped_destructive = (
         ToolEffect.DESTRUCTIVE in capability.effects
-        and (offered_private_action or (fixture_delete and experiment_skip_action_gate) or (
-            (fixture_delete or family in (authorized_write_families(user_text) | frozenset(turn_authorized_families)))
-            and mutation_action_requested(user_text)
-            and bool(re.search(r'\b(?:delete|remove|cancel|forget)\b', str(user_text or ''), re.I))
-        ))
+        and family in (authorized_write_families(user_text) | frozenset(turn_authorized_families))
+        and mutation_action_requested(user_text)
+        and bool(re.search(r'\b(?:delete|remove|cancel|forget)\b', str(user_text or ''), re.I))
     )
     if explicit_scoped_destructive:
         blocked_effects.remove(ToolEffect.DESTRUCTIVE)
@@ -3677,27 +3474,6 @@ def evaluate_preview_call(name, args, user_text='', *, allow_execute_code=False,
     if unsupported:
         return decision(False, 'effect_not_allowed:' + ','.join(sorted(effect.value for effect in unsupported)))
     return decision(True, 'allowed')
-
-
-def preview_call_allowed(name, args, user_text='', *, allow_execute_code=False,
-                         contextual_write_families=frozenset(),
-                         turn_authorized_families=frozenset(),
-                         contract_required_tools=frozenset(),
-                         allow_native_workspace=False):
-    return evaluate_preview_call(
-        name, args, user_text,
-        allow_execute_code=allow_execute_code,
-        contextual_write_families=contextual_write_families,
-        turn_authorized_families=turn_authorized_families,
-        contract_required_tools=contract_required_tools,
-        allow_native_workspace=allow_native_workspace,
-    ).allowed
-
-
-def readonly_call(name, args):
-    """Compatibility helper used by the original read-only experiment tests."""
-    capability = capabilities_for_action(name, json.dumps(args))
-    return preview_call_allowed(name, args) and ToolEffect.WRITE_PRIVATE not in capability.effects
 
 
 def _rehydrate_recent_image(message, metadata, owner, *, max_images=3, max_bytes=12 * 1024 * 1024):
@@ -3724,6 +3500,7 @@ def _rehydrate_recent_image(message, metadata, owner, *, max_images=3, max_bytes
         try:
             info = handler.resolve_upload(upload_id, owner=owner, allow_admin=False)
         except Exception:
+            logger.warning('Could not resolve upload %s for image rehydration', upload_id, exc_info=True)
             continue
         if not info:
             continue
@@ -3817,9 +3594,7 @@ def conversation(history_session, messages, *, owner=None, diagnostics=None):
         content = item.get('content') if isinstance(item, dict) else getattr(item, 'content', '')
         metadata = item.get('metadata', {}) if isinstance(item, dict) else getattr(item, 'metadata', {})
         if role == 'user':
-            # Never size/trim history with raw base64 image data. The metadata
-            # is the durable source and is owner-checked below after whole-turn
-            # trimming has selected the retained conversation window.
+            # Trim without base64 data; attachments are restored from owner-checked metadata below.
             groups.append([{'role': 'user', 'content': _conversation_user_text(content), '_attachment_metadata': metadata or {}}])
         elif role == 'assistant' and groups:
             from src.background_tool_jobs import background_result_context
@@ -3827,10 +3602,7 @@ def conversation(history_session, messages, *, owner=None, diagnostics=None):
             saved = (metadata or {}).get('clean_v3_turn')
             if isinstance(saved, list):
                 groups[-1].extend(text_only_clean_trace(saved))
-                # Native trace metadata owns tool protocol continuity, while
-                # the persisted assistant row owns what the user actually saw.
-                # Structured renderers can finish after the trace was captured,
-                # so retain that visible answer unless it is already present.
+                # A structured renderer can finish after the trace was captured, so keep the visible answer.
                 visible = str(content or '').strip()
                 if visible and not any(
                     message.get('role') == 'assistant'
@@ -4014,8 +3786,7 @@ def targets_active_editor(active_document, user_text):
     """Whether a mutation refers to the visible editor rather than a new item."""
     if active_document is None:
         return False
-    # Use the same editor-target interpretation as capability selection. A
-    # second verb allowlist previously rejected valid requests such as "fix".
+    # Same editor-target reading as capability selection.
     return targets_bound_editor_request(editor_request_instructions(user_text))
 
 
@@ -4075,9 +3846,7 @@ def inline_suggestion_request(user_text, *, require_editor_reference=False):
             text, re.I,
         )
         or re.search(prefix + r'(?:feedback|comments?|inline\s+suggestions?)\b', text, re.I)
-        # UI-generated review requests often lead with the transformation
-        # ("Rewrite the open document...") and state the output mode later.
-        # The explicit inline-only clause still owns the operation type.
+        # The inline-only clause owns the operation even when it comes after the transformation.
         or re.search(r'\b(?:create|leave|provide|add|write)?\s*inline\s+suggestions?\s+only\b', text, re.I)
     )
 
@@ -4256,9 +4025,7 @@ def mutation_action_requested(user_text):
         return True
     if not inline_text_transformation(text) and scheduled_automation_request(text):
         return True
-    # Safety qualifiers deny authority; their mutation verbs are not action
-    # requests. Keep later independent instructions after punctuation or
-    # contrast words so "don't delete; archive it" still authorizes archive.
+    # Mutation verbs inside a prohibition are not requests; "don't delete; archive it" still authorizes archive.
     actionable = re.sub(
         r"\b(?:do\s+not|don't|never|without)\s+"
         r"(?:(?:chang(?:e|ing)|modif(?:y|ying)|edit(?:ing)?|delet(?:e|ing)|"
@@ -4713,7 +4480,7 @@ def note_search_result_empty(value):
     text = str(value or '').strip()
     try:
         decoded = json.loads(text)
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         decoded = None
     if isinstance(decoded, dict):
         text = str(decoded.get('response') or decoded.get('results') or decoded.get('output') or '')
@@ -4740,7 +4507,7 @@ def note_referent_error(name, args, *, user_text='', history=()):
                 function = call.get('function') or {}
                 try:
                     call_args = json.loads(function.get('arguments') or '{}')
-                except (TypeError, ValueError, json.JSONDecodeError):
+                except (TypeError, ValueError):
                     continue
                 if canonical(function.get('name')) == 'manage_notes':
                     calls[call.get('id')] = call_args
@@ -4776,7 +4543,7 @@ def research_referent_error(name, args, *, user_text='', history=()):
                 function = call.get('function') or {}
                 try:
                     parsed = json.loads(function.get('arguments') or '{}')
-                except (TypeError, ValueError, json.JSONDecodeError):
+                except (TypeError, ValueError):
                     continue
                 if canonical(function.get('name', '')) == 'manage_research':
                     calls[call.get('id')] = parsed
@@ -4945,7 +4712,7 @@ def private_browser_effective_url(result):
     raw = result.get('output') if isinstance(result, dict) else result
     try:
         decoded = json.loads(raw) if isinstance(raw, str) else raw
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return ''
     rows = decoded if isinstance(decoded, list) else [decoded]
     urls = []
@@ -5109,10 +4876,7 @@ def provider_wire_messages(messages):
     cleaned = []
     for item in provider_request_messages(messages):
         item.pop('_harness_control', None)
-        # A reasoning-only/contentless model turn may be followed by a
-        # harness-owned completion recovery.  Persisting that empty assistant
-        # placeholder makes strict OpenAI-compatible providers reject the next
-        # request because neither content nor tool_calls is present.
+        # Strict providers reject an assistant message with neither content nor tool_calls.
         if (
             item.get('role') == 'assistant'
             and not item.get('content')
@@ -5169,7 +4933,7 @@ async def preview_model_response(client, endpoint_url, headers, request, recover
                 if (getattr(response, 'status_code', 200) in (400, 413)
                         and recovery.get('attempts', 0) < 2):
                     await response.aread()
-                    logging.getLogger(__name__).warning(
+                    logger.warning(
                         'Provider rejected clean preview request status=%s detail=%s',
                         response.status_code,
                         response.text[:1000].replace('\n', ' '),
@@ -5180,9 +4944,7 @@ async def preview_model_response(client, endpoint_url, headers, request, recover
                         recovery['attempts'] = recovery.get('attempts', 0) + 1
                         recovery['context_limit'] = plan.context_limit
                         recovery['scale'] = 1 if recovery['attempts'] == 1 else 0.7
-                        # A known input window lets us trim evidence instead of
-                        # starving synthesis to a single token. Only output-only
-                        # rejections without a window need the reduced allowance.
+                        # With a known window, trim evidence rather than cut output.
                         if not plan.context_limit:
                             request['max_tokens'] = plan.max_tokens
                         continue
@@ -5191,10 +4953,7 @@ async def preview_model_response(client, endpoint_url, headers, request, recover
                 yield response
                 return
         except httpx.TransportError:
-            # A disconnect before response headers/content is safe to replay:
-            # no model output or tool proposal could have reached the harness.
-            # Never replay a stream after yielding it to the caller because it
-            # may already have emitted prose or a complete tool call.
+            # Replay only before any output reached the caller.
             if response_started or transport_attempts >= 1:
                 raise
             transport_attempts += 1
@@ -5244,11 +5003,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                          request_authority=MISSING_AUTHORITY, **ignored):
     from src.generation_sampling import validate_temperature
     temperature = validate_temperature(temperature)
-    # This path sends requests directly with httpx and therefore bypasses
-    # llm_core's model stability defaults. Promoted merged-tools checkpoints
-    # were trained, selected, and benchmarked deterministically at temperature
-    # zero; honoring a generic UI preset here materially changes both refusal
-    # behavior and tool-call accuracy.
+    # Merged-tools checkpoints were tuned at temperature zero, and this path bypasses llm_core defaults.
     if is_odysseus_merged_tools_model(model):
         temperature = 0.0
     started = time.monotonic()
@@ -5292,9 +5047,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
         for schema in (external_tool_schemas or ())
         if isinstance(schema, dict) and isinstance(schema.get('function'), dict)
     }
-    # Compact-v5 intentionally strips many optional constraints from static
-    # tools. A validated dynamic tool's original schema is its executable
-    # contract, so preserve it for names the turn contract already offered.
+    # Compact-v5 strips constraints; a validated dynamic tool keeps its original schema.
     offered = [
         external_schema_by_name.get(
             str((schema.get('function') or {}).get('name') or ''), schema,
@@ -5382,17 +5135,6 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
             'in the open message; do not return an advisory suggestion or placeholder.'
         )
     conversation_diagnostics = {}
-    from src.tool_routing_experiment import FIXTURE_MODES, MODEL_CHOICE_MODE, model_choice_private_tools
-    if getattr(turn_contract, 'routing_experiment', '') == MODEL_CHOICE_MODE:
-        system += (
-            ' A supplied link normally asks you to inspect its contents. Read it with the appropriate '
-            'available tool before describing it; URL words and titles are not page evidence. '
-            'Use youtube_tool for YouTube video content. Reuse fetched content on follow-ups. '
-            'If reading fails or is disabled, say so rather than pretending to have read it.'
-        )
-    private_action_tools = model_choice_private_tools(owner, model, turn_contract)
-    fixture_mode = (getattr(turn_contract, 'routing_experiment', '')
-                    if owner == 'sft_alex_creator' else '')
     history = [{'role': 'system', 'content': system}] + conversation(
         history_session, messages, owner=owner, diagnostics=conversation_diagnostics,
     )
@@ -5458,17 +5200,6 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
     contract_required_tools = frozenset(
         canonical(name) for name in (getattr(turn_contract, 'required', ()) or ())
     )
-    experiment_fixture_ids = frozenset()
-    if (owner == 'sft_alex_creator'
-            and fixture_mode in FIXTURE_MODES):
-        from core.database import SessionLocal, Note
-        with SessionLocal() as fixture_db:
-            fixture_rows = [{'id': row.id, 'title': row.title} for row in fixture_db.query(Note).filter(
-                Note.owner == owner, Note.session_id == session_id,
-                Note.source == 'eval',
-                (Note.title.like('ody-multinote-%') | (Note.label == 'ody-multinote-fixture')),
-            ).all()]
-            experiment_fixture_ids = frozenset(row['id'] for row in fixture_rows)
     initial_length = len(history)
     security = ToolRunSecurityContext(
         external_untrusted_context_seen=bool(external_untrusted_context_seen),
@@ -5509,11 +5240,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
     static_fetch_failed_urls = set()
     entity_result_links = {}
     calendar_create_confirmation = ''
-    # Resolve the effective window once, before any model request, so the
-    # turn budgets against it and metrics report exactly what it ran under.
-    # The chat route prepares it; only callers arriving without one (or with
-    # one for a different route) resolve here. Terminal metrics must never
-    # start this discovery themselves.
+    # Resolve once before any request; terminal metrics must not start discovery.
     if context_resolution is None or not context_resolution.applies_to(endpoint_url, model):
         from src.agent_runtime.context_resolution import resolve_effective_context
         context_resolution = await resolve_effective_context(
@@ -5703,23 +5430,20 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                 usage_in += intent_accounting.get('input_tokens', 0)
                 usage_out += intent_accounting.get('output_tokens', 0)
                 has_real_usage = intent_accounting.get('usage_source') == 'real'
-            # One extra iteration is available only when a provider emits raw
-            # tool markup during the normal final no-tools round. Ordinary
-            # turns still obey ``round_limit`` exactly.
+            final_answer = None
+            # The extra iteration is only for raw tool markup in the final no-tools round.
             for round_number in range(1, round_limit + 2):
                 if intent_scope_failed:
                     break
                 if round_number > round_limit and not emergency_completion_round:
                     break
                 if active_editor_target and successful_write and agent_runs.should_finish(session_id):
-                    answer = (
+                    final_answer = (
                         f'Finished with {len(editor_suggested_finds)} inline suggestions ready for review. '
                         'No changes were applied.'
                         if suggestion_target else
                         'Finished with the document edits saved so far. Remaining passages were not processed.'
                     )
-                    history.append({'role': 'assistant', 'content': answer})
-                    yield event({'type': 'final_response', 'content': answer})
                     break
                 rounds_used = round_number
                 artifact_body_handoff_active_at_round_start = bool(
@@ -5734,11 +5458,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                     ),
                     'artifact_write_phase': artifact_write_phase,
                 })
-                # Preserve the final model round for an actual user-facing
-                # answer once tools have returned evidence. Previously the
-                # model could spend the last round emitting another tool call
-                # (or provider-native tool markup that was rendered as prose),
-                # leaving no opportunity to synthesize the result.
+                # Keep the last round for the answer once tools have returned evidence.
                 reserve_final_synthesis = bool(
                     round_number >= round_limit
                     and executions
@@ -5869,18 +5589,13 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         retrievals=successful_web_retrievals,
                         search_limit=2,
                     )
-                # Thinking providers can consume several thousand tokens before
-                # emitting the requested body.  Reusing the configured output
-                # budget avoids a reasoning-only response that leaves the
-                # required artifact unwritten.
+                # Thinking providers can spend thousands of tokens before the body.
                 round_max_tokens = request_max_tokens
                 request = {'model': model, 'messages': request_messages, 'temperature': temperature,
                            'max_tokens': round_max_tokens, 'stream': True,
                            'stream_options': {'include_usage': True},
                            'chat_template_kwargs': {'enable_thinking': progressive_thinking}}
-                # Once the bound editor has been updated, the next round owns
-                # only the short user-facing confirmation. Re-offering the
-                # sole writer would force duplicate full-document rewrites.
+                # After the editor write, re-offering the writer forces duplicate rewrites.
                 editor_write_complete = (
                     active_editor_target and successful_write
                     and not editor_partial_pending and not editor_batch_pending
@@ -5917,10 +5632,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                                 ]
                                 if selected:
                                     request['tools'] = selected
-                    # Whole rewrites and inline feedback each have one typed
-                    # editor output owner. Bind that sole channel at protocol
-                    # level so prose cannot masquerade as an applied edit or
-                    # a review suggestion.
+                    # Bind the editor's one output channel so prose cannot pass for an applied edit.
                     editor_choice = required_active_editor_tool_choice(
                         active_editor_target=active_editor_target,
                         suggestion_target=suggestion_target,
@@ -6030,9 +5742,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         source_tools = [schema for schema in source_tools
                                         if canonical(schema['function']['name']) == 'read_email']
                     if not source_tools:
-                        answer = 'I could not retrieve the requested source, so I cannot answer from your records.'
-                        history.append({'role': 'assistant', 'content': answer})
-                        yield event({'type': 'final_response', 'content': answer})
+                        final_answer = 'I could not retrieve the requested source, so I cannot answer from your records.'
                         break
                     request['tools'] = source_tools
                     request['tool_choice'] = 'required'
@@ -6057,9 +5767,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                 tool_call_requested = request.get('tool_choice') not in (None, 'auto', 'none')
                 request = provider_compatible_tool_choice_request(request, model)
                 if active_editor_target and request.get('tools'):
-                    # Edits share mutable document state. Await a saved result
-                    # before asking for another call; one call may still batch
-                    # multiple edits and explicitly request further batches.
+                    # Edits share document state, so await each saved result.
                     request['parallel_tool_calls'] = False
                 editor_progress_kind = (
                     'suggestions' if suggestion_target else 'edits'
@@ -6086,12 +5794,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         ],
                         'tool_choice': request.get('tool_choice'),
                     })
-                    # Artifact completion deliberately narrows a broader round
-                    # contract to its writer on the wire. Validate that
-                    # response against the same list so a hallucinated call to
-                    # one of the earlier research tools cannot regain
-                    # execution permission. Other recovery modes retain their
-                    # established budget/error semantics.
+                    # Validate against the narrowed list so a call to an earlier research tool cannot regain permission.
                     round_offered = list(request.get('tools') or [])
                 finish_during_stream = False
                 async with preview_model_response(client, endpoint_url, headers, request, context_recovery) as response:
@@ -6183,14 +5886,12 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                 if active_editor_target and successful_write and agent_runs.should_finish(session_id):
                     finish_during_stream = True
                 if finish_during_stream:
-                    answer = (
+                    final_answer = (
                         f'Finished with {len(editor_suggested_finds)} inline suggestions ready for review. '
                         'No changes were applied.'
                         if suggestion_target else
                         'Finished with the document edits saved so far. Remaining passages were not processed.'
                     )
-                    history.append({'role': 'assistant', 'content': answer})
-                    yield event({'type': 'final_response', 'content': answer})
                     break
                 if progressive_thinking:
                     content = visible_content_after_qwen_thinking(content)
@@ -6198,9 +5899,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         yield event({'delta': content})
                         streamed_round_text = True
                 proposed = [pending[i] for i in sorted(pending)]
-                # A lead-in emitted before a tool call is live progress, not
-                # part of the terminal answer. Replace that draft when the
-                # eventual synthesis begins instead of concatenating both.
+                # A lead-in before a tool call is progress, replaced when synthesis begins.
                 if proposed and streamed_round_text:
                     replace_streamed_draft_on_finish = True
                 unexecutable_dsml_completion = False
@@ -6222,7 +5921,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                             continue
                         try:
                             recovered_args = json.loads(block.content or '{}')
-                        except (TypeError, ValueError, json.JSONDecodeError):
+                        except (TypeError, ValueError):
                             continue
                         if not isinstance(recovered_args, dict):
                             continue
@@ -6259,9 +5958,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                                         'Retrieve the requested source using the available tools before answering. '
                                         'General advice does not answer this question.'})
                         continue
-                    answer = 'I could not retrieve the requested source, so I cannot answer from your records.'
-                    history.append({'role': 'assistant', 'content': answer})
-                    yield event({'type': 'final_response', 'content': answer})
+                    final_answer = 'I could not retrieve the requested source, so I cannot answer from your records.'
                     break
                 proposed, recovered_write_calls = expand_concatenated_write_calls(proposed)
                 if recovered_write_calls:
@@ -6282,10 +5979,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                                      'function': proposal.get('function', {})})
                 message = {'role': 'assistant', 'content': content or None}
                 if round_reasoning and 'deepseek' in str(model or '').casefold():
-                    # DeepSeek requires each tool-round reasoning payload to
-                    # be echoed verbatim on subsequent requests. Unlike local
-                    # Qwen/Nemotron templates, its API owns this structured
-                    # field and does not reinterpret it as visible output.
+                    # DeepSeek requires the reasoning payload echoed on later requests.
                     message['reasoning_content'] = round_reasoning
                 if proposed:
                     message['tool_calls'] = protocol_safe_tool_calls(proposed)
@@ -6586,10 +6280,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         and required_artifacts
                         and not successful_artifact_write
                     ):
-                        # Runner-owned workspaces (for example Harbor containers)
-                        # are not visible in the harness process. Use declared
-                        # completion requirements plus successful mutation evidence
-                        # instead of probing an unrelated host path.
+                        # Runner-owned workspaces are not visible here; trust declared requirements and mutation evidence.
                         missing_artifacts = required_artifacts
                     else:
                         missing_artifacts = (
@@ -6609,11 +6300,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                             + '. Continue with the offered tools, create the exact path(s), '
                             'and only then give the final response.'
                         )
-                        # Qwen3.5's native chat template permits a system
-                        # message only at index zero.  A mid-turn system role
-                        # makes vLLM reject the entire recovery request with
-                        # HTTP 400, so continue the agent dialogue as a user
-                        # protocol correction instead.
+                        # Qwen3.5's template allows a system message only at index zero; vLLM returns 400 otherwise.
                         history.append({'role': 'user', '_harness_control': True, 'content': recovery})
                         yield event({
                             'type': 'completion_recovery',
@@ -6694,14 +6381,9 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         # The renderer may already have a streamed draft. Replace both
                         # that draft and persisted history with the evidence-backed result.
                         history.pop()
-                        refusal = denied_response()
-                        history.append({'role': 'assistant', 'content': refusal})
-                        yield event({'type': 'final_response', 'content': refusal})
+                        final_answer = denied_response()
                         break
-                    # Keep created-object navigation links, not search-result
-                    # citations. Finding a page does not establish that it
-                    # supports a generated claim; citation selection belongs
-                    # to evidence-grounded synthesis.
+                    # Finding a page does not show it supports a claim; citations belong to synthesis.
                     successful_executions = [e for e in executions
                                              if not e.get('error') and e.get('exit_code', 0) == 0]
                     if (calendar_create_confirmation and len(successful_executions) == 1
@@ -6722,9 +6404,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         yield event({'type': 'final_response', 'content': content,
                                      'render_owner': 'streamed', 'replacement_scope': 'turn'})
                     break
-                # Treat a model-proposed call batch atomically for preview
-                # policy. A harmless read followed by blocked mutations must
-                # not partially execute or emit one denial per attempted row.
+                # A batch is atomic: a read before a blocked mutation must not run.
                 batch_policy_denied = False
                 for call in proposed:
                     try:
@@ -6774,9 +6454,6 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         jsonschema.validate(preflight_args, preflight_schema['function']['parameters'])
                         decision = evaluate_preview_call(
                             preflight_name, preflight_args, latest_user,
-                            experiment_fixture_ids=experiment_fixture_ids,
-                            experiment_skip_action_gate=fixture_mode == 'recent_fixture_only',
-                            model_choice_private_tools=private_action_tools,
                             allow_execute_code=execute_code_enabled,
                             contextual_write_families=contextual_write_families,
                             turn_authorized_families=turn_authorized_families,
@@ -6788,15 +6465,13 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                             policy_decisions.append({'round': round_number, **decision.audit()})
                             batch_policy_denied = True
                             break
-                    except (KeyError, TypeError, ValueError, json.JSONDecodeError, jsonschema.ValidationError):
+                    except (KeyError, TypeError, ValueError, jsonschema.ValidationError):
                         # Malformed calls still enter the normal tool-error
                         # feedback path so the model can repair their syntax.
                         continue
                 if batch_policy_denied:
                     history.pop()
-                    refusal = denied_response()
-                    history.append({'role': 'assistant', 'content': refusal})
-                    yield event({'type': 'final_response', 'content': refusal})
+                    final_answer = denied_response()
                     break
                 terminal_denial = False
                 terminal_suppression_violation = False
@@ -6804,11 +6479,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                 terminal_budget_violation = False
                 structured_terminal_response = ''
                 round_recovery_messages = []
-                # Keep an OpenAI-compatible tool-call batch contiguous.  A
-                # multimodal user message inserted between sibling tool
-                # results makes providers such as DeepSeek reject the next
-                # request with HTTP 400.  Collect visual evidence while the
-                # batch executes and append it only after every tool result.
+                # A user message between sibling tool results makes DeepSeek reject the next request.
                 round_visual_blocks = []
                 for call in proposed:
                     name = offered_tool_alias(call['function']['name'], round_offered)
@@ -6817,9 +6488,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                     result, desc, policy_denied, block = None, name, False, None
                     args = {}
                     execution_attempted = False
-                    # Guidance a preview validator authored for this call. It
-                    # is the only failure text returned verbatim; exception
-                    # text goes through _public_preview_tool_error.
+                    # The only failure text returned verbatim; exception text goes through _public_preview_tool_error.
                     validator_error = ''
                     call_signature = None
                     semantic_scope = None
@@ -6854,9 +6523,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         args = ground_referenced_note_content(
                             name, args, user_text=direct_user_text, history=history,
                         )
-                        # Dispatch the same canonical arguments that policy and
-                        # schema validation inspected, including preview-only
-                        # transport defaults.
+                        # Dispatch exactly the arguments policy and schema validation inspected.
                         arguments = json.dumps(args, ensure_ascii=False)
                         call_signature = (
                             canonical(name),
@@ -6915,9 +6582,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                                         'Equivalent search intent was repeated after a correction reminder; '
                                         'web_search is disabled for this turn.'
                                     )
-                                # One correction turn still matters: it permits a materially
-                                # different query immediately instead of hiding the tool after
-                                # a merely stale/freshness variant was rejected.
+                                # Allow a materially different query right after a freshness-only variant was rejected.
                                 force_web_search_next_round = True
                                 raise ValueError(
                                     'An equivalent search already returned evidence. Change the '
@@ -6960,11 +6625,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                             name, args, user_text=direct_user_text,
                         )
                         if semantic_error:
-                            # Semantic/schema guards run before the ordinary
-                            # execution failure guard below.  Count their
-                            # rejected canonical call too, otherwise a model
-                            # can emit the same malformed request for every
-                            # remaining round without ever reaching that guard.
+                            # These guards run before the execution failure guard, so count the rejected call here too.
                             if failed_call_counts.get(call_signature, 0) >= 2:
                                 calls += 1
                                 terminal_suppression_violation = True
@@ -7080,11 +6741,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                                     'available with different arguments'
                                 )
                             elif duplicate_count >= 2:
-                                # A first duplicate leaves evidence tools available so a
-                                # corrected page/range/URL/query can execute immediately.
-                                # Repeating that exact successful call after the reminder
-                                # proves the model is not taking that route; continuing to
-                                # advertise it produces no-op loops and starves completion.
+                                # A repeat after the reminder means the model will not take a corrected route.
                                 terminal_suppression_violation = True
                                 permanently_suppressed_tools.add(canonical(name))
                                 suppression = 'disabled for the rest of this turn'
@@ -7111,12 +6768,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                                 blocked_failed_call_counts.get(call_signature, 0) + 1
                             )
                             blocked_failed_call_counts[call_signature] = blocked_count
-                            # Keep one blocked reminder permissive: the model may still
-                            # correct the arguments on its next turn.  If it ignores that
-                            # reminder and emits the same failed call again, continuing to
-                            # offer the tool only creates an unbounded no-op loop.  Suppress
-                            # that tool for the remainder of this turn and enter the normal
-                            # evidence-only completion path instead.
+                            # A second identical blocked call means the reminder was ignored; suppress the tool for the turn.
                             if blocked_count >= 2:
                                 terminal_suppression_violation = True
                                 permanently_suppressed_tools.add(canonical(name))
@@ -7159,9 +6811,6 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                                 raise ValueError(artifact_code_error)
                         decision = evaluate_preview_call(
                             name, args, latest_user,
-                            experiment_fixture_ids=experiment_fixture_ids,
-                            experiment_skip_action_gate=fixture_mode == 'recent_fixture_only',
-                            model_choice_private_tools=private_action_tools,
                             allow_execute_code=execute_code_enabled,
                             contextual_write_families=contextual_write_families,
                             turn_authorized_families=turn_authorized_families,
@@ -7193,10 +6842,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                             and tool_type in {'edit_document', 'update_document'}
                             and tool_type != successful_editor_writer
                         ):
-                            # Some models emit both a targeted edit and a whole-document
-                            # rewrite in one assistant message. Once one writer succeeds,
-                            # executing the other risks duplicating or overwriting that
-                            # mutation. Complete its protocol result without a second write.
+                            # A second writer after a successful one would duplicate or overwrite the mutation.
                             desc = f'{name}: skipped after {successful_editor_writer}'
                             result = {
                                 'action': 'already_applied',
@@ -7205,8 +6851,6 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                                 'exit_code': 0,
                             }
                         else:
-                            from src.tool_routing_experiment import note_fixture_scope
-                            fixture_token = note_fixture_scope.set(experiment_fixture_ids or None)
                             tool_started = time.monotonic()
                             try:
                                 execution_attempted = True
@@ -7227,7 +6871,6 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                                     'tool': canonical(block.tool_type), 'round': round_number,
                                     'seconds': round(time.monotonic() - tool_started, 3),
                                 })
-                                note_fixture_scope.reset(fixture_token)
                                 if (tool_type == 'private_browser'
                                         and not (result or {}).get('blocked')
                                         and (result or {}).get('failure_kind') != 'turn_contract_denied'):
@@ -7252,9 +6895,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                                     if browser_changed:
                                         browser_revision += 1
                         if block.tool_type == 'ui_control' and result.get('ui_event'):
-                            # The tool result is model evidence; this event is
-                            # the browser-side effect owner.  Without it the
-                            # call succeeds server-side but no panel opens.
+                            # This event makes the browser open the panel.
                             yield event({'type': 'ui_control', 'data': result})
                         if (
                             canonical(block.tool_type) == 'list_emails'
@@ -7298,9 +6939,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                                     refreshed = active_document_context_message(
                                         active_document, content_override=result.get('content'))
                                     editor_context['content'] = refreshed['content']
-                            # An identical execution command is not a duplicate
-                            # after the workspace has changed. A repair loop may
-                            # write corrected source and rerun the same command.
+                            # Rerunning the same command after a workspace write is a repair, not a duplicate.
                             for prior_signature in list(successful_call_counts):
                                 if prior_signature[0] in {'bash', 'python'}:
                                     successful_call_counts.pop(prior_signature, None)
@@ -7344,9 +6983,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                                 artifact_body_handoff_attempts += 1
                                 artifact_body_handoff_target = repeated_handoff_target
                         if str(exc).startswith('The calendar read has not succeeded yet.'):
-                            # Remove the dependent writer for one correction
-                            # round so the model must repair the source read
-                            # instead of repeating the premature draft.
+                            # Force a source read before the dependent draft.
                             suppressed_tool_until_round[canonical(name)] = round_number + 1
                         handoff_target = malformed_write_handoff_target(
                             arguments, required_artifacts, direct_user_text,
@@ -7358,7 +6995,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         ):
                             artifact_body_handoff_attempts += 1
                             artifact_body_handoff_target = handoff_target
-                        logging.getLogger(__name__).warning(
+                        logger.warning(
                             'Clean v3 tool call failed: %s', exc, exc_info=True,
                         )
                         if not validator_error and isinstance(exc, jsonschema.ValidationError) and schema:
@@ -7626,10 +7263,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                             for url in retrieved_source_urls(args)
                         )
                     ):
-                        # Static fetchers are routinely rejected by publisher
-                        # bot protection.  That is a transport failure, not
-                        # evidence that the source is unavailable.  Offer one
-                        # rendered-browser attempt at the same evidenced URL.
+                        # Bot protection rejects static fetchers; offer one rendered-browser attempt at the same URL.
                         suppressed_tool_until_round['web_fetch'] = round_number + 1
                         for fetch_url in retrieved_source_urls(args):
                             static_fetch_failed_urls.add(fetch_url.rstrip('/'))
@@ -7685,9 +7319,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                                 )
                         else:
                             failed_call_counts.pop(call_signature, None)
-                            # A completed search with zero sources did not return
-                            # reusable evidence. Let the model choose a retry;
-                            # execution/round budgets still bound empty loops.
+                            # Zero sources is not reusable evidence; budgets still bound retries.
                             if not (canonical(name) == 'web_search'
                                     and result.get('evidence_status') == 'empty'):
                                 successful_call_signatures.add(call_signature)
@@ -7710,10 +7342,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         and result.get('doc_id')
                         and not failed
                     ):
-                        # Match the established Agent runtime contract: the
-                        # database write is not enough for an already-open
-                        # editor. This event makes the browser reconcile its
-                        # visible document with the saved result immediately.
+                        # An open editor needs this event to show the saved document.
                         yield event({
                             'type': 'doc_update',
                             'doc_id': result['doc_id'],
@@ -7792,9 +7421,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                             query=args.get('query', ''),
                         )
                         if requested_links and source_links and source_link_only_request(direct_user_text):
-                            # For an exact requested link count, evidence owns
-                            # the final rendering so model prose cannot add a
-                            # wrong or duplicate source.
+                            # For an exact link count, evidence renders the answer.
                             structured_terminal_response = '\n'.join(
                                 link for _, link in source_links[:requested_links]
                             )
@@ -7815,9 +7442,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                     if block is not None and block.tool_type in {
                         'create_document', 'update_document', 'edit_document'
                     } and result.get('doc_id'):
-                        # Preserve the older tool_output fallback too. Clients
-                        # that miss doc_update can still reconcile from the
-                        # completed tool event without parsing its output text.
+                        # For clients that miss doc_update.
                         tool_event.update({
                             'doc_id': result['doc_id'],
                             'document_title': result.get('title', ''),
@@ -7831,11 +7456,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         yield event({'type': 'generated_image', 'url': result['image_url'],
                                      **{k: result[k] for k in ('image_url', 'image_id', 'image_prompt',
                                                                'image_model', 'image_size', 'image_quality') if k in result}})
-                    # Browser previews are a UI observation channel; model
-                    # history continues to receive only the bounded DOM text.
-                    # record_tool_execution keeps just the latest screenshot in
-                    # saved metadata so multi-step browsing does not balloon a
-                    # session with one base64 page image per interaction.
+                    # The model sees only bounded DOM text; saved metadata keeps only the latest screenshot.
                     visual_blocks = bounded_visual_result_blocks(result, max_images=3)
                     if visual_blocks:
                         tool_event['screenshot'] = visual_blocks[0]['image_url']['url']
@@ -7885,10 +7506,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         if re.fullmatch(r'[A-Za-z0-9_-]+', sid):
                             target = f'#research-{sid}'
                             entity_result_links[target] = f'[Open research progress]({target})'
-                            # Research is asynchronous. Do not give the model
-                            # another prose round here: small/local models
-                            # often invent an answer from prior knowledge
-                            # immediately after successfully starting the job.
+                            # Research runs in the background; another prose round invites an invented answer.
                             structured_terminal_response = output
                             if result.get('ui_event') == 'research_started':
                                 yield event({'type': 'ui_control', 'data': result})
@@ -7899,58 +7517,29 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         and {canonical(value) for value in turn_contract.required}
                         == {canonical(block.tool_type)}
                     ):
-                        # An exact, one-shot native read has completed its
-                        # required operation. The synthesis round owns prose;
-                        # do not let a broader repeat waste calls or context.
+                        # The required read is done; the synthesis round owns prose.
                         force_no_tools_next_round = True
-                    if (
-                        len(proposed) == 1
-                        and block is not None
-                        and block.tool_type == 'manage_calendar'
-                        and str(args.get('action') or '').replace('-', '_').casefold() in {'list', 'list_events'}
-                        and not failed
-                        and (
-                            model_choice_experiment
-                            or set(getattr(turn_contract, 'capabilities', ()) or ()) <= {'calendar'}
-                            or {canonical(schema['function']['name']) for schema in offered}
-                            <= {'manage_calendar'}
-                        )
+                    terminal_list = (
+                        _TERMINAL_LIST_RENDERERS.get(block.tool_type)
+                        if len(proposed) == 1 and block is not None and not failed else None
+                    )
+                    list_action = str(args.get('action') or '').replace('-', '_').casefold()
+                    if terminal_list and list_action in terminal_list[0] and (
+                        block.tool_type != 'manage_calendar'
+                        or model_choice_experiment
+                        or set(turn_contract.capabilities) <= {'calendar'}
+                        or {canonical(schema['function']['name']) for schema in offered}
+                        <= {'manage_calendar'}
                     ):
-                        # Calendar listings already contain stable event links.
-                        # A second model pass can discard those IDs while
-                        # paraphrasing, so the structured result owns rendering.
-                        structured_terminal_response = calendar_terminal_response(
-                            output, user_text=latest_user,
-                            max_items=contract_item_limit(turn_contract, 8),
+                        _actions, render, default_limit = terminal_list
+                        structured_terminal_response = render(
+                            result if block.tool_type == 'manage_documents' else output,
+                            user_text=latest_user,
+                            max_items=contract_item_limit(turn_contract, default_limit),
                         )
-                    if (
-                        block is not None
-                        and canonical(block.tool_type) == 'search_emails'
-                        and not failed
-                        and round_number < round_limit
-                    ):
-                        recovery = email_search_recovery(output, email_search_recovery_attempts)
-                        if recovery:
-                            email_search_recovery_attempts += 1
-                            round_recovery_messages.append(recovery)
-                    if (
-                        len(proposed) == 1
-                        and block is not None
-                        and block.tool_type == 'manage_notes'
-                        and str(args.get('action') or '').replace('-', '_').casefold()
-                        in {'list', 'search', 'find'}
-                        and not failed
-                    ):
-                        # Note locator rows contain stable #note IDs. Preserve
-                        # those links instead of allowing a second model round
-                        # to collapse them into vague prose.
-                        structured_terminal_response = notes_terminal_response(
-                            output, user_text=latest_user,
-                            max_items=contract_item_limit(turn_contract, 20),
-                        )
-                        action = str(args.get('action') or '').replace('-', '_').casefold()
                         if (
-                            action in {'search', 'find'}
+                            block.tool_type == 'manage_notes'
+                            and list_action in {'search', 'find'}
                             and note_search_result_empty(output)
                             and not note_search_recovery_attempted
                             and round_number < round_limit
@@ -7962,17 +7551,20 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                                 'broader user-grounded keywords, or report that no match exists. '
                                 'Do not open an unrelated note from an older list.'
                             )
+                        if block.tool_type == 'manage_tasks' and task_list_requires_synthesis(latest_user):
+                            # The list renderer cannot answer a question about schedule fields.
+                            structured_terminal_response = ''
+                            force_no_tools_next_round = True
                     if (
-                        len(proposed) == 1
-                        and block is not None
-                        and block.tool_type == 'manage_documents'
-                        and str(args.get('action') or '').replace('-', '_').casefold() == 'list'
+                        block is not None
+                        and canonical(block.tool_type) == 'search_emails'
                         and not failed
+                        and round_number < round_limit
                     ):
-                        structured_terminal_response = documents_terminal_response(
-                            result, user_text=latest_user,
-                            max_items=contract_item_limit(turn_contract, 8),
-                        )
+                        recovery = email_search_recovery(output, email_search_recovery_attempts)
+                        if recovery:
+                            email_search_recovery_attempts += 1
+                            round_recovery_messages.append(recovery)
                     if (
                         len(proposed) == 1
                         and block is not None
@@ -7990,12 +7582,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         if shell_terminal_response and not artifact_pending:
                             structured_terminal_response = shell_terminal_response
                         elif not artifact_pending:
-                            # Successful mutating shell commands commonly have
-                            # no stdout.  The executor's ``(no output)`` sentinel
-                            # is evidence, not a useful user-facing answer.  Give
-                            # the model one tool-free round to confirm precisely
-                            # what the completed command did without risking a
-                            # duplicate execution.
+                            # The ``(no output)`` sentinel is no answer; one tool-free round confirms what ran.
                             force_no_tools_next_round = True
                     if (
                         len(proposed) == 1
@@ -8006,48 +7593,6 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         structured_terminal_response = ui_panel_terminal_response(
                             result, args=args,
                         ) or structured_terminal_response
-                    if (
-                        len(proposed) == 1
-                        and block is not None
-                        and block.tool_type == 'manage_memory'
-                        and str(args.get('action') or '').replace('-', '_').casefold() == 'list'
-                        and not failed
-                    ):
-                        structured_terminal_response = memory_terminal_response(
-                            output, user_text=latest_user,
-                            max_items=contract_item_limit(turn_contract, 20),
-                        )
-                    if (
-                        len(proposed) == 1
-                        and block is not None
-                        and block.tool_type == 'manage_tasks'
-                        and str(args.get('action') or '').replace('-', '_').casefold() == 'list'
-                        and not failed
-                    ):
-                        structured_terminal_response = tasks_terminal_response(
-                            output, user_text=latest_user,
-                            max_items=contract_item_limit(turn_contract, 20),
-                        )
-                        if task_list_requires_synthesis(latest_user):
-                            # The canonical list renderer cannot answer a
-                            # comparison or question about schedule fields.
-                            # Give the model one no-tools synthesis round over
-                            # the successful task evidence instead of replacing
-                            # the requested answer with a generic inventory.
-                            structured_terminal_response = ''
-                            force_no_tools_next_round = True
-                    if (
-                        len(proposed) == 1
-                        and block is not None
-                        and block.tool_type == 'manage_skills'
-                        and str(args.get('action') or '').replace('-', '_').casefold()
-                        in {'list', 'index', 'search', 'find'}
-                        and not failed
-                    ):
-                        structured_terminal_response = skills_terminal_response(
-                            output, user_text=latest_user,
-                            max_items=contract_item_limit(turn_contract, 20),
-                        )
                     if (
                         len(proposed) == 1
                         and block is not None
@@ -8139,9 +7684,7 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         'round': round_number,
                     })
                 if terminal_denial:
-                    refusal = denied_response()
-                    history.append({'role': 'assistant', 'content': refusal})
-                    yield event({'type': 'final_response', 'content': refusal})
+                    final_answer = denied_response()
                     break
                 if terminal_search_budget_violation:
                     if not search_completion_attempted and round_number < round_limit:
@@ -8167,17 +7710,13 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                             'reason': 'bounded_search_final_synthesis',
                         })
                         continue
-                    evidence_answer = bounded_web_evidence_answer(
+                    final_answer = bounded_web_evidence_answer(
                         direct_user_text, discovered_web_sources,
+                    ) or (
+                        'I could not find usable Web evidence within the bounded search '
+                        'attempts. I did not infer an answer from unsupported results. Try a '
+                        'narrower topic, date range, organization, or source type.'
                     )
-                    if not evidence_answer:
-                        evidence_answer = (
-                            'I could not find usable Web evidence within the bounded search '
-                            'attempts. I did not infer an answer from unsupported results. Try a '
-                            'narrower topic, date range, organization, or source type.'
-                        )
-                    history.append({'role': 'assistant', 'content': evidence_answer})
-                    yield event({'type': 'final_response', 'content': evidence_answer})
                     break
                 if terminal_suppression_violation:
                     missing_artifacts = missing_workspace_artifacts(latest_user, workspace)
@@ -8242,12 +7781,10 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                             'reason': 'suppressed_tool_final_synthesis',
                         })
                         continue
-                    incomplete = (
+                    final_answer = (
                         'I could not complete the request because the model repeated a tool call '
                         'after that tool was disabled. No further tool calls were executed.'
                     )
-                    history.append({'role': 'assistant', 'content': incomplete})
-                    yield event({'type': 'final_response', 'content': incomplete})
                     break
                 if terminal_budget_violation:
                     if (
@@ -8264,29 +7801,25 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         )})
                         yield event({'type': 'completion_recovery', 'reason': 'tool_budget_final_synthesis'})
                         continue
-                    incomplete = (
+                    final_answer = (
                         'I stopped because the tool execution budget was exhausted. '
                         'No further tool calls were executed; any successfully created artifacts '
                         'remain in the workspace.'
                     )
                     if editor_partial_pending:
-                        incomplete = (
+                        final_answer = (
                             f'Applied {editor_partial_applied} exact edits to the document. '
                             'Some proposed edits lacked a unique match during this turn. '
                             'Please review the document for remaining errors.'
                         )
                     elif editor_batch_pending:
-                        incomplete = (
+                        final_answer = (
                             'The editor saved the completed batches, but more passages were marked '
                             'for review. Please continue the editing request to finish.'
                         )
-                    history.append({'role': 'assistant', 'content': incomplete})
-                    yield event({'type': 'final_response', 'content': incomplete})
                     break
                 if structured_terminal_response:
-                    # Follow-ups must resolve against the same bounded rows the
-                    # user saw. Keeping the larger raw result in the native
-                    # trace makes invisible overflow candidates selectable.
+                    # Follow-ups must resolve against the rows the user saw, not hidden overflow.
                     align_structured_tool_history(history, structured_terminal_response)
                     history.append({'role': 'assistant', 'content': structured_terminal_response})
                     yield event({'delta': structured_terminal_response})
@@ -8303,9 +7836,12 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
                         'for review. Please continue the editing request to finish.')})
                 else:
                     yield event({'delta': '\nThe preview reached its round limit. Please narrow the request.'})
+            if final_answer is not None:
+                history.append({'role': 'assistant', 'content': final_answer})
+                yield event({'type': 'final_response', 'content': final_answer})
     except ProviderStreamError as exc:
         detail = 'The selected model provider failed while generating. Retry or choose another model.'
-        logging.getLogger(__name__).warning('Clean v3 provider stream failed: %s', exc, exc_info=True)
+        logger.warning('Clean v3 provider stream failed: %s', exc, exc_info=True)
         yield f'event: error\ndata: {json.dumps({"status": 502, "error": detail, "error_category": "provider_stream_error"})}\n\n'
         return
     except httpx.HTTPStatusError as exc:
@@ -8320,11 +7856,11 @@ async def stream_preview(*, endpoint_url, model, messages, headers, turn_contrac
             detail = f'The selected model provider is unavailable (HTTP {status}). Retry later or choose another model.'
         else:
             detail = f'The selected model provider rejected the request (HTTP {status}). Check the provider or choose another model.'
-        logging.getLogger(__name__).warning('Clean v3 provider request failed with HTTP %s', status)
+        logger.warning('Clean v3 provider request failed with HTTP %s', status)
         yield f'event: error\ndata: {json.dumps({"status": status, "error": detail})}\n\n'
         return
     except Exception:
-        logging.getLogger(__name__).exception('Clean v3 preview failed')
+        logger.exception('Clean v3 preview failed')
         yield f'event: error\ndata: {json.dumps({"status": 500, "error": "The model request failed unexpectedly. Check the server log and retry."})}\n\n'
         return
     elapsed = time.monotonic() - started

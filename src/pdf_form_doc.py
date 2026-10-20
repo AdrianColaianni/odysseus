@@ -1,15 +1,9 @@
 """Bridge between extracted PDF form fields and the document editor.
 
-Design: the user edits the form as readable markdown — labels as bullets,
-values as plain text — exactly like any other document in the editor.
-
-A hidden HTML-comment front-matter pointer at the top of the markdown
-links the document back to the source PDF and the field-schema sidecar:
+The form is edited as markdown. A hidden front-matter comment links it to the
+source PDF and field sidecar, and the export route reads it:
 
     <!-- pdf_form_source upload_id="abc.pdf" fields="441" -->
-
-The export route reads that pointer to find the source PDF + sidecar JSON,
-then asks an LLM to map markdown values back to AcroForm field names.
 """
 
 import json

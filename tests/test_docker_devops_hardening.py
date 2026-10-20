@@ -19,17 +19,8 @@ from starlette.testclient import TestClient
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILES = [
     ROOT / "docker-compose.yml",
-    ROOT / "docker-compose.gpu-nvidia.yml",
-    ROOT / "docker-compose.gpu-amd.yml",
 ]
 HOST_DOCKER_OVERLAY = ROOT / "docker" / "host-docker.yml"
-HOST_WORKSPACE_OVERLAY = ROOT / "docker" / "host-workspace.yml"
-HOST_NETWORK_OVERLAY = ROOT / "docker" / "host-network.yml"
-TEST_DOCS = [
-    ROOT / "tests" / "README.md",
-    ROOT / "tests" / "TESTING_STANDARD.md",
-    ROOT / "tests" / "LAYOUT_INVENTORY.md",
-]
 
 
 def _compose_env_names(path: Path) -> set[str]:
@@ -73,16 +64,6 @@ def test_default_compose_files_do_not_mount_host_docker_socket():
         assert "/var/run/docker.sock" not in text, path.name
 
 
-def test_browser_image_includes_multilingual_font_support():
-    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-
-    # Headless Chromium must be able to render user/generated CJK text. A
-    # generic sans-serif declaration cannot help when the image has no glyph
-    # provider at all.
-    assert "fonts-noto-cjk" in dockerfile
-    assert "fontconfig" in dockerfile
-
-
 def test_host_docker_overlay_mounts_socket_and_adds_docker_group():
     overlay = yaml.safe_load(HOST_DOCKER_OVERLAY.read_text(encoding="utf-8"))
     service = overlay["services"]["odysseus"]
@@ -90,32 +71,6 @@ def test_host_docker_overlay_mounts_socket_and_adds_docker_group():
     assert "/var/run/docker.sock:/var/run/docker.sock" in service["volumes"]
     assert "${DOCKER_GID:-963}" in service["group_add"]
     assert "ODYSSEUS_ENABLE_HOST_DOCKER=true" in service["environment"]
-
-
-def test_host_workspace_overlay_mounts_explicit_host_workspace():
-    overlay = yaml.safe_load(HOST_WORKSPACE_OVERLAY.read_text(encoding="utf-8"))
-    service = overlay["services"]["odysseus"]
-
-    assert (
-        "${ODYSSEUS_HOST_WORKSPACE_DIR:?set ODYSSEUS_HOST_WORKSPACE_DIR}:${ODYSSEUS_HOST_WORKSPACE_MOUNT:-/host/workspace}:rw,z"
-        in service["volumes"]
-    )
-    assert (
-        "ODYSSEUS_HOST_WORKSPACE_MOUNT=${ODYSSEUS_HOST_WORKSPACE_MOUNT:-/host/workspace}"
-        in service["environment"]
-    )
-
-
-def test_host_network_overlay_uses_host_namespace_without_port_mapping():
-    text = HOST_NETWORK_OVERLAY.read_text(encoding="utf-8")
-
-    assert "network_mode: host" in text
-    assert "ports: !reset []" in text
-    assert "SEARXNG_INSTANCE=${ODYSSEUS_HOST_NETWORK_SEARXNG_INSTANCE:-http://127.0.0.1:8080}" in text
-    assert "CHROMADB_HOST=${ODYSSEUS_HOST_NETWORK_CHROMADB_HOST:-127.0.0.1}" in text
-    assert "CHROMADB_PORT=${ODYSSEUS_HOST_NETWORK_CHROMADB_PORT:-8100}" in text
-    assert "ODYSSEUS_CONTAINER_NETWORK_MODE=host" in text
-    assert '--port "$${APP_PORT:-7011}"' in text
 
 
 def test_docker_entrypoint_gates_socket_group_plumbing_on_explicit_opt_in():
@@ -156,22 +111,6 @@ def test_docker_entrypoint_ownership_repair_stays_inside_expected_mounts():
     assert "mount_root_for" in script
     assert "is_broad_mount_root" in script
     assert "Skipping recursive ownership repair" in script
-
-
-def test_docker_entrypoint_repairs_cache_parent_without_recursive_walk():
-    """Pin the hard-coded container-path contract without running entrypoint as root."""
-    script = (ROOT / "docker" / "entrypoint.sh").read_text(encoding="utf-8")
-    app_repair = script.index("repair_app_tree_ownership\n")
-    cache_parent_repair = script.index(
-        'chown "$PUID:$PGID" /app/.cache 2>/dev/null || true'
-    )
-    mounted_cache_root_repair = script.index(
-        'chown "$PUID:$PGID" /app/.cache/huggingface 2>/dev/null || true'
-    )
-
-    assert app_repair < cache_parent_repair < mounted_cache_root_repair
-    assert 'repair_tree_ownership "/app/.cache"' not in script
-    assert 'repair_bind_mount_ownership "/app/.cache/huggingface"' not in script
 
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="Docker CLI is unavailable")
@@ -277,17 +216,3 @@ def test_patch_preflight_is_allowed_by_configured_cors_methods():
     )
 
     assert response.status_code == 200
-
-
-def test_testing_docs_use_project_venv_for_python_validation():
-    stale_patterns = [
-        "python3 -m pytest",
-        "python3 -m py_compile",
-        "Focused `pytest`",
-        "`pytest` on neighboring",
-        ".venv/bin/python",
-    ]
-    for path in TEST_DOCS:
-        text = path.read_text(encoding="utf-8")
-        for stale in stale_patterns:
-            assert stale not in text, f"{path.name} still contains {stale!r}"

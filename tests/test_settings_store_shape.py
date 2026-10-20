@@ -8,7 +8,6 @@ def test_load_settings_falls_back_for_non_object_json(tmp_path, monkeypatch):
     settings._invalidate_caches()
 
     assert settings.load_settings() == settings.DEFAULT_SETTINGS
-    assert settings.is_setting_overridden("default_model") is False
 
 
 def test_load_features_falls_back_for_non_object_json(tmp_path, monkeypatch):

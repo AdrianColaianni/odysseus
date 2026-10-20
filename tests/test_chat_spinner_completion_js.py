@@ -1,7 +1,8 @@
 """Exercise the stream-owned sidebar cleanup for terminal and detached paths."""
 import json
-import subprocess
 from pathlib import Path
+
+from tests.helpers.node import run_node_module
 
 
 def test_sidebar_completion_clears_only_the_owning_finished_stream():
@@ -30,9 +31,7 @@ def test_sidebar_completion_clears_only_the_owning_finished_stream():
       }
       console.log(JSON.stringify(results));
     '''.replace('BODY', json.dumps(source[start:end]))
-    result = subprocess.run(['node', '--input-type=module', '-e', script],
-                            capture_output=True, text=True, check=True)
-    assert json.loads(result.stdout) == [['complete:chat'], ['clear:chat'], [], [], [], []]
+    assert run_node_module(script) == [['complete:chat'], ['clear:chat'], [], [], [], []]
 
 
 def test_tool_wait_indicator_cannot_reappear_after_completion_or_stop():
@@ -66,9 +65,7 @@ def test_tool_wait_indicator_cannot_reappear_after_completion_or_stop():
       }
       console.log(JSON.stringify(results));
     '''.replace('BODY', source[start:end])
-    result = subprocess.run(['node', '--input-type=module', '-e', script],
-                            capture_output=True, text=True, check=True)
-    assert json.loads(result.stdout) == [1, 0, 0, 0, 0, 0]
+    assert run_node_module(script) == [1, 0, 0, 0, 0, 0]
 
 
 def test_done_exits_reader_without_waiting_for_connection_close():
@@ -94,6 +91,4 @@ def test_done_exits_reader_without_waiting_for_connection_close():
       }
       console.log(JSON.stringify({reads, cancellations, done: _streamSawDone}));
     '''.replace('BODY', body)
-    result = subprocess.run(['node', '--input-type=module', '-e', script],
-                            capture_output=True, text=True, check=True)
-    assert json.loads(result.stdout) == {'reads': 1, 'cancellations': 1, 'done': True}
+    assert run_node_module(script) == {'reads': 1, 'cancellations': 1, 'done': True}

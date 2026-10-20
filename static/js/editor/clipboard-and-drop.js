@@ -38,7 +38,6 @@ export function wireClipboardAndDrop({
   clipboardBindings?.abort();
   clipboardBindings = new AbortController();
   const { signal } = clipboardBindings;
-  // ── Paste ──
   window.addEventListener('paste', (e) => {
     if (!state.editorOpen || state.container !== container) return;
     // Editable fields keep native paste. The Clipboard button focuses the
@@ -91,7 +90,6 @@ export function wireClipboardAndDrop({
     }
   }, { capture: true, signal });
 
-  // ── Drag-and-drop ──
   // Visual drop-zone overlay appears mid-drag; routes via
   // handleImportedImage so the import respects canvas resizing rules
   // + saves history (same path as the toolbar Import button).

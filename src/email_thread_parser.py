@@ -1,25 +1,8 @@
-"""
-email_thread_parser.py
+"""Server-side port of the thread parser in static/js/emailLibrary.js; keep the two in step.
 
-Server-side port of the JS thread parser in static/js/emailLibrary.js.
-Walks an email body (HTML or plain text) and returns a tree of reply turns
-that the client can render directly without re-parsing.
-
-Mirrors the rules from talon (mailgun) and email-reply-parser:
-  - Multilingual "On <date>, <name> wrote:" attribution lines (20+ locales)
-  - Outlook-style "From: ... Sent: ... Subject:" header blocks
-  - "----- Original Message -----" delimiters
-  - <blockquote> nesting (HTML)
-  - "> " prefix nesting (plain text)
-
-Returns a list of dicts:
-    [
-      {"level": 0, "body_html": "...", "meta": null},
-      {"level": 1, "body_html": "...", "meta": "Alice <a@x> · May 5"},
-      {"level": 2, "body_html": "...", "meta": "Bob <b@y> · May 4"},
-      ...
-    ]
-where level 0 is the current reply, increasing levels = deeper in the chain.
+Splits an email body into reply turns, returned as
+``[{"level": 0, "body_html": ..., "meta": None}, ...]`` where level 0 is the
+newest reply and deeper levels are older quotes.
 """
 
 from __future__ import annotations

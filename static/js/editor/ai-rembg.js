@@ -35,6 +35,7 @@
  *
  * @returns {{ buildSelectionHintMask: () => string | null }}
  */
+import { makeCanvas } from './placed-layer.js';
 import { state } from './state.js';
 import { selectionMaskToDocument } from './selection-mask.js';
 
@@ -42,7 +43,6 @@ export function wireRembgAndSharpen({
   applyImageTool, openCookbookForDependency,
   composite, renderLayerPanel, uiModule,
 }) {
-  // ── Sharpen ──
   const sharpenPrev = document.getElementById('ge-sharpen-preview');
   if (sharpenPrev) sharpenPrev.style.opacity = '0.5';
   document.getElementById('ge-sharpen-amount')?.addEventListener('input', (e) => {
@@ -54,7 +54,6 @@ export function wireRembgAndSharpen({
     applyImageTool('/api/image/sharpen', { amount }, 'Sharpened', document.getElementById('ge-sharpen-run'));
   });
 
-  // ── Bg Remove ──
   document.getElementById('ge-rembg-install-link')?.addEventListener('click', () => {
     openCookbookForDependency('rembg');
   });
@@ -98,14 +97,12 @@ export function wireRembgAndSharpen({
     if (g) { g.value = 0; document.getElementById('ge-rembg-grow-label').textContent = '0px'; syncRembgGrow(0); }
   });
 
-  // ── Live edge-cleanup tuner ──
   // Snapshots the pristine cutout the moment it lands; slider tweaks
   // rebuild alpha from that snapshot.
   function bindRembgLiveTuner(layer) {
     if (!layer) return;
     const w = layer.canvas.width, h = layer.canvas.height;
-    const snap = document.createElement('canvas');
-    snap.width = w; snap.height = h;
+    const snap = makeCanvas(w, h);
     snap.getContext('2d').drawImage(layer.canvas, 0, 0);
     state.rembgLiveLayer = layer;
     state.rembgLiveSnap = snap;
@@ -134,8 +131,7 @@ export function wireRembgAndSharpen({
     //      grow < 0 → high threshold (200) → only solid interior → shrinks.
     //    RGB is kept; only alpha is replaced.
     if (grow !== 0) {
-      const blurC = document.createElement('canvas');
-      blurC.width = w; blurC.height = h;
+      const blurC = makeCanvas(w, h);
       const bctx = blurC.getContext('2d');
       bctx.filter = `blur(${Math.abs(grow)}px)`;
       bctx.drawImage(snap, 0, 0);
@@ -155,8 +151,7 @@ export function wireRembgAndSharpen({
     //    faint blur at the edge which actually helps hide residual
     //    colour fringing from the original background.
     if (feather > 0) {
-      const fC = document.createElement('canvas');
-      fC.width = w; fC.height = h;
+      const fC = makeCanvas(w, h);
       const fctx = fC.getContext('2d');
       fctx.filter = `blur(${feather}px)`;
       fctx.drawImage(layer.canvas, 0, 0);
@@ -167,7 +162,6 @@ export function wireRembgAndSharpen({
     composite();
   }
 
-  // ── Slider preview swatches + wiring ──
   const rembgFeatherPrev = document.getElementById('ge-rembg-feather-preview');
   const rembgGrowPrev = document.getElementById('ge-rembg-grow-preview');
   function syncRembgFeather(v) {
@@ -197,7 +191,6 @@ export function wireRembgAndSharpen({
     scheduleRembgApply();
   });
 
-  // ── Selection-hint mask builder (used here + by wand-rembg) ──
   // Full-image white-on-transparent mask PNG (base64, no `data:`
   // prefix) of whichever selection is active — wand first, lasso
   // second. Returns null if neither has a selection.
@@ -215,8 +208,7 @@ export function wireRembgAndSharpen({
       return c.toDataURL('image/png').split(',')[1];
     }
     if (state.lassoPoints.length >= 3 && !state.lassoActive) {
-      const c = document.createElement('canvas');
-      c.width = w; c.height = h;
+      const c = makeCanvas(w, h);
       const ctx = c.getContext('2d');
       ctx.fillStyle = '#fff';
       ctx.beginPath();

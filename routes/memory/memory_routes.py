@@ -1,4 +1,3 @@
-# routes/memory_routes.py
 from fastapi import APIRouter, Form, HTTPException, Request, UploadFile, File
 from typing import Dict, Any, Optional, List
 import json
@@ -6,13 +5,9 @@ import os
 import re
 import tempfile
 import time
-from datetime import datetime
 import logging
 
-# Leading list-marker like "1.", "12)", or "3:" plus surrounding whitespace.
-# Strips one prefix per call so import-from-LLM-output doesn't leave the
-# numbering inside the saved memory text. Bullet markers (-, *, •) are
-# also peeled here for the same reason.
+# One leading "1.", "12)", "3:" or bullet marker, so LLM list numbering stays out of saved memories.
 _LIST_PREFIX_RE = re.compile(r"^\s*(?:\d{1,3}[.):]\s+|[-*•]\s+)")
 
 
@@ -24,7 +19,6 @@ def _strip_list_prefix(text: str) -> str:
 from services.memory import MemoryManager, MemoryStoreUnreadable
 from core.session_manager import SessionManager
 from src.request_models import MemoryAddRequest
-from core.database import SessionLocal
 from src.llm_core import llm_call_async
 from services.memory.memory_extractor import audit_memories
 from src.auth_helpers import get_current_user, require_user
@@ -40,7 +34,7 @@ def _load_for_update(memory_manager) -> List[Dict[str, Any]]:
 
     A transient read failure must not look like an empty store: the caller
     would append to ``[]`` and save that back, atomically destroying every
-    existing memory (issue #5673). Surface it as a 503 and change nothing.
+    existing memory. Surface it as a 503 and change nothing.
     """
     try:
         return memory_manager.load_all_for_update()
@@ -55,47 +49,17 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
     """Set up memory-related routes."""
     router = APIRouter(prefix="/api/memory", tags=["memory"])
 
-    def _owner(request: Request) -> Optional[str]:
-        return get_current_user(request)
-
     def _assert_session_owner(session_obj, user):
-        """SECURITY: 404 if the caller does not own this session.
-
-        SessionManager.get_session is NOT owner-scoped — it returns any
-        session by id. These routes accept a caller-supplied session id, so
-        without this gate a user could target another tenant's session and
-        leak their chat history, their session-scoped LLM credentials, or the
-        session title. Mirrors session_routes / webhook_routes ownership.
-        """
+        """404 unless `user` owns the session; SessionManager.get_session is not owner-scoped."""
         if user is not None and getattr(session_obj, "owner", None) != user:
             raise HTTPException(404, "Session not found")
 
     def _verify_memory_owner(memory: dict, user: Optional[str]):
-        """Raise 404 if user doesn't own this memory.
-
-        SECURITY: strict ownership — previously `mem_owner and mem_owner != user`
-        allowed any user to read/edit/delete memories with an empty/null owner
-        field, which leaked legacy data across the multi-user deploy.
-        """
+        """Raise 404 unless `user` owns this memory; a null owner matches nobody."""
         if user is None:
             return  # Auth disabled
         if memory.get("owner") != user:
             raise HTTPException(404, "Memory not found")
-
-    @router.post("/debug")
-    def debug_memory_relevance(request: Request, query: str = Form(...)):
-        """Debug which memories would be triggered for a query"""
-        user = _owner(request)
-        memories = memory_manager.load(owner=user)
-        relevant = memory_manager.get_relevant_memories(query, memories, threshold=0.05)
-
-        return {
-            "query": query,
-            "total_memories": len(memories),
-            "relevant_count": len(relevant),
-            "relevant_memories": [{"text": m["text"], "category": m.get("category", "unknown")}
-                                 for m in relevant]
-        }
 
     @router.post("/add", response_model=Dict[str, Any])
     async def api_add_memory(
@@ -114,7 +78,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 session_id=form.get("session_id")
             )
 
-        user = _owner(request)
+        user = get_current_user(request)
         text = (memory_data.text or "").strip()
         if not text:
             raise HTTPException(400, "empty memory")
@@ -148,13 +112,13 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
     @router.get("")
     def api_get_memory(request: Request):
         """Return all memory entries with their metadata."""
-        user = _owner(request)
+        user = get_current_user(request)
         return {"memory": memory_manager.load(owner=user)}
 
     @router.post("/search")
     def search_memories(request: Request, query: str = Form(...), session_id: str = Form(None), category: str = Form(None)):
         """Search across all memories with optional filters."""
-        user = _owner(request)
+        user = get_current_user(request)
         memories = memory_manager.load(owner=user)
 
         if session_id:
@@ -167,74 +131,6 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
 
         return {"memories": relevant, "total": len(relevant), "query": query}
 
-    @router.get("/timeline")
-    def memory_timeline(request: Request):
-        """Get memories in chronological order with source session information."""
-        user = _owner(request)
-        memories = memory_manager.load(owner=user)
-        sorted_memories = sorted(memories, key=lambda x: x.get("timestamp", 0), reverse=True)
-
-        results = []
-        for memory in sorted_memories:
-            if "timestamp" in memory:
-                try:
-                    dt = datetime.fromtimestamp(memory["timestamp"])
-                    memory["timestamp_str"] = dt.strftime("%Y-%m-%d %H:%M:%S")
-                except (ValueError, OSError, OverflowError):
-                    memory["timestamp_str"] = "Unknown"
-            else:
-                memory["timestamp_str"] = "Unknown"
-
-            session_id = memory.get("session_id")
-            if session_id and session_id in session_manager.sessions:
-                try:
-                    session = session_manager.get_session(session_id)
-                    if session:
-                        _assert_session_owner(session, user)
-                    memory["session_name"] = session.name if session else f"Session {session_id[:6]}"
-                except KeyError:
-                    memory["session_name"] = "Unknown"
-                except HTTPException as exc:
-                    if exc.status_code != 404:
-                        raise
-                    memory["session_name"] = "Unknown"
-            else:
-                memory["session_name"] = "Unknown"
-
-            results.append(memory)
-
-        return {"timeline": results, "total": len(results)}
-
-    @router.get("/by-session/{session_id}")
-    def get_memory_by_session(request: Request, session_id: str):
-        """Get all memories associated with a specific session."""
-        user = _owner(request)
-        try:
-            _session_obj = session_manager.get_session(session_id)
-        except KeyError:
-            raise HTTPException(404, f"Session {session_id} not found")
-        _assert_session_owner(_session_obj, user)
-        memories = memory_manager.load(owner=user)
-        session_memories = [m for m in memories if m.get("session_id") == session_id]
-
-        session_memories.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
-
-        try:
-            session = session_manager.get_session(session_id)
-            session_name = session.name if session else f"Session {session_id[:6]}"
-        except KeyError:
-            session_name = f"Session {session_id[:6]}"
-
-        for memory in session_memories:
-            memory["session_name"] = session_name
-
-        return {
-            "session_id": session_id,
-            "session_name": session_name,
-            "memory_count": len(session_memories),
-            "memories": session_memories
-        }
-
     @router.post("/extract")
     async def extract_memory(request: Request, session: str = Form(...)) -> Dict[str, List[str]]:
         """Analyze a session's chat history and return memory suggestions."""
@@ -243,7 +139,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             sess = session_manager.get_session(session)
         except KeyError:
             raise HTTPException(404, "Session not found")
-        _assert_session_owner(sess, _owner(request))
+        _assert_session_owner(sess, get_current_user(request))
 
         system_msg = {
             "role": "system",
@@ -258,7 +154,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         messages = [system_msg] + sess.get_context_messages()
 
         t_url, t_model, t_headers = resolve_task_endpoint(
-            sess.endpoint_url, sess.model, sess.headers, owner=_owner(request)
+            sess.endpoint_url, sess.model, sess.headers, owner=get_current_user(request)
         )
 
         from src.utility_effort import effort_for_call
@@ -271,7 +167,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 temperature=0.2,
                 max_tokens=500,
                 headers=t_headers,
-                reasoning_effort=effort_for_call(t_url, t_model, _owner(request), sess),
+                reasoning_effort=effort_for_call(t_url, t_model, get_current_user(request), sess),
             )
             try:
                 suggestions = json.loads(suggestion_text)
@@ -296,7 +192,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         the active session as fallback when no task or utility model is set.
         Returns before and after memory counts.
         """
-        user = _owner(request)
+        user = get_current_user(request)
         fallback_url = fallback_model = None
         fallback_headers = None
         if session:
@@ -333,9 +229,6 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             "before": result.get("before", 0),
             "after": result.get("after", 0),
             "removed": result.get("before", 0) - result.get("after", 0),
-            # True when the audit skipped the LLM because nothing changed
-            # since the last tidy. Frontend already says "Already clean"
-            # for removed==0, so this is here for future use / debugging.
             "already_tidy": bool(result.get("already_tidy")),
         }
 
@@ -354,7 +247,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         headers = {}
         sess = None
 
-        user = _owner(request)
+        user = get_current_user(request)
 
         if session:
             try:
@@ -395,7 +288,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 tmp.write(content)
                 tmp_path = tmp.name
             try:
-                text = _process_pdf(tmp_path, owner=_owner(request))
+                text = _process_pdf(tmp_path, owner=get_current_user(request))
             finally:
                 os.unlink(tmp_path)
         else:
@@ -409,13 +302,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         if not text.strip():
             return {"suggestions": [], "message": "No readable content found"}
 
-        # Fast path: a .json upload that already looks like a memories export
-        # (list of {text, category, ...} dicts, or list of strings) round-trips
-        # directly without spending an LLM call to re-extract its own output.
-        # Without this, re-importing a memories.json from another account
-        # ran the file through the extractor, which often re-emitted the
-        # entries as a numbered list (and the numbering leaked into the
-        # `text` field).
+        # A .json memories export round-trips directly; the extractor would re-number its entries.
         if ext == ".json":
             try:
                 parsed = json.loads(text)
@@ -473,7 +360,6 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 reasoning_effort=effort_for_call(endpoint_url, model, user, sess),
             )
 
-            # Parse JSON
             raw = raw.strip()
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -498,8 +384,6 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             return {"suggestions": suggestions, "filename": filename}
 
         except json.JSONDecodeError:
-            # Fallback: split by lines, stripping any "1.", "2)" markdown-list
-            # numbering the model added so saved memories don't keep the prefix.
             lines = [_strip_list_prefix(l.strip()) for l in raw.splitlines() if l.strip() and len(l.strip()) > 5]
             return {"suggestions": [{"text": l, "category": "fact"} for l in lines[:20]], "filename": filename}
         except Exception as e:
@@ -509,7 +393,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
     @router.post("/{memory_id}/pin")
     def pin_memory(request: Request, memory_id: str, pinned: bool = Form(True)):
         """Pin or unpin a memory. Pinned memories are always included in context."""
-        user = _owner(request)
+        user = get_current_user(request)
         all_mem = _load_for_update(memory_manager)
         for i, memory in enumerate(all_mem):
             if memory["id"] == memory_id:
@@ -523,7 +407,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
     @router.get("/{memory_id}")
     def get_memory_item(request: Request, memory_id: str):
         """Get a specific memory item by ID."""
-        user = _owner(request)
+        user = get_current_user(request)
         memories = memory_manager.load(owner=user)
         for memory in memories:
             if memory["id"] == memory_id:
@@ -534,7 +418,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
     @router.put("/{memory_id}")
     def update_memory(request: Request, memory_id: str, text: str = Form(...), category: str = Form(None)):
         """Update an existing memory item with new text and optional category."""
-        user = _owner(request)
+        user = get_current_user(request)
         all_mem = _load_for_update(memory_manager)
         for i, memory in enumerate(all_mem):
             if memory["id"] == memory_id:
@@ -556,7 +440,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
     @router.delete("/{memory_id}")
     def delete_memory(request: Request, memory_id: str):
         """Delete a memory item by its ID."""
-        user = _owner(request)
+        user = get_current_user(request)
         all_mem = _load_for_update(memory_manager)
 
         # Find and verify ownership before deleting

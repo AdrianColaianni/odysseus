@@ -21,6 +21,7 @@ from email.mime.text import MIMEText
 from types import SimpleNamespace
 
 import pytest
+from tests.helpers.routes import route_endpoint
 
 # -- A. upload reference scanners ---------------------------------------------
 
@@ -179,14 +180,10 @@ def test_connection_test_keeps_mail_server_auth_responses():
 
 
 def test_account_connection_test_route_applies_policy_to_both_protocols(monkeypatch):
-    import routes.email_routes as email_routes
+    import routes.email.email_routes as email_routes
 
     monkeypatch.delenv("EMAIL_BLOCK_PRIVATE_IPS", raising=False)
-    router = email_routes.setup_email_routes()
-    endpoint = next(
-        r.endpoint for r in router.routes
-        if r.path == "/api/email/accounts/test" and "POST" in getattr(r, "methods", set())
-    )
+    endpoint = route_endpoint(email_routes.setup_email_routes(), "/api/email/accounts/test", "POST")
 
     class _Request:
         async def json(self):
@@ -231,7 +228,7 @@ def test_two_users_same_folder_uid_cannot_overwrite_each_others_attachment(tmp_p
     bob's request rewrote the file whose path alice's agent was about to read.
     """
     import routes.email.email_helpers as helpers
-    import routes.email_routes as email_routes
+    import routes.email.email_routes as email_routes
 
     monkeypatch.setattr(helpers, "ATTACHMENTS_DIR", tmp_path)
     mailboxes = {
@@ -248,11 +245,12 @@ def test_two_users_same_folder_uid_cannot_overwrite_each_others_attachment(tmp_p
         email_routes, "_imap_uid_fetch",
         lambda conn, uid, query: ("OK", [(b"42 (RFC822)", mailboxes[conn.owner])]),
     )
-    router = email_routes.setup_email_routes()
-    endpoint = next(r.endpoint for r in router.routes if r.path == "/api/email/attachment-path/{uid}/{index}")
+    endpoint = route_endpoint(
+        email_routes.setup_email_routes(), "/api/email/attachment-path/{uid}/{index}", "POST"
+    )
 
-    alice = asyncio.run(endpoint(uid="42", index=0, folder="INBOX", account_id=None, owner="alice"))
-    bob = asyncio.run(endpoint(uid="42", index=0, folder="INBOX", account_id=None, owner="bob"))
+    alice = endpoint(uid="42", index=0, folder="INBOX", account_id=None, owner="alice")
+    bob = endpoint(uid="42", index=0, folder="INBOX", account_id=None, owner="bob")
 
     assert alice["filename"] == bob["filename"] == "invoice.pdf"
     assert alice["path"] != bob["path"]

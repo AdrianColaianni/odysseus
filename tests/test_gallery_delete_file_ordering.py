@@ -7,23 +7,18 @@ stayed active but its file was already gone — a broken, unviewable image (data
 loss). The file is now removed only after the soft-delete commit succeeds, and
 best-effort so a missing/locked file can't fail an otherwise-successful delete.
 """
-import asyncio
-
 import pytest
 from fastapi import HTTPException, Request
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from core.database import Base, GalleryImage
-import routes.gallery_routes as gallery_routes
+import routes.gallery.gallery_routes as gallery_routes
+from tests.helpers.routes import route_endpoint
 
 
 def _delete_endpoint():
-    router = gallery_routes.setup_gallery_routes()
-    for route in router.routes:
-        if getattr(route, "path", "") == "/api/gallery/{image_id}" and "DELETE" in getattr(route, "methods", set()):
-            return route.endpoint
-    raise AssertionError("DELETE /api/gallery/{image_id} endpoint not found")
+    return route_endpoint(gallery_routes.setup_gallery_routes(), "/api/gallery/{image_id}", "DELETE")
 
 
 def _seed(tmp_path):
@@ -54,11 +49,10 @@ def test_file_kept_when_commit_fails(tmp_path, monkeypatch):
         raise RuntimeError("commit failed")
 
     monkeypatch.setattr(sess, "commit", _boom)
-    monkeypatch.setattr(gallery_routes, "SessionLocal", lambda: sess)
 
     delete = _delete_endpoint()
     with pytest.raises(HTTPException):
-        asyncio.run(delete(Request(scope={"type": "http"}), "img-1"))
+        delete(Request(scope={"type": "http"}), "img-1", db=sess)
 
     # File must survive a failed commit — the record is still active after rollback.
     assert (tmp_path / "data" / "generated_images" / "x.png").exists()
@@ -72,10 +66,11 @@ def test_file_removed_on_successful_delete(tmp_path, monkeypatch):
     SessionLocal = _seed(tmp_path)
     monkeypatch.setattr(gallery_routes, "GALLERY_IMAGE_DIR", tmp_path / "data" / "generated_images")
     monkeypatch.setattr(gallery_routes, "get_current_user", lambda r: "alice")
-    monkeypatch.setattr(gallery_routes, "SessionLocal", SessionLocal)
 
     delete = _delete_endpoint()
-    result = asyncio.run(delete(Request(scope={"type": "http"}), "img-1"))
+    sess = SessionLocal()
+    result = delete(Request(scope={"type": "http"}), "img-1", db=sess)
+    sess.close()
 
     assert result["status"] == "deleted"
     assert not (tmp_path / "data" / "generated_images" / "x.png").exists()

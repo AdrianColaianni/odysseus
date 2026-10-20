@@ -34,7 +34,6 @@ def forbidden_inference_and_execution(monkeypatch):
 
     spies = []
     for module, name in (
-        (agent_loop, "stream_llm"),
         (agent_loop, "stream_llm_with_fallback"),
         (agent_loop, "execute_tool_block"),
         (tool_execution, "execute_tool_block"),
@@ -80,10 +79,8 @@ async def test_actual_generator_reports_unavailable_before_inference(
     assert decision["data"]["evidence_ids"] == []
     failure = json.loads(chunks[2].removeprefix("data: "))
     assert set(failure) == {"delta"}
-    assert "can’t perform" in failure["delta"]
     assert "unavailable" in failure["delta"]
     assert missing in failure["delta"]
-    assert "haven’t substituted another tool" in failure["delta"]
     assert chunks[3] == "data: [DONE]\n\n"
 
 

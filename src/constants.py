@@ -1,8 +1,8 @@
-# src/constants.py
 """Application-wide constants and configuration values."""
 import os
 import subprocess
 
+from src.host_docker_access import running_in_container
 from src.runtime_paths import get_app_root, get_default_data_dir
 
 APP_VERSION = "1.0.3"
@@ -74,10 +74,17 @@ CONTACTS_FILE = os.path.join(DATA_DIR, "contacts.json")
 APP_KEY_FILE = os.path.join(DATA_DIR, ".app_key")
 EMBEDDING_ENDPOINT_FILE = os.path.join(DATA_DIR, "embedding_endpoint.json")
 COOKBOOK_STATE_FILE = os.path.join(DATA_DIR, "cookbook_state.json")
+# Docker compose mounts the cookbook key dir at <app root>/.ssh; native runs use ~/.ssh.
+COOKBOOK_SSH_DIR = (
+    os.path.join(get_app_root(), ".ssh") if running_in_container()
+    else os.path.join(os.path.expanduser("~"), ".ssh")
+)
+SFT_TRACE_DIR = os.path.join(DATA_DIR, "sft_traces")
+FIXTURE_EMAIL_MESSAGES_FILE = os.path.join(DATA_DIR, "fixture_email_messages.json")
+EMAIL_BLOCKED_SENDERS_FILE = os.path.join(DATA_DIR, "email_blocked_senders.json")
 BG_JOBS_FILE = os.path.join(DATA_DIR, "bg_jobs.json")
 CONTAINMENT_STATE_FILE = os.path.join(DATA_DIR, "containment_grants.json")
 VAULT_FILE = os.path.join(DATA_DIR, "vault.json")
-TIDY_CALENDAR_STATE_FILE = os.path.join(DATA_DIR, "tidy_calendar_state.json")
 SKILLS_FILE = os.path.join(DATA_DIR, "skills.json")
 APP_DB = os.path.join(DATA_DIR, "app.db")
 SCHEDULED_EMAILS_DB = os.path.join(DATA_DIR, "scheduled_emails.db")
@@ -100,6 +107,7 @@ SKILLS_DIR = os.path.join(DATA_DIR, "skills")
 GALLERY_DIR = os.path.join(DATA_DIR, "gallery")
 GALLERY_UPLOADS_DIR = os.path.join(DATA_DIR, "gallery_uploads")
 MEMORY_VECTORS_DIR = os.path.join(DATA_DIR, "memory_vectors")
+PLAYWRIGHT_MCP_CACHE_DIR = os.path.join(DATA_DIR, "local", "playwright-mcp-cache")
 
 # The only part of DATA_DIR the agent's file tools and subprocesses may touch.
 # Everything else under DATA_DIR is application state (session store, auth
@@ -108,12 +116,7 @@ AGENT_WORKSPACE_DIR = os.path.join(DATA_DIR, "agent_workspace")
 
 # Paths with an intentional dedicated env override, defaulting under DATA_DIR.
 MAIL_ATTACHMENTS_DIR = os.getenv("ODYSSEUS_MAIL_ATTACHMENTS_DIR", os.path.join(DATA_DIR, "mail-attachments"))
-# `or` (not os.getenv's default arg) so a PRESENT-but-EMPTY value falls back to
-# the default. docker-compose.yml injects `FASTEMBED_CACHE_PATH=${FASTEMBED_CACHE_PATH:-}`,
-# which sets the var to "" when the host hasn't defined it. os.getenv(name, default)
-# only returns the default when the var is ABSENT, so the empty string would win →
-# os.makedirs("") raises [Errno 2] No such file or directory: '' → FastEmbed fails to
-# init and all vector features (RAG, semantic memory, tool index) silently degrade.
+# `or`, not a getenv default: docker-compose.yml injects FASTEMBED_CACHE_PATH as "" when unset.
 FASTEMBED_CACHE_DIR = os.getenv("FASTEMBED_CACHE_PATH") or os.path.join(DATA_DIR, "fastembed_cache")
 
 # Agent tool output limits (single source of truth — imported by tool_execution.py,
@@ -122,7 +125,7 @@ MAX_OUTPUT_CHARS = 10_000       # cap for bash/python/web_search/web_fetch outpu
 MAX_READ_CHARS = 20_000         # cap for read_file / document preview
 MAX_DIFF_LINES = 400            # cap for edit_file unified-diff display
 
-# web_fetch response-size policy (#3812). MAX_OUTPUT_CHARS above only trims
+# web_fetch response-size policy. MAX_OUTPUT_CHARS above only trims
 # what the agent SEES; these caps bound what the server downloads, parses,
 # and writes to the content cache. The soft cap is the default download
 # budget; the agent can raise it per call (full/max_bytes) but never past
@@ -133,7 +136,6 @@ WEB_FETCH_HARD_MAX_BYTES = 20_000_000   # absolute ceiling, even with override (
 # API Configuration
 MAX_CONTEXT_MESSAGES = 90
 REQUEST_TIMEOUT = 20
-OPENAI_COMPAT_PATH = "/v1/chat/completions"
 
 # Outbound UA for web_fetch / web_search scraping; common desktop UA so pages serve normal HTML.
 WEB_FETCH_USER_AGENT = os.environ.get(
@@ -143,24 +145,19 @@ WEB_FETCH_USER_AGENT = os.environ.get(
 )
 
 # Environment variables with defaults
+# The port Odysseus listens on. The Docker image sets APP_PORT=7000 to match its CMD.
+APP_PORT = int(os.getenv("APP_PORT", "7011"))
 DEFAULT_HOST = os.getenv("LLM_HOST", "localhost")
 LLM_HOSTS = [h.strip() for h in os.getenv("LLM_HOSTS", "").split(",") if h.strip()]
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SEARXNG_INSTANCE = os.getenv("SEARXNG_INSTANCE", "http://localhost:8080")
 
-# Scholarly title resolution. These are the only third-party metadata APIs the
-# search path calls directly, so they get named constants rather than literals
-# repeated at each call site. The budget bounds the whole SearXNG -> OpenAlex ->
-# arXiv chain: each hop used to get its own full timeout, so one scholarly query
-# could stall a user-facing search for the sum of all three.
+# Scholarly title resolution. The total budget bounds the whole
+# SearXNG -> OpenAlex -> arXiv chain, not each hop.
 ARXIV_API_URL = "https://export.arxiv.org/api/query"
 OPENALEX_API_URL = "https://api.openalex.org/works"
 SCHOLARLY_LOOKUP_TIMEOUT = 12.0
 SCHOLARLY_LOOKUP_TOTAL_BUDGET = 20.0
-
-# Cleanup configuration
-CLEANUP_ENABLED = os.getenv("CLEANUP_ENABLED", "True").lower() == "true"
-CLEANUP_INTERVAL_HOURS = int(os.getenv("CLEANUP_INTERVAL_HOURS", "24"))
 
 # Agent workspace
 # The stable virtual root the tool contract promises an agent, independent of
@@ -187,14 +184,12 @@ def internal_api_base() -> str:
     Agent tools and background jobs reach admin-gated routes by calling the
     running server over HTTP. Resolution order:
       1. ODYSSEUS_INTERNAL_BASE  - explicit override (e.g. behind a TLS proxy).
-      2. APP_PORT                - http://127.0.0.1:$APP_PORT (docker-compose).
-      3. Fallback http://127.0.0.1:7011 - matches app.py's bind default.
+      2. http://127.0.0.1:APP_PORT.
 
     127.0.0.1 (not "localhost") avoids IPv6/DNS ambiguity for a strictly-local
-    call. Without this, loopback tools fail with "All connection attempts
-    failed" whenever the server is not on port 7000.
+    call.
     """
     override = os.environ.get("ODYSSEUS_INTERNAL_BASE")
     if override:
         return override.rstrip("/")
-    return f"http://127.0.0.1:{os.environ.get('APP_PORT', '7011')}"
+    return f"http://127.0.0.1:{APP_PORT}"

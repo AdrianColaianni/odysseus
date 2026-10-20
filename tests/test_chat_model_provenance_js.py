@@ -1,11 +1,9 @@
 """Execute the round-aware live model-provenance state helper under Node."""
 
 import json
-import shutil
-import subprocess
 from pathlib import Path
 
-import pytest
+from tests.helpers.node import run_node_module
 
 
 _REPO = Path(__file__).resolve().parents[1]
@@ -13,9 +11,6 @@ _MODULE = (_REPO / "static" / "js" / "chatModelProvenance.js").as_uri()
 
 
 def test_round_two_fallback_then_provider_alias_does_not_relabel_round_one():
-    if not shutil.which("node"):
-        pytest.skip("node is not installed")
-
     script = f"""
       import {{ applyModelRouteEventState }} from {json.dumps(_MODULE)};
       const round1 = {{ _requestedModel: 'selected-model', _actualModel: 'selected-model' }};
@@ -37,16 +32,7 @@ def test_round_two_fallback_then_provider_alias_does_not_relabel_round_one():
         round2,
       }}));
     """
-    result = subprocess.run(
-        ["node", "--input-type=module"],
-        input=script,
-        capture_output=True,
-        text=True,
-        cwd=_REPO,
-        timeout=30,
-    )
-    assert result.returncode == 0, result.stderr
-    state = json.loads(result.stdout)
+    state = run_node_module(script)
     assert state == {
         "fallbackIsRound2": True,
         "aliasIsRound2": True,
@@ -62,9 +48,6 @@ def test_round_two_fallback_then_provider_alias_does_not_relabel_round_one():
 
 
 def test_next_round_and_final_metrics_preserve_each_agent_round_route():
-    if not shutil.which("node"):
-        pytest.skip("node is not installed")
-
     script = f"""
       import {{
         applyModelMetricsState,
@@ -98,16 +81,7 @@ def test_next_round_and_final_metrics_preserve_each_agent_round_route():
         round3,
       }}));
     """
-    result = subprocess.run(
-        ["node", "--input-type=module"],
-        input=script,
-        capture_output=True,
-        text=True,
-        cwd=_REPO,
-        timeout=30,
-    )
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
+    assert run_node_module(script) == {
         "metricsIsRound3": True,
         "round1": {
             "_requestedModel": "selected-model",
@@ -125,9 +99,6 @@ def test_next_round_and_final_metrics_preserve_each_agent_round_route():
 
 
 def test_same_model_fallback_preserves_distinct_endpoint_route_state():
-    if not shutil.which("node"):
-        pytest.skip("node is not installed")
-
     script = f"""
       import {{ applyModelMetricsState, applyModelRouteEventState }} from {json.dumps(_MODULE)};
       const holder = {{ _requestedModel: 'same-model', _actualModel: 'same-model' }};
@@ -144,16 +115,7 @@ def test_same_model_fallback_preserves_distinct_endpoint_route_state():
       }}, holder, null, 'same-model');
       console.log(JSON.stringify(holder));
     """
-    result = subprocess.run(
-        ["node", "--input-type=module"],
-        input=script,
-        capture_output=True,
-        text=True,
-        cwd=_REPO,
-        timeout=30,
-    )
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
+    assert run_node_module(script) == {
         "_requestedModel": "same-model",
         "_actualModel": "same-model",
         "_requestedEndpointId": "account-one",
@@ -164,9 +126,6 @@ def test_same_model_fallback_preserves_distinct_endpoint_route_state():
 
 
 def test_metrics_preserve_explicitly_unknown_round_endpoint():
-    if not shutil.which("node"):
-        pytest.skip("node is not installed")
-
     script = f"""
       import {{ applyModelMetricsState }} from {json.dumps(_MODULE)};
       const holder = {{
@@ -184,16 +143,7 @@ def test_metrics_preserve_explicitly_unknown_round_endpoint():
       }}, holder, roundHolder, 'same-model');
       console.log(JSON.stringify(roundHolder));
     """
-    result = subprocess.run(
-        ["node", "--input-type=module"],
-        input=script,
-        capture_output=True,
-        text=True,
-        cwd=_REPO,
-        timeout=30,
-    )
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
+    assert run_node_module(script) == {
         "_requestedModel": "same-model",
         "_actualModel": "same-model",
         "_requestedEndpointId": "account-one",

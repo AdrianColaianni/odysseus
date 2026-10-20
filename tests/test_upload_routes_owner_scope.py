@@ -125,7 +125,7 @@ def test_download_file_denies_anonymous_when_auth_is_configured(tmp_path, monkey
     download_file = _upload_endpoints(handler, monkeypatch)["download_file"]
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(download_file(_Request(auth_manager=_AuthManager()), alice_id))
+        download_file(_Request(auth_manager=_AuthManager()), alice_id)
 
     assert exc.value.status_code == 403
 
@@ -135,7 +135,7 @@ def test_download_file_denies_cross_owner_without_leaking_file(tmp_path, monkeyp
     download_file = _upload_endpoints(handler, monkeypatch)["download_file"]
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(download_file(_Request(user="alice", auth_manager=_AuthManager()), bob_id))
+        download_file(_Request(user="alice", auth_manager=_AuthManager()), bob_id)
 
     assert exc.value.status_code == 404
 
@@ -144,9 +144,7 @@ def test_download_file_allows_same_owner(tmp_path, monkeypatch):
     handler, alice_id, _bob_id, _upload_dir = _make_upload_store(tmp_path, monkeypatch)
     download_file = _upload_endpoints(handler, monkeypatch)["download_file"]
 
-    response = asyncio.run(
-        download_file(_Request(user="alice", auth_manager=_AuthManager()), alice_id)
-    )
+    response = download_file(_Request(user="alice", auth_manager=_AuthManager()), alice_id)
 
     assert response.path.endswith(alice_id)
     assert response.media_type == "image/png"
@@ -157,12 +155,10 @@ def test_download_file_allows_admin_to_read_other_owner_upload(tmp_path, monkeyp
     handler, _alice_id, bob_id, _upload_dir = _make_upload_store(tmp_path, monkeypatch)
     download_file = _upload_endpoints(handler, monkeypatch)["download_file"]
 
-    response = asyncio.run(
-        download_file(
+    response = download_file(
             _Request(user="admin", auth_manager=_AuthManager(admins={"admin"})),
             bob_id,
         )
-    )
 
     assert response.path.endswith(bob_id)
     assert response.media_type == "image/png"
@@ -177,12 +173,10 @@ def test_download_file_rejects_upload_symlink_escape(tmp_path, monkeypatch):
     _add_upload_symlink(upload_dir, escape_id, outside)
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(
-            download_file(
+        download_file(
                 _Request(user="alice", auth_manager=_AuthManager()),
                 escape_id,
             )
-        )
 
     assert exc.value.status_code == 403
 
@@ -196,12 +190,10 @@ def test_download_file_keeps_owner_gate_before_path_resolution(tmp_path, monkeyp
     _add_upload_symlink(upload_dir, bob_escape_id, outside, owner="bob")
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(
-            download_file(
+        download_file(
                 _Request(user="alice", auth_manager=_AuthManager()),
                 bob_escape_id,
             )
-        )
 
     assert exc.value.status_code == 404
 
@@ -216,12 +208,10 @@ def test_get_vision_text_denies_cross_owner_before_cache_read(tmp_path, monkeypa
     _guard_cache_open(monkeypatch, cache_path, blocked_modes=("r",))
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(
-            get_vision_text(
+        get_vision_text(
                 _Request(user="alice", auth_manager=_AuthManager()),
                 bob_id,
             )
-        )
 
     assert exc.value.status_code == 404
 
@@ -236,13 +226,11 @@ def test_get_vision_text_denies_cross_owner_before_image_analysis(tmp_path, monk
     monkeypatch.setattr("src.document_processor.analyze_image_with_vl", fail_analysis)
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(
-            get_vision_text(
+        get_vision_text(
                 _Request(user="alice", auth_manager=_AuthManager()),
                 bob_id,
                 force=1,
             )
-        )
 
     assert exc.value.status_code == 404
 
@@ -261,13 +249,11 @@ def test_get_vision_text_rejects_upload_symlink_escape_before_analysis(tmp_path,
     monkeypatch.setattr("src.document_processor.analyze_image_with_vl", fail_analysis)
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(
-            get_vision_text(
+        get_vision_text(
                 _Request(user="alice", auth_manager=_AuthManager()),
                 escape_id,
                 force=1,
             )
-        )
 
     assert exc.value.status_code == 403
 
@@ -324,7 +310,7 @@ def test_download_file_survives_corrupted_uploads_json(tmp_path, monkeypatch):
     (upload_dir / "uploads.json").write_text('{"alice:h1": {', encoding="utf-8")
 
     # No auth configured -> owner gate skipped.
-    response = asyncio.run(download_file(_Request(), alice_id))
+    response = download_file(_Request(), alice_id)
 
     assert str(response.path).endswith(alice_id)
     # Metadata unreadable, so the display filename falls back to the file_id.

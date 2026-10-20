@@ -34,28 +34,6 @@ Pre-fix the assertion fails because the `except` branch never reaches
 `conn.logout`; post-fix the `finally` block guarantees it.
 """
 
-import os
-import sys
-import tempfile
-from pathlib import Path
-from unittest.mock import MagicMock
-
-
-# Point every data-dir-using dependency (core.database, secret_storage,
-# routes.email_helpers, ...) at a per-process tmp dir BEFORE any
-# `from routes...` import runs. Without this the SQLAlchemy engine
-# created at module-import time would try to open `./data/app.db`,
-# which doesn't exist on bare CI machines, and our test would fail
-# with `OperationalError: unable to open database file` long before
-# the leak regression had a chance to fire.
-_TMP_DATA = Path(tempfile.mkdtemp(prefix="odysseus-email-polly-leak-"))
-os.environ.setdefault("DATA_DIR", str(_TMP_DATA))
-os.environ.setdefault("DATABASE_URL", f"sqlite:///{_TMP_DATA / 'app.db'}")
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
 
 async def test_auto_summarize_pass_logs_out_imap_on_select_failure(monkeypatch):
     """An exception after `conn = _imap_connect(...)` must still call
@@ -64,7 +42,7 @@ async def test_auto_summarize_pass_logs_out_imap_on_select_failure(monkeypatch):
     post-connect path is the first un-guarded IMAP call, so forcing
     it to raise lands us in the outer `except` cleanly without any
     of the inner try/except scans swallowing the error first."""
-    import routes.email_pollers as email_pollers
+    import routes.email.email_pollers as email_pollers
 
     captured = {}
 

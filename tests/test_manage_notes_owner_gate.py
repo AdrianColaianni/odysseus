@@ -109,32 +109,6 @@ def test_toggle_rejects_other_owner(monkeypatch):
     assert db.commits == 0
 
 
-def test_ablation_scope_blocks_nonfixture_even_with_matching_owner(monkeypatch):
-    from src.tool_routing_experiment import note_fixture_scope
-    note = _note(owner='alice')
-    db = _install_fakes(monkeypatch, note)
-    token = note_fixture_scope.set(frozenset({'different-fixture'}))
-    try:
-        result = _run({'action': 'delete', 'id': note.id})
-    finally:
-        note_fixture_scope.reset(token)
-    assert result['exit_code'] == 1
-    assert db.deleted == [] and db.commits == 0
-
-
-def test_ablation_scope_allows_owned_fixture(monkeypatch):
-    from src.tool_routing_experiment import note_fixture_scope
-    note = _note(owner='alice')
-    db = _install_fakes(monkeypatch, note)
-    token = note_fixture_scope.set(frozenset({note.id}))
-    try:
-        result = _run({'action': 'delete', 'id': note.id})
-    finally:
-        note_fixture_scope.reset(token)
-    assert result['exit_code'] == 0
-    assert db.deleted == [note] and db.commits == 1
-
-
 def test_update_allows_matching_owner(monkeypatch):
     note = _note(owner="alice")
     db = _install_fakes(monkeypatch, note)

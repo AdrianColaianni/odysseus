@@ -169,29 +169,21 @@ def test_action_aliases(store):
 # this feature hit). These lock in that bg-job control reaches the files domain.
 
 
-@pytest.mark.parametrize("msg", [
-    "stop the job",
-    "kill that job",
-    "Now kill that background job.",
-    "is the job done?",
-    "check the job output",
-    "list my jobs",
-    "kill the bg task",
-])
-def test_bg_job_commands_are_not_low_signal(msg):
+def test_bg_job_commands_are_not_low_signal():
     from src.agent_loop import _classify_agent_request, _DOMAIN_TOOL_MAP
-    r = _classify_agent_request([{"role": "user", "content": msg}], msg)
-    assert r["low_signal"] is False
-    assert "files" in r["domains"]
     # files domain seeds manage_bg_jobs, so it gets offered to the model.
     assert "manage_bg_jobs" in _DOMAIN_TOOL_MAP["files"]
+    for msg in ["kill that job", "is the job done?", "list my jobs"]:
+        r = _classify_agent_request([{"role": "user", "content": msg}], msg)
+        assert r["low_signal"] is False, msg
+        assert "files" in r["domains"], msg
 
 
-@pytest.mark.parametrize("msg", [
-    "run this in the background",   # launching, not managing
-    "find me a job listing",        # unrelated use of "job"
-])
-def test_non_bg_messages_do_not_trip_files_domain(msg):
+def test_non_bg_messages_do_not_trip_files_domain():
     from src.agent_loop import _classify_agent_request
-    r = _classify_agent_request([{"role": "user", "content": msg}], msg)
-    assert "files" not in r["domains"]
+    for msg in [
+        "run this in the background",   # launching, not managing
+        "find me a job listing",        # unrelated use of "job"
+    ]:
+        r = _classify_agent_request([{"role": "user", "content": msg}], msg)
+        assert "files" not in r["domains"], msg

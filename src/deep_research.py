@@ -26,9 +26,8 @@ logger = logging.getLogger(__name__)
 
 def current_date_context() -> str:
     """Preamble that grounds query-generation/planning LLMs in the real current
-    date. Without it the model falls back to its training-cutoff year and emits
-    queries like "best Python tutorials 2025" when the year is actually 2026.
-    System TZ-local so it matches what the user sees. Portable strftime only."""
+    date, so queries do not default to the model's training-cutoff year.
+    System TZ-local so it matches what the user sees."""
     now = datetime.now().astimezone()
     return (
         f"Today's date is {now.strftime('%B %d, %Y')} ({now.strftime('%Y-%m-%d')}). "
@@ -592,10 +591,7 @@ class DeepResearcher:
         self._emit(phase="writing", total_sources=len(self.urls_fetched),
                    total_findings=len(findings))
         if not report:
-            # Synthesis can fail (e.g. the LLM timed out) even though the search
-            # rounds did gather findings. Don't throw that work away — return the
-            # gathered findings as a basic compiled report instead of claiming
-            # nothing was found (#1551).
+            # Synthesis can fail (e.g. a timeout) after the rounds gathered findings.
             if findings:
                 logger.warning(
                     "Synthesis produced no report; returning %d gathered "
@@ -1233,12 +1229,6 @@ class DeepResearcher:
 
         return all_findings
 
-    async def _search_and_extract(self, queries: List[str],
-                                  question: str) -> List[Dict]:
-        """Legacy query-array wrapper retained for compatibility/tests."""
-        actions = [ResearchAction("web_search", {"query": q}) for q in queries]
-        return await self._execute_research_actions(actions, question)
-
     async def _search(self, query: str) -> List[Dict]:
         """Run a search query using the configured research search provider."""
         navigator = getattr(self, "navigator", None)
@@ -1720,10 +1710,7 @@ class DeepResearcher:
                 [{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=self.max_report_tokens,
-                # Synthesis is a heavy generation call like the final report
-                # (which gets 180s); a slow local model (e.g. a 20B served from
-                # LM Studio) routinely needs >60s for it. The old 60s cap timed
-                # out mid-stream and discarded the round's findings (#1551).
+                # Same budget as the final report: slow local models need >60s here.
                 timeout=180,
             )
         except Exception as e:
@@ -1827,13 +1814,11 @@ class DeepResearcher:
         if self._progress:
             try:
                 self._progress(kwargs)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"research progress callback failed: {e}")
 
     def _time_exceeded(self) -> bool:
         return (time.time() - self._start_time) > self.max_time
-
-    # _strip_think_tags removed — use research_utils.strip_thinking()
 
     @staticmethod
     def _strip_code_block(text: str) -> str:
@@ -1938,9 +1923,7 @@ class DeepResearcher:
         """Compile gathered findings into a basic report.
 
         Used when the LLM synthesis step produced no report (e.g. it timed out)
-        but the search rounds did collect findings — so the user still gets the
-        material that was gathered instead of "No information could be gathered"
-        (#1551).
+        but the search rounds did collect findings.
         """
         return (
             f"# {question}\n\n"

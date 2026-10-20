@@ -1,20 +1,10 @@
-// static/js/emailLibrary/utils.js
-//
-// Pure helpers extracted from emailLibrary.js. No DOM state, no fetch,
-// no shared mutable references — safe to import anywhere.
-
-// ── Talon-inspired multilingual quote-detection regexes ───────────
-// Borrowed (loosely) from Mailgun's `talon` library. These are partial
-// regex source strings — combined with surrounding patterns by callers.
-// Multilingual on purpose: a typed "wrote:" line is locale-bound, and
-// people forward / reply across language settings all the time.
+// Partial regex sources adapted from Mailgun's talon. Multilingual because a
+// reply header follows the sender's locale, not the reader's.
 
 export const _TALON_WROTE = '(?:wrote|écrit|escribió|scrisse|schrieb|skrev|schreef|napisał|написал|napsal|написа|έγραψε|katselivat|napisao|написав|napisała|napisali|hat geschrieben|kirjoitti|написала|escreveu|napisao|написа|написала)';
 
 export const _TALON_FROM = '(?:From|Från|Von|De|Da|От|Od|Van|差出人|发件人|寄件人|Ut|Frá|Lähettäjä|Avsender|Pošiljatelj|Од|Від|Posiljatelj|Frå)';
 export const _TALON_SENT = '(?:Sent|Skickat|Gesendet|Envoy[ée]|Inviato|Enviado|Verzonden|Отправлено|Wysłane|Date|送信日時|发送时间|寄件日期|Sendt|Lähetetty|Tarih|Datum|Data|Datum)';
-export const _TALON_SUBJ = '(?:Subject|Ämne|Betreff|Objet|Oggetto|Asunto|Onderwerp|Тема|Temat|件名|主题|主旨|Emne|Aihe|Onderwerp|Konu)';
-export const _TALON_TO   = '(?:To|Till|An|À|A|Voor|Para|Naar|Кому|Do|宛先|收件人|Emri|Komu)';
 export const _TALON_ORIG_RE = /(?:^|\n)[\s>]*[-_=]{3,}\s*(?:Original\s+Message|Forwarded\s+message|Ursprüngliche\s+Nachricht|Mensaje\s+original|Messaggio\s+originale|Message\s+d['’]origine|Oorspronkelijk\s+bericht|Original\s+meddelande|Vor[ ]asal[a]\s+meddelande|原文|原始邮件|転送)\s*[-_=]{3,}/i;
 
 // Minimum plain-text length of a "signature" before we bother folding it.
@@ -22,12 +12,11 @@ export const _TALON_ORIG_RE = /(?:^|\n)[\s>]*[-_=]{3,}\s*(?:Original\s+Message|F
 // a click for two bytes of saving.
 export const _SIG_BLOAT_MIN_CHARS = 200;
 
-// HTML-escape a string by round-tripping through a detached div. Cheap
-// and correct (handles all the entities that matter for innerHTML).
+const _ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+// Same output as ui.js `esc`; this copy keeps utils.js and signatureFold.js
+// loadable in node, where ui.js's DOM imports fail. Everything else imports `esc`.
 export function _esc(text) {
-  const div = document.createElement('div');
-  div.textContent = text || '';
-  return div.innerHTML;
+  return String(text || '').replace(/[&<>"']/g, (m) => _ESC_MAP[m]);
 }
 
 const _EMAIL_SUMMARY_ERROR_MESSAGES = Object.freeze({
@@ -144,9 +133,6 @@ export function _formatRecipients(raw) {
   return friendly.slice(0, 2).join(', ') + ' +' + (friendly.length - 2);
 }
 
-// Deterministic per-sender colour. Same hashing as
-// emailInbox.js#_senderColor so a sender's avatar / name colour matches
-// across the list view and the bubble reader.
 export function _senderColor(name) {
   if (!name) return 'hsl(220, 55%, 65%)';
   const key = String(name).toLowerCase();
@@ -245,4 +231,45 @@ export function _sanitizeHtml(html) {
     out = next;
   }
   return out;
+}
+
+export function sortedFolders(folders) {
+  const roleOf = (folder) => {
+    const f = String(folder || '').toLowerCase();
+    if (f === 'inbox') return 'inbox';
+    if (f.includes('sent')) return 'sent';
+    if (f.includes('starred') || f.includes('flagged')) return 'starred';
+    if (f.includes('draft')) return 'drafts';
+    if (f.includes('all mail') || f.includes('archive')) return 'archive';
+    if (f.includes('spam') || f.includes('junk')) return 'junk';
+    if (f.includes('trash') || f.includes('bin') || f.includes('deleted')) return 'trash';
+    return '';
+  };
+  const roleOrder = ['inbox', 'sent', 'starred', 'archive', 'junk', 'trash', 'drafts'];
+  const found = new Map();
+  const others = [];
+  for (const f of folders) {
+    const role = roleOf(f);
+    if (role) {
+      if (!found.has(role)) found.set(role, f);
+    } else {
+      others.push(f);
+    }
+  }
+  return { priority: roleOrder.map(role => found.get(role)).filter(Boolean), others };
+}
+
+export function folderDisplayName(folder) {
+  const raw = String(folder || '');
+  const f = raw.toLowerCase();
+  if (f === 'inbox') return 'INBOX';
+  if (f.includes('all mail')) return 'Archive / All Mail';
+  if (f.includes('archive')) return 'Archive';
+  if (f.includes('spam')) return 'Spam';
+  if (f.includes('junk')) return 'Junk';
+  if (f.includes('trash') || f.includes('bin') || f.includes('deleted')) return 'Trash';
+  if (f.includes('sent')) return 'Sent';
+  if (f.includes('starred') || f.includes('flagged')) return 'Starred';
+  if (f.includes('draft')) return 'Drafts';
+  return raw;
 }

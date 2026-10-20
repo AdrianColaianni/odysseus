@@ -94,7 +94,6 @@ def prune_multimodal_images(
 
 COMPACT_THRESHOLD = 0.85  # Trigger compaction at 85% of context window
 SUMMARY_MAX_TOKENS = 1024
-SMALL_CONTEXT_LIMIT = 8192  # Models with context <= this get aggressive trimming
 
 
 def auto_compact_threshold_percent() -> int:

@@ -1,5 +1,3 @@
-import pytest
-
 from src.turn_contract import corrected_browser_target, requested_capabilities
 
 
@@ -7,14 +5,14 @@ def user(text):
     return {'role': 'user', 'content': text}
 
 
-@pytest.mark.parametrize('correction', ['retailer.example', 'https://retailer.example/shop/', 'try https://retailer.example/shop/'])
-def test_domain_correction_inherits_objective(correction):
+def test_domain_correction_inherits_objective():
     history = [user('browse wrong.example and find the best closet'),
                {'role': 'assistant', 'content': 'Navigation failed.'}]
-    result = corrected_browser_target(correction, history)
-    assert result['objective'] == history[0]['content']
-    assert result['url'].startswith('https://retailer.example')
-    assert requested_capabilities(correction, history) == {'search_browser'}
+    for correction in ['retailer.example', 'try https://retailer.example/shop/']:
+        result = corrected_browser_target(correction, history)
+        assert result['objective'] == history[0]['content']
+        assert result['url'].startswith('https://retailer.example')
+        assert requested_capabilities(correction, history) == {'search_browser'}
 
 
 def test_repeat_correction_and_current_message_in_history():
@@ -24,9 +22,9 @@ def test_repeat_correction_and_current_message_in_history():
     assert corrected_browser_target(history[-1]['content'], history)['objective'] == history[0]['content']
 
 
-@pytest.mark.parametrize('message', ['email me at person@example.com', 'do not browse example.com', 'file:///etc/passwd', 'example.com and delete my notes'])
-def test_not_a_bare_target_correction(message):
-    assert corrected_browser_target(message, [user('browse shop.example and find a desk')]) is None
+def test_not_a_bare_target_correction():
+    for message in ['email me at person@example.com', 'do not browse example.com', 'file:///etc/passwd', 'example.com and delete my notes']:
+        assert corrected_browser_target(message, [user('browse shop.example and find a desk')]) is None, message
 
 
 def test_unrelated_turn_breaks_reference():

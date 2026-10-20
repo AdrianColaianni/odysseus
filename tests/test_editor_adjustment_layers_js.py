@@ -1,24 +1,12 @@
 import json
-import subprocess
 import textwrap
 from pathlib import Path
+from tests.helpers.node import run_node_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PIXEL_MODULE = (ROOT / "static/js/editor/fx/pixel-pass.js").as_uri()
 ADJUSTMENT_MODULE = (ROOT / "static/js/editor/adjustment-layer.js").as_uri()
-ADJUSTMENT_WORKER = ROOT / "static/js/editor/adjustments-worker.js"
-
-
-def run_node(source: str):
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", source],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
 
 
 def test_curve_lut_is_identity_and_interpolates_control_points():
@@ -33,7 +21,7 @@ def test_curve_lut_is_identity_and_interpolates_control_points():
         }}));
         """
     )
-    result = run_node(source)
+    result = run_node_module(source)
     assert result["identity"] == [0, 64, 128, 255]
     assert result["shaped"] == [0, 110, 220, 238, 255]
 
@@ -47,7 +35,7 @@ def test_adjustment_normalization_deep_merges_channel_and_selective_defaults():
         console.log(JSON.stringify({{levels,selective}}));
         """
     )
-    result = run_node(source)
+    result = run_node_module(source)
     assert result["levels"]["params"]["channels"]["red"] == {
         "inBlack": 0, "inWhite": 255, "gamma": 1,
         "outBlack": 0, "outWhite": 90,
@@ -86,18 +74,8 @@ def test_color_adjustments_produce_deterministic_pixels_and_preserve_alpha():
         console.log(JSON.stringify(specs.map(spec=>Array.from(applyAdjustment(source,spec).pixels))));
         """
     )
-    result = run_node(source)
+    result = run_node_module(source)
     assert len(result) == 7
     assert all(pixel[3] == 173 for pixel in result)
     assert all(pixel[:3] != [160, 80, 40] for pixel in result)
     assert len({tuple(pixel) for pixel in result}) == 7
-
-
-def test_adjustment_worker_reuses_shared_pixel_pass_and_returns_transferable_bitmap():
-    worker = ADJUSTMENT_WORKER.read_text()
-    adjustment = (ROOT / "static/js/editor/adjustment-layer.js").read_text()
-    assert "await import('./fx/pixel-pass.js')" in worker
-    assert "self.document = { createElement:" in worker
-    assert "transferToImageBitmap()" in worker
-    assert "drawAdjustmentLayerAsync" in adjustment
-    assert "new Worker(new URL('./adjustments-worker.js', import.meta.url)" in adjustment

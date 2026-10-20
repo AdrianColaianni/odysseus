@@ -95,7 +95,7 @@ export function createApplyImageTool({
       if (!data.image) throw new Error('No image returned');
       const img = await decodeAIImage(data.image, operation.signal);
       operation.signal.throwIfAborted();
-      if (!state.editorOpen) return; // user closed mid-decode (v2 review HIGH-4)
+      if (!state.editorOpen) return; // user closed mid-decode
       {
         saveState();
         const layer = createLayer(layerName, state.imgWidth, state.imgHeight);

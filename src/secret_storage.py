@@ -1,21 +1,9 @@
-"""
-secret_storage.py
+"""Fernet encryption for secrets stored in the SQLite DB (IMAP/SMTP passwords).
 
-Fernet-based symmetric encryption for secrets stored in the SQLite DB
-(IMAP / SMTP passwords today; safe to extend). The key lives at
-`data/.app_key`, mode 0o600, generated on first call. `data/` is
-gitignored so the key never ships with the repo.
-
-Threat model: protects against SQLite-file exfiltration (stolen
-backup, leaked container layer, sibling-tenant read). Does **not**
-protect against a process compromise — anyone who can read this
-module's memory or the key file has plaintext.
-
-Encrypted values carry an `enc:` prefix so the migration is
-idempotent: passing an already-encrypted value to `encrypt()` is a
-no-op; passing a plaintext value to `decrypt()` returns it
-unchanged. That lets legacy rows coexist with new ones until a
-single migration pass rewrites them.
+The key is APP_KEY_FILE (mode 0o600, made on first use). Protects against DB
+file exfiltration, not process compromise. Values carry an `enc:` prefix:
+`encrypt()` on an encrypted value and `decrypt()` on plaintext are no-ops, so
+legacy rows coexist until migrated.
 """
 
 import os

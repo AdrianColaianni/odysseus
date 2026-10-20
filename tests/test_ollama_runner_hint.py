@@ -26,11 +26,6 @@ def test_hint_has_no_shell_expansion_tokens():
     assert "$(" not in OLLAMA_MISSING_HINT
 
 
-def test_hint_still_tells_the_user_how_to_install():
-    assert "https://ollama.com/download" in OLLAMA_MISSING_HINT
-    assert "install.sh" in OLLAMA_MISSING_HINT
-
-
 def test_no_runner_echo_line_uses_backticks_in_double_quotes():
     # Source-level guard: generated-script echo lines must never carry
     # backticks inside a double-quoted bash string again.

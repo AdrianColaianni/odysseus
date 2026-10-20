@@ -1,9 +1,9 @@
-"""Tests for extract_statistics (src/search/content.py)."""
+"""Tests for extract_statistics (services/search/content.py)."""
 import pytest
 
 pytest.importorskip("bs4")  # content.py imports BeautifulSoup at module load
 
-from src.search.content import extract_statistics
+from services.search.content import extract_statistics
 
 
 def test_captures_comma_less_large_number():

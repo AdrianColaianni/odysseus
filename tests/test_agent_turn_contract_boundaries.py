@@ -3,7 +3,6 @@ import ast
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "src" / "agent_loop.py"
@@ -27,34 +26,34 @@ def contract(*families):
     )
 
 
-@pytest.mark.parametrize("families", [("calendar",), ("calendar", "documents")])
-def test_contract_work_cannot_finish_through_single_action_shortcut(families):
+def test_contract_work_cannot_finish_through_single_action_shortcut():
     allows = load_function("_contract_allows_early_completion")
-    assert not allows(contract(*families))
+    for families in [("calendar",), ("calendar", "documents")]:
+        assert not allows(contract(*families))
     assert allows(None)
     assert allows(contract())
 
 
-@pytest.mark.parametrize("policy", [None, SimpleNamespace(blocks=lambda _: False)])
-def test_contract_rejection_needs_no_legacy_denial(policy):
+def test_contract_rejection_needs_no_legacy_denial():
     reason = load_function("_tool_rejection_reason")
-    rejected = reason("bash", {"bash"}, policy, contract("calendar"))
-    assert "outside" in rejected
-    assert "Available tool for this turn: manage_calendar." in rejected
-    assert "disabled" in reason("bash", {"bash"}, policy)
+    for policy in [None, SimpleNamespace(blocks=lambda _: False)]:
+        rejected = reason("bash", {"bash"}, policy, contract("calendar"))
+        assert "outside" in rejected
+        assert "Available tool for this turn: manage_calendar." in rejected
+        assert "disabled" in reason("bash", {"bash"}, policy)
 
 
-@pytest.mark.parametrize("surface,is_api,router,expected", [
-    ("none", True, False, []),
-    ("", False, False, []),
-    ("", True, True, []),
-    ("compact", True, True, ["manage_calendar"]),
-    ("full", True, False, ["manage_calendar", "bash"]),
-])
-def test_contract_schema_transport(surface, is_api, router, expected):
+def test_contract_schema_transport():
     fn = schema_function()
-    schemas = fn(route(surface, is_api, router))
-    assert [s["function"]["name"] for s in schemas] == expected
+    for surface, is_api, router, expected in [
+        ("none", True, False, []),
+        ("", False, False, []),
+        ("", True, True, []),
+        ("compact", True, True, ["manage_calendar"]),
+        ("full", True, False, ["manage_calendar", "bash"]),
+    ]:
+        schemas = fn(route(surface, is_api, router))
+        assert [s["function"]["name"] for s in schemas] == expected, surface
 
 
 def route(surface="compact", is_api=True, router=False):
@@ -100,7 +99,7 @@ def test_synthesis_preserves_existing_artifact_exception():
 def test_early_shortcuts_are_guarded_in_the_loop():
     tree = ast.parse(SOURCE.read_text())
     triggers = {"_early_active_email_reply_body", "_early_active_email_draft_update",
-                "_early_active_document_append", "_no_tool_boundary_answer", "_exact_file_edit"}
+                "_early_active_document_append", "_exact_file_edit"}
     found = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.If):
@@ -113,9 +112,13 @@ def test_early_shortcuts_are_guarded_in_the_loop():
     assert found == triggers
 
 
-@pytest.mark.parametrize("eligible,summary", [(False, "Thirty notes"), (True, "")])
-def test_successful_tool_continues_to_synthesis_without_eligible_answer(eligible, summary):
+def test_successful_tool_continues_to_synthesis_without_eligible_answer():
     """Run the actual post-tool completion branch, including its break."""
+    for eligible, summary in [(False, "Thirty notes"), (True, "")]:
+        _assert_reaches_synthesis(eligible, summary)
+
+
+def _assert_reaches_synthesis(eligible, summary):
     tree = ast.parse(SOURCE.read_text())
     node = next(n for n in ast.walk(tree) if isinstance(n, ast.If)
                 and "_ody_notes_tool_completed" in {

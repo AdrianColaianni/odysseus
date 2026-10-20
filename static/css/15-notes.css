@@ -1,19 +1,3 @@
-/* 15-notes - part of the former static/style.css.
- *
- * The stylesheet is split by area, but the split is mechanical: rules were
- * moved verbatim and NOT regrouped. The numeric prefix is the load order, and
- * that order is what preserves the cascade. A rule sits in the file its
- * original position fell into, so an area's rules are not all in its file and
- * a file is not only that area's rules.
- *
- * Do not reorder the <link> tags in static/index.html, and do not move a rule
- * between files: with 1,151 redeclarations and 1,886 !important in this
- * cascade, either can change which declaration wins.
- *
- * static/index.html and the PRECACHE list in static/sw.js must agree on this
- * order. tests/test_static_stylesheet_manifest.py and
- * tests/test_css_computed_style_snapshot.py fail if that drifts.
- */
 body.notes-drag-mode .note-card {
   cursor: grab;
   transform: scale(0.985);
@@ -29,7 +13,7 @@ body.notes-drag-mode .note-card {
   body.notes-drag-mode .note-card {
     filter: none;
     opacity: 0.96;
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent, var(--red)) 28%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--red) 28%, transparent);
   }
   body.notes-drag-mode .note-card::after {
     display: none;
@@ -119,8 +103,8 @@ body.notes-drag-mode .note-card {
   overflow-y: auto;
   padding: 8px 14px 24px;
 }
-/* The reused .note-form inside the fullscreen overlay should breathe —
-   it was originally sized to slot into a grid cell. */
+/* The reused .note-form inside the fullscreen overlay gets room; its
+   base sizing fits a grid cell. */
 .note-fullscreen-body .note-form {
   max-width: 720px;
   margin: 0 auto;
@@ -455,34 +439,6 @@ body.notes-drag-mode .note-card {
   min-width: 0;
   flex-shrink: 1;
 }
-.notes-pane-footer {
-  padding: 6px 8px;
-  border-top: 1px solid var(--border);
-  background: var(--panel);
-  flex-shrink: 0;
-  display: flex;
-  gap: 6px;
-}
-.notes-new-btn {
-  background: none;
-  border: 1px dashed color-mix(in srgb, var(--accent) 40%, transparent);
-  color: color-mix(in srgb, var(--fg) 50%, transparent);
-  border-radius: 6px;
-  padding: 6px 0;
-  flex: 1;
-  cursor: pointer;
-  font-size: 11px;
-  font-family: inherit;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  transition: border-color 0.15s, color 0.15s;
-}
-.notes-new-btn:hover {
-  border-color: var(--accent);
-  color: var(--fg);
-}
 .notes-pane-title {
   /* Match the other tool headers (.modal-header h4). */
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -605,7 +561,6 @@ body.notes-drag-mode .note-card {
   padding: 10px 14px;
   padding-right: 30px;
   min-height: 64px;
-  cursor: default;
   transition: background 0.15s;
   display: flex;
   flex-direction: column;
@@ -632,8 +587,7 @@ body.notes-drag-mode .note-card {
 @media (max-width: 768px) {
   .note-card { padding: 14px 16px; padding-right: 34px; min-height: 84px; font-size: 15px; }
   .note-card-image { max-height: 260px; max-width: 100%; object-fit: cover; }
-  /* Sticky create-todo bar — pin it to the top of the scrolling list pane.
-     Safe now that the cards no longer shrink (the list actually overflows). */
+  /* Sticky create-todo bar, pinned to the top of the scrolling list pane. */
   .notes-quick-add {
     position: sticky;
     top: -8px;
@@ -653,7 +607,7 @@ body.notes-drag-mode .note-card {
    It stays until the user interacts with that card. */
 .note-card.note-card-reminder-fired-sticky {
   position: relative;
-  outline: 1px solid color-mix(in srgb, var(--accent, var(--red)) 36%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--red) 36%, transparent);
   outline-offset: 2px;
   animation: note-reminder-glow 1.6s ease-in-out infinite;
 }
@@ -758,8 +712,8 @@ body.notes-drag-mode .note-card {
 .note-card-copy-corner:hover,
 .note-card-copy-corner:focus-visible {
   opacity: 1 !important;
-  background: color-mix(in srgb, var(--accent, var(--red)) 18%, var(--panel)) !important;
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 50%, var(--border)) !important;
+  background: color-mix(in srgb, var(--red) 18%, var(--panel)) !important;
+  border-color: color-mix(in srgb, var(--red) 50%, var(--border)) !important;
 }
 @media (hover: none) {
   .note-card-copy-corner {
@@ -914,17 +868,17 @@ body.notes-drag-mode .note-card {
   font-size: 11px;
   font-weight: 500;
   font-family: inherit;
-  background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 35%, transparent);
-  color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
+  color: var(--red);
   cursor: pointer;
   transition: background 0.12s, transform 0.12s, box-shadow 0.12s;
   vertical-align: middle;
 }
 .note-card-ai-chip:hover {
-  background: color-mix(in srgb, var(--accent, var(--red)) 22%, transparent);
+  background: color-mix(in srgb, var(--red) 22%, transparent);
   transform: translateY(-1px);
-  box-shadow: 0 2px 6px color-mix(in srgb, var(--accent, var(--red)) 30%, transparent);
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--red) 30%, transparent);
 }
 .note-card-ai-chip svg {
   flex-shrink: 0;
@@ -937,15 +891,15 @@ body.notes-drag-mode .note-card {
   color: color-mix(in srgb, var(--fg) 70%, transparent);
 }
 .note-card-ai-solving svg { animation: spin 0.9s linear infinite; filter: none; }
-.note-card-ai-done { background: color-mix(in srgb, var(--accent, var(--red)) 8%, transparent); }
+.note-card-ai-done { background: color-mix(in srgb, var(--red) 8%, transparent); }
 .note-card-ai-done svg { animation: none; }
-#notes-auto-ai-toggle.active { color: var(--accent, var(--red)); }
+#notes-auto-ai-toggle.active { color: var(--red); }
 
 /* ─── AI improve button (note form header) ───────────────────────────── */
 .note-form-improve-btn {
   width: 38px !important;
   height: 38px !important;
-  color: var(--accent, var(--red));
+  color: var(--red);
 }
 .note-form-improve-btn svg {
   width: 22px !important;
@@ -970,9 +924,9 @@ body.notes-drag-mode .note-card {
 }
 .note-card-pin.active {
   display: flex;
-  background: color-mix(in srgb, var(--accent, var(--red)) 12%, var(--bg));
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));
-  color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--red) 12%, var(--bg));
+  border-color: color-mix(in srgb, var(--red) 45%, var(--border));
+  color: var(--red);
   opacity: 1;
 }
 .note-card-selected .note-card-select {
@@ -1036,9 +990,8 @@ body.notes-drag-mode .note-card {
   display: flex;
   gap: 3px;
 }
-/* Re-asserted AFTER the base rule above so the mobile-hide actually
-   wins the cascade — earlier @media (hover:none) block was being
-   overridden because the unconditional display:flex rule came later. */
+/* After the base rule above, so the unconditional display:flex there
+   does not beat the mobile hide. */
 @media (hover: none) {
   .note-card-colors { display: none; }
 }
@@ -1090,12 +1043,9 @@ body.notes-drag-mode .note-card {
   object-fit: cover;
   border-radius: 4px;
   display: block;
-  /* Images are draggable=true by default; that catches the mousedown
-     and beats the X button to the click. Disabling drag at the CSS
-     level (the -webkit-user-drag prop) keeps the X button reliably
-     clickable even if the JS forgets to set draggable="false" on the
-     element. Unprefixed user-drag was never standardized — Firefox
-     drops it with a warning. */
+  /* Images are draggable by default, which catches the mousedown and
+     beats the X button to the click; -webkit-user-drag keeps X clickable
+     even without draggable="false". Unprefixed user-drag is not standard. */
   -webkit-user-drag: none;
   user-select: none;
 }
@@ -1144,7 +1094,7 @@ body.notes-drag-mode .note-card {
   transform: translateY(-2px);
   gap: 4px;
   background: var(--panel);
-  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 35%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--red) 35%, var(--border));
   border-radius: 6px;
   /* Toggle pill sits at the very left of the bar — no inset padding. The
      pill's own border provides visual breathing room from the wrapper edge. */
@@ -1158,13 +1108,13 @@ body.notes-drag-mode .note-card {
   animation: notes-quick-pulse 2.8s ease-in-out infinite;
 }
 .notes-quick-add:hover {
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 55%, var(--border));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
+  border-color: color-mix(in srgb, var(--red) 55%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 18%, transparent);
   animation: none;
 }
 .notes-quick-add:focus-within {
-  border-color: var(--accent, var(--red));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, var(--red)) 25%, transparent);
+  border-color: var(--red);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 25%, transparent);
   background: color-mix(in srgb, var(--fg) 3%, var(--panel));
   animation: none;
 }
@@ -1174,7 +1124,7 @@ body.notes-drag-mode .note-card {
   border: none;
   outline: none;
   color: var(--fg);
-  caret-color: var(--accent, var(--red));
+  caret-color: var(--red);
   font-family: inherit;
   font-size: 12px;
   padding: 6px 0;
@@ -1323,14 +1273,14 @@ body.notes-drag-mode .note-card {
    Update (✓) button morphs into an Archive action when the user opens a note
    and clicks without making any edits (see notes.js `archive-mode` toggle). */
 @media (max-width: 768px) {
-  .note-form-remind-btn { color: var(--accent, var(--red)) !important; }
-  .note-form-remind-btn > svg { color: var(--accent, var(--red)); }
+  .note-form-remind-btn { color: var(--red) !important; }
+  .note-form-remind-btn > svg { color: var(--red); }
   .note-form-archive-btn { display: none !important; }
   .notes-pane #notes-archive-toggle { display: none !important; }
   .note-form-save.archive-mode {
-    color: var(--accent, var(--red)) !important;
-    border-color: color-mix(in srgb, var(--accent, var(--red)) 50%, transparent) !important;
-    background: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent) !important;
+    color: var(--red) !important;
+    border-color: color-mix(in srgb, var(--red) 50%, transparent) !important;
+    background: color-mix(in srgb, var(--red) 10%, transparent) !important;
   }
 }
 .note-form-remind-btn {
@@ -1759,12 +1709,9 @@ body.notes-drag-mode .note-card {
   grid-column-start: 1;
 }
 /* Mobile: 2-lane masonry via the CSS-Grid row-span trick. Each card spans
-   N tiny rows (4px each) based on its measured height; the grid auto-places
-   cards into the two columns so left/right lanes flow independently — no
-   row alignment between them. JS in notes.js sets `grid-row-end: span N`
-   on every card after render. Pure CSS multi-column was tried but its
-   `column-span: all` interaction with sticky positioning broke clicks on
-   the quick-add bar (Firefox mobile). */
+   N 4px rows from its measured height (notes.js sets `grid-row-end:
+   span N`), so the lanes flow independently. CSS multi-column breaks
+   clicks on the sticky quick-add bar in Firefox mobile. */
 @media (max-width: 768px) {
   .notes-pane.notes-view-grid .notes-pane-body {
     display: grid;
@@ -1866,8 +1813,7 @@ body.notes-drag-mode .note-card {
 /* Keep filter chips consistent across Skills, Tasks, and the document
    library. Documents use the shared compact chip treatment as the baseline. */
 .skills-summary-chip,
-.memory-cat-chip,
-.doclib-chip {
+.memory-cat-chip {
   height: 23px;
   padding: 0 8px;
   border: 1px solid color-mix(in srgb, var(--fg) 12%, transparent);
@@ -1881,17 +1827,15 @@ body.notes-drag-mode .note-card {
   transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
 .skills-summary-chip:hover,
-.memory-cat-chip:hover,
-.doclib-chip:hover {
+.memory-cat-chip:hover {
   background: color-mix(in srgb, var(--fg) 8%, transparent);
   border-color: color-mix(in srgb, var(--fg) 18%, transparent);
   color: color-mix(in srgb, var(--fg) 70%, transparent);
 }
 .skills-summary-chip.active,
-.memory-cat-chip.active,
-.doclib-chip.active {
-  background: color-mix(in srgb, var(--accent, var(--red)) 13%, transparent);
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 28%, transparent);
+.memory-cat-chip.active {
+  background: color-mix(in srgb, var(--red) 13%, transparent);
+  border-color: color-mix(in srgb, var(--red) 28%, transparent);
   color: var(--fg);
 }
 .notes-labels-bar {
@@ -2160,13 +2104,6 @@ body.notes-drag-mode .note-card {
   font-style: italic;
 }
 
-/* Bulk action bar */
-.notes-bulk-info {
-  font-size: 10px;
-  opacity: 0.6;
-  margin-left: 4px;
-}
-
 /* Form label input */
 .note-form-label {
   background: transparent;
@@ -2280,9 +2217,9 @@ body.notes-drag-mode .note-card {
   opacity: 0.92;
   cursor: grabbing;
   transform: scale(1.03) rotate(-0.6deg);
-  box-shadow: 0 14px 32px rgba(0,0,0,0.4), 0 0 0 2px var(--accent, var(--red));
-  border-color: var(--accent, var(--red)) !important;
-  background: color-mix(in srgb, var(--accent, var(--red)) 6%, var(--panel)) !important;
+  box-shadow: 0 14px 32px rgba(0,0,0,0.4), 0 0 0 2px var(--red);
+  border-color: var(--red) !important;
+  background: color-mix(in srgb, var(--red) 6%, var(--panel)) !important;
   z-index: 10;
   position: relative;
   /* Let elementFromPoint see THROUGH the dragged card so the swap detector
@@ -2297,7 +2234,7 @@ body.notes-drag-mode .note-card {
   opacity: 0.78;
 }
 .notes-pane-body.drag-active .note-card:not(.dragging):hover {
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 50%, var(--border));
+  border-color: color-mix(in srgb, var(--red) 50%, var(--border));
   opacity: 1;
 }
 
@@ -2371,10 +2308,8 @@ body.notes-drag-mode .note-card {
   padding-right: 4px;
 }
 .note-cl-quickadd {
-  /* In flow now (was position:absolute), rendered AFTER the reminder badge
-     so the "+ Add item" input sits underneath the reminder instead of
-     overlapping it. Slight right inset keeps clear of the bottom-right
-     copy button on hover. */
+  /* In flow after the reminder badge, so the "+ Add item" input sits under
+     the reminder. The right inset clears the bottom-right copy button. */
   display: block;
   padding-top: 2px;
   padding-right: 32px;
@@ -2438,10 +2373,10 @@ body.notes-drag-mode .note-card {
   transition: opacity 0.12s, background 0.12s, color 0.12s;
 }
 .note-checkbox-rm:hover { opacity: 1 !important; color: var(--red); background: color-mix(in srgb, var(--red) 12%, transparent); }
-.note-checkbox-edit:hover { opacity: 1 !important; color: var(--accent, var(--blue)); background: color-mix(in srgb, var(--accent, var(--blue)) 12%, transparent); }
+.note-checkbox-edit:hover { opacity: 1 !important; color: var(--blue); background: color-mix(in srgb, var(--blue) 12%, transparent); }
 .note-check-text[contenteditable="true"] {
   background: color-mix(in srgb, var(--fg) 8%, transparent);
-  outline: 1px solid var(--accent, var(--blue));
+  outline: 1px solid var(--blue);
   border-radius: 2px;
   cursor: text;
   padding: 0 2px;
@@ -2500,7 +2435,7 @@ body.notes-drag-mode .note-card {
 
 /* Color classes — theme-aware via color-mix with --panel */
 .note-color-red    { background: color-mix(in srgb, var(--red) 18%, var(--panel)); border-color: color-mix(in srgb, var(--red) 30%, var(--border)); }
-.note-color-orange { background: color-mix(in srgb, #d19a66 18%, var(--panel)); border-color: color-mix(in srgb, #d19a66 30%, var(--border)); }
+.note-color-orange { background: color-mix(in srgb, var(--accent-warm) 18%, var(--panel)); border-color: color-mix(in srgb, var(--accent-warm) 30%, var(--border)); }
 .note-color-yellow { background: color-mix(in srgb, var(--hl-string) 18%, var(--panel)); border-color: color-mix(in srgb, var(--hl-string) 30%, var(--border)); }
 .note-color-green  { background: color-mix(in srgb, #98c379 18%, var(--panel)); border-color: color-mix(in srgb, #98c379 30%, var(--border)); }
 .note-color-blue   { background: color-mix(in srgb, var(--hl-function) 18%, var(--panel)); border-color: color-mix(in srgb, var(--hl-function) 30%, var(--border)); }
@@ -2572,7 +2507,7 @@ body.notes-drag-mode .note-card {
 /* Label sits after the icon in each action button */
 .note-form-text-btn .nft-label { margin-left: 5px; }
 /* Never let the action buttons spill outside the card */
-.note-form-actions-group { flex-wrap: wrap; row-gap: 6px; }
+.note-form-actions-group { row-gap: 6px; }
 /* When the note card is narrow, collapse Archive / Delete / Cancel to
    icon-only (their text label hides; tooltip via title= remains). The
    Save/Update button is NOT collapsible — it always keeps its label and
@@ -2582,7 +2517,7 @@ body.notes-drag-mode .note-card {
   .note-form-collapsible { padding-left: 9px; padding-right: 9px; }
 }
 .note-form.note-color-red    { background: color-mix(in srgb, var(--red) 18%, var(--panel)) !important; border-color: color-mix(in srgb, var(--red) 30%, var(--border)) !important; }
-.note-form.note-color-orange { background: color-mix(in srgb, #d19a66 18%, var(--panel)) !important; border-color: color-mix(in srgb, #d19a66 30%, var(--border)) !important; }
+.note-form.note-color-orange { background: color-mix(in srgb, var(--accent-warm) 18%, var(--panel)) !important; border-color: color-mix(in srgb, var(--accent-warm) 30%, var(--border)) !important; }
 .note-form.note-color-yellow { background: color-mix(in srgb, var(--hl-string) 18%, var(--panel)) !important; border-color: color-mix(in srgb, var(--hl-string) 30%, var(--border)) !important; }
 .note-form.note-color-green  { background: color-mix(in srgb, #98c379 18%, var(--panel)) !important; border-color: color-mix(in srgb, #98c379 30%, var(--border)) !important; }
 .note-form.note-color-blue   { background: color-mix(in srgb, var(--hl-function) 18%, var(--panel)) !important; border-color: color-mix(in srgb, var(--hl-function) 30%, var(--border)) !important; }
@@ -2726,13 +2661,13 @@ body.notes-drag-mode .note-card {
   border-color: color-mix(in srgb, var(--fg) 28%, var(--border));
 }
 .note-form-text-btn.note-form-save {
-  background: color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));
-  color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+  border-color: color-mix(in srgb, var(--red) 45%, var(--border));
+  color: var(--red);
   font-weight: 600;
 }
 .note-form-text-btn.note-form-save:hover {
-  background: color-mix(in srgb, var(--accent, var(--red)) 28%, transparent);
+  background: color-mix(in srgb, var(--red) 28%, transparent);
 }
 .note-form-text-btn.danger:hover {
   background: color-mix(in srgb, var(--red) 14%, transparent);
@@ -2923,8 +2858,6 @@ body.notes-drag-mode .note-card {
   font-size: 8px;
   line-height: 1;
   letter-spacing: 0.3px;
-  /* Bare --accent is undefined here, was rendering invisible — use the
-     defined accent so the S/M/L size badge actually shows in theme colour. */
   color: var(--accent-primary, var(--red));
 }
 .note-form-draw-shape-badge {
@@ -3071,11 +3004,9 @@ body.notes-drag-mode .note-card {
 /* ── Calendar ── */
 .cal-modal-content { width:min(680px, 94vw); max-height:88vh; overflow-x:hidden; position:relative; }
 #calendar-modal .cal-modal-content { animation: none; }
-/* Was overflow-y:auto with grid + day-detail flowing naturally. Now uses a
-   true splitter layout: the body is a flex column that doesn't scroll
-   itself; the grid takes the remaining space and scrolls if needed; the
-   day-detail has an explicit height (driven by the splitter drag via
-   --cal-detail-h) and shrinks the grid visually as it grows. */
+/* Splitter layout: the body is a flex column that does not scroll; the
+   grid takes the remaining space and scrolls, and the day-detail has an
+   explicit height (--cal-detail-h, set by the splitter drag). */
 #cal-body { display:flex; flex-direction:column; gap:8px; overflow:hidden; padding:0; min-height:0; }
 #cal-body > .cal-grid { flex: 1 1 auto; min-height: 120px; overflow-y: auto; overflow-x: hidden; }
 @media (max-width: 768px) {
@@ -3129,9 +3060,9 @@ body.notes-drag-mode .note-card {
   white-space: nowrap;
   overflow: hidden;
 }
-.cal-quickadd-hint .qa-hint-accent { color: var(--accent, var(--red)); }
+.cal-quickadd-hint .qa-hint-accent { color: var(--red); }
 /* ↵ enter glyph in the hint — makes it obvious the field submits on Enter. */
-.cal-quickadd-hint .qa-hint-enter { margin-left: auto; flex: 0 0 auto; color: var(--accent, var(--red)); opacity: 0.8; }
+.cal-quickadd-hint .qa-hint-enter { margin-left: auto; flex: 0 0 auto; color: var(--red); opacity: 0.8; }
 /* Cycling example text fades out before swap, then fades back in. */
 .cal-quickadd-hint .qa-hint-example {
   display: block;
@@ -3141,7 +3072,6 @@ body.notes-drag-mode .note-card {
   font-style: italic;
   transition: opacity 0.18s ease;
 }
-.cal-quickadd-hint .qa-hint-example.qa-hint-fade { opacity: 0; }
 .cal-title-hint {
   position: absolute;
   left: 0;
@@ -3157,20 +3087,13 @@ body.notes-drag-mode .note-card {
   color: color-mix(in srgb, var(--fg) 42%, transparent);
 }
 .cal-hero-title:placeholder-shown ~ .cal-title-hint { display: inline-flex; }
-.cal-title-hint .cal-title-enter-ico { color: var(--accent, var(--red)); flex-shrink: 0; }
+.cal-title-hint .cal-title-enter-ico { color: var(--red); flex-shrink: 0; }
 /* Pure-CSS toggle: hide the hint as soon as the field has real text (no
    per-keystroke JS, so typing never triggers a re-render / focus loss). */
 .cal-quickadd-input:not(:placeholder-shown) ~ .cal-quickadd-hint { display: none; }
 .cal-quickadd-row:focus-within {
-  border-color: color-mix(in srgb, var(--accent, var(--fg)) 55%, var(--border));
+  border-color: color-mix(in srgb, var(--fg) 55%, var(--border));
   background: color-mix(in srgb, var(--fg) 5%, var(--bg));
-}
-.cal-quickadd-icon {
-  color: color-mix(in srgb, var(--accent, var(--fg)) 80%, transparent);
-  display: inline-flex;
-  align-items: center;
-  flex-shrink: 0;
-  opacity: 0.7;
 }
 .cal-quickadd-input {
   flex: 1;
@@ -3205,7 +3128,7 @@ body.notes-drag-mode .note-card {
 .cal-title { font-size:13px; font-weight:600; white-space:nowrap; height:24px; line-height:30px; padding:0 6px; display:inline-block; vertical-align:middle; box-sizing:border-box; }
 .cal-toolbar-clock {
   margin-left: 8px;
-  color: var(--accent, var(--red));
+  color: var(--red);
   font-size: 11px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
@@ -3221,7 +3144,7 @@ button.cal-nav.cal-toolbar-arrow {
   border: 1px solid color-mix(in srgb, var(--fg) 14%, transparent);
   border-radius: 50%;
   background: color-mix(in srgb, var(--bg) 86%, var(--fg) 14%);
-  color: var(--accent, var(--red));
+  color: var(--red);
   box-shadow: 0 6px 18px rgba(0,0,0,0.16);
   font-size: 18px;
   line-height: 1;
@@ -3295,8 +3218,8 @@ button.cal-nav.cal-toolbar-arrow {
 .cal-week-start-btn.active,
 .cal-week-start-btn.active:hover {
   color: var(--fg);
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 40%, var(--border));
-  background: color-mix(in srgb, var(--accent, var(--red)) 16%, transparent);
+  border-color: color-mix(in srgb, var(--red) 40%, var(--border));
+  background: color-mix(in srgb, var(--red) 16%, transparent);
 }
 .cal-side-nav {
   position: absolute;
@@ -3307,7 +3230,7 @@ button.cal-nav.cal-toolbar-arrow {
   border-radius: 50%;
   border: 1px solid color-mix(in srgb, var(--fg) 14%, transparent);
   background: color-mix(in srgb, var(--bg) 86%, var(--fg) 14%);
-  color: var(--accent, var(--red));
+  color: var(--red);
   box-shadow: 0 6px 18px rgba(0,0,0,0.16);
   cursor: pointer;
   z-index: 6;
@@ -3354,7 +3277,7 @@ button.cal-add-btn.cal-add-btn-text:hover {
 .cal-add-plus {
   font-size: 16px;
   line-height: 1;
-  color: var(--accent, var(--red));
+  color: var(--red);
   font-weight: 500;
   display: inline-block;
   transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -3484,7 +3407,7 @@ button.cal-add-btn.cal-add-btn-text.cal-add-btn-sm:hover .cal-add-label {
    the small bounce + accent color give a clear "done" cue. */
 #cal-sync.cal-sync-done svg,
 #email-lib-refresh-btn.email-lib-refresh-done svg {
-  color: var(--accent, #2ea043);
+  color: #2ea043;
   animation: refresh-check-pop 0.32s ease-out;
 }
 @keyframes refresh-check-pop {
@@ -3496,9 +3419,9 @@ button.cal-add-btn.cal-add-btn-text.cal-add-btn-sm:hover .cal-add-label {
 #email-lib-refresh-btn.email-lib-refreshing svg { animation: spin 0.6s linear infinite; }
 .email-undone-toggle.active,
 .email-attach-toggle.active {
-  background: color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 50%, transparent);
-  color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+  border-color: color-mix(in srgb, var(--red) 50%, transparent);
+  color: var(--red);
   font-weight: 600;
 }
 /* Hide the gallery-style reader-btn labels on desktop — only the mobile
@@ -3573,8 +3496,8 @@ button.cal-add-btn.cal-add-btn-text.cal-add-btn-sm:hover .cal-add-label {
 }
 .email-attach-toggle-inline.active {
   opacity: 1;
-  background: color-mix(in srgb, var(--accent, var(--red)) 16%, transparent) !important;
-  color: var(--accent, var(--red)) !important;
+  background: color-mix(in srgb, var(--red) 16%, transparent) !important;
+  color: var(--red) !important;
 }
 /* Inline undone-toggle nested inside the search input, sits LEFT of the
    attach toggle. Same visual treatment. */
@@ -3616,8 +3539,8 @@ button.cal-add-btn.cal-add-btn-text.cal-add-btn-sm:hover .cal-add-label {
 }
 .email-reminder-toggle-inline.active {
   opacity: 1;
-  background: color-mix(in srgb, var(--accent, var(--red)) 16%, transparent) !important;
-  color: var(--accent, var(--red)) !important;
+  background: color-mix(in srgb, var(--red) 16%, transparent) !important;
+  color: var(--red) !important;
 }
 .email-undone-toggle-inline:hover {
   opacity: 1;
@@ -3625,8 +3548,8 @@ button.cal-add-btn.cal-add-btn-text.cal-add-btn-sm:hover .cal-add-label {
 }
 .email-undone-toggle-inline.active {
   opacity: 1;
-  background: color-mix(in srgb, var(--accent, var(--red)) 16%, transparent) !important;
-  color: var(--accent, var(--red)) !important;
+  background: color-mix(in srgb, var(--red) 16%, transparent) !important;
+  color: var(--red) !important;
 }
 /* Round (circular) toggles in the search bar, matching the app's default icon
    buttons. Always fully visible (not dimmed until hover). */
@@ -3655,8 +3578,8 @@ button.cal-add-btn.cal-add-btn-text.cal-add-btn-sm:hover .cal-add-label {
 .email-search-options-btn:hover,
 .email-search-options-btn.active {
   opacity: 1;
-  background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent) !important;
-  color: var(--accent, var(--red)) !important;
+  background: color-mix(in srgb, var(--red) 14%, transparent) !important;
+  color: var(--red) !important;
 }
 .email-search-options-menu {
   position: absolute;
@@ -3672,7 +3595,7 @@ button.cal-add-btn.cal-add-btn-text.cal-add-btn-sm:hover .cal-add-label {
 }
 .email-search-options-title {
   padding: 5px 9px 4px;
-  color: var(--fg-muted, var(--fg));
+  color: var(--fg);
   font-size: 10px;
   font-weight: 600;
   opacity: 0.65;
@@ -3700,8 +3623,8 @@ button.cal-add-btn.cal-add-btn-text.cal-add-btn-sm:hover .cal-add-label {
 }
 .email-search-options-menu button:hover,
 .email-search-options-menu button.active {
-  background: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent);
-  color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+  color: var(--red);
 }
 .email-search-option-icon {
   width: 14px;
@@ -3730,11 +3653,11 @@ button.cal-add-btn.cal-add-btn-text.cal-add-btn-sm:hover .cal-add-label {
   color: var(--fg);
   font: inherit;
 }
-.email-search-date-panel input:focus { border-color: var(--accent, var(--red)); }
+.email-search-date-panel input:focus { border-color: var(--red); }
 .email-search-date-actions { display: flex; justify-content: flex-end; gap: 5px; }
 .email-search-options-menu .email-search-date-actions [data-email-date-apply] {
-  color: var(--accent, var(--red));
-  background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
 }
 @media (max-width: 768px) {
   .email-search-options-menu button {
@@ -3914,16 +3837,16 @@ button.cal-add-btn.cal-add-btn-text.cal-add-btn-sm:hover .cal-add-label {
   gap: 5px;
 }
 .email-account-chip.email-account-has-unread {
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 42%, var(--border));
-  background: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent);
-  color: color-mix(in srgb, var(--accent, var(--red)) 86%, var(--fg));
+  border-color: color-mix(in srgb, var(--red) 42%, var(--border));
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+  color: color-mix(in srgb, var(--red) 86%, var(--fg));
 }
 .email-account-unread-dot {
   width: 6px;
   height: 6px;
   border-radius: 999px;
-  background: var(--accent, var(--red));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);
+  background: var(--red);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 14%, transparent);
   flex: 0 0 auto;
 }
 .email-account-chip-label {
@@ -3935,13 +3858,13 @@ button.cal-add-btn.cal-add-btn-text.cal-add-btn-sm:hover .cal-add-label {
   font-size: 9px;
   line-height: 1;
   font-weight: 700;
-  color: var(--accent, var(--red));
+  color: var(--red);
   opacity: 0.9;
   position: relative;
   top: 0;
 }
 .email-account-away-label {
-  color: var(--accent, var(--red));
+  color: var(--red);
   font-size: 9px;
   font-weight: 700;
   line-height: 1;

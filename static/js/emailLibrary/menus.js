@@ -13,7 +13,8 @@ import spinnerModule from '../spinner.js';
 import { SELECT_MENU_ICON, actionMenuRank, orderActionMenuItems } from '../actionMenuOrder.js';
 import { bindMenuDismiss, dismissOrRemove } from '../escMenuStack.js';
 import { topPortalZ } from '../toolWindowZOrder.js';
-import { showToast, styledConfirm } from '../ui.js?v=20260916largetoolscroll1';
+import { showError, showToast, styledConfirm } from '../ui.js?v=20260916largetoolscroll1';
+import { jsonRequest } from '../shared/http.js';
 import { state } from './state.js';
 import {
   _handleAiReplyButton,
@@ -40,6 +41,60 @@ import { _openEmailAsTab } from './reader.js';
 
 const API_BASE = window.location.origin;
 
+const _icon = (svg) => `<span class="dropdown-icon">${svg}</span>`;
+const _NEW_TAB_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
+const _BELL_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>';
+const _UNREAD_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>';
+const _CHECK_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+const _ARCHIVE_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>';
+const _TRASH_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>';
+const _CANCEL_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+
+const _emailActionUrl = (action, uid) => `${API_BASE}/api/email/${action}/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`;
+
+async function _saveDoneState(em, done) {
+  try {
+    if (done) {
+      await fetch(_emailActionUrl('mark-answered', em.uid), { method: 'POST' });
+      await fetch(_emailActionUrl('mark-read', em.uid), { method: 'POST' });
+    } else {
+      await fetch(_emailActionUrl('clear-answered', em.uid), { method: 'POST' });
+    }
+  } catch (e) { console.error('Failed to toggle done:', e); }
+}
+
+function _favoriteAction(em) {
+  return {
+    label: em.is_flagged ? 'Unfavorite' : 'Favorite (pin to top)',
+    icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="' + (em.is_flagged ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>',
+    action: async () => {
+      const next = !em.is_flagged;
+      em.is_flagged = next;
+      _renderGrid();
+      try {
+        const response = await fetch(`${_emailActionUrl('flag', em.uid)}&on=${next ? 'true' : 'false'}`, { method: 'POST' });
+        await _requireSuccessfulEmailMutation(response, 'Failed to toggle favorite');
+      } catch (e) {
+        em.is_flagged = !next;
+        _renderGrid();
+        console.error('Failed to toggle favorite:', e);
+      }
+    },
+  };
+}
+
+// Mobile-only; CSS hides it on desktop, where an outside click dismisses.
+function _appendCancelItem(dropdown, onCancel) {
+  const cancelItem = document.createElement('div');
+  cancelItem.className = 'dropdown-item-compact dropdown-cancel-mobile';
+  cancelItem.innerHTML = _icon(_CANCEL_ICON) + '<span>Cancel</span>';
+  cancelItem.addEventListener('click', (e) => {
+    e.stopPropagation();
+    onCancel();
+  });
+  dropdown.appendChild(cancelItem);
+}
+
 export function _showReaderMoreMenu(em, card, reader, anchor, data) {
   // Toggle: if a dropdown for THIS anchor is already open, close it.
   const existing = document.querySelector('.email-card-dropdown');
@@ -58,16 +113,10 @@ export function _showReaderMoreMenu(em, card, reader, anchor, data) {
   const rect = anchor.getBoundingClientRect();
   dropdown.style.cssText = `position:fixed;z-index:${topPortalZ()};min-width:180px;background:var(--panel,var(--bg));border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.3);padding:4px;font-size:12px;top:${rect.bottom + 4}px;right:${window.innerWidth - rect.right}px;`;
 
-  const _icon = (svg) => `<span class="dropdown-icon">${svg}</span>`;
-  const _unreadIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>';
-  const _archIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>';
   const _spamIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
-  const _trashIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>';
   const _deleteForeverIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="14" y2="15"/><line x1="14" y1="11" x2="10" y2="15"/></svg>';
-  const _bellIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>';
-  const _newTabIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
-  const _checkIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
   const _translateIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary, var(--red))" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>';
+  const _contactIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>';
 
   const closeAndRemove = async () => {
     // Pick the next neighbour BEFORE we re-render so we know which email to
@@ -90,12 +139,6 @@ export function _showReaderMoreMenu(em, card, reader, anchor, data) {
     }
   };
 
-  const _bubblesIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
-  const _contactIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>';
-  // Three groups separated by dividers:
-  //   1. Open / Mark Unread / Remind — the per-email view actions
-  //   2. Save sender / Not Done / Archive — non-destructive state changes
-  //   3. Move to Spam / Move to Trash / Delete — destructive
   const overflowActions = Array.from(reader.querySelectorAll('.reader-action-overflowed')).map(button => ({
     label: button.querySelector('.reader-btn-label')?.textContent?.trim() || button.title || 'Action',
     icon: button.querySelector('svg')?.outerHTML || '',
@@ -116,7 +159,7 @@ export function _showReaderMoreMenu(em, card, reader, anchor, data) {
     ...(overflowActions.length ? [{ separator: true }] : []),
     {
       label: 'Open in new tab',
-      icon: _newTabIcon,
+      icon: _NEW_TAB_ICON,
       action: async () => {
         const folder = state._libFolder || 'INBOX';
         await _openEmailAsTab(em, folder);
@@ -124,7 +167,7 @@ export function _showReaderMoreMenu(em, card, reader, anchor, data) {
     },
     {
       label: 'Remind to reply',
-      icon: _bellIcon,
+      icon: _BELL_ICON,
       submenu: 'remind',
     },
     {
@@ -135,44 +178,20 @@ export function _showReaderMoreMenu(em, card, reader, anchor, data) {
     { separator: true },
     {
       label: em.is_read ? 'Mark as Unread' : 'Mark as Read',
-      icon: _unreadIcon,
+      icon: _UNREAD_ICON,
       action: async () => {
         const newRead = !em.is_read;
         _syncEmailReadState(em.uid, newRead);
         try {
-          if (newRead) {
-            await fetch(`${API_BASE}/api/email/mark-read/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-          } else {
-            await fetch(`${API_BASE}/api/email/mark-unread/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-          }
+          await fetch(_emailActionUrl(newRead ? 'mark-read' : 'mark-unread', em.uid), { method: 'POST' });
         } catch (e) { console.error(e); }
         _renderGrid();
       },
     },
-    {
-      // Favorite (pin to top). Same bookmark glyph we use for the
-      // sidebar-pin / favorites filter so the visual language stays
-      // consistent. Toggling updates em.is_flagged and re-sorts via
-      // _renderGrid (favorited rows are always pinned at the top).
-      label: em.is_flagged ? 'Unfavorite' : 'Favorite (pin to top)',
-      icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="' + (em.is_flagged ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>',
-      action: async () => {
-        const next = !em.is_flagged;
-        em.is_flagged = next;
-        _renderGrid();
-        try {
-          await fetch(`${API_BASE}/api/email/flag/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}&on=${next ? 'true' : 'false'}`, { method: 'POST' });
-        } catch (e) {
-          // Roll back the optimistic flip if the server didn't take it.
-          em.is_flagged = !next;
-          _renderGrid();
-          console.error('Failed to toggle favorite:', e);
-        }
-      },
-    },
+    _favoriteAction(em),
     {
       label: em.is_answered ? 'Mark as Not Done' : 'Mark as Done',
-      icon: _checkIcon,
+      icon: _CHECK_ICON,
       action: async () => {
         const newState = !em.is_answered;
         em.is_answered = newState;
@@ -180,54 +199,38 @@ export function _showReaderMoreMenu(em, card, reader, anchor, data) {
           _clearDoneResponseTagsLocal(em);
           _syncEmailReadState(em.uid, true);
         }
-        try {
-          if (newState) {
-            await fetch(`${API_BASE}/api/email/mark-answered/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-            await fetch(`${API_BASE}/api/email/mark-read/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-          } else {
-            await fetch(`${API_BASE}/api/email/clear-answered/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-          }
-        } catch (e) { console.error('Failed to toggle done:', e); }
+        await _saveDoneState(em, newState);
         _renderGrid();
       },
     },
     {
       label: 'Move to Archive',
-      icon: _archIcon,
+      icon: _ARCHIVE_ICON,
       action: async () => {
         try {
-          await fetch(`${API_BASE}/api/email/archive/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
+          await fetch(_emailActionUrl('archive', em.uid), { method: 'POST' });
         } catch (e) { console.error(e); }
         await closeAndRemove();
       },
     },
     {
-      // Save the sender to CardDAV contacts. Pulls name + address off the
-      // list-item (em); falls back to splitting the local-part for a name.
       label: 'Save sender to contacts',
       icon: _contactIcon,
       action: async () => {
         const email = (em.from_address || em.from || '').trim();
         if (!email) {
-          import('../ui.js?v=20260916largetoolscroll1').then(m => m.showError && m.showError('No sender address')).catch(() => {});
+          showError('No sender address');
           return;
         }
         const name = (em.from_name || '').trim() || email.split('@')[0];
         try {
-          const r = await fetch(`${API_BASE}/api/contacts/add`, {
-            method: 'POST', credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, email }),
-          });
+          const r = await fetch(`${API_BASE}/api/contacts/add`, jsonRequest('POST', { name, email }));
           const d = await r.json();
-          import('../ui.js?v=20260916largetoolscroll1').then(m => {
-            if (!m.showToast) return;
-            if (d.success && d.message === 'Already exists') m.showToast('Already in contacts');
-            else if (d.success) m.showToast('Saved to contacts');
-            else m.showError && m.showError('Failed to save contact');
-          }).catch(() => {});
+          if (d.success && d.message === 'Already exists') showToast('Already in contacts');
+          else if (d.success) showToast('Saved to contacts');
+          else showError('Failed to save contact');
         } catch (_) {
-          import('../ui.js?v=20260916largetoolscroll1').then(m => m.showError && m.showError('Failed to save contact')).catch(() => {});
+          showError('Failed to save contact');
         }
       },
     },
@@ -237,14 +240,14 @@ export function _showReaderMoreMenu(em, card, reader, anchor, data) {
       icon: _spamIcon,
       action: async () => {
         try {
-          await fetch(`${API_BASE}/api/email/move/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}&dest=Junk`, { method: 'POST' });
+          await fetch(`${_emailActionUrl('move', em.uid)}&dest=Junk`, { method: 'POST' });
         } catch (e) { console.error(e); }
         await closeAndRemove();
       },
     },
     {
       label: 'Move to Trash',
-      icon: _trashIcon,
+      icon: _TRASH_ICON,
       action: async () => {
         const busy = _showEmailDeleteOverlay(card);
         await busy?.ready;
@@ -332,17 +335,7 @@ export function _showReaderMoreMenu(em, card, reader, anchor, data) {
     });
     dropdown.appendChild(item);
   }
-  // Mobile-only Cancel item — explicit close for touch users. CSS hides it
-  // on desktop where outside-click already dismisses cleanly.
-  const _cancelIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-  const cancelItem = document.createElement('div');
-  cancelItem.className = 'dropdown-item-compact dropdown-cancel-mobile';
-  cancelItem.innerHTML = _icon(_cancelIco) + '<span>Cancel</span>';
-  cancelItem.addEventListener('click', (e) => {
-    e.stopPropagation();
-    close();
-  });
-  dropdown.appendChild(cancelItem);
+  _appendCancelItem(dropdown, () => close());
 
   document.body.appendChild(dropdown);
   _fitEmailDropdown(dropdown, rect);
@@ -366,17 +359,8 @@ export function _showCardMenu(em, anchor) {
   const rect = anchor.getBoundingClientRect();
   dropdown.style.cssText = `position:fixed;z-index:${topPortalZ()};min-width:140px;background:var(--panel,var(--bg));border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.3);padding:4px;font-size:12px;top:${rect.bottom + 4}px;right:${window.innerWidth - rect.right}px;`;
 
-  const _icon = (svg) => `<span class="dropdown-icon">${svg}</span>`;
   const _replyIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>';
-  const _archIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>';
-  const _delIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>';
-  const _unreadIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>';
-  const _checkIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-  const _cardBellIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>';
 
-  const isSentFolder = /sent/i.test(state._libFolder);
-
-  const _newTabIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
   const actions = [
     { label: 'Open', icon: _replyIcon, action: async () => {
       // Just expand inline (same as tapping the row).
@@ -385,17 +369,14 @@ export function _showCardMenu(em, anchor) {
         await _toggleCardPreview(card, em);
       }
     }},
-    { label: 'Open in new tab', icon: _newTabIcon, action: async () => {
-      // Open this email as its own in-app modal that registers a dock
-      // chip — multiple emails can be opened simultaneously, each gets
-      // its own chip in the minimized dock.
+    { label: 'Open in new tab', icon: _NEW_TAB_ICON, action: async () => {
       const folder = state._libFolder || 'INBOX';
       await _openEmailAsTab(em, folder);
     }},
-    { label: 'Remind to reply', icon: _cardBellIcon, submenu: 'remind' },
+    { label: 'Remind to reply', icon: _BELL_ICON, submenu: 'remind' },
   ];
 
-  if (!isSentFolder) {
+  if (!/sent/i.test(state._libFolder)) {
     // Source of truth = the visible "active" class on the card's done
     // check, so the menu label and the actual toggle behaviour can't
     // disagree with what the user sees.
@@ -404,7 +385,7 @@ export function _showCardMenu(em, anchor) {
     const _currentlyDone = _checkForLabel ? _checkForLabel.classList.contains('active') : !!em.is_answered;
     actions.push({
       label: _currentlyDone ? 'Not Done' : 'Done',
-      icon: _checkIcon,
+      icon: _CHECK_ICON,
       action: async () => {
         const card = anchor.closest('.doclib-card');
         const check = card ? card.querySelector('.email-card-done') : null;
@@ -413,16 +394,9 @@ export function _showCardMenu(em, anchor) {
         em.is_answered = newState;
         if (newState) {
           _clearDoneResponseTagsLocal(em);
-          _syncEmailReadState(em.uid, true); // mark-done implies mark-read
+          _syncEmailReadState(em.uid, true);
         }
-        try {
-          if (newState) {
-            await fetch(`${API_BASE}/api/email/mark-answered/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-            await fetch(`${API_BASE}/api/email/mark-read/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-          } else {
-            await fetch(`${API_BASE}/api/email/clear-answered/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-          }
-        } catch (e) { console.error('Failed to toggle done:', e); }
+        await _saveDoneState(em, newState);
         if (card) {
           if (check) check.classList.toggle('active', newState);
           if (newState) {
@@ -432,72 +406,25 @@ export function _showCardMenu(em, anchor) {
         }
       },
     });
-    actions.push({
-      label: em.is_flagged ? 'Unfavorite' : 'Favorite (pin to top)',
-      icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="' + (em.is_flagged ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>',
-      action: async () => {
-        const next = !em.is_flagged;
-        em.is_flagged = next;
-        _renderGrid();
-        try {
-          await fetch(`${API_BASE}/api/email/flag/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}&on=${next ? 'true' : 'false'}`, { method: 'POST' });
-        } catch (e) {
-          em.is_flagged = !next;
-          _renderGrid();
-          console.error('Failed to toggle favorite:', e);
-        }
-      },
-    });
-    actions.push({
-      label: 'Archive',
-      icon: _archIcon,
-      action: async () => {
-        await fetch(`${API_BASE}/api/email/archive/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-        await _animateEmailCardRemoval([em.uid]);
-        state._libEmails = state._libEmails.filter(e => String(e.uid) !== String(em.uid));
-        _renderGrid();
-        _libCacheWriteBack();
-      },
-    });
-  } else {
-    actions.push({
-      label: em.is_flagged ? 'Unfavorite' : 'Favorite (pin to top)',
-      icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="' + (em.is_flagged ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>',
-      action: async () => {
-        const next = !em.is_flagged;
-        em.is_flagged = next;
-        _renderGrid();
-        try {
-          await fetch(`${API_BASE}/api/email/flag/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}&on=${next ? 'true' : 'false'}`, { method: 'POST' });
-        } catch (e) {
-          em.is_flagged = !next;
-          _renderGrid();
-          console.error('Failed to toggle favorite:', e);
-        }
-      },
-    });
-    actions.push({
-      label: 'Archive',
-      icon: _archIcon,
-      action: async () => {
-        await fetch(`${API_BASE}/api/email/archive/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-        await _animateEmailCardRemoval([em.uid]);
-        state._libEmails = state._libEmails.filter(e => String(e.uid) !== String(em.uid));
-        _renderGrid();
-        _libCacheWriteBack();
-      },
-    });
   }
+  actions.push(_favoriteAction(em));
+  actions.push({
+    label: 'Archive',
+    icon: _ARCHIVE_ICON,
+    action: async () => {
+      const response = await fetch(_emailActionUrl('archive', em.uid), { method: 'POST' });
+      await _requireSuccessfulEmailMutation(response, 'Failed to archive email');
+      await _animateEmailCardRemoval([em.uid]);
+      state._libEmails = state._libEmails.filter(e => String(e.uid) !== String(em.uid));
+      _renderGrid();
+      _libCacheWriteBack();
+    },
+  });
 
-  // "Select" — switch to multi-select mode with THIS email pre-selected so
-  // the user can quickly fan-out to neighbours with the bulk bar.
-  // Match the chat-sidebar Select icon — a thick bullet character reads
-  // much heavier than a small SVG circle. Nudged up 2px so its visual
-  // center lines up with the SVG icons above (which sit a bit higher).
-  const _selectIcon = SELECT_MENU_ICON;
+  // "Select" switches to multi-select mode with this email pre-selected.
   actions.push({
     label: 'Select',
-    icon: _selectIcon,
+    icon: SELECT_MENU_ICON,
     action: () => {
       state._selectMode = true;
       state._selectedUids.add(em.uid);
@@ -507,7 +434,7 @@ export function _showCardMenu(em, anchor) {
   });
 
   actions.push(
-    { label: 'Delete', icon: _delIcon, danger: true, action: async () => {
+    { label: 'Delete', icon: _TRASH_ICON, danger: true, action: async () => {
       const subject = em.subject || '(no subject)';
       const ok = await styledConfirm(`Delete "${subject}"?`, { confirmText: 'Delete', cancelText: 'Cancel', danger: true });
       if (!ok) return;
@@ -554,17 +481,7 @@ export function _showCardMenu(em, anchor) {
     });
     dropdown.appendChild(item);
   }
-  // Mobile-only Cancel item — explicit close for touch users. CSS hides it
-  // on desktop where outside-click already dismisses cleanly.
-  const _cancelIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-  const cancelItem = document.createElement('div');
-  cancelItem.className = 'dropdown-item-compact dropdown-cancel-mobile';
-  cancelItem.innerHTML = _icon(_cancelIco) + '<span>Cancel</span>';
-  cancelItem.addEventListener('click', (e) => {
-    e.stopPropagation();
-    close();
-  });
-  dropdown.appendChild(cancelItem);
+  _appendCancelItem(dropdown, () => close());
 
   document.body.appendChild(dropdown);
   _fitEmailDropdown(dropdown, rect);
@@ -582,38 +499,29 @@ export function _showBulkActionsMenu(anchor) {
   const rect = anchor.getBoundingClientRect();
   dropdown.style.cssText = `position:fixed;z-index:${topPortalZ()};min-width:160px;background:var(--panel,var(--bg));border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.3);padding:4px;font-size:12px;top:${rect.bottom + 4}px;left:${rect.left}px;`;
   const _readIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="m22 2-7 20-4-9-9-4 20-7z"/></svg>';
-  const _unreadIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>';
-  const _doneIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
   const _exportIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
   const items = [
     { label: 'Export Attachments', icon: _exportIco, action: () => _exportSelectedAttachments() },
-    { label: 'Done', icon: _doneIco, action: () => _bulkAction('done') },
+    { label: 'Done', icon: _CHECK_ICON, action: () => _bulkAction('done') },
     { label: 'Mark Read', icon: _readIco, action: () => _bulkAction('read') },
-    { label: 'Mark Unread', icon: _unreadIco, action: () => _bulkAction('unread') },
+    { label: 'Mark Unread', icon: _UNREAD_ICON, action: () => _bulkAction('unread') },
   ];
   for (const a of items) {
     const it = document.createElement('div');
     it.className = 'dropdown-item-compact' + (a.danger ? ' dropdown-item-danger' : '');
-    it.innerHTML = `<span class="dropdown-icon">${a.icon}</span><span>${a.label}</span>`;
+    it.innerHTML = _icon(a.icon) + `<span>${a.label}</span>`;
     it.addEventListener('click', (e) => { e.stopPropagation(); close(); a.action(); });
     dropdown.appendChild(it);
   }
-  // Mobile-only Cancel — matches the per-card and sidebar dropdowns.
-  const _cancelIco2 = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-  const cancelIt = document.createElement('div');
-  cancelIt.className = 'dropdown-item-compact dropdown-cancel-mobile';
-  cancelIt.innerHTML = `<span class="dropdown-icon">${_cancelIco2}</span><span>Cancel</span>`;
-  cancelIt.addEventListener('click', (e) => {
-    e.stopPropagation();
+  _appendCancelItem(dropdown, () => {
     close();
-    // Cancel inside the bulk-Actions menu also exits select mode — matches the
+    // Cancel inside the bulk-Actions menu also exits select mode, like the
     // documents bulk dropdown.
     state._selectMode = false;
     state._selectedUids.clear();
     _updateBulkBar();
     _renderGrid();
   });
-  dropdown.appendChild(cancelIt);
   document.body.appendChild(dropdown);
   _fitEmailDropdown(dropdown, rect);
   const close = bindMenuDismiss(dropdown, () => {
@@ -665,11 +573,7 @@ export async function _bulkAction(action) {
     _renderGrid();
     _libCacheWriteBack();
     showToast(`Moved ${uids.length} email${uids.length === 1 ? '' : 's'} to Trash`);
-    fetch(`${API_BASE}/api/email/delete-bulk`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ uids, folder: state._libFolder, account_id: state._libAccountId || null }),
-    }).then(async (res) => {
+    fetch(`${API_BASE}/api/email/delete-bulk`, jsonRequest('POST', { uids, folder: state._libFolder, account_id: state._libAccountId || null })).then(async (res) => {
       const data = await res.json().catch(() => null);
       if (!res.ok || data?.success === false || (data?.failed_uids || []).length) {
         throw new Error(data?.error || `${data?.failed_uids?.length || 0} emails could not be deleted`);
@@ -690,11 +594,8 @@ export async function _bulkAction(action) {
   const originalDeleteHtml = deleteBtn?.innerHTML || '';
   const originalCountText = countEl?.textContent || '';
   let busySpinner = null;
-  // Loading state for every bulk action, not just delete — large
-  // selections (e.g. 90+ Dones) used to silently hammer the server
-  // with sequential requests and the user got zero feedback. Now the
-  // Actions button (or Delete button) shows a whirlpool + verb-ing
-  // label, and the count surfaces progress.
+  // Every bulk action shows a spinner and progress count; large selections
+  // run many sequential requests.
   const verbing = {
     delete: 'Deleting',
     archive: 'Archiving',
@@ -734,14 +635,14 @@ export async function _bulkAction(action) {
   const handleOne = async (uid) => {
     try {
       if (action === 'archive') {
-        const res = await fetch(`${API_BASE}/api/email/archive/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
+        const res = await fetch(_emailActionUrl('archive', uid), { method: 'POST' });
         const data = await res.json().catch(() => null);
         if (!res.ok || data?.success === false) throw new Error(data?.error || `HTTP ${res.status}`);
       } else if (action === 'delete') {
         // Bulk Delete matches the permanent-delete behavior used by the
         // library and albums. Moving a batch through provider Trash folders
         // is unreliable on several IMAP implementations.
-        const res = await fetch(`${API_BASE}/api/email/delete-permanent/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'DELETE' });
+        const res = await fetch(_emailActionUrl('delete-permanent', uid), { method: 'DELETE' });
         const data = await res.json().catch(() => null);
         if (!res.ok || data?.success === false) throw new Error(data?.error || `HTTP ${res.status}`);
       } else if (action === 'done') {
@@ -755,12 +656,12 @@ export async function _bulkAction(action) {
           em.is_read = true;
           _clearDoneResponseTagsLocal(em);
         }
-        const ansRes = await fetch(`${API_BASE}/api/email/mark-answered/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-        const readRes = await fetch(`${API_BASE}/api/email/mark-read/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
+        const ansRes = await fetch(_emailActionUrl('mark-answered', uid), { method: 'POST' });
+        const readRes = await fetch(_emailActionUrl('mark-read', uid), { method: 'POST' });
         if (!ansRes.ok || !readRes.ok) throw new Error(`mark-done HTTP ${ansRes.status}/${readRes.status}`);
       } else if (action === 'read' || action === 'unread') {
         const endpoint = action === 'read' ? 'mark-read' : 'mark-unread';
-        const res = await fetch(`${API_BASE}/api/email/${endpoint}/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
+        const res = await fetch(_emailActionUrl(endpoint, uid), { method: 'POST' });
         let data = null;
         try { data = await res.json(); } catch (_) {}
         if (!res.ok || data?.success === false) {
@@ -786,11 +687,7 @@ export async function _bulkAction(action) {
     let finishedCount = 0;
     let bulkDeletedUids = null;
     if (action === 'delete') {
-      const res = await fetch(`${API_BASE}/api/email/delete-bulk`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uids, folder: state._libFolder, account_id: state._libAccountId || null }),
-      });
+      const res = await fetch(`${API_BASE}/api/email/delete-bulk`, jsonRequest('POST', { uids, folder: state._libFolder, account_id: state._libAccountId || null }));
       const data = await res.json().catch(() => null);
       if (!res.ok || data?.success === false) throw new Error(data?.error || `HTTP ${res.status}`);
       for (const uid of data?.failed_uids || []) failedUids.add(String(uid));

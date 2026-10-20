@@ -39,13 +39,13 @@ def schema(name):
     return {'type': 'function', 'function': {'name': name}}
 
 
-@pytest.mark.parametrize('operation', ['draft', 'revise'])
-def test_draft_never_grants_delivery_or_unneeded_lookup(operation):
-    intent = parse_email_task_intent({'operation': operation, 'dependencies': [], 'summary': 'Thank Jon'})
-    tools = [schema(n) for n in ['web_fetch', 'private_browser', 'send_email',
-             'mcp__email__reply_to_email', 'bash', 'update_document', 'ask_user']]
-    assert scope_email_tools(tools, intent) == []
-    assert scope_email_tools(tools, intent, active_editor=True) == tools[-2:-1]
+def test_draft_never_grants_delivery_or_unneeded_lookup():
+    for operation in ('draft', 'revise'):
+        intent = parse_email_task_intent({'operation': operation, 'dependencies': [], 'summary': 'Thank Jon'})
+        tools = [schema(n) for n in ['web_fetch', 'private_browser', 'send_email',
+                 'mcp__email__reply_to_email', 'bash', 'update_document', 'ask_user']]
+        assert scope_email_tools(tools, intent) == []
+        assert scope_email_tools(tools, intent, active_editor=True) == tools[-2:-1]
 
 
 def test_lookup_dependency_does_not_grant_send_or_new_tools():
@@ -55,18 +55,16 @@ def test_lookup_dependency_does_not_grant_send_or_new_tools():
     assert scope_email_tools([], intent) == []
 
 
-@pytest.mark.parametrize('operation, dependencies', [
-    ('draft', []), ('revise', ['email']), ('read', ['email']),
-])
-def test_open_editor_tools_survive_email_intent_scope(operation, dependencies):
-    intent = parse_email_task_intent({
-        'operation': operation, 'dependencies': dependencies, 'summary': 'Review this',
-    })
-    editor = [schema(n) for n in ('manage_documents', 'create_document',
-              'edit_document', 'update_document', 'suggest_document')]
-    offered = editor + [schema('mcp__email__send_email'), schema('web_fetch')]
-    result = scope_email_tools(offered, intent, active_editor=True)
-    assert result == editor
+def test_open_editor_tools_survive_email_intent_scope():
+    for operation, dependencies in (('draft', []), ('revise', ['email']), ('read', ['email'])):
+        intent = parse_email_task_intent({
+            'operation': operation, 'dependencies': dependencies, 'summary': 'Review this',
+        })
+        editor = [schema(n) for n in ('manage_documents', 'create_document',
+                  'edit_document', 'update_document', 'suggest_document')]
+        offered = editor + [schema('mcp__email__send_email'), schema('web_fetch')]
+        result = scope_email_tools(offered, intent, active_editor=True)
+        assert result == editor
 
 
 def test_compose_destination_keeps_contact_resolution_and_unsent_draft_only():
@@ -79,17 +77,21 @@ def test_compose_destination_keeps_contact_resolution_and_unsent_draft_only():
     assert scope_email_tools(tools, intent) == tools[:2]
 
 
-@pytest.mark.parametrize('operation', ['other', 'send', 'read'])
-def test_other_operations_preserve_existing_permission_boundary(operation):
-    tools = [schema('ask_user')]
-    intent = parse_email_task_intent({'operation': operation, 'dependencies': [], 'summary': ''})
-    assert scope_email_tools(tools, intent) == tools
+def test_other_operations_preserve_existing_permission_boundary():
+    for operation in ('other', 'send', 'read'):
+        tools = [schema('ask_user')]
+        intent = parse_email_task_intent({'operation': operation, 'dependencies': [], 'summary': ''})
+        assert scope_email_tools(tools, intent) == tools
 
 
-@pytest.mark.parametrize('value', [None, {}, {'operation': 'draft', 'dependencies': ['bash'], 'summary': ''}])
-def test_invalid_task_scope_is_rejected(value):
-    with pytest.raises(ValueError):
-        parse_email_task_intent(value)
+def test_invalid_task_scope_is_rejected():
+    for value in (
+        None,
+        {},
+        {'operation': 'draft', 'dependencies': ['bash'], 'summary': ''},
+    ):
+        with pytest.raises(ValueError):
+            parse_email_task_intent(value)
 
 
 @pytest.mark.asyncio
@@ -144,17 +146,23 @@ async def test_classifier_rejects_oversized_context_before_network():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('body', [None, [], {}, {'choices': []}, {'choices': [{'message': {'content': '{}'}}]}])
-async def test_classifier_rejects_invalid_provider_responses(body):
-    from src.email_task_intent import classify_email_task
-    class Response:
-        def raise_for_status(self): pass
-        def json(self): return body
-    class Client:
-        async def post(self, *args, **kwargs): return Response()
-    with pytest.raises(ValueError):
-        await classify_email_task(Client(), endpoint_url='http://fixture', headers={},
-                                  model='Ajax', history=[], accounting={})
+async def test_classifier_rejects_invalid_provider_responses():
+    for body in (
+        None,
+        [],
+        {},
+        {'choices': []},
+        {'choices': [{'message': {'content': '{}'}}]},
+    ):
+        from src.email_task_intent import classify_email_task
+        class Response:
+            def raise_for_status(self): pass
+            def json(self): return body
+        class Client:
+            async def post(self, *args, **kwargs): return Response()
+        with pytest.raises(ValueError):
+            await classify_email_task(Client(), endpoint_url='http://fixture', headers={},
+                                      model='Ajax', history=[], accounting={})
 
 
 @pytest.mark.asyncio

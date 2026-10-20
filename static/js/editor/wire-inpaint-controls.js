@@ -34,6 +34,7 @@
  */
 import { state } from './state.js';
 import { invertMaskInPlace } from './mask-utils.js';
+import { hexToRgb } from '../color/hex.js';
 
 const EYE_OPEN_SM = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
 const EYE_OFF_SM  = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg>';
@@ -42,7 +43,6 @@ export function wireInpaintControls({
   composite, applyInpaintFeather, autoMatchInpaint, syncToolClearIndicators,
   attachColorPicker, uiModule,
 }) {
-  // ── Feather + Strength preview swatches ──
   const featherPrev = document.getElementById('ge-feather-preview');
   const strengthPrev = document.getElementById('ge-strength-preview');
   function syncFeatherPreview(v) {
@@ -55,7 +55,6 @@ export function wireInpaintControls({
     strengthPrev.style.opacity = (v / 100).toFixed(2);
   }
 
-  // ── Post-inpaint live edge tuner ──
   // Alpha-blur (Feather) + dilate/erode (Edge Stroke) on the last
   // Inpaint Result layer. rAF-throttled so dragging stays smooth.
   let featherRafPending = false;
@@ -101,7 +100,6 @@ export function wireInpaintControls({
   syncFeatherPreview(0);
   syncStrengthPreview(75);
 
-  // ── Mask vis / invert / clear ──
   document.getElementById('ge-mask-vis')?.addEventListener('click', () => {
     state.maskVisible = !state.maskVisible;
     const btn = document.getElementById('ge-mask-vis');
@@ -123,7 +121,6 @@ export function wireInpaintControls({
     syncToolClearIndicators();
   });
 
-  // ── Paint / Erase segmented toggle ──
   function setInpaintMode(eraseMode) {
     state.inpaintEraseMode = !!eraseMode;
     const paintBtn = document.getElementById('ge-inpaint-mode-paint');
@@ -134,14 +131,11 @@ export function wireInpaintControls({
   document.getElementById('ge-inpaint-mode-paint')?.addEventListener('click', () => setInpaintMode(false));
   document.getElementById('ge-inpaint-mode-erase')?.addEventListener('click', () => setInpaintMode(true));
 
-  // ── Mask color picker ──
   // Updates state.maskTintColor live so the user can pick a colour
   // that contrasts with their photo. Wire both the topbar picker AND
   // the inpaint-section picker so changing one syncs the other.
   function applyMaskTintFromHex(hex) {
-    const r = parseInt(hex.slice(1, 3), 16);
-    const g = parseInt(hex.slice(3, 5), 16);
-    const b = parseInt(hex.slice(5, 7), 16);
+    const { r, g, b } = hexToRgb(hex);
     state.maskTintColor = `rgba(${r}, ${g}, ${b}, 1)`;
     const inpaintPicker = document.querySelector('.ge-inpaint-mask-color');
     const topbarPicker = document.getElementById('ge-topbar-mask-color');

@@ -27,6 +27,7 @@ import core.database as cdb
 from core.database import GalleryImage
 from src.upload_handler import count_recent_uploads, UploadHandler
 import routes.upload_routes as up
+from tests.helpers.routes import route_endpoint
 
 _REPO = Path(__file__).resolve().parent.parent
 
@@ -69,13 +70,6 @@ def _fake_handler():
 _NOW = 5_000.0
 
 
-def _endpoint(router):
-    for r in router.routes:
-        if getattr(r, "path", None) == "/api/upload" and "POST" in getattr(r, "methods", set()):
-            return r.endpoint
-    raise AssertionError("upload endpoint not found")
-
-
 def _request(ip="1.2.3.4", user="tester"):
     return types.SimpleNamespace(
         client=types.SimpleNamespace(host=ip),
@@ -104,9 +98,9 @@ async def test_multifile_after_a_recent_upload_is_not_rejected():
     h = _fake_handler()
     h.upload_rate_log["1.2.3.4"] = [_NOW - 1]  # step 1: a single file moments ago
     up.setup_upload_routes(h)
-    endpoint = _endpoint(up.router)
+    endpoint = route_endpoint(up.router, "/api/upload", "POST")
 
-    result = await endpoint(_request(), _files(3))
+    result = endpoint(_request(), _files(3))
 
     assert [f["name"] for f in result["files"]] == ["f0.txt", "f1.txt", "f2.txt"]
 
@@ -114,9 +108,9 @@ async def test_multifile_after_a_recent_upload_is_not_rejected():
 async def test_fresh_multifile_upload_succeeds():
     h = _fake_handler()
     up.setup_upload_routes(h)
-    endpoint = _endpoint(up.router)
+    endpoint = route_endpoint(up.router, "/api/upload", "POST")
 
-    result = await endpoint(_request(), _files(5))
+    result = endpoint(_request(), _files(5))
 
     assert len(result["files"]) == 5
 
@@ -128,10 +122,10 @@ async def test_genuine_recent_volume_still_throttled():
     h = _fake_handler()
     h.upload_rate_log["1.2.3.4"] = [_NOW - 1, _NOW - 2, _NOW - 3]  # 3 recent events
     up.setup_upload_routes(h)
-    endpoint = _endpoint(up.router)
+    endpoint = route_endpoint(up.router, "/api/upload", "POST")
 
     with pytest.raises(HTTPException) as ei:
-        await endpoint(_request(), _files(1))
+        endpoint(_request(), _files(1))
     assert ei.value.status_code == 429
 
 
@@ -189,9 +183,9 @@ async def test_chat_image_upload_is_added_to_gallery(tmp_path, monkeypatch):
 
     h = UploadHandler(base_dir=str(tmp_path), upload_dir=str(tmp_path / "uploads"))
     up.setup_upload_routes(h)
-    endpoint = _endpoint(up.router)
+    endpoint = route_endpoint(up.router, "/api/upload", "POST")
 
-    result = await endpoint(_request(user="alice"), [_image_upload()], gallery_id=None)
+    result = endpoint(_request(user="alice"), [_image_upload()], gallery_id=None)
     uploaded = result["files"][0]
 
     assert uploaded["gallery_id"]
@@ -220,9 +214,9 @@ async def test_non_image_chat_upload_is_not_added_to_gallery(tmp_path, monkeypat
 
     h = UploadHandler(base_dir=str(tmp_path), upload_dir=str(tmp_path / "uploads"))
     up.setup_upload_routes(h)
-    endpoint = _endpoint(up.router)
+    endpoint = route_endpoint(up.router, "/api/upload", "POST")
 
-    result = await endpoint(_request(user="alice"), [types.SimpleNamespace(
+    result = endpoint(_request(user="alice"), [types.SimpleNamespace(
         filename="notes.txt",
         file=io.BytesIO(b"plain text upload"),
     )])

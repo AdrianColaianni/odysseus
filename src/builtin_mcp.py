@@ -14,6 +14,7 @@ import subprocess
 import sys
 
 from core.platform_compat import IS_WINDOWS, which_tool
+from src.constants import PLAYWRIGHT_MCP_CACHE_DIR
 from src.runtime_paths import get_app_root
 
 logger = logging.getLogger(__name__)
@@ -226,10 +227,7 @@ async def register_builtin_servers(mcp_manager):
             try:
                 env = None
                 if server_id == "builtin_browser":
-                    cache_home = os.environ.get(
-                        "ODYSSEUS_BROWSER_MCP_CACHE",
-                        os.path.join(base_dir, "data", "local", "playwright-mcp-cache"),
-                    )
+                    cache_home = os.environ.get("ODYSSEUS_BROWSER_MCP_CACHE", PLAYWRIGHT_MCP_CACHE_DIR)
                     os.makedirs(cache_home, exist_ok=True)
                     env = {
                         "XDG_CACHE_HOME": cache_home,

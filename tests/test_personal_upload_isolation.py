@@ -6,7 +6,7 @@ from routes import personal_routes
 
 
 def test_personal_upload_paths_are_owner_scoped_and_unique(tmp_path, monkeypatch):
-    monkeypatch.setattr(personal_routes, "UPLOADS_DIR", str(tmp_path))
+    monkeypatch.setattr(personal_routes, "PERSONAL_UPLOADS_DIR", str(tmp_path))
 
     alice_dir = personal_routes._personal_upload_dir_for_owner("alice")
     bob_dir = personal_routes._personal_upload_dir_for_owner("bob")
@@ -32,7 +32,7 @@ def test_personal_upload_paths_are_owner_scoped_and_unique(tmp_path, monkeypatch
 
 
 def test_personal_upload_paths_stay_under_upload_root(tmp_path, monkeypatch):
-    monkeypatch.setattr(personal_routes, "UPLOADS_DIR", str(tmp_path))
+    monkeypatch.setattr(personal_routes, "PERSONAL_UPLOADS_DIR", str(tmp_path))
 
     upload_dir = personal_routes._personal_upload_dir_for_owner("../alice")
     file_path, stored_name, display_name = personal_routes._unique_personal_upload_path(
@@ -46,7 +46,7 @@ def test_personal_upload_paths_stay_under_upload_root(tmp_path, monkeypatch):
 
 
 def test_rename_personal_upload_owner_moves_files_and_rewrites_rag(tmp_path, monkeypatch):
-    monkeypatch.setattr(personal_routes, "UPLOADS_DIR", str(tmp_path))
+    monkeypatch.setattr(personal_routes, "PERSONAL_UPLOADS_DIR", str(tmp_path))
 
     old_dir = Path(personal_routes._personal_upload_dir_for_owner("alice"))
     old_file = old_dir / "note.txt"

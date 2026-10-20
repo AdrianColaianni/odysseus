@@ -21,15 +21,14 @@ import {
   _isBloatedSig,
   _looksLikeSignature,
 } from './signatureFold.js';
+import { esc } from '../ui.js?v=20260916largetoolscroll1';
 import { state } from './state.js';
 import {
   _SIG_BLOAT_MIN_CHARS,
   _TALON_ORIG_RE,
   _TALON_WROTE,
-  _esc,
   _escLinkify,
   _formatBubbleDate,
-  _formatRecipients,
   _initials,
   _parseTurnMeta,
   _sanitizeHtml,
@@ -51,6 +50,12 @@ const API_BASE = window.location.origin;
  *      boilerplate.
  * Anything matched gets wrapped from the marker through end-of-body.
  */
+// The chat-bubble thread view stays off: the server's thread parser still
+// splits signatures and disclaimers into bogus turns.
+function _bubblesDisabled() {
+  return true;
+}
+
 /**
  * Render the email body with sig/quote folds. If the backend has cached
  * LLM-detected boundary offsets (data.boundaries), use those for an exact
@@ -58,22 +63,6 @@ const API_BASE = window.location.origin;
  * detectors. The plain-body branch is always preferred when boundaries
  * exist because the offsets are computed against plain text.
  */
-// Global escape hatch — when the server's thread parser misfires (it
-// occasionally splits a single reply into two bogus "turns" by treating a
-// signature/disclaimer as its own message), the user can flip this off to
-// fall back to plain rendering. Survives reloads.
-const _BUBBLES_DISABLED_KEY = 'odysseus.email.bubblesDisabled';
-// Threaded chat-bubble email view is DISABLED for now — too buggy to
-// ship. Force plain-text rendering everywhere by always returning true.
-// Re-enable by restoring the localStorage-backed body + the toggle
-// menu item in the reader's More menu.
-function _bubblesDisabled() {
-  return true;
-}
-function _setBubblesDisabled(v) {
-  try { localStorage.setItem(_BUBBLES_DISABLED_KEY, v ? '1' : '0'); } catch {}
-}
-
 export function _renderEmailBody(data) {
   const plain = (typeof data?.body === 'string' && data.body.length) ? data.body : '';
   const folder = String(data?.folder || '').toLowerCase();
@@ -220,11 +209,11 @@ function _prepareEmailInlineImages(html) {
         </span>
       </span>
       <span class="email-inline-image-info">
-        <span class="email-inline-image-title">${_esc(label)}</span>
+        <span class="email-inline-image-title">${esc(label)}</span>
         <span class="email-inline-image-sub">${isHttp ? 'Remote image blocked' : isCid ? 'Inline image hidden' : 'Image unavailable'}</span>
       </span>
       <span class="email-inline-image-actions">
-        ${isHttp ? `<a class="email-inline-image-btn email-inline-image-download-btn" href="${_esc(src)}" target="_blank" rel="noopener noreferrer" download title="Download" aria-label="Download"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></a>` : ''}
+        ${isHttp ? `<a class="email-inline-image-btn email-inline-image-download-btn" href="${esc(src)}" target="_blank" rel="noopener noreferrer" download title="Download" aria-label="Download"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></a>` : ''}
         ${isCid ? `<button type="button" class="email-inline-image-btn email-inline-image-download-btn" data-email-img-download="${idx}" title="Download" aria-label="Download"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>` : ''}
       </span>
     `;
@@ -296,7 +285,7 @@ export function _wireEmailInlineImages(reader) {
       if (frame) frame.classList.remove('is-loading');
       img.classList.add('is-visible');
     };
-    const showError = (err) => {
+    const showImageError = (err) => {
       if (settled) return;
       settled = true;
       if (frame?.isConnected) frame.replaceWith(ph);
@@ -305,7 +294,7 @@ export function _wireEmailInlineImages(reader) {
       if (sub) sub.textContent = err?.message ? `Image failed: ${err.message}` : 'Image failed to load';
       if (actions) actions.style.display = '';
       if (objectUrl) {
-        try { URL.revokeObjectURL(objectUrl); } catch {}
+        URL.revokeObjectURL(objectUrl);
       }
     };
     const loadDirect = () => {
@@ -317,12 +306,12 @@ export function _wireEmailInlineImages(reader) {
     img.addEventListener('load', showLoaded, { once: true });
     img.addEventListener('error', () => {
       if (!directFallbackUsed && objectUrl && isCidImage) {
-        try { URL.revokeObjectURL(objectUrl); } catch {}
+        URL.revokeObjectURL(objectUrl);
         objectUrl = '';
         loadDirect();
         return;
       }
-      showError();
+      showImageError();
     }, { once: true });
     if (isCidImage || isRemoteImage) {
       loadDirect();
@@ -348,13 +337,13 @@ export function _wireEmailInlineImages(reader) {
         if (img.complete && img.naturalWidth > 0) showLoaded();
         if (!settled && typeof img.decode === 'function') {
           img.decode().then(showLoaded).catch(() => {
-            if (img.complete && img.naturalWidth === 0) showError();
+            if (img.complete && img.naturalWidth === 0) showImageError();
           });
         }
       })
       .catch(err => {
         clearTimeout(timeoutId);
-        showError(err?.name === 'AbortError' ? new Error('request timed out') : err);
+        showImageError(err?.name === 'AbortError' ? new Error('request timed out') : err);
       });
     setTimeout(() => {
       if (!settled && !frame) {
@@ -445,9 +434,6 @@ function _meEmailAddrs() {
   return set;
 }
 
-// _parseTurnMeta / _formatBubbleDate / _formatRecipients / _senderColor /
-// _initials live in ./emailLibrary/utils.js
-
 function _renderTurnsAsBubbles(turns, data) {
   if (!Array.isArray(turns) || !turns.length) return '';
   const mineSet = _meEmailAddrs();
@@ -522,10 +508,10 @@ function _renderTurnsAsBubbles(turns, data) {
     const color = _senderColor(author || (t.level === 0 ? lvl0Email : ''));
     const head =
       `<div class="email-bubble-head">`
-      + `<span class="email-bubble-author" style="color:${color}">${_esc(author)}</span>`
-      + (date ? `<span class="email-bubble-date">${_esc(date)}</span>` : '')
+      + `<span class="email-bubble-author" style="color:${color}">${esc(author)}</span>`
+      + (date ? `<span class="email-bubble-date">${esc(date)}</span>` : '')
       + `</div>`;
-    const avatar = `<div class="email-bubble-avatar" aria-hidden="true" style="background:${color}">${_esc(initials)}</div>`;
+    const avatar = `<div class="email-bubble-avatar" aria-hidden="true" style="background:${color}">${esc(initials)}</div>`;
     return (
       `<div class="email-bubble-row email-bubble-${side}" style="--bubble-accent:${color}">`
       + (isMine ? '' : avatar)
@@ -538,61 +524,6 @@ function _renderTurnsAsBubbles(turns, data) {
     );
   });
   return `<div class="email-bubbles">${rows.join('')}</div>`;
-}
-
-/**
- * Render server-cached thread turns (list of {level, body_html, meta})
- * into the same nested-card structure the client-side parser produces.
- */
-function _renderTurnsFromServer(turns) {
-  if (!Array.isArray(turns) || !turns.length) return '';
-  let out = '';
-  const stack = []; // [{ level, html }]
-  const wrap = (t) =>
-    `<details class="email-thread-turn email-quote-fold">`
-    + _foldSummary('Earlier reply', _QUOTE_ICON, t.meta || '')
-    + `<div class="email-thread-turn-body">${t.html}</div>`
-    + '</details>';
-
-  for (const t of turns) {
-    if (t.level === 0) {
-      while (stack.length) {
-        const top = stack.pop();
-        const w = wrap(top);
-        if (stack.length) stack[stack.length - 1].html += w; else out += w;
-      }
-      out += _sanitizeHtml(t.body_html || '');
-    } else {
-      while (stack.length && stack[stack.length - 1].level > t.level) {
-        const top = stack.pop();
-        const w = wrap(top);
-        if (stack.length) stack[stack.length - 1].html += w; else out += w;
-      }
-      if (!stack.length || stack[stack.length - 1].level < t.level) {
-        stack.push({ level: t.level, meta: t.meta, html: _sanitizeHtml(t.body_html || '') });
-      } else {
-        stack[stack.length - 1].html += _sanitizeHtml(t.body_html || '');
-        if (t.meta && !stack[stack.length - 1].meta) {
-          stack[stack.length - 1].meta = t.meta;
-        }
-      }
-    }
-  }
-  while (stack.length) {
-    const top = stack.pop();
-    const w = wrap(top);
-    if (stack.length) stack[stack.length - 1].html += w; else out += w;
-  }
-  // Mark the bottom-most fold for rounded corners.
-  const lastIdx = out.lastIndexOf('<details class="email-thread-turn email-quote-fold"');
-  if (lastIdx >= 0) {
-    out = out.slice(0, lastIdx)
-        + out.slice(lastIdx).replace(
-            'email-thread-turn email-quote-fold"',
-            'email-thread-turn email-quote-fold last-fold"'
-          );
-  }
-  return out;
 }
 
 /**

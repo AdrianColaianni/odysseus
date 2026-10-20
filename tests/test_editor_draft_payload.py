@@ -9,7 +9,7 @@ from fastapi import HTTPException
 def _load_module(monkeypatch):
     db_stub = types.ModuleType("core.database")
     db_stub.EditorDraft = MagicMock()
-    db_stub.SessionLocal = MagicMock()
+    db_stub.get_db = MagicMock()
     monkeypatch.setitem(sys.modules, "core.database", db_stub)
     monkeypatch.delitem(sys.modules, "routes.editor_draft_routes", raising=False)
 

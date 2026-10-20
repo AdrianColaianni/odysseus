@@ -16,8 +16,8 @@ async def test_scheduled_remote_ssh_refusal_is_deterministic_and_fail_closed():
     """Unscoped remote SSH in a scheduled workload must fail closed."""
     authority = RequestAuthority("sched-1", "alice", "sched-session", "", (OperationGrant("bash"),))
     with bind_request_authority(authority):
-        # 1. Direct _run_subprocess with ssh argv
-        output, success = await _run_subprocess(["ssh", "user@remote.host", "uptime"])
+        # 1. Direct _run_subprocess for a remote host
+        output, success = await _run_subprocess("uptime", remote=True)
         assert success is False
         assert output == "Remote scheduled workload requires an exact external backend binding."
 
@@ -35,6 +35,6 @@ async def test_scheduled_remote_ssh_refusal_is_deterministic_and_fail_closed():
 @pytest.mark.asyncio
 async def test_scheduled_ssh_refusal_requires_authority_first():
     """Without any active authority, launch is denied before reaching the remote SSH gate."""
-    output, success = await _run_subprocess(["ssh", "user@remote.host", "uptime"])
+    output, success = await _run_subprocess("uptime", remote=True)
     assert success is False
     assert output == "Scheduled process launch has no server authority."

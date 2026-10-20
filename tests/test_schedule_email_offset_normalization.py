@@ -13,26 +13,20 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-
-def _route_endpoint(router, path: str, method: str):
-    method = method.upper()
-    for route in router.routes:
-        if route.path == path and method in getattr(route, "methods", set()):
-            return route.endpoint
-    raise AssertionError(f"route not found: {method} {path}")
+from routes.email.email_routes import ScheduleEmailRequest
+from tests.helpers.routes import route_endpoint
 
 
 @pytest.fixture
 def schedule(tmp_path, monkeypatch):
-    import routes.email_helpers as email_helpers
-    import routes.email_routes as email_routes
+    import routes.email.email_helpers as email_helpers
+    import routes.email.email_routes as email_routes
 
     db_path = tmp_path / "scheduled_emails.db"
     monkeypatch.setattr(email_helpers, "SCHEDULED_DB", db_path)
-    monkeypatch.setattr(email_routes, "SCHEDULED_DB", db_path)
     email_helpers._init_scheduled_db()
     router = email_routes.setup_email_routes()
-    endpoint = _route_endpoint(router, "/api/email/schedule", "POST")
+    endpoint = route_endpoint(router, "/api/email/schedule", "POST")
 
     def _stored(sid):
         row = sqlite3.connect(db_path).execute(
@@ -48,7 +42,7 @@ async def test_positive_offset_stored_as_naive_utc(schedule):
     endpoint, stored = schedule
     local = datetime.now(timezone(timedelta(hours=2))) + timedelta(hours=1)
     res = await endpoint(
-        {"to": "a@example.com", "body": "b", "send_at": local.isoformat()},
+        ScheduleEmailRequest(**{"to": "a@example.com", "body": "b", "send_at": local.isoformat()}),
         owner="alice",
     )
     assert res["success"] is True
@@ -66,7 +60,7 @@ async def test_negative_offset_does_not_fire_early(schedule):
     endpoint, stored = schedule
     local = datetime.now(timezone(timedelta(hours=-5))) + timedelta(hours=3)
     res = await endpoint(
-        {"to": "a@example.com", "body": "b", "send_at": local.isoformat()},
+        ScheduleEmailRequest(**{"to": "a@example.com", "body": "b", "send_at": local.isoformat()}),
         owner="alice",
     )
     assert res["success"] is True
@@ -82,7 +76,7 @@ async def test_z_suffix_stored_without_suffix(schedule):
     utc = datetime.now(timezone.utc) + timedelta(hours=1)
     send_at = utc.replace(tzinfo=None).isoformat() + "Z"
     res = await endpoint(
-        {"to": "a@example.com", "body": "b", "send_at": send_at},
+        ScheduleEmailRequest(**{"to": "a@example.com", "body": "b", "send_at": send_at}),
         owner="alice",
     )
     assert res["success"] is True
@@ -94,7 +88,7 @@ async def test_naive_utc_send_at_unchanged(schedule):
     endpoint, stored = schedule
     naive = (datetime.utcnow() + timedelta(days=1)).isoformat()
     res = await endpoint(
-        {"to": "a@example.com", "body": "b", "send_at": naive}, owner="alice"
+        ScheduleEmailRequest(**{"to": "a@example.com", "body": "b", "send_at": naive}), owner="alice"
     )
     assert res["success"] is True
     assert stored(res["id"]) == naive

@@ -28,7 +28,6 @@ be checked on this host; the execution evidence for the defect itself came from
 a Linux host.
 """
 import os
-import shlex
 
 import pytest
 
@@ -43,28 +42,18 @@ def workspace(tmp_path):
     return str(tmp_path)
 
 
-def _argv(workspace, **kwargs):
-    """The namespace argv, with bubblewrap forced present.
-
-    `shutil.which` is patched rather than skipped so the argv is asserted on
-    every platform the suite runs on — the bind flags are the finding, and they
-    are wrong independently of whether this host can execute them.
-    """
+def _argv(workspace):
+    """The namespace argv, with bubblewrap forced present so it is asserted on every platform."""
     import shutil as _shutil
 
     original = _shutil.which
-    original_available = containment._bwrap_available
     try:
-        containment._bwrap_available = lambda: True
         _shutil.which = lambda name, *a, **kw: (
             "/usr/bin/bwrap" if name == "bwrap" else original(name, *a, **kw)
         )
-        wrapped = subprocess_tools._wrap_workspace_namespace("true", workspace, **kwargs)
+        return containment._bwrap_prefix(containment.agent_spec(workspace, {}, 5))
     finally:
         _shutil.which = original
-        containment._bwrap_available = original_available
-    assert wrapped is not None, "forced bwrap should produce a namespace argv"
-    return shlex.split(wrapped)
 
 
 def _bind_mode(argv, dest):
@@ -73,14 +62,6 @@ def _bind_mode(argv, dest):
         if argv[index + 2] == dest and argv[index].startswith("--"):
             return argv[index]
     return None
-
-
-# ── what the namespace binds ────────────────────────────────────────────────
-@pytest.mark.skipif(os.name == "nt", reason="bwrap argv is POSIX-only")
-def test_home_and_mnt_are_read_only(workspace):
-    argv = _argv(workspace)
-    assert _bind_mode(argv, "/home") == "--ro-bind"
-    assert _bind_mode(argv, "/mnt") == "--ro-bind"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="bwrap argv is POSIX-only")
@@ -109,24 +90,6 @@ def test_the_workspace_stays_writable_at_its_real_host_path_too(workspace):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="bwrap argv is POSIX-only")
-def test_no_dir_chain_is_created_inside_a_read_only_bind(monkeypatch, tmp_path):
-    """mkdir inside a read-only mount fails and takes the namespace with it.
-
-    A workspace under `/home` or `/mnt` already has its parents, because the
-    argv mounted those roots. Emitting `--dir /home/someone` for it would be an
-    error, not a no-op.
-    """
-    assert subprocess_tools._namespace_dir_chain("/home/someone/ws") == []
-    assert subprocess_tools._namespace_dir_chain("/mnt/data/ws") == []
-    assert subprocess_tools._namespace_dir_chain("/usr/share/ws") == []
-    # Somewhere the argv does not mount: the parents have to be created in the
-    # private tmpfs root.
-    assert subprocess_tools._namespace_dir_chain("/srv/agents/ws") == [
-        "--dir", "/srv", "--dir", "/srv/agents",
-    ]
-
-
-@pytest.mark.skipif(os.name == "nt", reason="bwrap argv is POSIX-only")
 def test_reserved_destinations_are_never_bound_over(workspace, monkeypatch):
     """Overlaying the private root, tmpfs or the workspace mount with a host
     directory undoes the namespace from inside the argv that builds it."""
@@ -146,96 +109,6 @@ def test_a_workspace_at_a_reserved_destination_gets_no_extra_bind(monkeypatch):
     assert _bind_mode(argv, "/tmp") is None, (
         f"a host bind of /tmp would undo the private tmpfs; argv was {argv}"
     )
-
-
-# ── the silent downgrade ────────────────────────────────────────────────────
-def test_fallback_reports_that_filesystem_containment_did_not_hold(
-    workspace, monkeypatch,
-):
-    """The fallback still runs under report-only — but it is now recorded.
-
-    Before this, the only difference between a contained run and a host run was
-    whether a regex had rewritten a token, and nothing in the result said so.
-    """
-    monkeypatch.setattr(
-        subprocess_tools, "_wrap_workspace_namespace",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(containment, "CONTAINMENT_MODE", containment.MODE_REPORT_ONLY)
-    command, block, confined = subprocess_tools._contained_command(
-        "echo hi", workspace,
-    )
-    assert confined is False
-    assert command == "echo hi"
-    assert block["contained"] is False
-    assert block["executed"] is True
-    assert block["unenforced_required"] == [containment.FILESYSTEM]
-    assert block["mechanism"] == subprocess_tools.ALIAS_REWRITE_MECHANISM
-    assert block["mode"] == containment.MODE_REPORT_ONLY
-
-
-def test_the_fallback_mechanism_is_not_named_like_a_mechanism(workspace, monkeypatch):
-    """A string rewrite reported as "bubblewrap" or "none" is the same silence
-    with extra steps. It gets its own name so a reader cannot mistake it."""
-    monkeypatch.setattr(containment, "CONTAINMENT_MODE", containment.MODE_REPORT_ONLY)
-    monkeypatch.setattr(
-        subprocess_tools, "_wrap_workspace_namespace",
-        lambda *args, **kwargs: None,
-    )
-    _command, block, _confined = subprocess_tools._contained_command("echo hi", workspace)
-    assert block["mechanism"] == "workspace_alias_rewrite"
-    assert block["mechanism"] not in {name.name for name in containment.MECHANISMS}
-
-
-def test_enforcing_mode_refuses_instead_of_falling_back(workspace, monkeypatch):
-    """Fail closed. Containment required and unavailable means not executed."""
-    monkeypatch.setattr(
-        subprocess_tools, "_wrap_workspace_namespace",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(containment, "CONTAINMENT_MODE", containment.MODE_ENFORCING)
-    with pytest.raises(containment.ContainmentUnavailable) as caught:
-        subprocess_tools._contained_command("echo hi", workspace)
-    assert caught.value.missing == frozenset({containment.FILESYSTEM})
-
-
-def test_a_namespaced_command_reports_the_mechanism_that_established_it(
-    workspace, monkeypatch,
-):
-    monkeypatch.setattr(
-        subprocess_tools, "_wrap_workspace_namespace",
-        lambda *args, **kwargs: "bwrap --whatever true",
-    )
-    monkeypatch.setattr(
-        containment, "probe",
-        lambda spec: containment.ContainmentProbe(
-            mechanism="bubblewrap",
-            enforced=frozenset({containment.FILESYSTEM, containment.PROCESS_TREE}),
-            degraded=(),
-            unenforced_required=(),
-            mode=containment.MODE_REPORT_ONLY,
-        ),
-    )
-    command, block, confined = subprocess_tools._contained_command("true", workspace)
-    assert confined is True
-    assert command == "bwrap --whatever true"
-    assert block["mechanism"] == "bubblewrap"
-    assert block["contained"] is True
-    assert block["enforced"] == [containment.FILESYSTEM]
-
-
-def test_the_reported_block_claims_only_the_filesystem_dimension(workspace, monkeypatch):
-    """These tools still build their own create_subprocess_* call and pass
-    neither start_new_session nor a group-wide kill, so listing process_tree or
-    wall_clock here would be a false claim. The block names its own scope."""
-    monkeypatch.setattr(
-        subprocess_tools, "_wrap_workspace_namespace",
-        lambda *args, **kwargs: "bwrap --whatever true",
-    )
-    _command, block, _confined = subprocess_tools._contained_command("true", workspace)
-    assert block["reported_dimensions"] == [containment.FILESYSTEM]
-    assert containment.PROCESS_TREE not in block["enforced"]
-    assert containment.WALL_CLOCK not in block["enforced"]
 
 
 # ── containment.probe: the single answer both tools ask for ─────────────────

@@ -54,8 +54,6 @@ export default ui;
         "export const initModelPicker = () => {};\n"
         "export const updateModelPicker = () => {};\n"
     ),
-    "theme.mjs": "export default {};\n",
-    "spinner.mjs": "export default {};\n",
     "actionMenuOrder.mjs": (
         "export const SELECT_MENU_ICON = '';\n"
         "export const actionMenuRank = () => 0;\n"
@@ -320,14 +318,6 @@ def results(tmp_path_factory):
         (
             r"import \{ initModelPicker, updateModelPicker \} from './modelPicker\.js(?:[?#][^']*)?';",
             "import { initModelPicker, updateModelPicker } from './modelPicker.mjs';",
-        ),
-        (
-            r"import themeModule from './theme\.js(?:[?#][^']*)?';",
-            "import themeModule from './theme.mjs';",
-        ),
-        (
-            r"import spinnerModule from './spinner\.js(?:[?#][^']*)?';",
-            "import spinnerModule from './spinner.mjs';",
         ),
         (
             r"import \{ actionMenuRank, orderActionMenuItems, SELECT_MENU_ICON \} from './actionMenuOrder\.js(?:[?#][^']*)?';",

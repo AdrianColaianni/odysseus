@@ -1,31 +1,7 @@
 """Browser coverage for undoable Rich Text table cell merge and split."""
 
-import json
-import subprocess
-from pathlib import Path
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source, function_body
-
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-
-
-def test_merge_split_commands_use_contextual_undoable_table_path():
-    actions = function_body("_applyRichTableAction")
-    menu = DOC_JS.split("function _showMdDropdown", 1)[1].split(
-        "function initMdToolbar", 1
-    )[0]
-
-    assert "function _richTableCanMergeRight" in DOC_JS
-    assert "function _richTableCanSplitCell" in DOC_JS
-    assert "function _mergeRichTableCellRight" in DOC_JS
-    assert "function _splitRichTableCell" in DOC_JS
-    assert "table:merge-right" in actions
-    assert "table:split-cell" in actions
-    assert "_applyRichTableHeaderModes(clone, headerModes)" in actions
-    assert "_replaceRichTable(rich, original, clone" in actions
-    assert "unavailableTableAction" in menu
+from tests.helpers.node import run_node_module
 
 
 def test_mobile_merge_split_round_trip_preserves_headers_formatting_and_history():
@@ -139,15 +115,7 @@ def test_mobile_merge_split_round_trip_preserves_headers_formatting_and_history(
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
 
     initial_tags = [["TH", "TH", "TH"], ["TH", "TD", "TD"]]
     merged_tags = [["TH", "TH", "TH"], ["TH", "TD"]]

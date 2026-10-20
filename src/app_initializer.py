@@ -1,4 +1,3 @@
-# src/app_initializer.py
 """Initialize all application components and dependencies."""
 import os
 import logging
@@ -23,7 +22,7 @@ from src.chat_handler import ChatHandler
 from src.research_handler import ResearchHandler
 from src.upload_handler import UploadHandler
 from src.tool_utils import set_upload_handler
-from src.search import update_search_config
+from services.search import update_search_config
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +73,7 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     create_directories()
 
     # Initialize core managers
-    memory_manager = MemoryManager(DATA_DIR)
+    memory_manager = MemoryManager()
     skills_manager = SkillsManager(DATA_DIR)
     session_manager = SessionManager(SESSIONS_FILE)
     set_session_manager(session_manager)  # Enable Session.add_message() persistence
@@ -83,7 +82,7 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     set_upload_handler(upload_handler)
     personal_docs_manager = PersonalDocsManager(PERSONAL_DIR, rag_manager)
     api_key_manager = APIKeyManager(DATA_DIR)
-    preset_manager = PresetManager(DATA_DIR)
+    preset_manager = PresetManager()
 
     # Initialize memory vector store (share embedding model with RAG if available)
     memory_vector = None

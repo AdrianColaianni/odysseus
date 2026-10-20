@@ -12,6 +12,7 @@ import collections
 import contextlib
 import csv
 import difflib
+import functools
 import html
 import json
 import os
@@ -31,7 +32,6 @@ from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urlpars
 
 from src.llm_core import (
     dedupe_model_candidates,
-    stream_llm,
     stream_llm_with_fallback,
     _strip_visible_chat_template_artifacts,
     _is_ollama_native_url,
@@ -57,6 +57,7 @@ from src.context_compactor import (
     maybe_compact,
 )
 from src.settings import get_setting
+from src.user_time import now_user_local, user_timezone
 from src.prompt_security import untrusted_context_message
 from src.tool_security import (
     blocked_tools_for_owner,
@@ -69,9 +70,7 @@ from src.client_tool_contract import TUI_CLIENT_TOOL_NAMES
 from src.tool_capabilities import (
     ResultIntegrity,
     ToolRunSecurityContext,
-    blocked_tool_result,
     capabilities_for_action,
-    capabilities_for_tool,
     messages_contain_external_untrusted_context,
     tool_result_is_successful,
     tool_result_should_arm_gate,
@@ -81,6 +80,7 @@ from src.tool_approvals import (
     document_content_digest,
     tool_approval_store,
 )
+from src.tool_index import ALWAYS_AVAILABLE
 from src.tool_types import ToolBlock
 from src.tool_parsing import iter_email_addresses, strip_angle_tags
 from src.text_scanning import (
@@ -108,7 +108,6 @@ from src.agent_tools import (
     set_active_model,
     function_call_to_tool_block,
     FUNCTION_TOOL_SCHEMAS,
-    TOOL_TAGS,
     MAX_AGENT_ROUNDS,
 )
 
@@ -129,12 +128,12 @@ def _local_media_discovery_call_allowed(tool_name: str, command: str) -> bool:
         return False
     text = str(command or "").strip()
     # ``#!bg`` is a parser marker emitted in some fenced shell blocks.
-    text = re.sub(r"^#!\s*bg\s*\n?", "", text, count=1).strip()
+    text = _rx(r"^#!\s*bg\s*\n?").sub("", text, count=1).strip()
     if not text or "\n" in text:
         return False
-    if re.search(r"[;&|<>`$()]", text):
+    if _rx(r"[;&|<>`$()]").search(text):
         return False
-    return bool(re.fullmatch(r"(?:ls|stat|file)(?:\s+-[A-Za-z0-9./_-]+)*\s+[^\s]+", text))
+    return bool(_rx(r"(?:ls|stat|file)(?:\s+-[A-Za-z0-9./_-]+)*\s+[^\s]+").fullmatch(text))
 
 
 def _resolved_tool_call_id(
@@ -161,6 +160,16 @@ def _resolved_tool_call_id(
     return f"odysseus-auto-{digest}"
 
 logger = logging.getLogger(__name__)
+
+
+def _sse(payload: Any) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+# The file holds over a thousand literal patterns, more than re's own cache
+# keeps, so without this the per-turn routers recompile them every turn.
+_rx = functools.cache(re.compile)
+
 
 _MODEL_TOOL_SURFACES = {"none", "compact", "full"}
 _ROUTE_THINKING_MODES = {"auto", "on", "off"}
@@ -199,7 +208,7 @@ def _thinking_mode_for_route(
     """
 
     model_name = str(model or "").lower()
-    qwen35_family = bool(re.search(r"(?:qwen3\.5|qwen35)", model_name))
+    qwen35_family = bool(_rx(r"(?:qwen3\.5|qwen35)").search(model_name))
     if not (_is_qwen38_tool_router(model) or qwen35_family):
         return None
     # The pre-Heretic control is served by vLLM without a verified reasoning
@@ -257,19 +266,11 @@ def _looks_like_explicit_web_search_request(
         return False
     value = str(text or "")
     return bool(
-        re.search(
-            r"\b(?:latest|current|today|online|internet|web|search|look\s+up)\b"
-            r"|\bfind\b.{0,80}\b(?:official\s+)?(?:website|site|page|url|link)\b",
-            value,
-            re.IGNORECASE,
-        )
-        and not re.search(
-            r"\b(?:email|mail|inbox|calendar|meeting|task|note|memory|saved\s+research|"
+        _rx(r"\b(?:latest|current|today|online|internet|web|search|look\s+up)\b"
+            r"|\bfind\b.{0,80}\b(?:official\s+)?(?:website|site|page|url|link)\b", re.IGNORECASE).search(value)
+        and not _rx(r"\b(?:email|mail|inbox|calendar|meeting|task|note|memory|saved\s+research|"
             r"skills?|procedures?|documents?|docs?|past\s+chat|prior\s+chat|"
-            r"previous\s+conversation|research|deep\s+dive|investigate)\b",
-            value,
-            re.IGNORECASE,
-        )
+            r"previous\s+conversation|research|deep\s+dive|investigate)\b", re.IGNORECASE).search(value)
     )
 
 
@@ -330,12 +331,7 @@ def _post_finish_inspection_should_converge(
 def _parse_model_tool_modes(raw: Any) -> Dict[str, str]:
     if not raw:
         return {}
-    try:
-        data = json.loads(raw) if isinstance(raw, str) else raw
-    except Exception:
-        return {}
-    if not isinstance(data, dict):
-        return {}
+    data = _json_object(raw)
     modes: Dict[str, str] = {}
     for key, value in data.items():
         model_id = str(key or "").strip()
@@ -347,7 +343,7 @@ def _parse_model_tool_modes(raw: Any) -> Dict[str, str]:
 
 def _model_id_tokens(value: Any) -> List[str]:
     leaf = os.path.basename(str(value or "").strip().rstrip("/")).lower()
-    return [part for part in re.split(r"[^a-z0-9]+", leaf) if part]
+    return [part for part in _rx(r"[^a-z0-9]+").split(leaf) if part]
 
 
 def _model_tool_mode_for_model(modes: Dict[str, str], model: str) -> str:
@@ -424,12 +420,8 @@ def _request_has_compound_actions(text: str) -> bool:
     """Return whether a turn explicitly requests multiple semantic operations."""
     value = str(text or "")
     if (
-        len(re.findall(r"\bhttps?://[^\s<>\"']+", value, re.IGNORECASE)) >= 2
-        and re.search(
-            r"\b(?:compare|contrast|synthesi[sz]e|cite|citing|evidence)\b",
-            value,
-            re.IGNORECASE,
-        )
+        len(_rx(r"\bhttps?://[^\s<>\"']+", re.IGNORECASE).findall(value)) >= 2
+        and _rx(r"\b(?:compare|contrast|synthesi[sz]e|cite|citing|evidence)\b", re.IGNORECASE).search(value)
     ):
         return True
     groups = (
@@ -450,17 +442,9 @@ def _request_forbids_execution_retry(text: str) -> bool:
     """Return whether the user explicitly bounded command execution to one try."""
     value = str(text or "")
     return bool(
-        re.search(
-            r"\b(?:do\s+not|don['’]?t|dont|never)\s+"
-            r"(?:retry|re-?run|run\s+(?:it|that|the\s+command)\s+again)\b",
-            value,
-            re.IGNORECASE,
-        )
-        or re.search(
-            r"\b(?:run|execute|try)\b[^.!?\n]{0,120}\b(?:once|one\s+time)\b",
-            value,
-            re.IGNORECASE,
-        )
+        _rx(r"\b(?:do\s+not|don['’]?t|dont|never)\s+"
+            r"(?:retry|re-?run|run\s+(?:it|that|the\s+command)\s+again)\b", re.IGNORECASE).search(value)
+        or _rx(r"\b(?:run|execute|try)\b[^.!?\n]{0,120}\b(?:once|one\s+time)\b", re.IGNORECASE).search(value)
     )
 
 
@@ -576,7 +560,7 @@ def _required_read_summary(block, result, max_items=None):
         # A contract cap bounds the actual answer payload, including overflow.
         summary = summary.split("<!-- ody-more-", 1)[0].rstrip()
         lines = summary.splitlines()
-        rows = [i for i, line in enumerate(lines) if re.match(r"^\s*(?:[-*]|\d+[.)])\s+", line)]
+        rows = [i for i, line in enumerate(lines) if _rx(r"^\s*(?:[-*]|\d+[.)])\s+").match(line)]
         if len(rows) > max_items:
             summary = "\n".join(lines[:rows[max_items]]).rstrip()
     return summary or "Read completed; no content was returned."
@@ -748,7 +732,7 @@ def _redirect_local_html_inspection_call(
     if not isinstance(args, dict):
         return name, arguments
     path = str(args.get("path") or "").strip()
-    if not re.search(r"(?:^/workspace/|^file:/).*\.html?$", path, re.IGNORECASE):
+    if not _rx(r"(?:^/workspace/|^file:/).*\.html?$", re.IGNORECASE).search(path):
         return name, arguments
     url = path if path.lower().startswith("file:") else f"file://{path}"
     return "private_browser", json.dumps(
@@ -875,11 +859,8 @@ def _is_qwen38_tool_router(model: str) -> bool:
 
 def _explicitly_avoids_web_lookup(text: str) -> bool:
     return bool(
-        re.search(
-            r"\b(?:no\s+web|do\s+not\s+search|don'?t\s+search|without\s+looking\s+it\s+up|"
-            r"without\s+searching|answer\s+from\s+memory\s+only|from\s+memory)\b",
-            str(text or "").lower(),
-        )
+        _rx(r"\b(?:no\s+web|do\s+not\s+search|don'?t\s+search|without\s+looking\s+it\s+up|"
+            r"without\s+searching|answer\s+from\s+memory\s+only|from\s+memory)\b").search(str(text or "").lower())
     )
 
 
@@ -889,17 +870,13 @@ def _looks_like_explicit_plan_request(text: str) -> bool:
     # update a task-management plan. In particular, "floor plan" is common in
     # multimodal reconstruction tasks; treating it as plan-only strips the
     # artifact tools that must produce the requested diagram.
-    if re.search(r"\bfloor\s+plan\b", value, re.IGNORECASE):
+    if _rx(r"\bfloor\s+plan\b", re.IGNORECASE).search(value):
         return False
-    return bool(re.search(
-        r"\b(?:make|create|write|draft|build|give(?:\s+me)?|update|revise|edit|"
+    return bool(_rx(r"\b(?:make|create|write|draft|build|give(?:\s+me)?|update|revise|edit|"
         r"change|show|open|use|finish|complete|mark)\b.{0,80}\b(?:plan|checklist|todo\s+list|"
         r"step[-\s]?by[-\s]?step|steps|roadmap)\b|"
         r"\b(?:plan|checklist|todo\s+list|roadmap)\b.{0,80}\b(?:for|to|of|about|"
-        r"next|this|that|it|by)\b",
-        value,
-        re.IGNORECASE,
-    ))
+        r"next|this|that|it|by)\b", re.IGNORECASE).search(value))
 
 
 _BARE_WEB_DOMAIN_RE = (
@@ -917,27 +894,15 @@ def _looks_like_explicit_browser_interaction(text: str) -> bool:
         re.IGNORECASE,
     ):
         return True
-    if re.search(r"\b(?:go\s+to|visit|browse|navigate\s+to)\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:go\s+to|visit|browse|navigate\s+to)\b", re.IGNORECASE).search(value):
         return True
-    if re.search(
-        r"\bopen\b[^?\n.]{0,100}\b(?:web\s+player|web\s+app|website|web\s*site|web\s*page|site|page)\b",
-        value,
-        re.IGNORECASE,
-    ):
+    if _rx(r"\bopen\b[^?\n.]{0,100}\b(?:web\s+player|web\s+app|website|web\s*site|web\s*page|site|page)\b", re.IGNORECASE).search(value):
         return True
-    if re.search(
-        r"\bopen\b[^?\n.]{1,100}\b(?:and|then)\b[^?\n.]{0,80}\b(?:search|find|look\s+for|compare|check)\b",
-        value,
-        re.IGNORECASE,
-    ):
+    if _rx(r"\bopen\b[^?\n.]{1,100}\b(?:and|then)\b[^?\n.]{0,80}\b(?:search|find|look\s+for|compare|check)\b", re.IGNORECASE).search(value):
         return True
     return bool(
-        re.search(
-            r"\b(?:open|click|interact\s+with|fill|submit|screenshot|snapshot|evaluate|find\s+(?:the\s+)?visible\s+text)\b"
-            r"[^?\n.]{0,100}\b(?:url|link|site|website|web\s*page|page|form|button)\b",
-            value,
-            re.IGNORECASE,
-        )
+        _rx(r"\b(?:open|click|interact\s+with|fill|submit|screenshot|snapshot|evaluate|find\s+(?:the\s+)?visible\s+text)\b"
+            r"[^?\n.]{0,100}\b(?:url|link|site|website|web\s*page|page|form|button)\b", re.IGNORECASE).search(value)
     )
 
 
@@ -945,18 +910,14 @@ def _parse_explicit_private_browser_inspection(text: str) -> Optional[tuple[str,
     """Normalize explicit inspection commands without guessing page intent."""
 
     value = str(text or "").strip()
-    if not re.search(r"\bprivate[-_\s]?browser\b", value, re.IGNORECASE):
+    if not _rx(r"\bprivate[-_\s]?browser\b", re.IGNORECASE).search(value):
         return None
 
-    url_match = re.search(r"https?://[^\s<>\"']+", value, re.IGNORECASE)
+    url_match = _rx(r"https?://[^\s<>\"']+", re.IGNORECASE).search(value)
     if (
         url_match
-        and re.search(r"\b(?:open|browse|navigate|visit|go\s+to)\b", value, re.IGNORECASE)
-        and not re.search(
-            r"\b(?:do\s+not|don't|dont)\s+(?:use|call|open)\b[^.!?;\n]{0,80}\bprivate[-_\s]?browser\b",
-            value,
-            re.IGNORECASE,
-        )
+        and _rx(r"\b(?:open|browse|navigate|visit|go\s+to)\b", re.IGNORECASE).search(value)
+        and not _rx(r"\b(?:do\s+not|don't|dont)\s+(?:use|call|open)\b[^.!?;\n]{0,80}\bprivate[-_\s]?browser\b", re.IGNORECASE).search(value)
     ):
         return "private_browser", json.dumps({
             "action": "open",
@@ -966,37 +927,21 @@ def _parse_explicit_private_browser_inspection(text: str) -> Optional[tuple[str,
     # A reviewed unsubscribe handoff contains the exact URL the browser must
     # open. Seed the first browser action deterministically so compact models
     # cannot reinterpret the URL as a web-search or email-API request.
-    if re.search(
-        r"\b(?:unsubscribe|unsubscribes|mailing\s+list)\b",
-        value,
-        re.IGNORECASE,
-    ):
-        if re.search(
-            r"\b(?:do\s+not|don't|dont)\s+(?:use|call|open)\b[^.!?;\n]{0,80}\bprivate[-_\s]?browser\b",
-            value,
-            re.IGNORECASE,
-        ):
+    if _rx(r"\b(?:unsubscribe|unsubscribes|mailing\s+list)\b", re.IGNORECASE).search(value):
+        if _rx(r"\b(?:do\s+not|don't|dont)\s+(?:use|call|open)\b[^.!?;\n]{0,80}\bprivate[-_\s]?browser\b", re.IGNORECASE).search(value):
             return None
-        url_match = re.search(r"https?://[^\s<>\"']+", value, re.IGNORECASE)
+        url_match = _rx(r"https?://[^\s<>\"']+", re.IGNORECASE).search(value)
         if url_match:
             url = url_match.group(0).rstrip(".,;)")
             return "private_browser", json.dumps({"action": "open", "url": url})
 
-    find_match = re.search(
-        r"\bfind\s+(?:the\s+)?visible\s+text\s+(['\"])(?P<text>.+?)\1",
-        value,
-        re.IGNORECASE,
-    )
+    find_match = _rx(r"\bfind\s+(?:the\s+)?visible\s+text\s+(['\"])(?P<text>.+?)\1", re.IGNORECASE).search(value)
     if find_match:
         needle = find_match.group("text").strip()
         if needle:
             return "private_browser", json.dumps({"action": "find", "find": needle})
 
-    evaluate_match = re.search(
-        r"\bevaluate\s+(?P<script>.+?)(?:\s+and\s+(?:report|return|tell)\b|$)",
-        value,
-        re.IGNORECASE,
-    )
+    evaluate_match = _rx(r"\bevaluate\s+(?P<script>.+?)(?:\s+and\s+(?:report|return|tell)\b|$)", re.IGNORECASE).search(value)
     if evaluate_match:
         script = evaluate_match.group("script").strip().rstrip("?.").strip().strip("`'\"")
         if script:
@@ -1009,33 +954,22 @@ def _looks_like_map_browser_request(text: str) -> bool:
     value = str(text or "")
     if not value.strip():
         return False
-    if re.search(
-        r"\b(?:google\s+maps?|apple\s+maps?|openstreetmap|osm|map|maps|"
+    if _rx(r"\b(?:google\s+maps?|apple\s+maps?|openstreetmap|osm|map|maps|"
         r"directions?|route|walk(?:ing)?|drive|transit|nearest|closest|nearby|"
         r"parking|car\s+park|garage|p-?hus|conbini|convenience\s+store|"
-        r"station|address)\b",
-        value,
-        re.IGNORECASE,
-    ) and re.search(
-        r"\b(?:use|open|check|show|find|where|nearest|closest|nearby|from|to|around)\b",
-        value,
-        re.IGNORECASE,
-    ):
+        r"station|address)\b", re.IGNORECASE).search(value) and _rx(r"\b(?:use|open|check|show|find|where|nearest|closest|nearby|from|to|around)\b", re.IGNORECASE).search(value):
         return True
     return False
 
 
 def _looks_like_youtube_tool_turn(text: str) -> bool:
     value = str(text or "").lower()
-    if re.search(
-        r"\b(?:youtube|youtu\.be|yt|video\s+comments?|comments?\s+on\s+(?:the\s+)?video|"
+    if _rx(r"\b(?:youtube|youtu\.be|yt|video\s+comments?|comments?\s+on\s+(?:the\s+)?video|"
         r"transcript\s+(?:of|for)|(?:latest|newest|recent)\s+(?:\d+\s+)?(?:videos?|uploads?)"
-        r")\b",
-        value,
-    ):
+        r")\b").search(value):
         return True
-    official_ends = iter(match.end() for match in re.finditer(r"\bofficial", value))
-    channel_starts = iter(match.start() for match in re.finditer(r"channel\b", value))
+    official_ends = iter(match.end() for match in _rx(r"\bofficial").finditer(value))
+    channel_starts = iter(match.start() for match in _rx(r"channel\b").finditer(value))
     next_official_end = next(official_ends, -1)
     next_channel_start = next(channel_starts, -1)
     leading_space = False
@@ -1074,36 +1008,31 @@ def _qwen38_router_tool_names(query: str) -> Set[str]:
     selected: Set[str] = set()
     explicit_no_lookup = _explicitly_avoids_web_lookup(q)
     calendarish_reminder = (
-        re.search(r"\b(?:remind me|reminder|remind)\b", q)
-        and re.search(r"\b(?:calendar|events?|meeting|appointment|reservation|festival|dinner|lunch)\b", q)
+        _rx(r"\b(?:remind me|reminder|remind)\b").search(q)
+        and _rx(r"\b(?:calendar|events?|meeting|appointment|reservation|festival|dinner|lunch)\b").search(q)
     )
-    calendarish_event = bool(re.search(
-        r"\b(?:calendar|events?|meeting|appointment|appointments?|schedule|reservation|festival|"
-        r"dinner|lunch|pickup|trash)\b",
-        q,
-    ))
+    calendarish_event = bool(_rx(r"\b(?:calendar|events?|meeting|appointment|appointments?|schedule|reservation|festival|"
+        r"dinner|lunch|pickup|trash)\b").search(q))
     if calendarish_reminder:
         selected.add("manage_calendar")
     elif (
         not calendarish_event
-        and re.search(r"\b(?:remind me|reminder|recurring|repeating|every morning|every weekday)\b", q)
+        and _rx(r"\b(?:remind me|reminder|recurring|repeating|every morning|every weekday)\b").search(q)
     ):
         return {"manage_tasks"}
     if (
-        re.search(r"\b(?:delete|remove|cancel|get\s+rid\s+of|move|shift|reschedule|change)\b", q)
-        and re.search(r"\b(?:calendar|events?|meeting|appointment|pickup|reservation|festival)\b", q)
+        _rx(r"\b(?:delete|remove|cancel|get\s+rid\s+of|move|shift|reschedule|change)\b").search(q)
+        and _rx(r"\b(?:calendar|events?|meeting|appointment|pickup|reservation|festival)\b").search(q)
     ):
         selected.add("manage_calendar")
-    if re.search(r"(?:^|\s)(?:/tmp/|/home/|~/|\.{1,2}/)[^\s]+", q):
+    if _rx(r"(?:^|\s)(?:/tmp/|/home/|~/|\.{1,2}/)[^\s]+").search(q):
         selected.update({"read_file", "write_file", "edit_file", "apply_patch", "host_shell"})
     for keywords, tools in _QWEN38_ROUTER_KEYWORD_TOOLS:
         if tools == {"manage_tasks"} and calendarish_event:
             continue
         if calendarish_reminder and tools == {"manage_tasks"}:
             continue
-        if "web_search" in tools and re.search(
-            r"\b(?:prior|past|previous)\s+(?:chat|conversation|session)s?\b", q
-        ) and not re.search(r"\b(?:online|internet|web|latest)\b", q):
+        if "web_search" in tools and _rx(r"\b(?:prior|past|previous)\s+(?:chat|conversation|session)s?\b").search(q) and not _rx(r"\b(?:online|internet|web|latest)\b").search(q):
             # "search prior chats" is history lookup, not a web request.
             continue
         # Keep the small router's candidate set unambiguous for chat history.
@@ -1111,10 +1040,10 @@ def _qwen38_router_tool_names(query: str) -> Set[str]:
         # a prior conversation by content. Exposing both makes the model pick
         # the wrong one surprisingly often.
         if "search_chats" in tools and any(keyword in q for keyword in keywords):
-            if re.search(r"\b(?:list|show|view)\b.{0,30}\b(?:chat\s+)?sessions?\b", q):
+            if _rx(r"\b(?:list|show|view)\b.{0,30}\b(?:chat\s+)?sessions?\b").search(q):
                 selected.add("list_sessions")
                 continue
-            if re.search(r"\b(?:prior|past|previous|search|find)\b.{0,40}\b(?:chat|conversation|session)s?\b", q):
+            if _rx(r"\b(?:prior|past|previous|search|find)\b.{0,40}\b(?:chat|conversation|session)s?\b").search(q):
                 selected.add("search_chats")
                 continue
         if any(keyword in q for keyword in keywords):
@@ -1123,45 +1052,42 @@ def _qwen38_router_tool_names(query: str) -> Set[str]:
     # inbox request. Current/online lookups without a personal-domain noun are
     # unambiguously web requests for the compact router.
     if (
-        re.search(r"\b(?:latest|current|today|online|internet|web)\b", q)
-        and not re.search(
-            r"\b(?:email|mail|inbox|calendar|events?|meeting|appointment|pickup|reservation|"
+        _rx(r"\b(?:latest|current|today|online|internet|web)\b").search(q)
+        and not _rx(r"\b(?:email|mail|inbox|calendar|events?|meeting|appointment|pickup|reservation|"
             r"task|note|memory|saved\s+research|"
-            r"emails|messages|past\s+chat|prior\s+chat|previous\s+conversation)\b",
-            q,
-        )
-        and not re.search(r"\b(?:research|deep\s+dive|investigate)\b", q)
+            r"emails|messages|past\s+chat|prior\s+chat|previous\s+conversation)\b").search(q)
+        and not _rx(r"\b(?:research|deep\s+dive|investigate)\b").search(q)
     ):
         selected = {"web_search"}
     if (
-        re.search(r"\b(?:skill|skills|tdd|procedures?)\b", q)
-        and re.search(r"\b(?:available|list|show|view)\b", q)
+        _rx(r"\b(?:skill|skills|tdd|procedures?)\b").search(q)
+        and _rx(r"\b(?:available|list|show|view)\b").search(q)
     ):
         selected = {"manage_skills"}
-    if re.search(r"\b(?:email|emails|mail|inbox|message|messages|reply|response|respond)\b", q):
-        if re.search(r"\b(?:blocked|blocklist|block\s+list|blocked\s+list)\b", q):
+    if _rx(r"\b(?:email|emails|mail|inbox|message|messages|reply|response|respond)\b").search(q):
+        if _rx(r"\b(?:blocked|blocklist|block\s+list|blocked\s+list)\b").search(q):
             selected.update({"mcp__email__manage_email_state"})
-        if re.search(r"\b(?:latest|newest|recent|most recent|inbox)\b", q):
+        if _rx(r"\b(?:latest|newest|recent|most recent|inbox)\b").search(q):
             selected.add("mcp__email__list_emails")
-        if re.search(r"\b(?:send|email)\b", q) and next(iter_email_addresses(q), None):
+        if _rx(r"\b(?:send|email)\b").search(q) and next(iter_email_addresses(q), None):
             selected.update({"send_email", "resolve_contact"})
-        if re.search(r"\b(?:reply|respond|response)\b", q):
+        if _rx(r"\b(?:reply|respond|response)\b").search(q):
             selected.update({"mcp__email__list_emails", "mcp__email__read_email", "mcp__email__draft_email_reply"})
-        if re.search(r"\b(?:draft|write|compose)\b", q) and re.search(r"\b(?:reply|response)\b", q):
+        if _rx(r"\b(?:draft|write|compose)\b").search(q) and _rx(r"\b(?:reply|response)\b").search(q):
             selected.update({"mcp__email__list_emails", "mcp__email__read_email", "mcp__email__draft_email_reply"})
             selected.discard("reply_to_email")
-        if re.search(r"\barchive\b", q):
+        if _rx(r"\barchive\b").search(q):
             selected.update({"mcp__email__list_emails", "mcp__email__read_email", "archive_email"})
-        if re.search(r"\b(?:delete|trash|remove)\b", q):
+        if _rx(r"\b(?:delete|trash|remove)\b").search(q):
             selected.update({"mcp__email__list_emails", "mcp__email__read_email", "delete_email"})
-        if re.search(r"\bmark\b.{0,30}\b(?:read|unread)\b", q):
+        if _rx(r"\bmark\b.{0,30}\b(?:read|unread)\b").search(q):
             selected.update({"mcp__email__list_emails", "mcp__email__read_email", "mark_email_read"})
-    if re.search(r"\b(?:attachment|attachments|attached|pdf|csv|file|files)\b", q) and re.search(r"\b(?:open|read|show|summari[sz]e|what|find|search|email|mail|message)\b", q):
+    if _rx(r"\b(?:attachment|attachments|attached|pdf|csv|file|files)\b").search(q) and _rx(r"\b(?:open|read|show|summari[sz]e|what|find|search|email|mail|message)\b").search(q):
         selected.update({"mcp__email__list_emails", "mcp__email__read_email", "mcp__email__download_attachment"})
     if (
-        re.search(r"\b(?:search|find)\b.{0,40}\b(?:prior|past|previous)\s+"
-                  r"(?:chat|conversation|session)s?\b", q)
-        and not re.search(r"\b(?:online|internet|web)\b", q)
+        _rx(r"\b(?:search|find)\b.{0,40}\b(?:prior|past|previous)\s+"
+                  r"(?:chat|conversation|session)s?\b").search(q)
+        and not _rx(r"\b(?:online|internet|web)\b").search(q)
     ):
         return {"search_chats"}
     if _looks_like_youtube_tool_turn(q):
@@ -1178,81 +1104,49 @@ def _qwen38_router_tool_names(query: str) -> Set[str]:
 def _parse_explicit_skill_request(text: str) -> Optional[dict[str, Any]]:
     """Parse a narrowly explicit skill-library action for the compact router."""
     value = str(text or "").strip()
-    if not re.search(r"\bskills?\b", value, re.IGNORECASE):
+    if not _rx(r"\bskills?\b", re.IGNORECASE).search(value):
         return None
-    if re.search(
-        r"^\s*(?:please\s+)?(?:"
+    if _rx(r"^\s*(?:please\s+)?(?:"
         r"(?:what(?:'s| is| are)?|show|list|see)\s+(?:me\s+)?(?:my\s+|the\s+|available\s+)?skills?"
         r"|what\s+skills?\s+(?:do\s+i\s+have|are\s+(?:available|there))"
-        r")\??\s*$",
-        value,
-        re.IGNORECASE,
-    ):
+        r")\??\s*$", re.IGNORECASE).search(value):
         return {"action": "list"}
-    if re.search(
-        r"\b(?:most\s+relevant|best|top|first|that|those|previous)\s+skill\b"
-        r"|\bskill\s+from\s+(?:that|the|this)\s+(?:search|result|list)\b",
-        value,
-        re.IGNORECASE,
-    ):
+    if _rx(r"\b(?:most\s+relevant|best|top|first|that|those|previous)\s+skill\b"
+        r"|\bskill\s+from\s+(?:that|the|this)\s+(?:search|result|list)\b", re.IGNORECASE).search(value):
         return None
-    search_match = re.search(
-        r"^\s*(?:please\s+)?(?:search|find)\s+(?:my\s+|the\s+|available\s+)?"
-        r"skills?\s+(?:for|about|matching)\s+(.+?)\??\s*$",
-        value,
-        re.IGNORECASE,
-    )
+    search_match = _rx(r"^\s*(?:please\s+)?(?:search|find)\s+(?:my\s+|the\s+|available\s+)?"
+        r"skills?\s+(?:for|about|matching)\s+(.+?)\??\s*$", re.IGNORECASE).search(value)
     if search_match:
-        query = re.sub(r"\s+", " ", search_match.group(1)).strip(" .\"'`")
+        query = _rx(r"\s+").sub(" ", search_match.group(1)).strip(" .\"'`")
         if query:
             return {"action": "search", "query": query}
-    name_match = re.search(
-        r"\bskill\s+(?:named|called)\s+([A-Za-z0-9][A-Za-z0-9_.-]{2,80})",
-        value,
-        re.IGNORECASE,
-    )
+    name_match = _rx(r"\bskill\s+(?:named|called)\s+([A-Za-z0-9][A-Za-z0-9_.-]{2,80})", re.IGNORECASE).search(value)
     if not name_match:
-        name_match = re.search(
-            r"\b(?:delete|remove|trash|open|view|inspect|read)\s+(?:the\s+)?"
-            r"([a-z0-9][a-z0-9_.-]{2,100})\s+skill\b",
-            value,
-            re.IGNORECASE,
-        )
+        name_match = _rx(r"\b(?:delete|remove|trash|open|view|inspect|read)\s+(?:the\s+)?"
+            r"([a-z0-9][a-z0-9_.-]{2,100})\s+skill\b", re.IGNORECASE).search(value)
     if not name_match:
         # Verification prompts often use natural phrasing such as
         # "verify skill foo is absent". Keep this narrow to a skill-shaped
         # token so ordinary mentions of skills do not become tool calls.
-        name_match = re.search(
-            r"\bskill\s+([a-z0-9][a-z0-9-]{2,80})\b",
-            value,
-            re.IGNORECASE,
-        )
+        name_match = _rx(r"\bskill\s+([a-z0-9][a-z0-9-]{2,80})\b", re.IGNORECASE).search(value)
     if not name_match:
         return None
     parsed_name = name_match.group(1).rstrip(".")
-    parsed_name = re.sub(r"[^a-z0-9]+", "-", parsed_name.lower()).strip("-")[:60]
+    parsed_name = _rx(r"[^a-z0-9]+").sub("-", parsed_name.lower()).strip("-")[:60]
     if parsed_name.lower() in {
         "and", "that", "this", "the", "it", "one", "now", "then", "audit",
         "from", "for", "with", "search", "result", "results", "list",
     }:
         return None
-    if re.search(r"\b(?:delete|remove|trash)\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:delete|remove|trash)\b", re.IGNORECASE).search(value):
         action = "delete"
-    elif re.search(r"\b(?:publish|release)\b", value, re.IGNORECASE):
+    elif _rx(r"\b(?:publish|release)\b", re.IGNORECASE).search(value):
         action = "publish"
-    elif re.search(r"\b(?:view|open|inspect|read)\b", value, re.IGNORECASE):
+    elif _rx(r"\b(?:view|open|inspect|read)\b", re.IGNORECASE).search(value):
         action = "view"
-    elif re.search(
-        r"^\s*(?:please\s+)?(?:add|create|make|write|save)\b",
-        value,
-        re.IGNORECASE,
-    ):
+    elif _rx(r"^\s*(?:please\s+)?(?:add|create|make|write|save)\b", re.IGNORECASE).search(value):
         action = "add"
-    elif re.search(
-        r"\b(?:verify|check|confirm|search|find|list|show)\b|\b(?:exists?|absent|missing)\b",
-        value,
-        re.IGNORECASE,
-    ):
+    elif _rx(r"\b(?:verify|check|confirm|search|find|list|show)\b|\b(?:exists?|absent|missing)\b", re.IGNORECASE).search(value):
         return {"action": "search", "query": parsed_name}
     else:
         return None
@@ -1266,18 +1160,14 @@ def _parse_explicit_skill_request(text: str) -> Optional[dict[str, Any]]:
             re.IGNORECASE,
         )
         if not match and field == "status":
-            match = re.search(r"\bstatus\s+(draft|published)\b", value, re.IGNORECASE)
+            match = _rx(r"\bstatus\s+(draft|published)\b", re.IGNORECASE).search(value)
         if match:
             args[field] = match.group(1).strip()
     if "description" not in args:
-        purpose_match = re.search(
-            r"\bfor\s+(.+?)(?:\.|;|\s+with\s+|\s+and\s+|$)",
-            value,
-            re.IGNORECASE,
-        )
+        purpose_match = _rx(r"\bfor\s+(.+?)(?:\.|;|\s+with\s+|\s+and\s+|$)", re.IGNORECASE).search(value)
         if purpose_match:
             args["description"] = purpose_match.group(1).strip()
-    if "status" not in args and re.search(r"\bdraft\b", value, re.IGNORECASE):
+    if "status" not in args and _rx(r"\bdraft\b", re.IGNORECASE).search(value):
         args["status"] = "draft"
     for field in ("procedure", "verification", "pitfalls"):
         match = re.search(rf"\b{field}\s+(\[[^\]]*\])", value, re.IGNORECASE)
@@ -1318,12 +1208,8 @@ def _parse_qwen_explicit_create_request(text: str) -> Optional[tuple[str, str]]:
     title = r"([A-Za-z0-9][A-Za-z0-9_.-]{2,100})"
     quoted = r"['\"]([^'\"]+)['\"]"
 
-    document_match = re.search(
-        r"^\s*(?:please\s+)?create\s+(?:a\s+)?(?:temporary\s+)?(?:editor\s+)?document\s+"
-        r"titled\s+(.+?)\s+with\s+(?:exactly\s+)?(?:this\s+)?(?:sentence|content)\s*:\s*(.+)\s*$",
-        value,
-        re.IGNORECASE | re.DOTALL,
-    )
+    document_match = _rx(r"^\s*(?:please\s+)?create\s+(?:a\s+)?(?:temporary\s+)?(?:editor\s+)?document\s+"
+        r"titled\s+(.+?)\s+with\s+(?:exactly\s+)?(?:this\s+)?(?:sentence|content)\s*:\s*(.+)\s*$", re.IGNORECASE | re.DOTALL).search(value)
     if document_match:
         doc_title = document_match.group(1).strip(" \t\r\n\"'`.")
         doc_content = document_match.group(2).strip()
@@ -1359,12 +1245,7 @@ def _parse_qwen_explicit_create_request(text: str) -> Optional[tuple[str, str]]:
         re.IGNORECASE,
     )
     if match:
-        from datetime import date, timedelta
-        try:
-            from src.user_time import now_user_local
-            target_date = now_user_local().date() + timedelta(days=1)
-        except Exception:
-            target_date = date.today() + timedelta(days=1)
+        target_date = now_user_local().date() + timedelta(days=1)
         hour = int(match.group(2))
         minute = int(match.group(3) or "0")
         ampm = (match.group(4) or "").lower()
@@ -1379,22 +1260,13 @@ def _parse_qwen_explicit_create_request(text: str) -> Optional[tuple[str, str]]:
             "dtend": f"{target_date.isoformat()}T{(hour + 1) % 24:02d}:{minute:02d}:00",
         })
 
-    match = re.search(
-        r"^\s*(?:please\s+)?(?:add|create|schedule)\s+(?:a\s+)?(?:calendar\s+)?event\s+"
+    match = _rx(r"^\s*(?:please\s+)?(?:add|create|schedule)\s+(?:a\s+)?(?:calendar\s+)?event\s+"
         r"(?:(next\s+week|this\s+week)\s+)?"
         r"(monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow)"
         r"\s*,?\s+(.+?)"
-        r"(?:\s+(?:at|from)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?\s*$",
-        value,
-        re.IGNORECASE,
-    )
+        r"(?:\s+(?:at|from)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?\s*$", re.IGNORECASE).search(value)
     if match:
-        from datetime import date, timedelta
-        try:
-            from src.user_time import now_user_local
-            today = now_user_local().date()
-        except Exception:
-            today = date.today()
+        today = now_user_local().date()
         week_hint = (match.group(1) or "").lower()
         day_name = match.group(2).lower()
         summary = match.group(3).strip().rstrip(".")
@@ -1445,22 +1317,13 @@ def _parse_qwen_explicit_create_request(text: str) -> Optional[tuple[str, str]]:
             args["all_day"] = True
         return "manage_calendar", json.dumps(args)
 
-    recurring_calendar_match = re.search(
-        r"^\s*(?:please\s+)?(?:add|create|schedule)\s+(?:a\s+)?recurring\s+event\s+"
+    recurring_calendar_match = _rx(r"^\s*(?:please\s+)?(?:add|create|schedule)\s+(?:a\s+)?recurring\s+event\s+"
         r"every\s+(.+?)\s+of\s+(?:the\s+)?month\s+"
-        r"(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+(.+?)\s*$",
-        value,
-        re.IGNORECASE,
-    )
+        r"(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+(.+?)\s*$", re.IGNORECASE).search(value)
     if recurring_calendar_match:
         import calendar as _calendar
-        from datetime import date, timedelta
 
-        try:
-            from src.user_time import now_user_local
-            today = now_user_local().date()
-        except Exception:
-            today = date.today()
+        today = now_user_local().date()
 
         ordinal_weekday_text = recurring_calendar_match.group(1)
         hour = int(recurring_calendar_match.group(2))
@@ -1471,9 +1334,9 @@ def _parse_qwen_explicit_create_request(text: str) -> Optional[tuple[str, str]]:
         elif ampm == "am" and hour == 12:
             hour = 0
         summary = recurring_calendar_match.group(5).strip().rstrip(".")
-        summary = re.sub(r"\bremind\s+me\b.*$", "", summary, flags=re.IGNORECASE).strip()
+        summary = _rx(r"\bremind\s+me\b.*$", re.IGNORECASE).sub("", summary).strip()
         reminder_minutes = None
-        reminder_match = re.search(r"\bremind\s+me\s+(\d+)\s*(?:min|mins|minutes?)\s+before\b", value, re.IGNORECASE)
+        reminder_match = _rx(r"\bremind\s+me\s+(\d+)\s*(?:min|mins|minutes?)\s+before\b", re.IGNORECASE).search(value)
         if reminder_match:
             reminder_minutes = int(reminder_match.group(1))
 
@@ -1556,9 +1419,9 @@ def _parse_explicit_open_panel_request(text: str) -> Optional[tuple[str, str]]:
     # Follow-up discourse must not turn a concrete navigation command into a
     # content lookup. Normalize common sequencing language before applying
     # the deliberately strict panel grammar below.
-    value = re.sub(r"^(?:(?:ok(?:ay)?|now|then|also|next)[,;:]?\s+)+", "", value)
-    value = re.sub(r"^go\s+back\s+(?:and\s+)?(?:open|to)\s+", "open ", value)
-    value = re.sub(r"^return\s+to\s+", "open ", value)
+    value = _rx(r"^(?:(?:ok(?:ay)?|now|then|also|next)[,;:]?\s+)+").sub("", value)
+    value = _rx(r"^go\s+back\s+(?:and\s+)?(?:open|to)\s+").sub("open ", value)
+    value = _rx(r"^return\s+to\s+").sub("open ", value)
     trailing_punctuation = len(value)
     while trailing_punctuation and value[trailing_punctuation - 1] in ".!?":
         trailing_punctuation -= 1
@@ -1587,14 +1450,10 @@ def _parse_explicit_open_panel_request(text: str) -> Optional[tuple[str, str]]:
         "november": "11", "nov": "11",
         "december": "12", "dec": "12",
     }
-    match = re.match(
-        r"^(?:please\s+)?(open(?:\s+up)?|show|bring\s+up)\s+(?:me\s+)?(?:my\s+|the\s+)?"
+    match = _rx(r"^(?:please\s+)?(open(?:\s+up)?|show|bring\s+up)\s+(?:me\s+)?(?:my\s+|the\s+)?"
         r"(calendar|schedule|documents?|docs?|library|gallery|images?|emails?|inbox|mail|"
         r"sessions?|chats?|history|notes?|brain|memor(?:y|ies)|skills?|settings|preferences|"
-        r"themes?|appearance|cookbook|models?|serv(?:e|ing))(?:\s+(day|week|month|year|agenda)(?:\s+view)?)?(?:\s+(?:for\s+|to\s+)?(.+?))?\s*$",
-        value,
-        re.IGNORECASE,
-    )
+        r"themes?|appearance|cookbook|models?|serv(?:e|ing))(?:\s+(day|week|month|year|agenda)(?:\s+view)?)?(?:\s+(?:for\s+|to\s+)?(.+?))?\s*$", re.IGNORECASE).match(value)
     if not match:
         return None
     verb = match.group(1).strip().lower()
@@ -1622,22 +1481,18 @@ def _parse_explicit_open_panel_request(text: str) -> Optional[tuple[str, str]]:
         "serving": "cookbook",
     }
     target = aliases.get(panel, panel)
-    if verb == "show" and target in {"documents", "notes", "brain", "skills"} and not re.search(r"\bpanel\b", value):
+    if verb == "show" and target in {"documents", "notes", "brain", "skills"} and not _rx(r"\bpanel\b").search(value):
         return None
     view = (match.group(3) or "").strip()
     target_date = ""
     calendar_target = (match.group(4) or "").strip()
     if target == "calendar" and calendar_target:
-        try:
-            from src.user_time import user_timezone
-            now = datetime.now(user_timezone())
-        except Exception:
-            now = datetime.now()
-        clean_target = re.sub(r"\b(?:view|calendar)\b", " ", calendar_target)
-        clean_target = re.sub(r"\s+", " ", clean_target).strip()
-        if re.match(r"^\d{4}-\d{2}(?:-\d{2})?$", clean_target):
+        now = datetime.now(user_timezone())
+        clean_target = _rx(r"\b(?:view|calendar)\b").sub(" ", calendar_target)
+        clean_target = _rx(r"\s+").sub(" ", clean_target).strip()
+        if _rx(r"^\d{4}-\d{2}(?:-\d{2})?$").match(clean_target):
             target_date = clean_target
-        elif re.match(r"^\d{4}$", clean_target):
+        elif _rx(r"^\d{4}$").match(clean_target):
             target_date = f"{clean_target}-01"
             if not view:
                 view = "year"
@@ -1669,9 +1524,9 @@ def _parse_explicit_open_panel_request(text: str) -> Optional[tuple[str, str]]:
             if month_match:
                 month_name = month_match.group(2)
                 relative_year = 0
-                if re.search(r"\b(?:next|following)\s+year\b", clean_target):
+                if _rx(r"\b(?:next|following)\s+year\b").search(clean_target):
                     relative_year = 1
-                elif re.search(r"\b(?:last|previous)\s+year\b", clean_target):
+                elif _rx(r"\b(?:last|previous)\s+year\b").search(clean_target):
                     relative_year = -1
                 year = int(month_match.group(1) or month_match.group(3) or (now.year + relative_year))
                 target_date = f"{year}-{month_names[month_name]}"
@@ -1683,11 +1538,7 @@ def _parse_explicit_open_panel_request(text: str) -> Optional[tuple[str, str]]:
 def _parse_explicit_theme_change_request(text: str) -> Optional[tuple[str, str]]:
     """Bind explicit preset changes to ``set_theme``, not panel navigation."""
     value = str(text or "").strip().lower()
-    value = re.sub(
-        r"^(?:(?:ok(?:ay)?|now|then|also|hmm|actually|please)[,;:]?\s+)+",
-        "",
-        value,
-    )
+    value = _rx(r"^(?:(?:ok(?:ay)?|now|then|also|hmm|actually|please)[,;:]?\s+)+").sub("", value)
     presets = (
         "dark|light|midnight|paper|cyberpunk|retrowave|forest|ocean|ume|"
         "copper|terminal|organs|lavender|gpt|claude|cute"
@@ -1716,18 +1567,14 @@ def _calendar_open_panel_snapshot_command(result: dict[str, Any]) -> str:
         view = "month"
     target = str(result.get("target_date") or "").strip()
 
-    try:
-        from src.user_time import user_timezone
-        now = datetime.now(user_timezone())
-    except Exception:
-        now = datetime.now()
+    now = datetime.now(user_timezone())
 
     dt = now
     if target:
         try:
-            if re.match(r"^\d{4}-\d{2}$", target):
+            if _rx(r"^\d{4}-\d{2}$").match(target):
                 dt = datetime.fromisoformat(f"{target}-01T00:00:00")
-            elif re.match(r"^\d{4}-\d{2}-\d{2}$", target):
+            elif _rx(r"^\d{4}-\d{2}-\d{2}$").match(target):
                 dt = datetime.fromisoformat(f"{target}T00:00:00")
             else:
                 parsed = datetime.fromisoformat(target.replace("Z", "+00:00"))
@@ -1786,7 +1633,7 @@ def _inherit_calendar_open_range_from_tool_events(
             continue
         start = str(args.get("start") or args.get("start_date") or "").strip()
         end = str(args.get("end") or args.get("end_date") or "").strip()
-        m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", start)
+        m = _rx(r"^(\d{4})-(\d{2})-(\d{2})").match(start)
         if not m:
             continue
         year, month, day = m.groups()
@@ -1809,7 +1656,7 @@ def _inherit_calendar_open_range_from_tool_events(
 
 def _fabricated_calendar_event_anchor_without_tool(text: str, relevant_tools: Any) -> bool:
     """Detect model-invented calendar links before accepting a no-tool turn."""
-    if not re.search(r"#event-[0-9a-fA-F-]{8,64}\b", str(text or "")):
+    if not _rx(r"#event-[0-9a-fA-F-]{8,64}\b").search(str(text or "")):
         return False
     try:
         tools = set(relevant_tools or set())
@@ -1820,7 +1667,7 @@ def _fabricated_calendar_event_anchor_without_tool(text: str, relevant_tools: An
 
 def _calendar_anchor_was_already_persisted(text: str, history_session: Any) -> bool:
     """Allow a no-tool answer to cite an event returned in recent history."""
-    anchors = set(re.findall(r"#event-([0-9a-fA-F-]{8,64})\b", str(text or "")))
+    anchors = set(_rx(r"#event-([0-9a-fA-F-]{8,64})\b").findall(str(text or "")))
     if not anchors:
         return False
     history = getattr(history_session, "history", None) or getattr(history_session, "_history", None) or []
@@ -1830,7 +1677,7 @@ def _calendar_anchor_was_already_persisted(text: str, history_session: Any) -> b
         if role != "assistant":
             continue
         content = row.get("content", "") if isinstance(row, dict) else getattr(row, "content", "")
-        known.update(re.findall(r"#event-([0-9a-fA-F-]{8,64})\b", str(content or "")))
+        known.update(_rx(r"#event-([0-9a-fA-F-]{8,64})\b").findall(str(content or "")))
     return anchors <= known
 
 
@@ -1838,11 +1685,11 @@ def _calendar_expected_mutation_actions(user_text: str) -> set[str]:
     value = str(user_text or "").strip().lower()
     if not value:
         return set()
-    if re.search(r"\b(?:add|create|schedule|book|set\s+up)\b", value):
+    if _rx(r"\b(?:add|create|schedule|book|set\s+up)\b").search(value):
         return {"create", "create_event", "add", "add_event"}
-    if re.search(r"\b(?:move|shift|reschedule|change|update|rename|tag|retag|edit)\b", value):
+    if _rx(r"\b(?:move|shift|reschedule|change|update|rename|tag|retag|edit)\b").search(value):
         return {"update", "update_event", "move", "reschedule", "edit_event"}
-    if re.search(r"\b(?:delete|cancel|remove|clear)\b", value):
+    if _rx(r"\b(?:delete|cancel|remove|clear)\b").search(value):
         return {"delete", "delete_event", "remove", "remove_event", "cancel"}
     return set()
 
@@ -1863,38 +1710,8 @@ def _has_successful_calendar_action_evidence(
         if not tool_result_is_successful(event):
             continue
         command = str(event.get("command") or "").strip()
-        action = ""
-        try:
-            parsed = json.loads(command)
-            if isinstance(parsed, dict):
-                action = str(parsed.get("action") or "").strip().lower()
-        except Exception:
-            action = command.splitlines()[0].strip().lower() if command else ""
+        action = _tool_block_action(command)
         if action in expected:
-            return True
-    return False
-
-
-def _has_calendar_mutation_then_verification(
-    tool_events: list[dict[str, Any]],
-    expected_actions: set[str],
-) -> bool:
-    """True after a requested calendar mutation and a later successful readback."""
-    expected = {str(action or "").strip().lower() for action in expected_actions if action}
-    mutation_seen = False
-    for event in tool_events or []:
-        if not isinstance(event, dict) or _resolved_tool_event_name(event) != "manage_calendar":
-            continue
-        if not tool_result_is_successful(event):
-            continue
-        try:
-            payload = json.loads(str(event.get("command") or "{}"))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            payload = {}
-        action = str(payload.get("action") or "").strip().lower() if isinstance(payload, dict) else ""
-        if action in expected:
-            mutation_seen = True
-        elif mutation_seen and action in {"list", "list_events", "lis_events"}:
             return True
     return False
 
@@ -1918,44 +1735,33 @@ def _state_manager_expected_action(
     # verbs inside "do not ..." clauses turn a read-only request into an app
     # state mutation (for example, a report about scheduled-task health that
     # also says "do not create anything").
-    positive_value = re.sub(
-        r"\b(?:do\s+not|don't|without|never)\b[^.!?;\n]*(?:[.!?;\n]|$)",
-        " ",
-        value,
-        flags=re.IGNORECASE,
-    )
+    positive_value = _rx(r"\b(?:do\s+not|don't|without|never)\b[^.!?;\n]*(?:[.!?;\n]|$)", re.IGNORECASE).sub(" ", value)
     try:
         tools = set(relevant_tools or set())
     except TypeError:
         tools = set()
 
     def _actions(candidate: str = positive_value) -> set[str]:
-        if re.search(r"\b(?:add|create|save|remember|schedule|set\s+up)\b", candidate):
+        if _rx(r"\b(?:add|create|save|remember|schedule|set\s+up)\b").search(candidate):
             return {"add", "create", "save"}
-        if re.search(r"\b(?:edit|update|change|rename|modify|pause|resume|enable|disable)\b", candidate):
+        if _rx(r"\b(?:edit|update|change|rename|modify|pause|resume|enable|disable)\b").search(candidate):
             return {"edit", "update", "change", "rename", "modify", "pause", "resume", "enable", "disable"}
-        if re.search(r"\b(?:delete|remove|clear|trash|cancel)\b", candidate):
+        if _rx(r"\b(?:delete|remove|clear|trash|cancel)\b").search(candidate):
             return {"delete", "remove", "clear", "trash", "cancel"}
-        if re.search(
-            r"\b(?:list|show|view|open|find|search)\b|(?<!-)\bread\b(?!-)",
-            candidate,
-        ):
+        if _rx(r"\b(?:list|show|view|open|find|search)\b|(?<!-)\bread\b(?!-)").search(candidate):
             return {"list", "show", "view", "open", "find", "search", "read"}
         return set()
 
     actions = _actions()
     if not actions:
         return "", set()
-    if "manage_memory" in tools and re.search(r"\b(?:memory|memories|remember)\b", positive_value):
+    if "manage_memory" in tools and _rx(r"\b(?:memory|memories|remember)\b").search(positive_value):
         return "manage_memory", actions
     if "manage_tasks" in tools:
-        _task_noun = re.compile(
-            r"\b(?:tasks?|reminders?|scheduled\s+tasks?)\b",
-            re.IGNORECASE,
-        )
+        _task_noun = _rx(r"\b(?:tasks?|reminders?|scheduled\s+tasks?)\b", re.IGNORECASE)
         _task_clauses = " ".join(
             clause
-            for clause in re.split(r"[.!?;\n]+", positive_value)
+            for clause in _rx(r"[.!?;\n]+").split(positive_value)
             if _task_noun.search(clause)
         )
         _task_actions = _actions(_task_clauses)
@@ -1963,27 +1769,21 @@ def _state_manager_expected_action(
             return "manage_tasks", _task_actions
         _short_contextual_mutation = bool(
             len(positive_value) <= 200
-            and re.search(
-                r"\b(?:pause|resume|enable|disable|delete|remove|edit|update|change)\b",
-                positive_value,
-            )
-            and not re.search(
-                r"\b(?:email|mail|message|inbox|calendar|event|meeting|appointment|"
-                r"note|memory|skill|document|doc|report|review)\b",
-                positive_value,
-            )
+            and _rx(r"\b(?:pause|resume|enable|disable|delete|remove|edit|update|change)\b").search(positive_value)
+            and not _rx(r"\b(?:email|mail|message|inbox|calendar|event|meeting|appointment|"
+                r"note|memory|skill|document|doc|report|review)\b").search(positive_value)
         )
         if _short_contextual_mutation:
             return "manage_tasks", actions
-    if "manage_skills" in tools and re.search(r"\b(?:skills?|procedures?)\b", positive_value):
+    if "manage_skills" in tools and _rx(r"\b(?:skills?|procedures?)\b").search(positive_value):
         return "manage_skills", actions
-    if "manage_documents" in tools and re.search(r"\b(?:documents?|docs?)\b", positive_value):
+    if "manage_documents" in tools and _rx(r"\b(?:documents?|docs?)\b").search(positive_value):
         if actions & {"add", "create", "save"}:
             return "", set()
         return "manage_documents", actions
-    if "manage_research" in tools and re.search(r"\b(?:research|reports?)\b", positive_value):
+    if "manage_research" in tools and _rx(r"\b(?:research|reports?)\b").search(positive_value):
         return "manage_research", actions
-    if "ui_control" in tools and re.search(r"\b(?:open|show|switch)\b.{0,30}\b(?:panel|settings|theme|calendar|notes?|tasks?|skills?|cookbook|email|inbox|memories)\b", positive_value):
+    if "ui_control" in tools and _rx(r"\b(?:open|show|switch)\b.{0,30}\b(?:panel|settings|theme|calendar|notes?|tasks?|skills?|cookbook|email|inbox|memories)\b").search(positive_value):
         return "ui_control", actions
     return "", set()
 
@@ -2006,13 +1806,7 @@ def _has_successful_state_manager_evidence(
         if not expected:
             return True
         command = str(event.get("command") or "").strip()
-        action = ""
-        try:
-            parsed = json.loads(command)
-            if isinstance(parsed, dict):
-                action = str(parsed.get("action") or "").strip().lower()
-        except Exception:
-            action = command.splitlines()[0].strip().lower() if command else ""
+        action = _tool_block_action(command)
         if not action:
             return True
         aliases = {
@@ -2032,6 +1826,17 @@ def _has_successful_state_manager_evidence(
         if action in expected or aliases.get(action, set()) & expected:
             return True
     return False
+
+
+def _json_object(raw: Any) -> dict:
+    """Parse tool-call or event JSON; anything but an object yields {}."""
+    if isinstance(raw, dict):
+        return raw
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _tool_block_action(content: str) -> str:
@@ -2088,37 +1893,25 @@ def _calendar_lookup_requires_fresh_tool(
     value = str(user_text or "").strip().lower()
     if not value:
         return False
-    if re.search(
-        r"\b(?:add|create|schedule|book|move|shift|reschedule|change|update|"
-        r"delete|cancel|remove|clear|rename|mark|tag|retag)\b",
-        value,
-    ):
+    if _rx(r"\b(?:add|create|schedule|book|move|shift|reschedule|change|update|"
+        r"delete|cancel|remove|clear|rename|mark|tag|retag)\b").search(value):
         return False
-    calendar_noun = re.search(
-        r"\b(?:calendar|events?|meetings?|appointments?|schedule|reminders?)\b",
-        value,
-    )
-    lookup_verb = re.search(
-        r"\b(?:what|when|which|show|list|check|find|see|any|anything|do\s+i\s+have)\b",
-        value,
-    )
+    calendar_noun = _rx(r"\b(?:calendar|events?|meetings?|appointments?|schedule|reminders?)\b").search(value)
+    lookup_verb = _rx(r"\b(?:what|when|which|show|list|check|find|see|any|anything|do\s+i\s+have)\b").search(value)
     if calendar_noun and lookup_verb:
         return True
     refs = _recent_odysseus_anchor_refs(messages or [], history_session)
     if (
         refs.get("event_uid")
         and lookup_verb
-        and re.search(r"\b(?:it|this|that|entry|item|prep|block)\b", value)
+        and _rx(r"\b(?:it|this|that|entry|item|prep|block)\b").search(value)
     ):
         return True
     return bool(
-        re.search(r"\b(?:do\s+i\s+have|am\s+i|any|anything)\b", value)
-        and re.search(
-            r"\b(?:free|busy|available|booked|today|tomorrow|tonight|"
+        _rx(r"\b(?:do\s+i\s+have|am\s+i|any|anything)\b").search(value)
+        and _rx(r"\b(?:free|busy|available|booked|today|tomorrow|tonight|"
             r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
-            r"morning|afternoon|evening|night|next\s+week|this\s+week)\b",
-            value,
-        )
+            r"morning|afternoon|evening|night|next\s+week|this\s+week)\b").search(value)
     )
 
 
@@ -2151,25 +1944,20 @@ def _looks_like_agent_reasoning_preamble(text: str) -> bool:
     # e.g. a full comparison followed by "Now let me verify nothing started."
     # That whole round is progress text; retaining it duplicates the answer
     # once the tool-result round supplies the actual verification.
-    trailing_segment = re.split(r"(?:\n+|[.!?]\s+)", lowered)[-1]
-    if re.match(
-        r"(?:but\s+)?(?:now\s+)?"
+    trailing_segment = _rx(r"(?:\n+|[.!?]\s+)").split(lowered)[-1]
+    if _rx(r"(?:but\s+)?(?:now\s+)?"
         r"(?:let me|i(?:'ll| will)(?:\s+need\s+to)?|i\s+can(?:\s+now)?|i(?:'m| am)\s+(?:preparing|planning)\s+to)\s+"
         r"(?:(?:carefully|methodically|systematically|closely|further)\s+){0,2}"
         r"(?:continue|continuing|analy[sz]e|scan|check|verify|inspect|confirm|look up|fetch|open|list|search|refine|request|review|track|read|watch|(?:re-?)?examine|provide|give|state|report|answer|respond|summarize|conclude)\b"
-        r"[^.!?]*+[.!?]?\s*$",
-        trailing_segment,
-    ):
+        r"[^.!?]*+[.!?]?\s*$").match(trailing_segment):
         return True
     # A process heading followed only by partial observation bullets is still
     # analysis, not a delivered answer. Keep this bounded to inspection verbs
     # so completed answer headings such as "Let me summarize:" remain valid.
-    process_heading_re = re.compile(
-        r"\s*(?:now\s+)?(?:let me|i(?:'ll| will))\s+"
+    process_heading_re = _rx(r"\s*(?:now\s+)?(?:let me|i(?:'ll| will))\s+"
         r"(?:carefully\s+|methodically\s+|systematically\s+){0,2}"
         r"(?:track|trace|inspect|review|analy[sz]e|examine|check)\b[^\n]{0,140}:\s*\n"
-        r"(?:\s*[-*]\s+[^\n]{1,240}\n?){1,8}\s*$"
-    )
+        r"(?:\s*[-*]\s+[^\n]{1,240}\n?){1,8}\s*$")
     if any(marker in lowered for marker in ("let me", "i'll", "i will")):
         line_start = 0
         while line_start <= len(lowered):
@@ -2180,33 +1968,25 @@ def _looks_like_agent_reasoning_preamble(text: str) -> bool:
                 break
             line_start = newline + 1
     first_line = lowered.splitlines()[0].strip()
-    if re.search(
-        r"\b(?:i need to|i should|let me|i'll(?:\s+need\s+to)?|i(?:'m| am)\s+(?:preparing|planning)\s+to)\s+"
+    if _rx(r"\b(?:i need to|i should|let me|i'll(?:\s+need\s+to)?|i(?:'m| am)\s+(?:preparing|planning)\s+to)\s+"
         r"(?:(?:carefully|methodically|systematically|closely|further)\s+){0,2}"
         r"(?:analy[sz]e|scan|check|list|search|refine|request|review|track|open|create|update|delete|use|call|pull up|"
-        r"read|watch|inspect|(?:re-?)?examine)\b",
-        first_line,
-    ):
+        r"read|watch|inspect|(?:re-?)?examine)\b").search(first_line):
         return True
     # A completed tool round can begin with an observation but end with the
     # model's private response plan.  That whole fragment is internal process,
     # not a user-facing answer (for example: "The calendar query returned no
     # events. I should answer directly.").
-    if re.search(
-        r"(?:^|[.!?]\s+)(?:now\s+)?i\s+should\s+"
+    if _rx(r"(?:^|[.!?]\s+)(?:now\s+)?i\s+should\s+"
         r"(?:answer|respond|report|tell|summarize|state|present|explain|relay)\b"
-        r"[^.!?\n]{0,160}[.!?]?\s*$",
-        lowered,
-    ):
+        r"[^.!?\n]{0,160}[.!?]?\s*$").search(lowered):
         return True
-    chinese_body = re.compile(
-        r"(?:我需要|需要先|让我|先|接下来(?:我)?(?:会|要)?).{0,12}"
-        r"(?:查看|检查|读取|分析|继续|使用|调用)"
-    )
+    chinese_body = _rx(r"(?:我需要|需要先|让我|先|接下来(?:我)?(?:会|要)?).{0,12}"
+        r"(?:查看|检查|读取|分析|继续|使用|调用)")
     if chinese_body.match(value):
         return True
     pos = 0
-    boundary_pattern = re.compile(r"[。！？\n]")
+    boundary_pattern = _rx(r"[。！？\n]")
     while boundary := boundary_pattern.search(value, pos):
         candidate = boundary.end()
         while candidate < len(value) and value[candidate].isspace():
@@ -2236,13 +2016,10 @@ def _strip_trailing_answer_promise(text: str) -> str:
     value = str(text or "").strip()
     if not value:
         return value
-    match = re.fullmatch(
-        r"(?is)(?P<answer>.+?[.!?])\s+"
+    match = _rx(r"(?is)(?P<answer>.+?[.!?])\s+"
         r"(?:(?:now\s+)?i|we)\s+should\s+(?:now\s+)?"
         r"(?:report|tell|answer|respond|summarize|state|present|explain|relay)\b"
-        r"[^.!?\n]{0,160}[.!?]?",
-        value,
-    )
+        r"[^.!?\n]{0,160}[.!?]?").fullmatch(value)
     if not match:
         return value
     answer = match.group("answer").strip()
@@ -2252,34 +2029,18 @@ def _strip_trailing_answer_promise(text: str) -> str:
 def _parse_qwen_explicit_recurring_task_request(text: str) -> Optional[tuple[str, str]]:
     """Build a manage_tasks create call for clear recurring/scheduled requests."""
     value = str(text or "").strip()
-    if not re.search(
-        r"\b(?:recurring|repeating|every\s+(?:morning|weekday|day|evening|week|monday)|daily|weekly|scheduled task|schedule a repeating|set up a daily)\b",
-        value,
-        re.IGNORECASE,
-    ):
+    if not _rx(r"\b(?:recurring|repeating|every\s+(?:morning|weekday|day|evening|week|monday)|daily|weekly|scheduled task|schedule a repeating|set up a daily)\b", re.IGNORECASE).search(value):
         return None
-    if not re.search(r"\b(?:remind|reminder|task|schedule|set up|create|add)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:remind|reminder|task|schedule|set up|create|add)\b", re.IGNORECASE).search(value):
         return None
 
-    title_match = re.search(
-        r"\b(?:named|name|titled|title|called|call)\s+(?:it\s+)?(?:as\s+)?['\"]?([A-Za-z0-9][A-Za-z0-9_.-]{2,100})",
-        value,
-        re.IGNORECASE,
-    )
+    title_match = _rx(r"\b(?:named|name|titled|title|called|call)\s+(?:it\s+)?(?:as\s+)?['\"]?([A-Za-z0-9][A-Za-z0-9_.-]{2,100})", re.IGNORECASE).search(value)
     if not title_match:
-        title_match = re.search(
-            r"\b(?:task|reminder)\s+named\s+['\"]?([A-Za-z0-9][A-Za-z0-9_.-]{2,100})",
-            value,
-            re.IGNORECASE,
-        )
+        title_match = _rx(r"\b(?:task|reminder)\s+named\s+['\"]?([A-Za-z0-9][A-Za-z0-9_.-]{2,100})", re.IGNORECASE).search(value)
     if not title_match:
         return None
 
-    time_match = re.search(
-        r"\b(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b",
-        value,
-        re.IGNORECASE,
-    )
+    time_match = _rx(r"\b(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", re.IGNORECASE).search(value)
     hour = 9
     minute = 0
     if time_match:
@@ -2292,20 +2053,16 @@ def _parse_qwen_explicit_recurring_task_request(text: str) -> Optional[tuple[str
             hour = 0
 
     schedule = "daily"
-    if re.search(r"\bweekday\b", value, re.IGNORECASE):
+    if _rx(r"\bweekday\b", re.IGNORECASE).search(value):
         schedule = "weekday"
-    elif re.search(r"\bweekly|every\s+week|every\s+monday\b", value, re.IGNORECASE):
+    elif _rx(r"\bweekly|every\s+week|every\s+monday\b", re.IGNORECASE).search(value):
         schedule = "weekly"
 
     prompt = value
-    prompt_match = re.search(
-        r"\b(?:remind me to|tells? me to|to)\s+(.+?)(?:[;,]\s*(?:name|title|call)\b|\.?\s*$)",
-        value,
-        re.IGNORECASE,
-    )
+    prompt_match = _rx(r"\b(?:remind me to|tells? me to|to)\s+(.+?)(?:[;,]\s*(?:name|title|call)\b|\.?\s*$)", re.IGNORECASE).search(value)
     if prompt_match:
         prompt = prompt_match.group(1).strip()
-    prompt = re.sub(r"\b(?:name|title|call)\s+(?:it\s+)?(?:as\s+)?['\"]?[A-Za-z0-9][A-Za-z0-9_.-]{2,100}.*$", "", prompt, flags=re.IGNORECASE).strip(" .;,")
+    prompt = _rx(r"\b(?:name|title|call)\s+(?:it\s+)?(?:as\s+)?['\"]?[A-Za-z0-9][A-Za-z0-9_.-]{2,100}.*$", re.IGNORECASE).sub("", prompt).strip(" .;,")
     if not prompt:
         prompt = value
 
@@ -2336,14 +2093,10 @@ def _parse_explicit_task_state_request(text: str) -> Optional[ToolBlock]:
     if not value:
         return None
 
-    if re.search(
-        r"^\s*(?:please\s+)?(?:"
+    if _rx(r"^\s*(?:please\s+)?(?:"
         r"(?:what(?:'s| is| are)?|show|list|view|check)\s+(?:me\s+)?(?:my\s+|the\s+|all\s+|scheduled\s+)?tasks?"
         r"|what\s+tasks?\s+(?:do\s+i\s+have|are\s+on\s+my\s+list)"
-        r")\??\s*$",
-        value,
-        re.IGNORECASE,
-    ):
+        r")\??\s*$", re.IGNORECASE).search(value):
         return ToolBlock("manage_tasks", json.dumps({"action": "list"}))
 
     def _hhmm(match: re.Match) -> str:
@@ -2356,13 +2109,9 @@ def _parse_explicit_task_state_request(text: str) -> Optional[ToolBlock]:
             hour = 0
         return f"{hour:02d}:{minute:02d}"
 
-    update = re.search(
-        r"^\s*(?:change|update|edit|set)\s+(?:the\s+)?(?:scheduled\s+)?(?:task\s+)?"
+    update = _rx(r"^\s*(?:change|update|edit|set)\s+(?:the\s+)?(?:scheduled\s+)?(?:task\s+)?"
         r"(?P<name>.+?)\s+(?:to\s+)?(?:run|runs|running)?\s*(?:at|for|to)\s+"
-        r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>am|pm)?(?:\s+instead)?\.?\s*$",
-        value,
-        re.IGNORECASE,
-    )
+        r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>am|pm)?(?:\s+instead)?\.?\s*$", re.IGNORECASE).search(value)
     if update:
         name = update.group("name").strip(" .\"'`")
         if name:
@@ -2372,12 +2121,8 @@ def _parse_explicit_task_state_request(text: str) -> Optional[ToolBlock]:
                 "scheduled_time": _hhmm(update),
             }))
 
-    simple = re.search(
-        r"^\s*(?P<action>pause|resume|delete|remove)\s+(?:the\s+)?(?:scheduled\s+)?(?:task\s+)?"
-        r"(?P<name>.+?)\.?\s*$",
-        value,
-        re.IGNORECASE,
-    )
+    simple = _rx(r"^\s*(?P<action>pause|resume|delete|remove)\s+(?:the\s+)?(?:scheduled\s+)?(?:task\s+)?"
+        r"(?P<name>.+?)\.?\s*$", re.IGNORECASE).search(value)
     if simple:
         action = simple.group("action").lower()
         if action == "remove":
@@ -2400,25 +2145,21 @@ def _parse_explicit_memory_state_request(
     """Normalize exact memory follow-up mutations to the referenced memory id."""
 
     value = str(text or "").strip()
-    if not value or not re.search(r"\bmemor(?:y|ies)\b", value, re.IGNORECASE):
+    if not value or not _rx(r"\bmemor(?:y|ies)\b", re.IGNORECASE).search(value):
         return None
     refs = _recent_odysseus_anchor_refs(messages, history_session)
     memory_id = str(refs.get("memory_id") or "").strip()
     if not memory_id:
         return None
-    if re.search(r"\b(?:update|edit|change)\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:update|edit|change)\b", re.IGNORECASE).search(value):
         new_text = _extract_followup_content_update(value)
         if not new_text:
-            match = re.search(
-                r"\bso\s+(?:it|that\s+memory)\s+says\s+(.+?)(?:\.?\s*$)",
-                value,
-                re.IGNORECASE | re.DOTALL,
-            )
+            match = _rx(r"\bso\s+(?:it|that\s+memory)\s+says\s+(.+?)(?:\.?\s*$)", re.IGNORECASE | re.DOTALL).search(value)
             if match:
-                new_text = re.sub(r"\s+", " ", match.group(1)).strip(" .")
+                new_text = _rx(r"\s+").sub(" ", match.group(1)).strip(" .")
         if new_text:
             return ToolBlock("manage_memory", "\n".join(["edit", memory_id, new_text]))
-    if re.search(r"\b(?:delete|remove|forget)\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:delete|remove|forget)\b", re.IGNORECASE).search(value):
         return ToolBlock("manage_memory", "\n".join(["delete", memory_id]))
     return None
 
@@ -2429,34 +2170,30 @@ def _parse_explicit_memory_lookup_request(text: str) -> Optional[ToolBlock]:
     value = str(text or "").strip()
     if _is_personal_tool_definition_turn(value):
         return None
-    asks_what_is_remembered = bool(re.search(
-        r"\bwhat\s+(?:do|can)\s+you\s+remember(?:\s+about\s+me)?\b",
-        value,
-        re.IGNORECASE,
-    ))
+    asks_what_is_remembered = bool(_rx(r"\bwhat\s+(?:do|can)\s+you\s+remember(?:\s+about\s+me)?\b", re.IGNORECASE).search(value))
     if not value or not (
-        re.search(r"\bmemor(?:y|ies)\b", value, re.IGNORECASE)
+        _rx(r"\bmemor(?:y|ies)\b", re.IGNORECASE).search(value)
         or asks_what_is_remembered
     ):
         return None
     lowered = value.lower()
     if asks_what_is_remembered:
         return ToolBlock("manage_memory", "list")
-    if re.search(r"\b(?:list|show|view|open|what(?:'s|\s+is)?|latest|recent|saved)\b", lowered):
-        if not re.search(r"\b(?:find|search|containing|about|marker|timezone|local-date|preference)\b", lowered):
+    if _rx(r"\b(?:list|show|view|open|what(?:'s|\s+is)?|latest|recent|saved)\b").search(lowered):
+        if not _rx(r"\b(?:find|search|containing|about|marker|timezone|local-date|preference)\b").search(lowered):
             return ToolBlock("manage_memory", "list")
-    if re.search(r"\b(?:find|search|containing|about|marker|timezone|local-date|preference|saved about)\b", lowered):
+    if _rx(r"\b(?:find|search|containing|about|marker|timezone|local-date|preference|saved about)\b").search(lowered):
         query = value
-        marker = re.search(r"\bmarker\s+([A-Za-z0-9_.:-]+)", value, re.IGNORECASE)
+        marker = _rx(r"\bmarker\s+([A-Za-z0-9_.:-]+)", re.IGNORECASE).search(value)
         if marker:
             query = marker.group(1).strip(" .\"'`")
         else:
-            about = re.search(r"\b(?:about|containing|for)\s+(.+?)(?:\.?\s*$)", value, re.IGNORECASE | re.DOTALL)
+            about = _rx(r"\b(?:about|containing|for)\s+(.+?)(?:\.?\s*$)", re.IGNORECASE | re.DOTALL).search(value)
             if about:
                 query = about.group(1).strip()
-            query = re.sub(r"^\s*(?:find|search|show|open|read|list)\b(?:\s+the)?\s*", "", query, flags=re.IGNORECASE)
-            query = re.sub(r"\b(?:memory|memories|you\s+just\s+saved|saved)\b", " ", query, flags=re.IGNORECASE)
-            query = re.sub(r"\s+", " ", query).strip(" .\"'`")
+            query = _rx(r"^\s*(?:find|search|show|open|read|list)\b(?:\s+the)?\s*", re.IGNORECASE).sub("", query)
+            query = _rx(r"\b(?:memory|memories|you\s+just\s+saved|saved)\b", re.IGNORECASE).sub(" ", query)
+            query = _rx(r"\s+").sub(" ", query).strip(" .\"'`")
         if query:
             return ToolBlock("manage_memory", "search\n" + query)
     return None
@@ -2465,15 +2202,9 @@ def _parse_explicit_memory_lookup_request(text: str) -> Optional[ToolBlock]:
 def _parse_qwen_explicit_note_delete(text: str) -> Optional[str]:
     """Extract an exact note title from a clear delete request."""
     value = str(text or "").strip()
-    if not re.search(r"\bdelete\b", value, re.IGNORECASE) or not re.search(
-        r"\bnote\b", value, re.IGNORECASE
-    ):
+    if not _rx(r"\bdelete\b", re.IGNORECASE).search(value) or not _rx(r"\bnote\b", re.IGNORECASE).search(value):
         return None
-    match = re.search(
-        r"\bnote\s+titled\s+(.+?)(?:\.|;|\s+use\b|\s+in\s+one\s+tool\s+call\b|$)",
-        value,
-        re.IGNORECASE,
-    )
+    match = _rx(r"\bnote\s+titled\s+(.+?)(?:\.|;|\s+use\b|\s+in\s+one\s+tool\s+call\b|$)", re.IGNORECASE).search(value)
     return match.group(1).strip().strip("\"'`").rstrip(".") if match else None
 
 
@@ -2488,7 +2219,7 @@ def _payload_fields(value, grammar, flags=re.IGNORECASE):
     if grammar == "note_update":
         leaders = simple
         separator = r"(?<!\s)(\s++)so\s++its\s++content\s++is(?=\s)"
-        quoted = re.compile(r"\s++['\"]([^'\"]+)['\"]", flags)
+        quoted = _rx(r"\s++['\"]([^'\"]+)['\"]", flags)
         def tail(match):
             result = quoted.match(value, match.end())
             return result.groups() if result else None
@@ -2508,7 +2239,7 @@ def _payload_fields(value, grammar, flags=re.IGNORECASE):
             last_newline = value.rfind("\n", 0, len(value) - int(value.endswith("\n")))
             tail = lambda match: terminal_dot_field(value, match.end(), last_newline=last_newline)
         else:
-            markers = list(re.finditer(r"(?<!\s)(\s++)(?:in|and|then|before)\b|[.;]|$", value, flags))
+            markers = list(_rx(r"(?<!\s)(\s++)(?:in|and|then|before)\b|[.;]|$", flags).finditer(value))
             marker_index = 0
             previous_start = -1
             newline = value.find("\n")
@@ -2549,7 +2280,7 @@ def _payload_fields(value, grammar, flags=re.IGNORECASE):
     elif grammar == "tag":
         leaders = the
         separator = r"(?<!\s)(\s++)tag\s++to(?=\s)"
-        tag = re.compile(r"\s++#?([a-z][a-z0-9_-]{1,30})\b", flags)
+        tag = _rx(r"\s++#?([a-z][a-z0-9_-]{1,30})\b", flags)
         def tail(match):
             result = tag.match(value, match.end())
             return result.groups() if result else None
@@ -2588,9 +2319,7 @@ def _captures_after_first_prefix(
 def _parse_qwen_explicit_note_update(text: str) -> Optional[tuple[str, str]]:
     """Extract an exact note title and replacement content from a clear update."""
     value = str(text or "").strip()
-    if not re.search(r"\bupdate\b", value, re.IGNORECASE) or not re.search(
-        r"\bnote\b", value, re.IGNORECASE
-    ):
+    if not _rx(r"\bupdate\b", re.IGNORECASE).search(value) or not _rx(r"\bnote\b", re.IGNORECASE).search(value):
         return None
     captures = _captures_after_first_prefix(
         value,
@@ -2605,32 +2334,24 @@ def _parse_qwen_explicit_note_update(text: str) -> Optional[tuple[str, str]]:
 def _parse_qwen_explicit_note_search(text: str) -> Optional[str]:
     """Extract an exact note title from a clear read-only note lookup."""
     value = str(text or "").strip()
-    if re.search(r"\b(?:delete|remove|update|change|replace)\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:delete|remove|update|change|replace)\b", re.IGNORECASE).search(value):
         return None
-    if not re.search(r"\b(?:verify|check|confirm|search|find)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:verify|check|confirm|search|find)\b", re.IGNORECASE).search(value):
         return None
-    if not re.search(r"\bnote\b", value, re.IGNORECASE):
+    if not _rx(r"\bnote\b", re.IGNORECASE).search(value):
         return None
-    match = re.search(
-        r"\bnote\s+titled\s+(.+?)(?:\s+no\s+longer\b|\.|;|\s+and\b|$)",
-        value,
-        re.IGNORECASE,
-    )
+    match = _rx(r"\bnote\s+titled\s+(.+?)(?:\s+no\s+longer\b|\.|;|\s+and\b|$)", re.IGNORECASE).search(value)
     return match.group(1).strip().strip("\"'`").rstrip(".") if match else None
 
 
 def _parse_qwen_explicit_note_view(text: str) -> Optional[str]:
     """Extract a note title when the user explicitly asks for its contents."""
     value = str(text or "").strip()
-    if re.search(r"\b(?:delete|remove|update|change|replace)\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:delete|remove|update|change|replace)\b", re.IGNORECASE).search(value):
         return None
-    if not re.search(r"\b(?:show|read|view|open)\b.{0,40}\b(?:content|contents|body|inside)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:show|read|view|open)\b.{0,40}\b(?:content|contents|body|inside)\b", re.IGNORECASE).search(value):
         return None
-    match = re.search(
-        r"\bnote\s+(?:called|titled|named)\s+(.+?)(?:\s*,?\s*(?:then|and)\s+|\.|;|$)",
-        value,
-        re.IGNORECASE,
-    )
+    match = _rx(r"\bnote\s+(?:called|titled|named)\s+(.+?)(?:\s*,?\s*(?:then|and)\s+|\.|;|$)", re.IGNORECASE).search(value)
     if not match:
         return None
     title = match.group(1).strip().strip("\"'`").rstrip(".")
@@ -2640,40 +2361,24 @@ def _parse_qwen_explicit_note_view(text: str) -> Optional[str]:
 def _is_qwen_explicit_model_list_request(text: str) -> bool:
     """Recognize a request to inspect the configured model registry."""
     value = str(text or "").strip()
-    explicit_listing_verb = bool(re.search(
-        r"\b(?:list|show|view)\s+(?:the\s+)?(?:available\s+|running\s+|served\s+|configured\s+)?models?\b|"
+    explicit_listing_verb = bool(_rx(r"\b(?:list|show|view)\s+(?:the\s+)?(?:available\s+|running\s+|served\s+|configured\s+)?models?\b|"
         r"\b(?:what|which)\s+models?\s+(?:are\s+)?(?:available|running|served|configured)\b|"
-        r"\bmodels?\s+(?:are\s+)?(?:available|running|served|configured)\b",
-        value,
-        re.IGNORECASE,
-    ))
+        r"\bmodels?\s+(?:are\s+)?(?:available|running|served|configured)\b", re.IGNORECASE).search(value))
     return bool(
         not (
-            re.search(r"\b(?:ask|delegate|send|query|consult)\b", value, re.IGNORECASE)
+            _rx(r"\b(?:ask|delegate|send|query|consult)\b", re.IGNORECASE).search(value)
             and not explicit_listing_verb
         )
         and explicit_listing_verb
-        and not re.search(
-            r"\b(?:switch|change|use|select|pick|set|run)\s+(?:to\s+)?(?:the\s+)?model\b",
-            value,
-            re.IGNORECASE,
-        )
-        and not re.search(
-            r"\b(?:cached|download|downloads|downloading|on\s+disk|local)\b",
-            value,
-            re.IGNORECASE,
-        )
+        and not _rx(r"\b(?:switch|change|use|select|pick|set|run)\s+(?:to\s+)?(?:the\s+)?model\b", re.IGNORECASE).search(value)
+        and not _rx(r"\b(?:cached|download|downloads|downloading|on\s+disk|local)\b", re.IGNORECASE).search(value)
     )
 
 
 def _is_qwen_explicit_endpoint_list_request(text: str) -> bool:
     """Recognize a request to inspect configured model API endpoints."""
     value = str(text or "").strip()
-    if re.search(
-        r"\b(?:model\s+ids?|model\s+names?|model\s+catalog|available\s+models?)\b",
-        value,
-        re.IGNORECASE,
-    ):
+    if _rx(r"\b(?:model\s+ids?|model\s+names?|model\s+catalog|available\s+models?)\b", re.IGNORECASE).search(value):
         return False
     # A listing word and a provider word anywhere in a long prompt is not an
     # endpoint-management request. Research/comparison prompts routinely ask
@@ -2695,14 +2400,12 @@ def _is_qwen_explicit_endpoint_list_request(text: str) -> bool:
 
 
 def _pipeline_request_parts(value: str) -> tuple[str, str, str, str] | None:
-    prefix = re.search(
-        r"\bpipeline\s+using\s+([^\s,]+)\s+to(?=\s)", value, re.IGNORECASE
-    )
+    prefix = _rx(r"\bpipeline\s+using\s+([^\s,]+)\s+to(?=\s)", re.IGNORECASE).search(value)
     if prefix is None:
         return None
     rest = value[prefix.end():]
     last_newline = rest.rfind("\n", 0, len(rest) - int(rest.endswith("\n")))
-    separator = re.compile(r"(),\s*+then\s++([^\s,]+)\s++to(?=\s)", re.I)
+    separator = _rx(r"(),\s*+then\s++([^\s,]+)\s++to(?=\s)", re.I)
     def tail(match):
         final = terminal_dot_field(rest, match.end(), punctuation=True, last_newline=last_newline)
         return (match.group(2), *final) if final is not None else None
@@ -2724,11 +2427,7 @@ def _parse_explicit_pipeline_request(text: str) -> Optional[tuple[str, str]]:
 
 def _parse_explicit_teacher_request(text: str) -> Optional[tuple[str, str]]:
     value = str(text or "").strip()
-    match = re.search(
-        r"\b(?:ask|consult)\s+(?:the\s+)?teacher(?:\s+model)?\s+to\s+(?P<problem>.+?)(?:[.!?]\s*)?$",
-        value,
-        re.IGNORECASE,
-    )
+    match = _rx(r"\b(?:ask|consult)\s+(?:the\s+)?teacher(?:\s+model)?\s+to\s+(?P<problem>.+?)(?:[.!?]\s*)?$", re.IGNORECASE).search(value)
     if not match:
         return None
     problem = match.group("problem").strip()
@@ -2743,66 +2442,47 @@ def _parse_qwen_explicit_admin_request(text: str) -> Optional[tuple[str, str]]:
     # Capability exclusions are constraints, not requested actions. Without
     # removing them first, "search HF; do not download" routes to downloads,
     # and "do not use the endpoint model list" routes to list_models.
-    positive_value = re.sub(
-        r"\b(?:do\s+not|don't|without)\b[^.!?;]*(?:[.!?;]|$)",
-        " ",
-        value,
-        flags=re.IGNORECASE,
-    )
+    positive_value = _rx(r"\b(?:do\s+not|don't|without)\b[^.!?;]*(?:[.!?;]|$)", re.IGNORECASE).sub(" ", value)
     # URLs are data, not user intent. In particular, unsubscribe URLs often
     # contain `token=...`; leaving them in this text makes the compact router
     # incorrectly preempt `manage_tokens` for an unrelated browser workflow.
-    q = re.sub(r"https?://\S+", " ", positive_value, flags=re.IGNORECASE).lower()
+    q = _rx(r"https?://\S+", re.IGNORECASE).sub(" ", positive_value).lower()
     if pipeline_request := _parse_explicit_pipeline_request(positive_value):
         return pipeline_request
-    if re.search(
-        r"\b(?:start|begin|run|do)\b.{0,30}\b(?:deep\s+)?research(?:\s+report|\s+task|\s+job)?\b",
-        positive_value,
-        re.IGNORECASE,
-    ):
-        topic_match = re.search(
-            r"\b(?:about|on|into)\s+(.+?)(?:\s+and\s+(?:return|show|give)\b|[.!?]\s*$|$)",
-            positive_value,
-            re.IGNORECASE,
-        )
+    if _rx(r"\b(?:start|begin|run|do)\b.{0,30}\b(?:deep\s+)?research(?:\s+report|\s+task|\s+job)?\b", re.IGNORECASE).search(positive_value):
+        topic_match = _rx(r"\b(?:about|on|into)\s+(.+?)(?:\s+and\s+(?:return|show|give)\b|[.!?]\s*$|$)", re.IGNORECASE).search(positive_value)
         if topic_match and (topic := topic_match.group(1).strip(" \t\r\n\"'`.")):
             return "trigger_research", json.dumps({"topic": topic})
-    listish = bool(re.search(r"\b(?:list|show|view|check|inspect|which|what|configured|connected)\b", q))
+    listish = bool(_rx(r"\b(?:list|show|view|check|inspect|which|what|configured|connected)\b").search(q))
     # "research this" starts a new external lookup, even when the same turn
     # also asks for a workspace inspection. Only preempt requests that clearly
     # refer to the saved research library; otherwise the model's web/file tool
     # plan must remain authoritative.
     research_library_request = bool(
-        re.search(
-            r"\b(?:saved|completed|past|my)\s+(?:research(?:\s+reports?)?|reports?)\b|"
+        _rx(r"\b(?:saved|completed|past|my)\s+(?:research(?:\s+reports?)?|reports?)\b|"
             r"\bresearch\s+reports?\b|"
             r"\b(?:list|show|view|check|inspect|which|what)\b"
             r"(?:\s+(?:my|the|all|saved|past|completed))?\s+"
-            r"research(?:\s+reports?)?\s*$",
-            q,
-        )
+            r"research(?:\s+reports?)?\s*$").search(q)
     )
     if listish and research_library_request:
         search = "searxng" if "searxng" in q else ""
         return "manage_research", json.dumps({"action": "list", "search": search})
-    if re.search(r"\b(?:internal\s+)?app\s+api\b", q):
-        if re.search(r"\b(?:catalog|endpoints?|routes?)\b", q):
-            filter_match = re.search(
-                r"\b(?:safe\s+)?([a-z][a-z0-9_-]*)\s+(?:api\s+)?(?:endpoints?|routes?)\b",
-                q,
-            )
+    if _rx(r"\b(?:internal\s+)?app\s+api\b").search(q):
+        if _rx(r"\b(?:catalog|endpoints?|routes?)\b").search(q):
+            filter_match = _rx(r"\b(?:safe\s+)?([a-z][a-z0-9_-]*)\s+(?:api\s+)?(?:endpoints?|routes?)\b").search(q)
             endpoint_filter = filter_match.group(1) if filter_match else ""
             if endpoint_filter in {"internal", "app", "api", "list", "available"}:
                 endpoint_filter = ""
             return "app_api", json.dumps({"action": "endpoints", "filter": endpoint_filter})
-        if re.search(r"\bgallery\b.{0,30}\b(?:list|library|images?)\b|\b(?:list|library)\b.{0,30}\bgallery\b", q):
+        if _rx(r"\bgallery\b.{0,30}\b(?:list|library|images?)\b|\b(?:list|library)\b.{0,30}\bgallery\b").search(q):
             return "app_api", json.dumps({
                 "action": "call", "method": "GET", "path": "/api/gallery/library",
             })
     if (
-        re.search(r"\b(?:best|recommended?|suitable|compatible|fit)\b", q)
-        and re.search(r"\bmodels?\b", q)
-        and re.search(r"\b(?:my|this|the|current)\s+(?:hardware|machine|computer|pc|server|system)\b|\b(?:gpu|vram|ram)\b", q)
+        _rx(r"\b(?:best|recommended?|suitable|compatible|fit)\b").search(q)
+        and _rx(r"\bmodels?\b").search(q)
+        and _rx(r"\b(?:my|this|the|current)\s+(?:hardware|machine|computer|pc|server|system)\b|\b(?:gpu|vram|ram)\b").search(q)
     ):
         return "app_api", json.dumps({
             "action": "call",
@@ -2812,36 +2492,33 @@ def _parse_qwen_explicit_admin_request(text: str) -> Optional[tuple[str, str]]:
         })
     if listish and _looks_like_explicit_app_settings_request(q):
         return "manage_settings", json.dumps({"action": "list"})
-    if listish and re.search(r"\b(?:cookbook\s+servers?|configured\s+cookbook\s+servers?|default\s+cookbook\s+server)\b", q):
+    if listish and _rx(r"\b(?:cookbook\s+servers?|configured\s+cookbook\s+servers?|default\s+cookbook\s+server)\b").search(q):
         return "list_cookbook_servers", ""
-    if listish and re.search(r"\b(?:serve\s+presets?|saved\s+(?:cookbook\s+)?serve\s+presets?)\b", q):
+    if listish and _rx(r"\b(?:serve\s+presets?|saved\s+(?:cookbook\s+)?serve\s+presets?)\b").search(q):
         return "list_serve_presets", ""
-    if listish and re.search(
-        r"\b(?:running|serving|served)\b.{0,40}\b(?:models?|servers?)\b|"
+    if listish and _rx(r"\b(?:running|serving|served)\b.{0,40}\b(?:models?|servers?)\b|"
         r"\b(?:models?|servers?)\b.{0,40}\b(?:running|serving|served)\b|"
-        r"\bmodel\s+servers?\b",
-        q,
-    ):
+        r"\bmodel\s+servers?\b").search(q):
         return "list_served_models", ""
-    if listish and re.search(r"\b(?:cached\s+models?|models?\s+(?:on\s+disk|downloaded|cached)|local\s+models?)\b", q):
+    if listish and _rx(r"\b(?:cached\s+models?|models?\s+(?:on\s+disk|downloaded|cached)|local\s+models?)\b").search(q):
         return "list_cached_models", ""
-    if listish and re.search(r"\b(?:active\s+downloads?|downloads?|downloading|download\s+progress)\b", q):
+    if listish and _rx(r"\b(?:active\s+downloads?|downloads?|downloading|download\s+progress)\b").search(q):
         return "list_downloads", ""
     if _is_qwen_explicit_endpoint_list_request(positive_value):
         return "manage_endpoints", json.dumps({"action": "list"})
     if _is_qwen_explicit_model_list_request(positive_value):
         return "list_models", ""
-    if re.search(r"\b(?:disabled\s+tools?|tools?\s+(?:are\s+)?(?:currently\s+)?disabled)\b", q):
+    if _rx(r"\b(?:disabled\s+tools?|tools?\s+(?:are\s+)?(?:currently\s+)?disabled)\b").search(q):
         return "manage_settings", json.dumps({"action": "list_tools"})
-    if re.search(r"\b(?:turn|enable|re-enable|reenable)\b.{0,40}\b(?:image\s+generation|images?|generate_image)\b", q):
+    if _rx(r"\b(?:turn|enable|re-enable|reenable)\b.{0,40}\b(?:image\s+generation|images?|generate_image)\b").search(q):
         return "manage_settings", json.dumps({"action": "enable_tool", "tool": "images"})
-    if re.search(r"\b(?:disable|turn\s+off)\b.{0,40}\b(?:image\s+generation|images?|generate_image)\b", q):
+    if _rx(r"\b(?:disable|turn\s+off)\b.{0,40}\b(?:image\s+generation|images?|generate_image)\b").search(q):
         return "manage_settings", json.dumps({"action": "disable_tool", "tool": "images"})
-    if listish and re.search(r"\bapi\s+tokens?\b|\btokens?\b", q):
+    if listish and _rx(r"\bapi\s+tokens?\b|\btokens?\b").search(q):
         return "manage_tokens", json.dumps({"action": "list"})
-    if listish and re.search(r"\bwebhooks?\b", q):
+    if listish and _rx(r"\bwebhooks?\b").search(q):
         return "manage_webhooks", json.dumps({"action": "list"})
-    if listish and re.search(r"\bmcp(?:\s+servers?)?\b", q):
+    if listish and _rx(r"\bmcp(?:\s+servers?)?\b").search(q):
         return "manage_mcp", json.dumps({"action": "list"})
     return None
 
@@ -2873,17 +2550,14 @@ def _looks_like_explicit_app_settings_request(text: str) -> bool:
         q,
     ):
         return True
-    return bool(re.search(
-        r"\b(?:app|application|odysseus|agent)\s+(?:settings?|preferences?|configuration)\b",
-        q,
-    ))
+    return bool(_rx(r"\b(?:app|application|odysseus|agent)\s+(?:settings?|preferences?|configuration)\b").search(q))
 
 
 def _recent_session_id_for_title(messages: List[Dict], title_query: str) -> str:
     """Find a recently mentioned chat id from markdown session links."""
     query_terms = [
         term
-        for term in re.findall(r"[a-z0-9]+", str(title_query or "").lower())
+        for term in _rx(r"[a-z0-9]+").findall(str(title_query or "").lower())
         if term not in {
             "delete", "remove", "archive", "unarchive", "open", "switch",
             "the", "that", "this", "chat", "session", "scratch", "helper",
@@ -2911,13 +2585,8 @@ def _recent_cookbook_session_id(messages: List[Dict], text: str = "") -> str:
         return explicit.group(1)
     assistant_messages = [msg for msg in (messages or []) if msg.get("role") == "assistant"]
     for msg in reversed(assistant_messages):
-        metadata = msg.get("metadata") or {}
-        if isinstance(metadata, str):
-            try:
-                metadata = json.loads(metadata)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                metadata = {}
-        events = metadata.get("tool_events") if isinstance(metadata, dict) else []
+        metadata = _json_object(msg.get("metadata") or {})
+        events = metadata.get("tool_events")
         if isinstance(events, list):
             for event in reversed(events):
                 if not isinstance(event, dict) or event.get("tool") not in {
@@ -2944,25 +2613,21 @@ def _parse_explicit_cookbook_task_action(
 ) -> Optional[tuple[str, str]]:
     """Map clear follow-up log/stop requests to the latest Cookbook task."""
     value = str(text or "").strip()
-    if not re.search(
-        r"\b(?:cookbook|model|server|serve|serving|session|task|download|it|that)\b",
-        value,
-        re.IGNORECASE,
-    ):
+    if not _rx(r"\b(?:cookbook|model|server|serve|serving|session|task|download|it|that)\b", re.IGNORECASE).search(value):
         return None
     session_id = _recent_cookbook_session_id(messages, value)
     if not session_id:
         return None
-    if re.search(r"\b(?:tail|logs?|output|traceback|stderr)\b", value, re.IGNORECASE):
-        tail_match = re.search(r"\b(?:last|tail)\s+(\d{1,4})\s+lines?\b", value, re.IGNORECASE)
+    if _rx(r"\b(?:tail|logs?|output|traceback|stderr)\b", re.IGNORECASE).search(value):
+        tail_match = _rx(r"\b(?:last|tail)\s+(\d{1,4})\s+lines?\b", re.IGNORECASE).search(value)
         tail = int(tail_match.group(1)) if tail_match else 400
         return "tail_serve_output", json.dumps({"session_id": session_id, "tail": tail})
-    if re.search(r"\b(?:stop|kill|terminate|cancel)\b", value, re.IGNORECASE) and (
-        re.search(r"\bdownload\b", value, re.IGNORECASE)
+    if _rx(r"\b(?:stop|kill|terminate|cancel)\b", re.IGNORECASE).search(value) and (
+        _rx(r"\bdownload\b", re.IGNORECASE).search(value)
         or session_id.lower().startswith("cookbook-")
     ):
         return "cancel_download", json.dumps({"session_id": session_id})
-    if re.search(r"\b(?:stop|kill|shutdown|shut\s+down|terminate|cancel)\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:stop|kill|shutdown|shut\s+down|terminate|cancel)\b", re.IGNORECASE).search(value):
         return "stop_served_model", json.dumps({"session_id": session_id})
     return None
 
@@ -2970,42 +2635,33 @@ def _parse_explicit_cookbook_task_action(
 def _parse_qwen_explicit_session_action(text: str, messages: List[Dict]) -> Optional[tuple[str, str]]:
     """Map obvious chat/session actions to manage_session with the recent exact id."""
     value = str(text or "").strip()
-    if not re.search(r"\b(?:chat|session)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:chat|session)\b", re.IGNORECASE).search(value):
         return None
     action = ""
-    rename_match = re.search(
-        r"\brename\b.{0,40}\b(?:chat|session)\b\s+(?:to|as)\s+(.+?)[.?!]?$",
-        value,
-        re.IGNORECASE,
-    )
+    rename_match = _rx(r"\brename\b.{0,40}\b(?:chat|session)\b\s+(?:to|as)\s+(.+?)[.?!]?$", re.IGNORECASE).search(value)
     if rename_match:
         new_name = (rename_match.group(1) or "").strip(" \t\r\n\"'`.")
-        new_name = re.split(
-            r"(?<=\s)(?:Use the tool directly|Keep this read-only|Report the result|Do not)\b",
-            new_name,
-            maxsplit=1,
-            flags=re.IGNORECASE,
-        )[0].strip(" \t\r\n\"'`.")
-        if new_name and re.search(r"\b(?:this|current)\b", value, re.IGNORECASE):
+        new_name = _rx(r"(?<=\s)(?:Use the tool directly|Keep this read-only|Report the result|Do not)\b", re.IGNORECASE).split(new_name, maxsplit=1)[0].strip(" \t\r\n\"'`.")
+        if new_name and _rx(r"\b(?:this|current)\b", re.IGNORECASE).search(value):
             return "manage_session", json.dumps({
                 "action": "rename",
                 "session_id": "current",
                 "value": new_name,
             })
         action = "rename"
-    elif re.search(r"\b(?:delete|remove|get\s+rid\s+of)\b", value, re.IGNORECASE):
+    elif _rx(r"\b(?:delete|remove|get\s+rid\s+of)\b", re.IGNORECASE).search(value):
         action = "delete"
-    elif re.search(r"\bunarchive\b", value, re.IGNORECASE):
+    elif _rx(r"\bunarchive\b", re.IGNORECASE).search(value):
         action = "unarchive"
-    elif re.search(r"\barchive\b", value, re.IGNORECASE):
+    elif _rx(r"\barchive\b", re.IGNORECASE).search(value):
         action = "archive"
-    elif re.search(r"\b(?:open|switch|select|view)\b", value, re.IGNORECASE):
+    elif _rx(r"\b(?:open|switch|select|view)\b", re.IGNORECASE).search(value):
         action = "open"
     if not action:
         return None
     if (
         action in {"archive", "unarchive", "open", "rename"}
-        and re.search(r"\b(?:this|current)\b", value, re.IGNORECASE)
+        and _rx(r"\b(?:this|current)\b", re.IGNORECASE).search(value)
     ):
         return "manage_session", json.dumps({"action": action, "session_id": "current"})
     sid = _recent_session_id_for_title(messages, value)
@@ -3017,34 +2673,26 @@ def _parse_qwen_explicit_session_action(text: str, messages: List[Dict]) -> Opti
 def _parse_qwen_explicit_session_create(text: str) -> Optional[tuple[str, str]]:
     """Map obvious chat creation requests to create_session's two-line format."""
     value = str(text or "").strip()
-    if not re.search(r"\b(?:create|new|start)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:create|new|start)\b", re.IGNORECASE).search(value):
         return None
-    if not re.search(r"\b(?:chat|session)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:chat|session)\b", re.IGNORECASE).search(value):
         return None
 
     name = ""
     model_name = ""
-    match = re.search(
-        r"\bnamed\s+(.+?)(?:\s+using\s+model\s+([A-Za-z0-9_.:/-]+)|[.?!]?$)",
-        value,
-        re.IGNORECASE,
-    )
+    match = _rx(r"\bnamed\s+(.+?)(?:\s+using\s+model\s+([A-Za-z0-9_.:/-]+)|[.?!]?$)", re.IGNORECASE).search(value)
     if match:
         name = (match.group(1) or "").strip(" \t\r\n\"'`.")
         model_name = (match.group(2) or "").strip(" \t\r\n\"'`.")
     if not name:
-        match = re.search(
-            r"\b(?:create|new|start)\s+(?:a\s+)?(?:scratch\s+)?(?:chat|session)\s+(.+?)(?:\s+using\s+model\s+([A-Za-z0-9_.:/-]+)|[.?!]?$)",
-            value,
-            re.IGNORECASE,
-        )
+        match = _rx(r"\b(?:create|new|start)\s+(?:a\s+)?(?:scratch\s+)?(?:chat|session)\s+(.+?)(?:\s+using\s+model\s+([A-Za-z0-9_.:/-]+)|[.?!]?$)", re.IGNORECASE).search(value)
         if match:
             name = (match.group(1) or "").strip(" \t\r\n\"'`.")
             model_name = (match.group(2) or "").strip(" \t\r\n\"'`.")
     if not name:
         return None
-    if re.search(r"\b(?:using|with)\s+model\b", name, re.IGNORECASE):
-        name = re.split(r"\b(?:using|with)\s+model\b", name, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    if _rx(r"\b(?:using|with)\s+model\b", re.IGNORECASE).search(name):
+        name = _rx(r"\b(?:using|with)\s+model\b", re.IGNORECASE).split(name, maxsplit=1)[0].strip()
     if not model_name:
         model_name = "moonshotai/kimi-k3"
     return "create_session", f"{name}\n{model_name}"
@@ -3053,28 +2701,24 @@ def _parse_qwen_explicit_session_create(text: str) -> Optional[tuple[str, str]]:
 def _parse_qwen_explicit_session_send(text: str, messages: List[Dict]) -> Optional[tuple[str, str]]:
     """Map an explicit cross-chat relay to send_to_session using a recent link."""
     value = str(text or "").strip()
-    if not re.search(r"\b(?:send|message)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:send|message)\b", re.IGNORECASE).search(value):
         return None
-    if not re.search(r"\b(?:chat|session|conversation)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:chat|session|conversation)\b", re.IGNORECASE).search(value):
         return None
-    message_match = re.search(
-        r"\b(?:this\s+message|the\s+message)\s*:\s*(.+)$",
-        value,
-        re.IGNORECASE | re.DOTALL,
-    )
+    message_match = _rx(r"\b(?:this\s+message|the\s+message)\s*:\s*(.+)$", re.IGNORECASE | re.DOTALL).search(value)
     if not message_match:
         return None
     relay_message = message_match.group(1).strip()
     target_text = value[: message_match.start()].strip()
     sid = _recent_session_id_for_title(messages, target_text)
-    if not sid and re.search(r"\b(?:that|this)\b", target_text, re.IGNORECASE):
+    if not sid and _rx(r"\b(?:that|this)\b", re.IGNORECASE).search(target_text):
         for prior in reversed(messages or []):
             links = [
                 target
                 for _start, _end, _label, target in iter_markdown_links(
                     str(prior.get("content") or ""),
                     target_prefix="#session-",
-                    target_re=re.compile(r"[A-Za-z0-9_-]+"),
+                    target_re=_rx(r"[A-Za-z0-9_-]+"),
                 )
             ]
             if links:
@@ -3086,7 +2730,7 @@ def _parse_qwen_explicit_session_send(text: str, messages: List[Dict]) -> Option
 
 
 def _session_find_query_capture(value: str) -> str | None:
-    action_prefix = re.search(r"\b(?:find|search|show)\b(?=\s)", value, re.IGNORECASE)
+    action_prefix = _rx(r"\b(?:find|search|show)\b(?=\s)", re.IGNORECASE).search(value)
     if action_prefix is None:
         return None
     optional_for = r"(?:\s+for)?" if action_prefix.group(0).casefold() == "search" else ""
@@ -3101,55 +2745,43 @@ def _session_find_query_capture(value: str) -> str | None:
 def _parse_qwen_explicit_session_find(text: str) -> Optional[tuple[str, str]]:
     """Map obvious chat lookup requests to list_sessions with a filter."""
     value = str(text or "").strip()
-    if not re.search(r"\b(?:find|search|list|show)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:find|search|list|show)\b", re.IGNORECASE).search(value):
         return None
-    if not re.search(r"\b(?:chats?|sessions?|conversations?)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:chats?|sessions?|conversations?)\b", re.IGNORECASE).search(value):
         return None
-    if re.search(
-        r"\b(?:search|find)\b.{0,40}\b(?:prior|past|previous)\s+"
-        r"(?:chats?|sessions?|conversations?)\b",
-        value,
-        re.IGNORECASE,
-    ):
+    if _rx(r"\b(?:search|find)\b.{0,40}\b(?:prior|past|previous)\s+"
+        r"(?:chats?|sessions?|conversations?)\b", re.IGNORECASE).search(value):
         return None
-    if re.search(
-        r"\b(?:list|show|view)\b.{0,30}\b(?:my\s++)?(?:recent|latest|all)?\s*+(?:chats?|sessions?|conversations?)\b"
-        r"|\b(?:recent|latest|all)\s+(?:chats?|sessions?|conversations?)\b",
-        value,
-        re.IGNORECASE,
-    ):
+    if _rx(r"\b(?:list|show|view)\b.{0,30}\b(?:my\s++)?(?:recent|latest|all)?\s*+(?:chats?|sessions?|conversations?)\b"
+        r"|\b(?:recent|latest|all)\s+(?:chats?|sessions?|conversations?)\b", re.IGNORECASE).search(value):
         return "list_sessions", ""
     captured_query = _session_find_query_capture(value)
     if captured_query is None:
         return None
     query = captured_query.strip(" \t\r\n\"'`.")
-    query = re.sub(r"\bscratch\b", "", query, flags=re.IGNORECASE).strip()
-    query = re.sub(r"\s+", " ", query).strip()
+    query = _rx(r"\bscratch\b", re.IGNORECASE).sub("", query).strip()
+    query = _rx(r"\s+").sub(" ", query).strip()
     return "list_sessions", query or value
 
 
 def _parse_qwen_explicit_chat_transcript_search(text: str) -> Optional[tuple[str, str]]:
     """Map explicit prior-chat content searches to search_chats."""
     value = str(text or "").strip()
-    if not re.search(r"\b(?:search|find|look\s*up)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:search|find|look\s*up)\b", re.IGNORECASE).search(value):
         return None
-    if not re.search(r"\b(?:prior|past|previous|old)\s+(?:chats?|sessions?|conversations?)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:prior|past|previous|old)\s+(?:chats?|sessions?|conversations?)\b", re.IGNORECASE).search(value):
         return None
-    match = re.search(
-        r"\b(?:for|mentioning|about|containing)\s+(.+?)(?:\s+use\s+the\s+tool\b|\s+keep\s+this\b|[.!?]\s*$|$)",
-        value,
-        re.IGNORECASE,
-    )
+    match = _rx(r"\b(?:for|mentioning|about|containing)\s+(.+?)(?:\s+use\s+the\s+tool\b|\s+keep\s+this\b|[.!?]\s*$|$)", re.IGNORECASE).search(value)
     query = (match.group(1) if match else value).strip(" \t\r\n\"'`.")
-    query = re.sub(r"\{marker\}", "", query, flags=re.IGNORECASE).strip()
-    query = re.sub(r"\s+", " ", query).strip()
+    query = _rx(r"\{marker\}", re.IGNORECASE).sub("", query).strip()
+    query = _rx(r"\s+").sub(" ", query).strip()
     return "search_chats", query or value
 
 
 def _parse_qwen_explicit_resolve_contact(text: str) -> Optional[tuple[str, str]]:
     """Map obvious contact-address lookups to resolve_contact."""
     value = str(text or "").strip()
-    if re.search(r"\b(?:delete|remove|update|change|edit|add|create)\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:delete|remove|update|change|edit|add|create)\b", re.IGNORECASE).search(value):
         return None
     patterns = [
         r"\bfind\s+(?:the\s+)?(?:email\s+address|email|phone(?:\s+number)?)\s+for\s+(.+?)(?:[.!?]\s*)?$",
@@ -3160,7 +2792,7 @@ def _parse_qwen_explicit_resolve_contact(text: str) -> Optional[tuple[str, str]]
         match = re.search(pattern, value, re.IGNORECASE)
         if not match:
             continue
-        name = re.sub(r"\s+", " ", match.group(1)).strip(" \t\r\n\"'`.")
+        name = _rx(r"\s+").sub(" ", match.group(1)).strip(" \t\r\n\"'`.")
         if name:
             return "resolve_contact", json.dumps({"name": name})
     return None
@@ -3180,7 +2812,7 @@ def _has_successful_tool_evidence(tool_events: list[dict[str, Any]], tool_name: 
         if event.get("exit_code") not in (None, 0):
             continue
         output = str(event.get("output") or event.get("results") or event.get("response") or "")
-        if re.search(r"\b(?:Error:|Traceback|Exception|failed)\b", output, re.IGNORECASE):
+        if _rx(r"\b(?:Error:|Traceback|Exception|failed)\b", re.IGNORECASE).search(output):
             continue
         return True
     return False
@@ -3205,7 +2837,7 @@ def _summary_for_preemptive_admin_session_tool(tool_name: str, content: str, res
             or output
             or "Done."
         ).strip()
-        return re.sub(r"^AI:\s*", "", text).strip() or "Done."
+        return _rx(r"^AI:\s*").sub("", text).strip() or "Done."
     if tool_name == "send_to_session" and isinstance(result, dict):
         sid = str(result.get("session_id") or "").strip()
         name = str(result.get("session_name") or "the chat").strip()
@@ -3215,10 +2847,10 @@ def _summary_for_preemptive_admin_session_tool(tool_name: str, content: str, res
             return f"{link} replied:\n\n{response}"
         return f"Sent the message to {link}."
     if tool_name == "list_sessions":
-        text = re.sub(r"^AI:\s*", "", str(output or "").strip())
+        text = _rx(r"^AI:\s*").sub("", str(output or "").strip())
         return _session_list_summary_from_tool_output(text) or "No matching chats found."
     if tool_name == "manage_settings":
-        text = re.sub(r"^AI:\s*", "", str(output or "").strip())
+        text = _rx(r"^AI:\s*").sub("", str(output or "").strip())
         if "Currently disabled: (none)" in text:
             return "No agent tools are currently disabled."
         if "Enabled images" in text:
@@ -3227,45 +2859,36 @@ def _summary_for_preemptive_admin_session_tool(tool_name: str, content: str, res
             return "Image generation is now disabled."
         return text or "Settings updated."
     if tool_name == "manage_tokens":
-        text = re.sub(r"^AI:\s*", "", str(output or "").strip())
+        text = _rx(r"^AI:\s*").sub("", str(output or "").strip())
         return text or "Listed API tokens by name and prefix only."
     if tool_name == "manage_webhooks":
-        text = re.sub(r"^AI:\s*", "", str(output or "").strip())
+        text = _rx(r"^AI:\s*").sub("", str(output or "").strip())
         return text or "Listed webhook integrations."
     if tool_name == "manage_mcp":
-        text = re.sub(r"^AI:\s*", "", str(output or "").strip())
+        text = _rx(r"^AI:\s*").sub("", str(output or "").strip())
         return text or "Listed MCP servers."
     if tool_name == "manage_endpoints":
-        text = re.sub(r"^AI:\s*", "", str(output or "").strip())
+        text = _rx(r"^AI:\s*").sub("", str(output or "").strip())
         return text or "Listed configured model endpoints."
-    return re.sub(r"^AI:\s*", "", str(output or "").strip()) or "Done."
+    return _rx(r"^AI:\s*").sub("", str(output or "").strip()) or "Done."
 
 
 def _is_email_account_identity_request(text: str) -> bool:
     """Recognize requests for the user's configured email address/account."""
 
-    value = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    value = _rx(r"\s+").sub(" ", str(text or "").strip().lower())
     if not value:
         return False
-    if re.search(
-        r"\b(?:inbox|message|messages|latest|newest|recent|unread|subject|sender|from)\b",
-        value,
-    ):
+    if _rx(r"\b(?:inbox|message|messages|latest|newest|recent|unread|subject|sender|from)\b").search(value):
         return False
     return bool(
-        re.fullmatch(
-            r"(?:what(?:'s| is)|which|show|tell me|list|give me)\s+"
+        _rx(r"(?:what(?:'s| is)|which|show|tell me|list|give me)\s+"
             r"(?:(?:is|are)\s+)?(?:my\s+)?"
             r"(?:connected\s+)?(?:email|e-mail|mail)"
             r"(?:\s+(?:address|addresses|account|accounts))?"
-            r"(?:\s+(?:do i have|is connected|are connected|am i using))?[?.!]?",
-            value,
-        )
-        or re.fullmatch(
-            r"my\s+(?:connected\s+)?(?:email|e-mail|mail)"
-            r"(?:\s+(?:address|addresses|account|accounts))?[?.!]?",
-            value,
-        )
+            r"(?:\s+(?:do i have|is connected|are connected|am i using))?[?.!]?").fullmatch(value)
+        or _rx(r"my\s+(?:connected\s+)?(?:email|e-mail|mail)"
+            r"(?:\s+(?:address|addresses|account|accounts))?[?.!]?").fullmatch(value)
     )
 
 
@@ -3276,30 +2899,18 @@ def _is_qwen_explicit_latest_email_request(text: str) -> bool:
     # (reply/archive/delete/mark), not a hard rewrite to list_emails. The
     # model may still list first when it needs the UID, but the normalizer must
     # not erase an already-correct action call.
-    if re.search(
-        r"\b(?:send|reply|respond|draft|write|compose|archive|delete|trash|remove|mark)\b",
-        value,
-        re.IGNORECASE,
-    ):
+    if _rx(r"\b(?:send|reply|respond|draft|write|compose|archive|delete|trash|remove|mark)\b", re.IGNORECASE).search(value):
         return False
     if (
-        re.search(r"\b(?:any|new|latest|newest|recent|most\s+recent|show|check)\b", value, re.IGNORECASE)
-        and re.search(r"\b(?:emails?|mail|inbox|messages?)\b", value, re.IGNORECASE)
-        and not re.search(
-            r"\b(?:emails?|messages?)\b.{0,25}\b(?:from|about|matching|containing)\b",
-            value,
-            re.IGNORECASE,
-        )
+        _rx(r"\b(?:any|new|latest|newest|recent|most\s+recent|show|check)\b", re.IGNORECASE).search(value)
+        and _rx(r"\b(?:emails?|mail|inbox|messages?)\b", re.IGNORECASE).search(value)
+        and not _rx(r"\b(?:emails?|messages?)\b.{0,25}\b(?:from|about|matching|containing)\b", re.IGNORECASE).search(value)
     ):
         return True
     return bool(
-        re.search(r"\b(?:latest|newest|last|most\s+recent)\b", value, re.IGNORECASE)
-        and re.search(r"\b(?:emails?|mail|inbox|messages?)\b", value, re.IGNORECASE)
-        and not re.search(
-            r"\b(?:emails?|messages?)\b.{0,25}\b(?:from|about|matching|containing)\b",
-            value,
-            re.IGNORECASE,
-        )
+        _rx(r"\b(?:latest|newest|last|most\s+recent)\b", re.IGNORECASE).search(value)
+        and _rx(r"\b(?:emails?|mail|inbox|messages?)\b", re.IGNORECASE).search(value)
+        and not _rx(r"\b(?:emails?|messages?)\b.{0,25}\b(?:from|about|matching|containing)\b", re.IGNORECASE).search(value)
     )
 
 
@@ -3308,59 +2919,43 @@ def _is_explicit_latest_email_open_request(text: str) -> bool:
     value = str(text or "").strip()
     if not value:
         return False
-    if re.search(
-        r"\b(?:latest|newest|last|most\s+recent)\s+"
+    if _rx(r"\b(?:latest|newest|last|most\s+recent)\s+"
         r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+"
-        r"(?:emails|messages)\b",
-        value,
-        re.IGNORECASE,
-    ):
+        r"(?:emails|messages)\b", re.IGNORECASE).search(value):
         return False
     if (
-        re.search(r"\b(?:show|list|check)\b", value, re.IGNORECASE)
-        and re.search(r"\b(?:emails|messages)\b", value, re.IGNORECASE)
+        _rx(r"\b(?:show|list|check)\b", re.IGNORECASE).search(value)
+        and _rx(r"\b(?:emails|messages)\b", re.IGNORECASE).search(value)
     ):
         return False
     return bool(
-        re.search(r"\b(?:open|read|show|display|view)\b", value, re.IGNORECASE)
-        and re.search(r"\b(?:latest|newest|last|most\s+recent)\b", value, re.IGNORECASE)
-        and re.search(r"\b(?:email|mail|inbox|message)\b", value, re.IGNORECASE)
-        and not re.search(r"\b(?:emails|messages)\b", value, re.IGNORECASE)
+        _rx(r"\b(?:open|read|show|display|view)\b", re.IGNORECASE).search(value)
+        and _rx(r"\b(?:latest|newest|last|most\s+recent)\b", re.IGNORECASE).search(value)
+        and _rx(r"\b(?:email|mail|inbox|message)\b", re.IGNORECASE).search(value)
+        and not _rx(r"\b(?:emails|messages)\b", re.IGNORECASE).search(value)
     )
 
 
 def _parse_qwen_explicit_email_search_request(text: str) -> Optional[dict[str, Any]]:
     """Recognize sender/topic email searches that must not fall back to latest mail."""
     value = str(text or "").strip()
-    if not value or not re.search(r"\b(?:emails?|mail|inbox|messages?)\b", value, re.IGNORECASE):
+    if not value or not _rx(r"\b(?:emails?|mail|inbox|messages?)\b", re.IGNORECASE).search(value):
         return None
-    if re.search(r"\b(?:send|reply|respond|draft|write|compose|archive|delete|trash|remove|mark)\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:send|reply|respond|draft|write|compose|archive|delete|trash|remove|mark)\b", re.IGNORECASE).search(value):
         return None
-    match = re.search(
-        r"\b(?:find|search|look\s+for|show|list|check|open|read|view)\b.{0,30}\b(?:emails?|mail|messages?)\s+"
-        r"(?:from|about|matching|containing|with)\s+(.+?)(?:[.!?]\s*)?$",
-        value,
-        re.IGNORECASE,
-    )
+    match = _rx(r"\b(?:find|search|look\s+for|show|list|check|open|read|view)\b.{0,30}\b(?:emails?|mail|messages?)\s+"
+        r"(?:from|about|matching|containing|with)\s+(.+?)(?:[.!?]\s*)?$", re.IGNORECASE).search(value)
     if not match:
-        match = re.search(
-            r"\b(?:emails?|mail|messages?)\s+(?:from|about|matching|containing|with)\s+(.+?)(?:[.!?]\s*)?$",
-            value,
-            re.IGNORECASE,
-        )
+        match = _rx(r"\b(?:emails?|mail|messages?)\s+(?:from|about|matching|containing|with)\s+(.+?)(?:[.!?]\s*)?$", re.IGNORECASE).search(value)
     if not match:
         return None
-    query = re.sub(r"\s+", " ", match.group(1)).strip(" .\"'")
+    query = _rx(r"\s+").sub(" ", match.group(1)).strip(" .\"'")
     if not query:
         return None
     # In inventory requests, "with sender and subject" names the columns the
     # user wants displayed; it is not a topic query.  Treating that projection
     # as search text returns an empty result and masks the proper list reader.
-    if re.fullmatch(
-        r"(?:the\s+)?sender(?:\s+(?:and|,)\s+(?:the\s+)?subject)?",
-        query,
-        re.IGNORECASE,
-    ):
+    if _rx(r"(?:the\s+)?sender(?:\s+(?:and|,)\s+(?:the\s+)?subject)?", re.IGNORECASE).fullmatch(query):
         return None
     return {"query": query, "max_results": 10}
 
@@ -3370,20 +2965,20 @@ def _parse_qwen_explicit_email_topic_bulk_action_request(text: str) -> Optional[
 
     value = str(text or "").strip()
     q = value.lower()
-    if not value or not re.search(r"\b(?:emails?|mail|messages?)\b", q):
+    if not value or not _rx(r"\b(?:emails?|mail|messages?)\b").search(q):
         return None
     action = ""
-    if re.search(r"\b(?:delete|trash|remove)\b", q):
+    if _rx(r"\b(?:delete|trash|remove)\b").search(q):
         action = "delete"
-    elif re.search(r"\barchive\b", q):
+    elif _rx(r"\barchive\b").search(q):
         action = "archive"
-    elif re.search(r"\bmark\b.{0,40}\bunread\b|\bunread\b.{0,40}\bmark\b", q):
+    elif _rx(r"\bmark\b.{0,40}\bunread\b|\bunread\b.{0,40}\bmark\b").search(q):
         action = "mark_unread"
-    elif re.search(r"\bmark\b.{0,40}\bread\b|\bread\b.{0,40}\bmark\b", q):
+    elif _rx(r"\bmark\b.{0,40}\bread\b|\bread\b.{0,40}\bmark\b").search(q):
         action = "mark_read"
     if not action:
         return None
-    if re.search(r"\bUIDs?\b", value, re.IGNORECASE):
+    if _rx(r"\bUIDs?\b", re.IGNORECASE).search(value):
         return None
     captures = _captures_after_first_prefix(
         value,
@@ -3393,7 +2988,7 @@ def _parse_qwen_explicit_email_topic_bulk_action_request(text: str) -> Optional[
     )
     if captures is None:
         return None
-    query = re.sub(r"\s+", " ", captures[0]).strip(" .\"'")
+    query = _rx(r"\s+").sub(" ", captures[0]).strip(" .\"'")
     if not query or query.lower() in {"all", "the", "my"}:
         return None
     return {"action": action, "query": query, "folder": "INBOX", "max_results": 50}
@@ -3402,44 +2997,44 @@ def _parse_qwen_explicit_email_topic_bulk_action_request(text: str) -> Optional[
 def _parse_explicit_email_uid_action(text: str) -> Optional[tuple[str, str]]:
     """Normalize exact, explicitly requested reversible actions for one UID."""
     value = str(text or "").strip()
-    uid_match = re.search(r"\bUID\s+([A-Za-z0-9_-]+)\b", value, re.IGNORECASE)
+    uid_match = _rx(r"\bUID\s+([A-Za-z0-9_-]+)\b", re.IGNORECASE).search(value)
     if not uid_match:
         return None
     uid = uid_match.group(1)
-    account = "Primary Inbox" if re.search(r"\bPrimary Inbox\b", value, re.IGNORECASE) else ""
-    if re.search(r"\bAI\s+Reply\b|\bAI[- ](?:generated|assisted)\s+reply\b", value, re.IGNORECASE):
+    account = "Primary Inbox" if _rx(r"\bPrimary Inbox\b", re.IGNORECASE).search(value) else ""
+    if _rx(r"\bAI\s+Reply\b|\bAI[- ](?:generated|assisted)\s+reply\b", re.IGNORECASE).search(value):
         args = {"uid": uid, "folder": "INBOX"}
         if account:
             args["account"] = account
         return "mcp__email__ai_draft_email_reply", json.dumps(args)
-    if _email_immediate_send_requested(value) and re.search(r"\brepl(?:y|ied)|\brespond", value, re.IGNORECASE):
-        body_match = re.search(r"\b(?:saying|say|with(?:\s+body)?)\s*:\s*(.+)$", value, re.IGNORECASE | re.DOTALL)
+    if _email_immediate_send_requested(value) and _rx(r"\brepl(?:y|ied)|\brespond", re.IGNORECASE).search(value):
+        body_match = _rx(r"\b(?:saying|say|with(?:\s+body)?)\s*:\s*(.+)$", re.IGNORECASE | re.DOTALL).search(value)
         if body_match:
             args = {"uid": uid, "folder": "INBOX", "body": body_match.group(1).strip()}
             if account:
                 args["account"] = account
             return "mcp__email__reply_to_email", json.dumps(args)
-    if re.search(r"\b(?:read|open|show|view)\b.{0,40}\b(?:email|message)?\s*UID\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:read|open|show|view)\b.{0,40}\b(?:email|message)?\s*UID\b", re.IGNORECASE).search(value):
         args = {"uid": uid, "folder": "INBOX"}
         if account:
             args["account"] = account
         return "mcp__email__read_email", json.dumps(args)
-    if re.search(r"\bunarchive\b|\brestore\b.{0,30}\b(?:inbox|email)\b", value, re.IGNORECASE):
+    if _rx(r"\bunarchive\b|\brestore\b.{0,30}\b(?:inbox|email)\b", re.IGNORECASE).search(value):
         args = {"action": "unarchive", "uid": uid, "folder": "Archive"}
         if account:
             args["account"] = account
         return "mcp__email__manage_email_state", json.dumps(args)
-    if re.search(r"\bmark\b.{0,80}\bunread\b", value, re.IGNORECASE):
+    if _rx(r"\bmark\b.{0,80}\bunread\b", re.IGNORECASE).search(value):
         args = {"uid": uid, "folder": "INBOX", "read": False}
         if account:
             args["account"] = account
         return "mcp__email__mark_email_read", json.dumps(args)
-    if re.search(r"\bmark\b.{0,80}\bread\b", value, re.IGNORECASE):
+    if _rx(r"\bmark\b.{0,80}\bread\b", re.IGNORECASE).search(value):
         args = {"uid": uid, "folder": "INBOX", "read": True}
         if account:
             args["account"] = account
         return "mcp__email__mark_email_read", json.dumps(args)
-    if re.search(r"\barchive\b", value, re.IGNORECASE):
+    if _rx(r"\barchive\b", re.IGNORECASE).search(value):
         args = {"uid": uid, "folder": "INBOX"}
         if account:
             args["account"] = account
@@ -3451,7 +3046,7 @@ def _parse_explicit_email_search_tool(text: str) -> Optional[tuple[str, str]]:
     args = _parse_qwen_explicit_email_search_request(text)
     if not args:
         return None
-    if re.search(r"\bPrimary Inbox\b", str(text or ""), re.IGNORECASE):
+    if _rx(r"\bPrimary Inbox\b", re.IGNORECASE).search(str(text or "")):
         args["account"] = "Primary Inbox"
     return "mcp__email__search_emails", json.dumps(args)
 
@@ -3460,22 +3055,22 @@ def _parse_qwen_explicit_spam_scan_request(text: str) -> Optional[dict[str, Any]
     value = str(text or "").strip()
     if not value:
         return None
-    if not re.search(r"\b(?:spam|phishing|junk|scam)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:spam|phishing|junk|scam)\b", re.IGNORECASE).search(value):
         return None
     if not (
-        re.search(r"\b(?:email|emails|mail|inbox|messages?)\b", value, re.IGNORECASE)
-        or re.search(r"\b(?:scan|check|find|review|look\s+for)\b", value, re.IGNORECASE)
+        _rx(r"\b(?:email|emails|mail|inbox|messages?)\b", re.IGNORECASE).search(value)
+        or _rx(r"\b(?:scan|check|find|review|look\s+for)\b", re.IGNORECASE).search(value)
     ):
         return None
-    if re.search(r"\b(?:move|delete|trash|block|unsubscribe|mark)\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:move|delete|trash|block|unsubscribe|mark)\b", re.IGNORECASE).search(value):
         return None
-    mentions_inbox = bool(re.search(r"\b(?:primary\s+)?inbox\b", value, re.IGNORECASE))
-    mentions_junk = bool(re.search(r"\bjunk\b", value, re.IGNORECASE))
+    mentions_inbox = bool(_rx(r"\b(?:primary\s+)?inbox\b", re.IGNORECASE).search(value))
+    mentions_junk = bool(_rx(r"\bjunk\b", re.IGNORECASE).search(value))
     if mentions_inbox and mentions_junk:
         return None
-    limit_match = re.search(r"\b(?:top|first|last|latest)?\s*(\d{1,2})\b", value)
+    limit_match = _rx(r"\b(?:top|first|last|latest)?\s*(\d{1,2})\b").search(value)
     limit = int(limit_match.group(1)) if limit_match else 10
-    folder = "Junk" if re.search(r"\bjunk\s+(?:folder|mailbox)\b|\bin\s+junk\b", value, re.IGNORECASE) else "INBOX"
+    folder = "Junk" if _rx(r"\bjunk\s+(?:folder|mailbox)\b|\bin\s+junk\b", re.IGNORECASE).search(value) else "INBOX"
     return {"folder": folder, "limit": min(max(limit, 1), 20), "max_scan": 100}
 
 
@@ -3483,11 +3078,11 @@ def _parse_qwen_explicit_unsubscribe_scan_request(text: str) -> Optional[dict[st
     value = str(text or "").strip()
     if not value:
         return None
-    if not re.search(r"\b(?:unsubscribe|unsubscribes|newsletter|subscription|mailing\s+list)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:unsubscribe|unsubscribes|newsletter|subscription|mailing\s+list)\b", re.IGNORECASE).search(value):
         return None
-    if re.search(r"\b(?:execute|do\s+it|use\s+unsubscribe|using\s+unsubscribe|unsubscribe\s+(?:me\s+)?from|click|open\s+the\s+unsubscribe)\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:execute|do\s+it|use\s+unsubscribe|using\s+unsubscribe|unsubscribe\s+(?:me\s+)?from|click|open\s+the\s+unsubscribe)\b", re.IGNORECASE).search(value):
         return None
-    limit_match = re.search(r"\b(?:top|first|last|latest)?\s*(\d{1,2})\b", value)
+    limit_match = _rx(r"\b(?:top|first|last|latest)?\s*(\d{1,2})\b").search(value)
     limit = int(limit_match.group(1)) if limit_match else 25
     return {"folder": "INBOX", "limit": min(max(limit, 1), 500), "max_scan": 500}
 
@@ -3496,15 +3091,15 @@ def _parse_qwen_explicit_unsubscribe_email_request(text: str) -> Optional[dict[s
     value = str(text or "").strip()
     if not value:
         return None
-    if not re.search(r"\b(?:unsubscribe|unsub)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:unsubscribe|unsub)\b", re.IGNORECASE).search(value):
         return None
-    if re.search(r"\b(?:preview|do\s+not|don't|dont|without\s+(?:doing|executing|changing))\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:preview|do\s+not|don't|dont|without\s+(?:doing|executing|changing))\b", re.IGNORECASE).search(value):
         return None
-    uid_match = re.search(r"\bUID\s*#?\s*([A-Za-z0-9_.:-]+)\b", value, re.IGNORECASE)
+    uid_match = _rx(r"\bUID\s*#?\s*([A-Za-z0-9_.:-]+)\b", re.IGNORECASE).search(value)
     if not uid_match:
         return None
     method_index = 0
-    method_match = re.search(r"\bmethod\s*(?:index\s*)?(?:#|number|no\.?)?\s*(\d{1,2})\b", value, re.IGNORECASE)
+    method_match = _rx(r"\bmethod\s*(?:index\s*)?(?:#|number|no\.?)?\s*(\d{1,2})\b", re.IGNORECASE).search(value)
     if method_match:
         method_index = int(method_match.group(1))
     return {"uid": uid_match.group(1), "folder": "INBOX", "method_index": method_index, "allow_web": False}
@@ -3514,20 +3109,20 @@ def _parse_qwen_explicit_download_attachment_request(text: str) -> Optional[dict
     value = str(text or "").strip()
     if not value:
         return None
-    if not re.search(r"\b(?:attachment|attachments|attached|pdf|csv|file|files|packet|bundle)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:attachment|attachments|attached|pdf|csv|file|files|packet|bundle)\b", re.IGNORECASE).search(value):
         return None
-    if not re.search(r"\b(?:open|read|show|view|download|summari[sz]e|what\s+(?:does|did|is)|tell\s+me)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:open|read|show|view|download|summari[sz]e|what\s+(?:does|did|is)|tell\s+me)\b", re.IGNORECASE).search(value):
         return None
-    uid_match = re.search(r"\bUID\s*#?\s*([A-Za-z0-9_.:-]+)\b", value, re.IGNORECASE)
+    uid_match = _rx(r"\bUID\s*#?\s*([A-Za-z0-9_.:-]+)\b", re.IGNORECASE).search(value)
     if not uid_match:
         return None
     index = 0
-    index_match = re.search(r"\b(?:attachment|file|index)\s*(?:#|number|no\.?)?\s*(\d{1,2})\b", value, re.IGNORECASE)
+    index_match = _rx(r"\b(?:attachment|file|index)\s*(?:#|number|no\.?)?\s*(\d{1,2})\b", re.IGNORECASE).search(value)
     if index_match:
         # Users usually count visible attachments from 1; the MCP tool uses a
         # zero-based index. Keep explicit "index 0" as 0.
         raw_index = int(index_match.group(1))
-        index = raw_index if re.search(r"\bindex\s*0\b", value, re.IGNORECASE) else max(raw_index - 1, 0)
+        index = raw_index if _rx(r"\bindex\s*0\b", re.IGNORECASE).search(value) else max(raw_index - 1, 0)
     return {"uid": uid_match.group(1), "index": index, "folder": "INBOX"}
 
 
@@ -3535,25 +3130,25 @@ def _parse_qwen_explicit_blocked_sender_list_request(text: str) -> Optional[dict
     value = str(text or "").strip()
     if not value:
         return None
-    if not re.search(r"\b(?:email|emails|mail|sender|senders|address|addresses)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:email|emails|mail|sender|senders|address|addresses)\b", re.IGNORECASE).search(value):
         return None
-    if not re.search(r"\b(?:blocked|blocklist|block\s+list|blocked\s+list)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:blocked|blocklist|block\s+list|blocked\s+list)\b", re.IGNORECASE).search(value):
         return None
-    if re.search(r"\b(?:unblock|remove|delete|clear)\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:unblock|remove|delete|clear)\b", re.IGNORECASE).search(value):
         return None
     return {}
 
 
 def _parse_qwen_explicit_block_sender_request(text: str) -> Optional[dict[str, Any]]:
     value = str(text or "").strip()
-    if not value or not re.search(r"\bblock(?:\s+this)?\s+sender\b|\bblock\b", value, re.IGNORECASE):
+    if not value or not _rx(r"\bblock(?:\s+this)?\s+sender\b|\bblock\b", re.IGNORECASE).search(value):
         return None
-    if re.search(r"\b(?:should\s+i|should\s+we|would\s+you|can\s+i|do\s+you\s+think)\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:should\s+i|should\s+we|would\s+you|can\s+i|do\s+you\s+think)\b", re.IGNORECASE).search(value):
         return None
     address = next(iter_email_addresses(value), "")
     if not address:
         return None
-    move_existing = not re.search(r"\b(?:do\s+not|don't|dont)\s+(?:move|delete|trash|junk)\b|\bleave\s+existing\b", value, re.IGNORECASE)
+    move_existing = not _rx(r"\b(?:do\s+not|don't|dont)\s+(?:move|delete|trash|junk)\b|\bleave\s+existing\b", re.IGNORECASE).search(value)
     return {
         "sender": address,
         "folder": "INBOX",
@@ -3565,28 +3160,28 @@ def _parse_qwen_explicit_block_sender_request(text: str) -> Optional[dict[str, A
 def _parse_qwen_explicit_bulk_email_request(text: str) -> Optional[dict[str, Any]]:
     value = str(text or "").strip()
     q = value.lower()
-    if not value or not re.search(r"\b(?:email|emails|message|messages|uid|uids)\b", q):
+    if not value or not _rx(r"\b(?:email|emails|message|messages|uid|uids)\b").search(q):
         return None
-    uids = re.findall(r"\bUID(?:\s*#?\s*|\s+)([A-Za-z0-9_.:-]+)\b", value, re.IGNORECASE)
-    if re.search(r"\bUIDs\b", value, re.IGNORECASE):
+    uids = _rx(r"\bUID(?:\s*#?\s*|\s+)([A-Za-z0-9_.:-]+)\b", re.IGNORECASE).findall(value)
+    if _rx(r"\bUIDs\b", re.IGNORECASE).search(value):
         uids = []
     if not uids:
-        uid_list_match = re.search(r"\bUIDs?\s+([A-Za-z0-9_.:,\s-]+)", value, re.IGNORECASE)
+        uid_list_match = _rx(r"\bUIDs?\s+([A-Za-z0-9_.:,\s-]+)", re.IGNORECASE).search(value)
         if uid_list_match:
-            uids = re.findall(r"[A-Za-z0-9_.:-]+", uid_list_match.group(1))
-    uids = [uid for uid in uids if re.search(r"\d", uid)]
+            uids = _rx(r"[A-Za-z0-9_.:-]+").findall(uid_list_match.group(1))
+    uids = [uid for uid in uids if _rx(r"\d").search(uid)]
     if len(set(uids)) < 2:
         return None
     action = ""
-    if re.search(r"\bmark\b.{0,40}\bread\b|\bread\b.{0,40}\bmark\b", q):
+    if _rx(r"\bmark\b.{0,40}\bread\b|\bread\b.{0,40}\bmark\b").search(q):
         action = "mark_read"
-    elif re.search(r"\bmark\b.{0,40}\bunread\b|\bunread\b.{0,40}\bmark\b", q):
+    elif _rx(r"\bmark\b.{0,40}\bunread\b|\bunread\b.{0,40}\bmark\b").search(q):
         action = "mark_unread"
-    elif re.search(r"\barchive\b", q):
+    elif _rx(r"\barchive\b").search(q):
         action = "archive"
-    elif re.search(r"\b(?:delete|trash)\b", q):
+    elif _rx(r"\b(?:delete|trash)\b").search(q):
         action = "delete"
-    elif re.search(r"\b(?:junk|spam)\b", q):
+    elif _rx(r"\b(?:junk|spam)\b").search(q):
         action = "junk"
     if not action:
         return None
@@ -3595,7 +3190,7 @@ def _parse_qwen_explicit_bulk_email_request(text: str) -> Optional[dict[str, Any
 
 def _parse_qwen_explicit_unblock_sender_request(text: str) -> Optional[dict[str, Any]]:
     value = str(text or "").strip()
-    if not value or not re.search(r"\b(?:unblock|allow|remove\s+from\s+block)\b", value, re.IGNORECASE):
+    if not value or not _rx(r"\b(?:unblock|allow|remove\s+from\s+block)\b", re.IGNORECASE).search(value):
         return None
     address = next(iter_email_addresses(value), "")
     if not address:
@@ -3605,8 +3200,8 @@ def _parse_qwen_explicit_unblock_sender_request(text: str) -> Optional[dict[str,
 
 def _email_relative_date_range(text: str) -> Optional[dict[str, str]]:
     value = str(text or "").lower()
-    today = date.today()
-    if re.search(r"\blast\s+month\b", value):
+    today = now_user_local().date()
+    if _rx(r"\blast\s+month\b").search(value):
         start_this_month = today.replace(day=1)
         end = start_this_month
         if start_this_month.month == 1:
@@ -3614,11 +3209,11 @@ def _email_relative_date_range(text: str) -> Optional[dict[str, str]]:
         else:
             start = start_this_month.replace(month=start_this_month.month - 1)
         return {"date_from": start.isoformat(), "date_to": end.isoformat()}
-    if re.search(r"\blast\s+year\b", value):
+    if _rx(r"\blast\s+year\b").search(value):
         start = date(today.year - 1, 1, 1)
         end = date(today.year, 1, 1)
         return {"date_from": start.isoformat(), "date_to": end.isoformat()}
-    if re.search(r"\blast\s+week\b", value):
+    if _rx(r"\blast\s+week\b").search(value):
         start = today - timedelta(days=7)
         end = today
         return {"date_from": start.isoformat(), "date_to": end.isoformat()}
@@ -3627,9 +3222,9 @@ def _email_relative_date_range(text: str) -> Optional[dict[str, str]]:
 
 def _parse_qwen_explicit_email_date_list_request(text: str) -> Optional[dict[str, Any]]:
     value = str(text or "").strip()
-    if not value or not re.search(r"\b(?:emails?|mail|inbox|messages?)\b", value, re.IGNORECASE):
+    if not value or not _rx(r"\b(?:emails?|mail|inbox|messages?)\b", re.IGNORECASE).search(value):
         return None
-    if not re.search(r"\b(?:show|list|check|find|search|view)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:show|list|check|find|search|view)\b", re.IGNORECASE).search(value):
         return None
     date_range = _email_relative_date_range(value)
     if not date_range:
@@ -3637,185 +3232,15 @@ def _parse_qwen_explicit_email_date_list_request(text: str) -> Optional[dict[str
     return {"folder": "INBOX", "max_results": 50, "unread_only": False, **date_range}
 
 
-def _qwen_no_tool_boundary_answer(text: str) -> Optional[str]:
-    """Direct answers for domain-word prompts that explicitly should not use tools."""
-    value = str(text or "").strip()
-    if not value:
-        return None
-    lowered = value.lower()
-
-    if re.search(r"\bwhat\s+does\s+e-?mail\s+(?:stand\s+for|mean)\b", lowered):
-        return "Email stands for electronic mail: messages sent electronically between people or systems."
-    if re.search(r"\bwhat\s+does\s+['\"]?reply all['\"]?\s+mean\b", lowered):
-        return "Reply all means sending your email response to the original sender and everyone else included on the thread."
-    if re.search(r"\bemail\s+subject\s+line\b", lowered):
-        return "An email subject line is the short title or preview text that tells the recipient what the message is about."
-    if (
-        re.search(r"\binbox\b", lowered)
-        and re.search(r"\b(?:what|clarify|explain|mean)\b", lowered)
-        and not re.search(r"\b(?:latest|newest|recent|most\s+recent|show|list|open)\b", lowered)
-    ):
-        return "An email inbox is the place where received messages are collected so you can read, organize, and reply to them."
-    if re.search(r"\bemail\s+thread\b", lowered):
-        return "An email thread is a group of related messages and replies kept together as one conversation."
-    if re.search(r"\bemail\s+attachment\b", lowered):
-        return "An email attachment is a file included with an email message, such as a document, image, or PDF."
-    if (
-        re.search(r"\b(?:write|draft)\b", lowered)
-        and re.search(r"\bemail\b", lowered)
-        and re.search(r"\b(?:don'?t|do\s+not)\s+send\b|\bwithout\s+sending\b", lowered)
-        and len(value) <= 400
-        and not re.search(
-            r"(?:^|\n)\s*\d+[.)]\s|"
-            r"\b(?:first|then|also|read|check|look\s+up|coordinate|create|"
-            r"schedule|notify)\b",
-            lowered,
-        )
-        and not re.search(
-            r"\bUID\s+[A-Za-z0-9_-]+\b|\brepl(?:y|ied|ying)\b|\brespond\b|"
-            r"\bAI\s+Reply\b|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}",
-            value,
-            re.IGNORECASE,
-        )
-    ):
-        if re.search(r"\bthanks?\b|\bupdate\b", lowered):
-            return "Thanks for the update, I appreciate you keeping me in the loop."
-        return "Here's a concise draft: Thanks for reaching out. I appreciate the update."
-
-    if re.search(r"\bwhat\s+is\s+a\s+calendar\s+invite\b", lowered):
-        return "A calendar invite is an invitation to an event or meeting that can be added to someone's calendar."
-    if re.search(r"\brsvp\b", lowered) and re.search(r"\bcalendar\b|\bevent\b|\binvite\b", lowered):
-        return "RSVP on a calendar event is the attendee's response, such as yes, no, or maybe."
-    if (
-        re.search(r"\bdifference\b", lowered)
-        and re.search(r"\breminder\b", lowered)
-        and re.search(r"\bevent\b", lowered)
-    ):
-        return "A calendar event blocks or records time on a schedule; a reminder is an alert or prompt about something to do."
-    if re.search(r"\brecurring\s+meeting\b", lowered) and re.search(r"\bone[- ]off\b", lowered):
-        return "A recurring meeting repeats on a schedule, while a one-off meeting happens only once."
-    if re.search(r"\bshared\s+calendar\b", lowered):
-        return "A shared calendar is a calendar multiple people can view or edit so they can coordinate events and availability."
-    if (
-        re.search(r"\bcalendar\b", lowered)
-        and re.search(r"\b(?:joke|pun)\b", lowered)
-        and re.search(r"\b(?:don'?t|do\s+not)\s+(?:add|schedule)\b|\bwithout\s+scheduling\b", lowered)
-    ):
-        return "My calendar tried to make plans, but every date was already taken."
-    if re.search(r"\bwhat\s+does\b.*\btomorrow\s+morning\b", lowered):
-        return "It usually means the morning of the next day after today."
-    if re.search(r"\bwhat\s+does\b.*\btomorrow\s+at\s+8\b", lowered):
-        return "It usually means 8 o'clock on the next day; the exact AM or PM depends on context."
-    if (
-        re.search(r"\b(?:calendar|event|appointment|meeting|dinner|lunch|dentist|workout|schedule|book|reschedule|move|shift|change|set)\b", lowered)
-        and re.search(r"\b(?:tomorrow|tmrw|today|friday|monday|tuesday|wednesday|thursday|saturday|sunday)?\s*(?:at|to|for)\s+8\b", lowered)
-        and not re.search(r"\b(?:8\s*(?:am|pm)|8\s*:\s*\d{2}|morning|evening|night|tonight|afternoon)\b", lowered)
-    ):
-        return "Do you mean 8 AM or 8 PM?"
-
-    if (
-        re.search(r"\bweb\s+search\s+engine\b", lowered)
-        and re.search(r"\bwithout\s+(?:looking\s+anything\s+up|searching)\b|\bdon'?t\s+look\s+it\s+up\b", lowered)
-    ):
-        return "A web search engine indexes pages and lets people search those pages by keywords or questions."
-    if re.search(r"\bvat\b", lowered) and re.search(r"\b(?:stands?\s+for|mean)\b", lowered):
-        return "VAT stands for value-added tax."
-    if re.search(r"\bpublic\s+domain\s+art\b", lowered) and re.search(r"\b(?:good\s+sites?|sites?|resources?|where)\b", lowered):
-        return (
-            "Good public-domain art sources include Wikimedia Commons, The Met Open Access, "
-            "Rijksmuseum, Smithsonian Open Access, the Library of Congress, and the Art Institute of Chicago."
-        )
-    if re.search(r"\bpublic\s+domain\s+art\b", lowered) and re.search(r"\b(?:remember|before\s+buying|buying)\b", lowered):
-        return (
-            "Before buying public-domain art, verify the source and license, keep provenance or rights notes, "
-            "check whether the work is public domain in your jurisdiction, and watch for restrictions on photos of the artwork."
-        )
-    if re.search(r"\bsweden\b", lowered) and re.search(r"\bbordered\s+by\b|\bborders\b", lowered):
-        return "Sweden has land borders with Norway and Finland, and maritime neighbors across the Baltic Sea and Oresund."
-    if re.search(r"\bremember\b", lowered) and re.search(r"\bcomputer\b|\bcomputing\b", lowered):
-        return "In computing, to remember something means storing data in memory or persistent storage so it can be retrieved later."
-    if re.search(r"\bsearch\s+engine\b", lowered) and re.search(r"\bwithout\s+looking\s+it\s+up\b|\bdon'?t\s+search\b", lowered):
-        return "A search engine indexes web pages and ranks matching results for the words or questions people enter."
-    if re.search(r"\bphotosynthesis\b", lowered) and re.search(r"\bwithout\s+looking\s+it\s+up\b|\bdon'?t\s+search\b|\bno\s+web\b", lowered):
-        return "Photosynthesis is how plants, algae, and some bacteria use light energy to turn carbon dioxide and water into sugars, releasing oxygen as a byproduct."
-    if re.search(r"\bonions?\b", lowered) and re.search(r"\bcry\b", lowered) and re.search(r"\bno\s+web\b|\bdon'?t\s+search\b|\bwithout\s+searching\b", lowered):
-        return "Cut onions release sulfur compounds that form an eye-irritating gas. Your eyes tear up to dilute and wash the irritant away."
-    if re.search(r"\blithium[- ]ion\s+batter(?:y|ies)\b", lowered) and re.search(r"\bmemory\s+only\b|\bwithout\s+looking\s+it\s+up\b|\bdon'?t\s+search\b", lowered):
-        return "A lithium-ion battery stores energy by moving lithium ions between electrodes during charging and discharging."
-    if re.search(r"\binflation\b", lowered) and re.search(r"\bdo\s+not\s+search\b|\bdon'?t\s+search\b|\bno\s+web\b", lowered):
-        return "Inflation means prices are rising across the economy, so the same amount of money buys less than before."
-    if re.search(r"\bsearch\s+engines?\b", lowered) and re.search(r"\brank\s+pages\b", lowered):
-        return "Search engines rank web pages by estimating relevance and quality from signals like page text, links, freshness, location, and user intent."
-    if (
-        re.search(r"\bsearch\s+results\b", lowered)
-        and re.search(r"\bwithout\s+searching\b|\bdon'?t\s+look\s+it\s+up\b", lowered)
-    ):
-        return "Search results are the list of pages, snippets, or answers a search engine returns for a query."
-    if re.search(r"\burl\b", lowered) and re.search(r"\bdon'?t\s+look\s+this\s+up\b|\bwithout\s+searching\b", lowered):
-        return "A URL is the web address that points to a page or resource on the internet."
-    if re.search(r"\bad\s+blocker\b", lowered) and re.search(r"\bdon'?t\s+search\b|\bwithout\s+searching\b", lowered):
-        return "An ad blocker is software that filters web pages to hide or stop ads, trackers, or pop-ups from loading."
-    if (
-        re.search(r"\bcached\s+web\s+(?:pages?|content)\b", lowered)
-        and re.search(r"\bdon'?t\s+search\b|\bwithout\s+(?:opening|searching)\b", lowered)
-    ):
-        return "Cached web content is a stored copy of a page or resource kept by a browser, search engine, or service so it can load faster or be referenced later."
-    if re.search(r"\bincognito\b", lowered) and re.search(r"\b(?:browse|web)\b", lowered):
-        return "Incognito browsing is a private browser session that avoids saving local history, cookies, and form data after the window closes."
-    if (
-        re.search(r"\bsnails?\b", lowered)
-        and re.search(r"\b(?:bubble|bubbles|foam|foaming)\b", lowered)
-        and re.search(r"\bwithout\s+searching\b|\bdon'?t\s+look\s+it\s+up\b", lowered)
-    ):
-        return "A snail might make mucus bubbles when stressed, irritated, drying out, or defending itself."
-    if (
-        re.search(r"\bsnails?\b", lowered)
-        and re.search(r"\b(?:bubble|bubbles|bubbling|foam|foaming)\b", lowered)
-        and not re.search(r"\b(?:search|look\s*up|lookup|find\s*out|check\s+(?:online|the\s+web)|web|online|google|browse)\b", lowered)
-    ):
-        return (
-            "Snails bubble because air gets trapped in their mucus, making foam. "
-            "That usually happens when they are stressed, irritated, disturbed, defending themselves, "
-            "or trying to hold moisture."
-        )
-    if (
-        re.search(r"\b(?:polite\s+way|phrase|phrasing)\b", lowered)
-        and re.search(r"\b8\s*am\s+works\b", lowered)
-    ):
-        return "A polite phrasing is: 8am works well for me, thank you."
-    if (
-        re.search(r"\b8\s*am\b", lowered)
-        and re.search(r"\bmeeting\b", lowered)
-        and re.search(r"\b(?:too\s+early|suggest)\b", lowered)
-    ):
-        return "It depends on the people and timezone, but 8am can feel early unless everyone expects a morning schedule."
-
-    return None
-
-
 def _parse_qwen_explicit_calendar_delete(text: str) -> Optional[str]:
     value = str(text or "").strip()
-    if not re.search(r"\b(?:delete|remove|cancel|get\s+rid\s+of)\b", value, re.IGNORECASE) or not re.search(
-        r"\b(?:(?:calendar\s+)?event|schedule)\b", value, re.IGNORECASE
-    ):
+    if not _rx(r"\b(?:delete|remove|cancel|get\s+rid\s+of)\b", re.IGNORECASE).search(value) or not _rx(r"\b(?:(?:calendar\s+)?event|schedule)\b", re.IGNORECASE).search(value):
         return None
-    match = re.search(
-        r"\bevent\s+(?:titled|called|named)?\s*([A-Za-z0-9][A-Za-z0-9_.-]{2,120})",
-        value,
-        re.IGNORECASE,
-    )
+    match = _rx(r"\bevent\s+(?:titled|called|named)?\s*([A-Za-z0-9][A-Za-z0-9_.-]{2,120})", re.IGNORECASE).search(value)
     if not match:
-        match = re.search(
-            r"\b(?:delete|remove|cancel|get\s+rid\s+of)\s+([A-Za-z0-9][A-Za-z0-9_.-]{2,120})\s+(?:from|on)\s+(?:my\s+)?schedule\b",
-            value,
-            re.IGNORECASE,
-        )
+        match = _rx(r"\b(?:delete|remove|cancel|get\s+rid\s+of)\s+([A-Za-z0-9][A-Za-z0-9_.-]{2,120})\s+(?:from|on)\s+(?:my\s+)?schedule\b", re.IGNORECASE).search(value)
     if not match:
-        match = re.search(
-            r"\b(?:delete|remove|cancel|get\s+rid\s+of)\s+([A-Za-z0-9][A-Za-z0-9_.-]{2,120})\s+(?:from|on)\s+(?:my\s+)?calendar\b",
-            value,
-            re.IGNORECASE,
-        )
+        match = _rx(r"\b(?:delete|remove|cancel|get\s+rid\s+of)\s+([A-Za-z0-9][A-Za-z0-9_.-]{2,120})\s+(?:from|on)\s+(?:my\s+)?calendar\b", re.IGNORECASE).search(value)
     if not match:
         return None
     candidate = match.group(1).rstrip(".")
@@ -3830,58 +3255,33 @@ def _parse_qwen_explicit_calendar_delete(text: str) -> Optional[str]:
 def _parse_qwen_explicit_calendar_move(text: str) -> Optional[dict[str, Any]]:
     """Extract a named tomorrow calendar move into an update_event call."""
     value = str(text or "").strip()
-    if not re.search(r"\b(?:move|shift|reschedule|change)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:move|shift|reschedule|change)\b", re.IGNORECASE).search(value):
         return None
     bare_timed_reschedule = (
-        re.search(
-            r"^\s*(?:please\s+)?(?:move|shift|reschedule|change(?:\s+the\s+time\s+of)?)\s+"
+        _rx(r"^\s*(?:please\s+)?(?:move|shift|reschedule|change(?:\s+the\s+time\s+of)?)\s+"
             r"[A-Za-z0-9][A-Za-z0-9_.-]{2,120}\s+to\s+(?:tomorrow\s+at\s+)?"
-            r"\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s+tomorrow)?\.?\s*$",
-            value,
-            re.IGNORECASE,
-        )
-        and not re.search(r"\b(?:task|todo|to-do|reminder|remind)\b", value, re.IGNORECASE)
+            r"\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s+tomorrow)?\.?\s*$", re.IGNORECASE).search(value)
+        and not _rx(r"\b(?:task|todo|to-do|reminder|remind)\b", re.IGNORECASE).search(value)
     )
-    if not re.search(r"\b(?:calendar|event|meeting|appointment)\b", value, re.IGNORECASE) and not bare_timed_reschedule:
+    if not _rx(r"\b(?:calendar|event|meeting|appointment)\b", re.IGNORECASE).search(value) and not bare_timed_reschedule:
         return None
-    if not re.search(r"\btomorrow\b", value, re.IGNORECASE):
+    if not _rx(r"\btomorrow\b", re.IGNORECASE).search(value):
         return None
-    title_match = re.search(
-        r"\b(?:event|meeting|appointment)\s+(?:titled|called|named)?\s*([A-Za-z0-9][A-Za-z0-9_.-]{2,120})",
-        value,
-        re.IGNORECASE,
-    )
+    title_match = _rx(r"\b(?:event|meeting|appointment)\s+(?:titled|called|named)?\s*([A-Za-z0-9][A-Za-z0-9_.-]{2,120})", re.IGNORECASE).search(value)
     if not title_match:
-        title_match = re.search(
-            r"\b([A-Za-z0-9][A-Za-z0-9_.-]{2,120})\s+on\s+my\s+calendar\b",
-            value,
-            re.IGNORECASE,
-        )
-    if not title_match and not re.search(r"\b(?:task|todo|to-do|reminder|remind)\b", value, re.IGNORECASE):
-        title_match = re.search(
-            r"^\s*(?:please\s+)?(?:move|shift|reschedule|change(?:\s+the\s+time\s+of)?)\s+([A-Za-z0-9][A-Za-z0-9_.-]{2,120})\s+(?:on\s+my\s+calendar\s+)?to\b",
-            value,
-            re.IGNORECASE,
-        )
-    time_match = re.search(
-        r"\b(?:to\s+(?:tomorrow\s+at\s+)?|at\s+)(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s+tomorrow)?\b",
-        value,
-        re.IGNORECASE,
-    )
+        title_match = _rx(r"\b([A-Za-z0-9][A-Za-z0-9_.-]{2,120})\s+on\s+my\s+calendar\b", re.IGNORECASE).search(value)
+    if not title_match and not _rx(r"\b(?:task|todo|to-do|reminder|remind)\b", re.IGNORECASE).search(value):
+        title_match = _rx(r"^\s*(?:please\s+)?(?:move|shift|reschedule|change(?:\s+the\s+time\s+of)?)\s+([A-Za-z0-9][A-Za-z0-9_.-]{2,120})\s+(?:on\s+my\s+calendar\s+)?to\b", re.IGNORECASE).search(value)
+    time_match = _rx(r"\b(?:to\s+(?:tomorrow\s+at\s+)?|at\s+)(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s+tomorrow)?\b", re.IGNORECASE).search(value)
     if not title_match or not time_match:
         return None
 
-    from datetime import date, timedelta
-    try:
-        from src.user_time import now_user_local
-        target_date = now_user_local().date() + timedelta(days=1)
-    except Exception:
-        target_date = date.today() + timedelta(days=1)
+    target_date = now_user_local().date() + timedelta(days=1)
 
     hour = int(time_match.group(1))
     minute = int(time_match.group(2) or "0")
     ampm = (time_match.group(3) or "").lower()
-    if not ampm and re.search(r"\b(?:evening|tonight)\b", value, re.IGNORECASE):
+    if not ampm and _rx(r"\b(?:evening|tonight)\b", re.IGNORECASE).search(value):
         ampm = "pm"
     if ampm == "pm" and hour < 12:
         hour += 12
@@ -3900,21 +3300,16 @@ def _parse_qwen_explicit_calendar_move(text: str) -> Optional[dict[str, Any]]:
 
 def _parse_qwen_explicit_calendar_absence_verify(text: str) -> Optional[dict[str, str]]:
     value = str(text or "").strip()
-    if not re.search(r"\b(?:verify|check|confirm)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:verify|check|confirm)\b", re.IGNORECASE).search(value):
         return None
-    if not re.search(r"\b(?:absent|missing|no\s+longer\s+exists|does\s+not\s+exist)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:absent|missing|no\s+longer\s+exists|does\s+not\s+exist)\b", re.IGNORECASE).search(value):
         return None
-    if not re.search(r"\b(?:calendar\s+)?event\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:calendar\s+)?event\b", re.IGNORECASE).search(value):
         return None
-    title_match = re.search(
-        r"\bevent\s+(?:titled\s+)?([A-Za-z0-9][A-Za-z0-9_.-]{2,120})",
-        value,
-        re.IGNORECASE,
-    )
-    date_match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\s+range\b", value, re.IGNORECASE)
+    title_match = _rx(r"\bevent\s+(?:titled\s+)?([A-Za-z0-9][A-Za-z0-9_.-]{2,120})", re.IGNORECASE).search(value)
+    date_match = _rx(r"\b(20\d{2}-\d{2}-\d{2})\s+range\b", re.IGNORECASE).search(value)
     if not title_match or not date_match:
         return None
-    from datetime import datetime, timedelta
 
     start = date_match.group(1)
     try:
@@ -3931,32 +3326,24 @@ def _parse_qwen_explicit_calendar_absence_verify(text: str) -> Optional[dict[str
 
 def _parse_qwen_explicit_memory_search(text: str) -> Optional[str]:
     value = str(text or "").strip()
-    if not re.search(r"\bmemory\b", value, re.IGNORECASE):
+    if not _rx(r"\bmemory\b", re.IGNORECASE).search(value):
         return None
-    if not re.search(r"\b(?:search|find|look\s*up)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:search|find|look\s*up)\b", re.IGNORECASE).search(value):
         return None
-    if re.search(r"\b(?:delete|remove)\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:delete|remove)\b", re.IGNORECASE).search(value):
         return None
-    match = re.search(
-        r"\b(?:exact\s+)?marker\s+([A-Za-z0-9][A-Za-z0-9_.-]{3,120})",
-        value,
-        re.IGNORECASE,
-    )
+    match = _rx(r"\b(?:exact\s+)?marker\s+([A-Za-z0-9][A-Za-z0-9_.-]{3,120})", re.IGNORECASE).search(value)
     return match.group(1).rstrip(".") if match else None
 
 
 def _parse_qwen_explicit_memory_delete(text: str) -> Optional[str]:
     """Extract an exact marker from a destructive saved-memory request."""
     value = str(text or "").strip()
-    if not re.search(r"\b(?:delete|remove|forget)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:delete|remove|forget)\b", re.IGNORECASE).search(value):
         return None
-    if not re.search(r"\b(?:memory|memories|saved\s+memory)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:memory|memories|saved\s+memory)\b", re.IGNORECASE).search(value):
         return None
-    match = re.search(
-        r"\b(?:exact\s+)?marker\s+([A-Za-z0-9][A-Za-z0-9_.-]{3,120})",
-        value,
-        re.IGNORECASE,
-    )
+    match = _rx(r"\b(?:exact\s+)?marker\s+([A-Za-z0-9][A-Za-z0-9_.-]{3,120})", re.IGNORECASE).search(value)
     if match:
         return match.group(1).rstrip(".")
     return None
@@ -3995,29 +3382,21 @@ def _extract_memory_add_text_from_user(text: str) -> str:
     for pattern in patterns:
         match = re.search(pattern, value, re.IGNORECASE | re.DOTALL)
         if match:
-            return re.sub(r"\s+", " ", match.group(1)).strip(" .")
+            return _rx(r"\s+").sub(" ", match.group(1)).strip(" .")
     return ""
 
 
 def _parse_qwen_explicit_document_request(text: str) -> Optional[tuple[str, str]]:
     value = str(text or "").strip()
-    if not re.search(r"\bdocuments?\b", value, re.IGNORECASE):
+    if not _rx(r"\bdocuments?\b", re.IGNORECASE).search(value):
         return None
-    if re.search(
-        r"^\s*(?:please\s+)?(?:"
+    if _rx(r"^\s*(?:please\s+)?(?:"
         r"(?:show|list|view|check)\s+(?:me\s+)?(?:my\s+|the\s+|all\s+|available\s+)?documents?"
         r"|what\s+documents?\s+(?:do\s+i\s+have|are\s+(?:available|there))"
-        r")\??\s*$",
-        value,
-        re.IGNORECASE,
-    ):
+        r")\??\s*$", re.IGNORECASE).search(value):
         return "manage_documents", json.dumps({"action": "list"})
-    if re.search(r"\b(?:edit|replace|change|update)\b", value, re.IGNORECASE):
-        match = re.search(
-            r"replace\s+(['\"])(.*?)\1\s+with\s+(['\"])(.*?)\3",
-            value,
-            re.IGNORECASE,
-        )
+    if _rx(r"\b(?:edit|replace|change|update)\b", re.IGNORECASE).search(value):
+        match = _rx(r"replace\s+(['\"])(.*?)\1\s+with\s+(['\"])(.*?)\3", re.IGNORECASE).search(value)
         if match:
             return "edit_document", (
                 "<<<FIND>>>\n"
@@ -4026,7 +3405,7 @@ def _parse_qwen_explicit_document_request(text: str) -> Optional[tuple[str, str]
                 + match.group(4)
                 + "\n<<<END>>>"
             )
-    if re.search(r"\bdelete\b", value, re.IGNORECASE):
+    if _rx(r"\bdelete\b", re.IGNORECASE).search(value):
         return "manage_documents", json.dumps({"action": "delete"})
     return None
 
@@ -4034,13 +3413,9 @@ def _parse_qwen_explicit_document_request(text: str) -> Optional[tuple[str, str]
 def _parse_qwen_document_absence_verify(text: str) -> str:
     """Extract a document title from absence-verification wording."""
     value = str(text or "").strip()
-    if not re.search(r"\bdocuments?\b", value, re.IGNORECASE):
+    if not _rx(r"\bdocuments?\b", re.IGNORECASE).search(value):
         return ""
-    if not re.search(
-        r"\b(?:verify|confirm|check|search|find|absent|no\s+longer\s+exists|does(?:n't| not)\s+exist)\b",
-        value,
-        re.IGNORECASE,
-    ):
+    if not _rx(r"\b(?:verify|confirm|check|search|find|absent|no\s+longer\s+exists|does(?:n't| not)\s+exist)\b", re.IGNORECASE).search(value):
         return ""
     patterns = [
         r"\b(?:editor\s+)?document\s+(?:titled|called|named)\s+(.+?)\s+(?:no\s+longer\s+exists|does(?:n't| not)\s+exist|is\s+absent)\b",
@@ -4050,7 +3425,7 @@ def _parse_qwen_document_absence_verify(text: str) -> str:
     for pattern in patterns:
         match = re.search(pattern, value, re.IGNORECASE | re.DOTALL)
         if match:
-            title = re.sub(r"\s+", " ", match.group(1)).strip(" .\"'")
+            title = _rx(r"\s+").sub(" ", match.group(1)).strip(" .\"'")
             if title:
                 return title
     return ""
@@ -4058,46 +3433,29 @@ def _parse_qwen_document_absence_verify(text: str) -> str:
 
 def _parse_qwen_explicit_contact_request(text: str) -> Optional[tuple[str, str]]:
     value = str(text or "").strip()
-    if not re.search(r"\bcontact\b", value, re.IGNORECASE):
+    if not _rx(r"\bcontact\b", re.IGNORECASE).search(value):
         return None
-    value_for_intent = re.sub(
-        r"\bdo\s+not\s+(?:delete|remove|update|change|edit|add|create)\b",
-        "do not",
-        value,
-        flags=re.IGNORECASE,
-    )
-    name_match = re.search(
-        r"\bcontact\s+named\s+([A-Za-z0-9][A-Za-z0-9_.-]{2,120})",
-        value,
-        re.IGNORECASE,
-    )
+    value_for_intent = _rx(r"\bdo\s+not\s+(?:delete|remove|update|change|edit|add|create)\b", re.IGNORECASE).sub("do not", value)
+    name_match = _rx(r"\bcontact\s+named\s+([A-Za-z0-9][A-Za-z0-9_.-]{2,120})", re.IGNORECASE).search(value)
     _contact_lookup_request = bool(
-        re.search(r"\b(?:verify|check|confirm|search|find)\b", value, re.IGNORECASE)
-        and not re.search(
-            r"\b(?:delete|remove|update|change|edit|add|create)\b",
-            value_for_intent,
-            re.IGNORECASE,
-        )
+        _rx(r"\b(?:verify|check|confirm|search|find)\b", re.IGNORECASE).search(value)
+        and not _rx(r"\b(?:delete|remove|update|change|edit|add|create)\b", re.IGNORECASE).search(value_for_intent)
     )
     if not name_match and _contact_lookup_request:
-        name_match = re.search(
-            r"\bcontact\s+([A-Za-z0-9][A-Za-z0-9_.-]{2,120})",
-            value,
-            re.IGNORECASE,
-        )
+        name_match = _rx(r"\bcontact\s+([A-Za-z0-9][A-Za-z0-9_.-]{2,120})", re.IGNORECASE).search(value)
     if not name_match:
         return None
     if _contact_lookup_request:
         return "manage_contact", json.dumps({
             "action": "search", "query": name_match.group(1).rstrip(".")
         })
-    if re.search(r"\b(?:update|change|edit)\b", value, re.IGNORECASE):
-        phone = re.search(r"\bphone\s+(?:to\s+)?([+0-9][0-9() -]+)", value, re.IGNORECASE)
+    if _rx(r"\b(?:update|change|edit)\b", re.IGNORECASE).search(value):
+        phone = _rx(r"\bphone\s+(?:to\s+)?([+0-9][0-9() -]+)", re.IGNORECASE).search(value)
         args: dict[str, Any] = {"action": "update", "name": name_match.group(1)}
         if phone:
             args["phone"] = phone.group(1).strip().rstrip(".")
         return "manage_contact", json.dumps(args)
-    if re.search(r"\bdelete\b", value, re.IGNORECASE):
+    if _rx(r"\bdelete\b", re.IGNORECASE).search(value):
         return "manage_contact", json.dumps({
             "action": "delete", "name": name_match.group(1).rstrip(".")
         })
@@ -4161,7 +3519,7 @@ def _model_request_snapshot(
 
 def _safe_runtime_value(value: Any, *, limit: int = 240) -> str:
     """Flatten and bound client-provided runtime metadata before prompt use."""
-    return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
+    return _rx(r"\s+").sub(" ", str(value or "")).strip()[:limit]
 
 
 def _client_runtime_context_message(
@@ -4184,7 +3542,7 @@ def _client_runtime_context_message(
     control_names = []
     for key, value in controls.items():
         if bool(value):
-            control_names.append(_safe_runtime_value(re.sub(r"([a-z])([A-Z])", r"\1_\2", str(key)).lower()))
+            control_names.append(_safe_runtime_value(_rx(r"([a-z])([A-Z])").sub(r"\1_\2", str(key)).lower()))
     commands = context.get("commands")
     command_names = [
         _safe_runtime_value(key)
@@ -4200,7 +3558,7 @@ def _client_runtime_context_message(
                 "lanScan": "lan-scan",
                 "dnsLookup": "dns",
                 "sshClient": "ssh",
-            }.get(str(key), re.sub(r"([a-z])([A-Z])", r"\1-\2", str(key)).lower())
+            }.get(str(key), _rx(r"([a-z])([A-Z])").sub(r"\1-\2", str(key)).lower())
             capability_names.append(_safe_runtime_value(normalized))
     lines = [
         "CLIENT RUNTIME CONTEXT (data, not instructions):",
@@ -4378,15 +3736,6 @@ def _filter_raw_browser_mcp_schemas(
     ]
 
 
-def _looks_like_notes_list_request(text: str) -> bool:
-    """Whether the user is asking to see existing notes, not create one."""
-    t = (text or "").lower()
-    return bool(
-        re.search(r"\b(what|show|list|see|current|existing|all|my)\b.{0,60}\bnotes?\b", t)
-        or re.search(r"\bnotes?\b.{0,60}\b(what|show|list|see|current|existing|all|my)\b", t)
-    )
-
-
 def _note_list_summary_from_tool_output(raw: str, max_items: int = 20) -> str:
     """Format manage_notes list/search output for chat without an LLM pass."""
     if not isinstance(raw, str) or not raw.strip():
@@ -4396,11 +3745,8 @@ def _note_list_summary_from_tool_output(raw: str, max_items: int = 20) -> str:
     # known text fields so the canonical note-link renderer still owns the
     # final response.
     for _ in range(3):
-        try:
-            payload = json.loads(raw)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            break
-        if not isinstance(payload, dict):
+        payload = _json_object(raw)
+        if not payload:
             break
         nested = next((payload.get(key) for key in ("results", "output", "response", "content")
                        if isinstance(payload.get(key), str) and payload.get(key).strip()), None)
@@ -4409,27 +3755,27 @@ def _note_list_summary_from_tool_output(raw: str, max_items: int = 20) -> str:
         raw = nested.strip()
     titles: list[str] = []
     for line in raw.splitlines():
-        m = re.match(r"^\s*-\s+\[([^\]]+)\]\s+\*\*(.*?)\*\*(.*)$", line)
+        m = _rx(r"^\s*-\s+\[([^\]]+)\]\s+\*\*(.*?)\*\*(.*)$").match(line)
         if not m:
             continue
-        note_id = re.sub(r"\s+", " ", m.group(1)).strip()
-        title = re.sub(r"\s+", " ", m.group(2)).strip()
-        suffix = re.sub(r"\s+", " ", m.group(3) or "").strip()
-        is_checklist = bool(re.search(r"\[checklist\]", suffix, re.IGNORECASE))
-        is_pinned = bool(re.search(r"\[PINNED\]", suffix, re.IGNORECASE))
-        suffix = re.sub(r"\s*\[checklist\]\s*", " ", suffix, flags=re.IGNORECASE)
-        suffix = re.sub(r"\s*\[PINNED\]\s*", " ", suffix, flags=re.IGNORECASE)
-        suffix = re.sub(r"\s+", " ", suffix).strip()
+        note_id = _rx(r"\s+").sub(" ", m.group(1)).strip()
+        title = _rx(r"\s+").sub(" ", m.group(2)).strip()
+        suffix = _rx(r"\s+").sub(" ", m.group(3) or "").strip()
+        is_checklist = bool(_rx(r"\[checklist\]", re.IGNORECASE).search(suffix))
+        is_pinned = bool(_rx(r"\[PINNED\]", re.IGNORECASE).search(suffix))
+        suffix = _rx(r"\s*\[checklist\]\s*", re.IGNORECASE).sub(" ", suffix)
+        suffix = _rx(r"\s*\[PINNED\]\s*", re.IGNORECASE).sub(" ", suffix)
+        suffix = _rx(r"\s+").sub(" ", suffix).strip()
         prefix = "☑️" if is_checklist else "📝"
         pinned = " 📌" if is_pinned else ""
         label = f"{prefix} [{title}](#note-{note_id}){pinned} {suffix}".strip()
         if label:
             titles.append(label)
     if not titles:
-        if re.search(r"\b(no notes|0 notes|found 0)\b", raw, re.IGNORECASE):
+        if _rx(r"\b(no notes|0 notes|found 0)\b", re.IGNORECASE).search(raw):
             return "No notes found."
         return ""
-    total = len(re.findall(r"^\s*-\s+\[[^\]]+\]\s+\*\*", raw, re.MULTILINE))
+    total = len(_rx(r"^\s*-\s+\[[^\]]+\]\s+\*\*", re.MULTILINE).findall(raw))
     heading_count = total or len(titles)
     lines = [f"Here are your notes ({heading_count}):"]
     shown = titles[:max_items]
@@ -4449,7 +3795,7 @@ def _note_title_id_pairs_from_tool_output(raw: str) -> list[tuple[str, str]]:
     seen: set[tuple[str, str]] = set()
 
     def add_pair(title: Any, note_id: Any) -> None:
-        clean_title = re.sub(r"\s+", " ", str(title or "")).strip()
+        clean_title = _rx(r"\s+").sub(" ", str(title or "")).strip()
         clean_id = str(note_id or "").strip()
         if len(clean_title) < 2 or not clean_id:
             return
@@ -4461,10 +3807,45 @@ def _note_title_id_pairs_from_tool_output(raw: str) -> list[tuple[str, str]]:
     for _start, _end, title, note_id in iter_markdown_links(raw, target_prefix="#note-"):
         add_pair(title, note_id)
     for line in raw.splitlines():
-        match = re.match(r"^\s*-\s+\[([^\]]+)\]\s+\*\*(.*?)\*\*", line)
+        match = _rx(r"^\s*-\s+\[([^\]]+)\]\s+\*\*(.*?)\*\*").match(line)
         if match:
             add_pair(match.group(2), match.group(1))
     return pairs
+
+
+def _linkify_titles(
+    text: str,
+    title_to_id: dict[str, str],
+    kind: str,
+    *,
+    link_every_title: bool = False,
+) -> str:
+    """Turn known titles into #kind-<id> links, longest title first.
+
+    Lines that already carry a #kind- link stay as they are. Without
+    link_every_title, each line gets at most one link.
+    """
+    titles = sorted(title_to_id, key=len, reverse=True)
+    linked_lines: list[str] = []
+    for line in text.splitlines():
+        if f"#{kind}-" in line:
+            linked_lines.append(line)
+            continue
+        updated = line
+        for title in titles:
+            if title not in updated:
+                continue
+            label = title.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+            link = f"[{label}](#{kind}-{title_to_id[title]})"
+            bold = f"**{title}**"
+            if bold in updated:
+                updated = updated.replace(bold, f"**{link}**", 1)
+            else:
+                updated = updated.replace(title, link, 1)
+            if not link_every_title:
+                break
+        linked_lines.append(updated)
+    return "\n".join(linked_lines)
 
 
 def _linkify_note_titles_from_tool_events(answer: str, tool_events: list[dict[str, Any]]) -> str:
@@ -4488,128 +3869,79 @@ def _linkify_note_titles_from_tool_events(answer: str, tool_events: list[dict[st
     title_to_id = {title: note_id for title, note_id in title_to_id.items() if title and note_id}
     if not title_to_id:
         return text
-
-    titles = sorted(title_to_id, key=len, reverse=True)
-    linked_lines: list[str] = []
-    for line in text.splitlines():
-        if "#note-" in line:
-            linked_lines.append(line)
-            continue
-        updated = line
-        for title in titles:
-            if title not in updated:
-                continue
-            note_id = title_to_id[title]
-            label = title.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
-            link = f"[{label}](#note-{note_id})"
-            bold_pattern = re.compile(rf"\*\*{re.escape(title)}\*\*")
-            if bold_pattern.search(updated):
-                updated = bold_pattern.sub(f"**{link}**", updated, count=1)
-                continue
-            updated = updated.replace(title, link, 1)
-        linked_lines.append(updated)
-    return "\n".join(linked_lines)
+    return _linkify_titles(text, title_to_id, "note", link_every_title=True)
 
 
 def _notes_expected_actions(user_text: str) -> set[str]:
     value = str(user_text or "").strip().lower()
     if not value:
         return set()
-    if re.search(r"\b(?:delete|remove|clear)\b", value):
+    if _rx(r"\b(?:delete|remove|clear)\b").search(value):
         return {"delete", "remove"}
-    if re.search(r"\b(?:check\s+off|mark\s+(?:done|complete)|toggle|uncheck)\b", value):
+    if _rx(r"\b(?:check\s+off|mark\s+(?:done|complete)|toggle|uncheck)\b").search(value):
         return {"toggle_item", "update"}
-    if re.search(r"\b(?:update|change|edit|rename|tag|retag|pin|unpin|color|colour)\b", value):
+    if _rx(r"\b(?:update|change|edit|rename|tag|retag|pin|unpin|color|colour)\b").search(value):
         return {"update", "edit"}
-    if re.search(r"\b(?:add|create|make|write\s+down|jot|save|remind)\b", value):
+    if _rx(r"\b(?:add|create|make|write\s+down|jot|save|remind)\b").search(value):
         return {"add", "create", "save", "remind"}
-    if re.search(r"\b(?:show|list|search|find|open|view|read|what|which)\b", value):
+    if _rx(r"\b(?:show|list|search|find|open|view|read|what|which)\b").search(value):
         return {"list", "search", "find", "view", "lis"}
     return set()
 
 
 def _split_note_items(value: str) -> list[dict[str, Any]]:
     parts = [
-        re.sub(r"\s+", " ", part).strip(" .")
-        for part in re.split(r",|(?<=\s)and(?=\s)", str(value or ""))
+        _rx(r"\s+").sub(" ", part).strip(" .")
+        for part in _rx(r",|(?<=\s)and(?=\s)").split(str(value or ""))
     ]
     return [{"text": part, "done": False} for part in parts if part]
 
 
 def _clean_notes_search_query(value: str) -> str:
-    query = re.sub(r"\s+", " ", str(value or "")).strip(" .\"'")
-    query = re.sub(r"^(?:the|my|a|an)\s+", "", query, flags=re.IGNORECASE)
-    query = re.sub(r"\s+(?:note|notes|checklist|list|reminder)\s*$", "", query, flags=re.IGNORECASE)
-    query = re.sub(r"\s+", " ", query).strip(" .\"'")
+    query = _rx(r"\s+").sub(" ", str(value or "")).strip(" .\"'")
+    query = _rx(r"^(?:the|my|a|an)\s+", re.IGNORECASE).sub("", query)
+    query = _rx(r"\s+(?:note|notes|checklist|list|reminder)\s*$", re.IGNORECASE).sub("", query)
+    query = _rx(r"\s+").sub(" ", query).strip(" .\"'")
     return query
 
 
-def _notes_general_definition_answer(text: str) -> Optional[str]:
-    """Answer note-like word questions that are not saved-note requests."""
-
-    value = re.sub(r"\s+", " ", str(text or "")).strip()
-    lower = value.lower()
-    if not value:
-        return None
-    if re.search(r"\b(?:my|saved|open|show|list|search|find|create|add|delete|archive|pin|tag)\s+(?:notes?|checklists?)\b", lower):
-        return None
-    if not re.search(r"\b(?:what(?:'s| is)?|define|explain|meaning|mean|difference|synonym|sentence)\b", lower):
-        return None
-    if re.search(r"\bmusical\s+note\b|\bnote\s+in\s+music\b|\bmusic\s+theory\b", lower):
-        return "A musical note is a written or sounded pitch with a duration."
-    if re.search(r"\bpinned\b|\bpinning\b", lower):
-        return "Pinned usually means an item is kept fixed, visible, or prioritized in place."
-    if re.search(r"\barchiv(?:e|ed|ing)\b", lower):
-        return "Archive means store something for later reference instead of keeping it active."
-    if re.search(r"\bchecklist\b", lower) and not re.search(
-        r"\b(?:left|remaining|complete|completed|done|unfinished|pending)\b",
-        lower,
-    ):
-        return "A checklist is a list where items can be marked complete."
-    if re.search(r"\btag\b|\btagged\b", lower):
-        return "A tag is a label used to categorize or find an item."
-    if re.search(r"\bcolor coding\b|\bcolour coding\b", lower):
-        return "Color coding means using colors to classify or distinguish information."
-    if re.search(r"\b(?:word\s+)?note\b", lower):
-        if re.search(r"\bsentence\b", lower):
-            return "Please note that the meeting starts at noon."
-        if re.search(r"\bsynonym\b", lower):
-            return "A useful synonym for note is memo, comment, or remark depending on context."
-        return "A note can mean a short written record, a comment, or a musical pitch depending on context."
-    return None
+def _is_notes_word_definition_turn(text: str) -> bool:
+    """Recognize questions about note-like words that are not saved-note requests."""
+    lower = _rx(r"\s+").sub(" ", str(text or "")).strip().lower()
+    if _rx(r"\b(?:my|saved|open|show|list|search|find|create|add|delete|archive|pin|tag)\s+(?:notes?|checklists?)\b").search(lower):
+        return False
+    if not _rx(r"\b(?:what(?:'s| is)?|define|explain|meaning|mean|difference|synonym|sentence)\b").search(lower):
+        return False
+    if _rx(r"\bchecklist\b").search(lower) and not _rx(r"\b(?:left|remaining|complete|completed|done|unfinished|pending)\b").search(lower):
+        return True
+    return bool(_rx(r"\b(?:note|pinned|pinning|archive|archived|archiving|tag|tagged|colou?r coding)\b").search(lower))
 
 
 def _is_personal_tool_definition_turn(text: str) -> bool:
     """Recognize definitions that mention app nouns without requesting app data."""
-    q = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    q = _rx(r"\s+").sub(" ", str(text or "").lower()).strip()
     return bool(
-        re.match(
-            r"^(?:what(?:'s| is)|define|explain)\s+(?:(?:a|an|the)\s+)?"
-            r"(?:calendar|event|meeting|appointment|schedule|note|task|memory|skill)\b",
-            q,
-        )
-        or re.match(
-            r"^what\s+does\s+(?:(?:computer|human|working|long[- ]term)\s+)?"
-            r"(?:memory|calendar|event|schedule|note|task|skill)\s+mean\b",
-            q,
-        )
+        _rx(r"^(?:what(?:'s| is)|define|explain)\s+(?:(?:a|an|the)\s+)?"
+            r"(?:calendar|event|meeting|appointment|schedule|note|task|memory|skill)\b").match(q)
+        or _rx(r"^what\s+does\s+(?:(?:computer|human|working|long[- ]term)\s+)?"
+            r"(?:memory|calendar|event|schedule|note|task|skill)\s+mean\b").match(q)
     )
 
 
 def _remaining_checklist_name(value: str) -> str | None:
     """Return the checklist name from the staged legacy question grammar."""
-    lead = re.search(r"\b(?:what(?:'s| is)?|show|tell\s+me)\b", value, re.IGNORECASE)
+    lead = _rx(r"\b(?:what(?:'s| is)?|show|tell\s+me)\b", re.IGNORECASE).search(value)
     if lead is None:
         return None
     line_end = value.find("\n", lead.end())
     if line_end < 0:
         line_end = len(value)
-    remaining = re.compile(r"\b(?:left|remaining)\b", re.IGNORECASE).search(
+    remaining = _rx(r"\b(?:left|remaining)\b", re.IGNORECASE).search(
         value, lead.end(), line_end
     )
     if remaining is None:
         return None
-    location = re.compile(r"\b(?:on|in)\b(?=\s)", re.IGNORECASE).search(
+    location = _rx(r"\b(?:on|in)\b(?=\s)", re.IGNORECASE).search(
         value, remaining.end(), line_end
     )
     if location is None:
@@ -4626,27 +3958,20 @@ def _parse_simple_notes_tool_request(text: str) -> Optional[tuple[str, str]]:
         return None
     if (
         _parse_explicit_open_panel_request(value)
-        and not re.search(
-            r"\b(?:create|add|make|save|write|edit|update|change|delete|remove|archive|pin|tag)\b",
-            lower,
-        )
+        and not _rx(r"\b(?:create|add|make|save|write|edit|update|change|delete|remove|archive|pin|tag)\b").search(lower)
     ):
         return None
-    if _notes_general_definition_answer(value):
+    if _is_notes_word_definition_turn(value):
         return None
     explicit_note_create = bool(
-        re.search(r"\b(?:create|add|make|save|write\s+down|jot)\b.{0,80}\bnotes?\b", lower)
-        or re.search(r"\bnotes?\b.{0,80}\b(?:create|add|make|save|write\s+down|jot)\b", lower)
+        _rx(r"\b(?:create|add|make|save|write\s+down|jot)\b.{0,80}\bnotes?\b").search(lower)
+        or _rx(r"\bnotes?\b.{0,80}\b(?:create|add|make|save|write\s+down|jot)\b").search(lower)
     )
-    if re.search(r"\b(?:email|mail|inbox)\b", lower):
+    if _rx(r"\b(?:email|mail|inbox)\b").search(lower):
         return None
 
-    label_match = re.search(
-        r"\b(?:tagged|under)\s+#?([a-zA-Z0-9_-]{2,40})\b"
-        r"|\b(?:tag|label(?:ed)?)\s+(?:it\s+)?(?:as\s+)?#?([a-zA-Z0-9_-]{2,40})\b",
-        value,
-        re.IGNORECASE,
-    )
+    label_match = _rx(r"\b(?:tagged|under)\s+#?([a-zA-Z0-9_-]{2,40})\b"
+        r"|\b(?:tag|label(?:ed)?)\s+(?:it\s+)?(?:as\s+)?#?([a-zA-Z0-9_-]{2,40})\b", re.IGNORECASE).search(value)
     if label_match:
         label = next((g for g in label_match.groups() if g), "").lower()
     else:
@@ -4658,7 +3983,7 @@ def _parse_simple_notes_tool_request(text: str) -> Optional[tuple[str, str]]:
         r"\s+(.+?)\s+with\s+(.+?)$",
     )
     if checklist_captures is not None:
-        title = re.sub(r"\s+", " ", checklist_captures[0]).strip(" .\"'")
+        title = _rx(r"\s+").sub(" ", checklist_captures[0]).strip(" .\"'")
         items = _split_note_items(checklist_captures[1])
         if title and items:
             return "manage_notes", json.dumps({
@@ -4668,16 +3993,12 @@ def _parse_simple_notes_tool_request(text: str) -> Optional[tuple[str, str]]:
                 "checklist_items": items,
             })
 
-    note_named_match = re.search(
-        r"\b(?:create|add|make|save)\s+(?:a\s+|the\s+)?(?:short\s+)?note\s+"
+    note_named_match = _rx(r"\b(?:create|add|make|save)\s+(?:a\s+|the\s+)?(?:short\s+)?note\s+"
         r"(?:called|titled|named)\s+(.+?)"
-        r"(?:\s+(?:with|saying|that says|summari[sz]ing|about)\s+(.+?))?\s*$",
-        value,
-        re.IGNORECASE,
-    )
+        r"(?:\s+(?:with|saying|that says|summari[sz]ing|about)\s+(.+?))?\s*$", re.IGNORECASE).search(value)
     if note_named_match:
-        title = re.sub(r"\s+", " ", note_named_match.group(1)).strip(" .\"'")
-        body = re.sub(r"\s+", " ", note_named_match.group(2) or title).strip(" .\"'")
+        title = _rx(r"\s+").sub(" ", note_named_match.group(1)).strip(" .\"'")
+        body = _rx(r"\s+").sub(" ", note_named_match.group(2) or title).strip(" .\"'")
         if title:
             args = {"action": "add", "title": title, "content": body or title}
             if label:
@@ -4690,42 +4011,29 @@ def _parse_simple_notes_tool_request(text: str) -> Optional[tuple[str, str]]:
         if query:
             return "manage_notes", json.dumps({"action": "search", "query": query})
 
-    note_saying_match = re.search(
-        r"\b(?:create|add|make|save)\s++(?:a\s++)?note\s++(?:saying|that says|with)\s++(.+?)$",
-        value,
-        re.IGNORECASE,
-    )
+    note_saying_match = _rx(r"\b(?:create|add|make|save)\s++(?:a\s++)?note\s++(?:saying|that says|with)\s++(.+?)$", re.IGNORECASE).search(value)
     if note_saying_match:
-        body = re.sub(
-            r"(?<=\s)(?:and\s+)?(?:tag|label)\s+(?:it\s+)?(?:as\s+)?#?[a-zA-Z0-9_-]{2,40}\s*$",
-            "",
-            note_saying_match.group(1),
-            flags=re.IGNORECASE,
-        )
-        title = re.sub(r"\s+", " ", body).strip(" .\"'")
+        body = _rx(r"(?<=\s)(?:and\s+)?(?:tag|label)\s+(?:it\s+)?(?:as\s+)?#?[a-zA-Z0-9_-]{2,40}\s*$", re.IGNORECASE).sub("", note_saying_match.group(1))
+        title = _rx(r"\s+").sub(" ", body).strip(" .\"'")
         if title:
             args: dict[str, Any] = {"action": "add", "title": title, "content": title}
             if label:
                 args["label"] = label
             return "manage_notes", json.dumps(args)
 
-    if re.search(r"\b(?:show|list|see|what(?:'s| is)?)\b", lower) and re.search(r"\b(?:notes?|checklists?|reminders?)\b", lower):
+    if _rx(r"\b(?:show|list|see|what(?:'s| is)?)\b").search(lower) and _rx(r"\b(?:notes?|checklists?|reminders?)\b").search(lower):
         args = {"action": "list"}
         if label:
             args["label"] = label
-        if re.search(r"\bpinned\b", lower):
+        if _rx(r"\bpinned\b").search(lower):
             args["pinned"] = True
-        if re.search(r"\breminders?\b", lower):
+        if _rx(r"\breminders?\b").search(lower):
             args["reminders"] = True
         return "manage_notes", json.dumps(args)
 
-    search_match = re.search(
-        r"\b(?:search|find|open|view|read)\b(?:\s+(?:my\s+)?notes?)?(?:\s+(?:for|about))?\s+(.+?)\s*$",
-        value,
-        re.IGNORECASE,
-    )
-    if search_match and re.search(r"\b(?:notes?|note|checklist|reminder)\b", lower):
-        query = re.sub(r"\bnotes?\b", "", search_match.group(1), flags=re.IGNORECASE)
+    search_match = _rx(r"\b(?:search|find|open|view|read)\b(?:\s+(?:my\s+)?notes?)?(?:\s+(?:for|about))?\s+(.+?)\s*$", re.IGNORECASE).search(value)
+    if search_match and _rx(r"\b(?:notes?|note|checklist|reminder)\b").search(lower):
+        query = _rx(r"\bnotes?\b", re.IGNORECASE).sub("", search_match.group(1))
         query = _clean_notes_search_query(query)
         if query:
             args = {"action": "search", "query": query}
@@ -4733,18 +4041,14 @@ def _parse_simple_notes_tool_request(text: str) -> Optional[tuple[str, str]]:
                 args["label"] = label
             return "manage_notes", json.dumps(args)
 
-    delete_match = re.search(
-        r"\b(?:delete|remove|clear)\s+(?:the\s+)?(.+?)\s*$",
-        value,
-        re.IGNORECASE,
-    )
-    if delete_match and re.search(r"\b(?:notes?|note|checklist|list|reminder)\b", lower):
-        title = re.sub(r"\b(?:note|checklist|list|reminder)\b", "", delete_match.group(1), flags=re.IGNORECASE)
-        title = re.sub(r"\s+", " ", title).strip(" .\"'")
+    delete_match = _rx(r"\b(?:delete|remove|clear)\s+(?:the\s+)?(.+?)\s*$", re.IGNORECASE).search(value)
+    if delete_match and _rx(r"\b(?:notes?|note|checklist|list|reminder)\b").search(lower):
+        title = _rx(r"\b(?:note|checklist|list|reminder)\b", re.IGNORECASE).sub("", delete_match.group(1))
+        title = _rx(r"\s+").sub(" ", title).strip(" .\"'")
         if title:
             return "manage_notes", json.dumps({"action": "delete", "title": title})
 
-    if re.search(r"\b(?:calendar|events?|meeting|appointment)\b", lower) and not explicit_note_create:
+    if _rx(r"\b(?:calendar|events?|meeting|appointment)\b").search(lower) and not explicit_note_create:
         return None
 
     return None
@@ -4753,8 +4057,8 @@ def _parse_simple_notes_tool_request(text: str) -> Optional[tuple[str, str]]:
 def _notes_body_requested(text: str) -> bool:
     value = str(text or "")
     return bool(
-        re.search(r"\b(?:read|open|view)\b", value, re.IGNORECASE)
-        or re.search(r"\b(?:what(?:'s| is)?|show|tell\s+me)\b.*?\b(?:left|remaining)\b", value, re.IGNORECASE)
+        _rx(r"\b(?:read|open|view)\b", re.IGNORECASE).search(value)
+        or _rx(r"\b(?:what(?:'s| is)?|show|tell\s+me)\b.*?\b(?:left|remaining)\b", re.IGNORECASE).search(value)
     )
 
 
@@ -4774,18 +4078,18 @@ def _notes_request_requires_fresh_tool(
     if not value:
         return False
     if not (
-        re.search(r"\b(?:notes?|todos?|to-dos?|checklists?|reminders?)\b", value)
-        or re.search(r"\b(?:packing|shopping|grocery)\s+list\b", value)
+        _rx(r"\b(?:notes?|todos?|to-dos?|checklists?|reminders?)\b").search(value)
+        or _rx(r"\b(?:packing|shopping|grocery)\s+list\b").search(value)
         or _looks_like_implicit_notes_turn(value)
     ):
         return False
     explicit_note_create = bool(
-        re.search(r"\b(?:create|add|make|save|write\s+down|jot)\b.{0,80}\bnotes?\b", value)
-        or re.search(r"\bnotes?\b.{0,80}\b(?:create|add|make|save|write\s+down|jot)\b", value)
+        _rx(r"\b(?:create|add|make|save|write\s+down|jot)\b.{0,80}\bnotes?\b").search(value)
+        or _rx(r"\bnotes?\b.{0,80}\b(?:create|add|make|save|write\s+down|jot)\b").search(value)
     )
-    if re.search(r"\b(?:email|mail|inbox)\b", value):
+    if _rx(r"\b(?:email|mail|inbox)\b").search(value):
         return False
-    if re.search(r"\b(?:calendar|events?|meeting|appointment)\b", value) and not explicit_note_create:
+    if _rx(r"\b(?:calendar|events?|meeting|appointment)\b").search(value) and not explicit_note_create:
         return False
     return bool(_notes_expected_actions(value))
 
@@ -4813,13 +4117,7 @@ def _has_successful_notes_action_evidence(
         if not tool_result_is_successful(event):
             continue
         command = str(event.get("command") or "").strip()
-        action = ""
-        try:
-            parsed = json.loads(command or "{}")
-            if isinstance(parsed, dict):
-                action = str(parsed.get("action") or "").strip().lower()
-        except Exception:
-            action = command.splitlines()[0].strip().lower() if command else ""
+        action = _tool_block_action(command)
         action = aliases.get(action, action)
         if action in expected:
             return True
@@ -4833,17 +4131,13 @@ def _memory_list_summary_from_tool_output(raw: str, max_items: int = 20) -> str:
     # The memory tool may already return the compact form. Treat it as a
     # complete answer so the agent does not spend a second round asking the
     # model to summarize an answer that is already summarized.
-    compact_match = re.fullmatch(
-        r"Memory:\s+\d+\s+saved\s+entries?(?:\s+\([^\n]+\))?\.?",
-        raw.strip(),
-        re.IGNORECASE,
-    )
+    compact_match = _rx(r"Memory:\s+\d+\s+saved\s+entries?(?:\s+\([^\n]+\))?\.?", re.IGNORECASE).fullmatch(raw.strip())
     if compact_match:
         return raw.strip()
-    if re.search(r"\bno memories found\b", raw, re.IGNORECASE):
+    if _rx(r"\bno memories found\b", re.IGNORECASE).search(raw):
         return "No saved memories found."
-    count_match = re.search(r"Found\s+(\d+)\s+memory entries", raw, re.IGNORECASE)
-    compact_count_match = re.search(r"Memory:\s+(\d+)\s+saved\s+entries?", raw, re.IGNORECASE)
+    count_match = _rx(r"Found\s+(\d+)\s+memory entries", re.IGNORECASE).search(raw)
+    compact_count_match = _rx(r"Memory:\s+(\d+)\s+saved\s+entries?", re.IGNORECASE).search(raw)
     if not count_match:
         if not compact_count_match:
             return ""
@@ -4852,26 +4146,19 @@ def _memory_list_summary_from_tool_output(raw: str, max_items: int = 20) -> str:
     items: list[str] = []
     all_items: list[str] = []
     for line in raw.splitlines():
-        match = re.match(r"^\s*-\s+\[([^\]]+)\]", line)
+        match = _rx(r"^\s*-\s+\[([^\]]+)\]").match(line)
         if match:
             categories[match.group(1).strip().lower()] += 1
-        item_match = re.match(
-            r"^\s*-\s+\[([^\]]+)\]\s+`([^`]+)`\s+[—-]\s+(.+?)\s*$",
-            line,
-        )
+        item_match = _rx(r"^\s*-\s+\[([^\]]+)\]\s+`([^`]+)`\s+[—-]\s+(.+?)\s*$").match(line)
         if item_match:
             category = item_match.group(1).strip()
             memory_id = item_match.group(2).strip()
-            text = re.sub(r"\s+", " ", item_match.group(3)).strip()
+            text = _rx(r"\s+").sub(" ", item_match.group(3)).strip()
             row = f"- [{category} {memory_id}](#memory-{quote(memory_id, safe='')}) — {text}"
             all_items.append(row)
             if len(items) < max_items:
                 items.append(row)
-    compact_header_match = re.search(
-        r"^(Memory:\s+\d+\s+saved\s+entr(?:y|ies)(?:\s+\([^\n]+\))?\.?)",
-        raw.strip(),
-        re.IGNORECASE,
-    )
+    compact_header_match = _rx(r"^(Memory:\s+\d+\s+saved\s+entr(?:y|ies)(?:\s+\([^\n]+\))?\.?)", re.IGNORECASE).search(raw.strip())
     if compact_header_match:
         header = compact_header_match.group(1).strip()
     else:
@@ -4884,9 +4171,7 @@ def _memory_list_summary_from_tool_output(raw: str, max_items: int = 20) -> str:
         return header
     remaining = total - len(items)
     if remaining > 0:
-        # The Memory panel owns the complete browser. Embedding every omitted
-        # memory in an invisible chat payload turned a simple list into a huge
-        # terminal SSE event and copied private text into chat history.
+        # The Memory panel lists the rest; embedding them here would copy private text into chat history.
         items.append(
             f"...and {remaining} more saved memories. [Open Memory to browse all](#memory)."
         )
@@ -4900,7 +4185,7 @@ def _document_list_summary_from_tool_output(raw: str, max_items: int = 8) -> str
     text = raw.strip()
     if text.startswith("AI: "):
         text = text[4:].strip()
-    if re.search(r"\b(no documents|0 documents|found 0)\b", text, re.IGNORECASE):
+    if _rx(r"\b(no documents|0 documents|found 0)\b", re.IGNORECASE).search(text):
         return "No documents found."
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
@@ -4914,14 +4199,14 @@ def _document_list_summary_from_tool_output(raw: str, max_items: int = 8) -> str
             (
                 row
                 for row in rows
-                if re.match(r"^[-*]\s+\.\.\.and\s+\d+\s+more\b", row, re.IGNORECASE)
+                if _rx(r"^[-*]\s+\.\.\.and\s+\d+\s+more\b", re.IGNORECASE).match(row)
             ),
             "",
         )
         real_rows = [
             row
             for row in rows
-            if not re.match(r"^[-*]\s+\.\.\.and\s+\d+\s+more\b", row, re.IGNORECASE)
+            if not _rx(r"^[-*]\s+\.\.\.and\s+\d+\s+more\b", re.IGNORECASE).match(row)
         ]
         clipped = real_rows[:max_items]
         if continuation:
@@ -4943,13 +4228,10 @@ def _document_read_summary_from_tool_output(raw: str) -> str:
 def _document_detail_requested(text: str) -> bool:
     """Whether a document locator must be followed by a read/open call."""
     t = (text or "").lower()
-    if not re.search(r"\b(doc|docs|document|documents|library|file|files)\b", t):
+    if not _rx(r"\b(doc|docs|document|documents|library|file|files)\b").search(t):
         return False
     return bool(
-        re.search(
-            r"\b(read|open|view|show|display|summari[sz]e|quote|contents?|body|text|inside|passphrase|phrase|detail|details)\b",
-            t,
-        )
+        _rx(r"\b(read|open|view|show|display|summari[sz]e|quote|contents?|body|text|inside|passphrase|phrase|detail|details)\b").search(t)
     )
 
 
@@ -4959,7 +4241,7 @@ def _single_document_id_from_tool_output(raw: str) -> str:
         return ""
     ids = {
         match.group(1).strip()
-        for match in re.finditer(r"#document-([A-Za-z0-9][A-Za-z0-9_.:-]*)", raw)
+        for match in _rx(r"#document-([A-Za-z0-9][A-Za-z0-9_.:-]*)").finditer(raw)
     }
     return next(iter(ids)) if len(ids) == 1 else ""
 
@@ -5006,7 +4288,7 @@ def _session_list_summary_from_tool_output(raw: str, max_items: int = 12) -> str
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return ""
-    if re.search(r"\b(no chats|no sessions|0 sessions)\b", text, re.IGNORECASE):
+    if _rx(r"\b(no chats|no sessions|0 sessions)\b", re.IGNORECASE).search(text):
         return lines[0]
     rows = [line for line in lines[1:] if line.startswith("-")]
     if not rows:
@@ -5016,12 +4298,12 @@ def _session_list_summary_from_tool_output(raw: str, max_items: int = 12) -> str
         link = _session_link_from_row(row)
         if link:
             meta = next(
-                (match.group(1) for match in re.finditer(r"\(([^()]*)\)", row)
+                (match.group(1) for match in _rx(r"\(([^()]*)\)").finditer(row)
                  if any(marker in match.group(1)
                         for marker in ("last active", "msgs", "model", "id:"))),
                 "",
             )
-            active = re.search(r"last active [^)]+", meta)
+            active = _rx(r"last active [^)]+").search(meta)
             suffix = f" ({active.group(0)})" if active else ""
             formatted_rows.append(f"- {link}{suffix}")
         else:
@@ -5082,7 +4364,7 @@ def _research_list_summary_from_tool_output(raw: str, max_items: int = 6) -> str
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return ""
-    if re.search(r"\b(no research|0 research|0 items)\b", text, re.IGNORECASE):
+    if _rx(r"\b(no research|0 research|0 items)\b", re.IGNORECASE).search(text):
         return lines[0]
     rows: list[str] = []
     for line in lines[1:]:
@@ -5090,16 +4372,16 @@ def _research_list_summary_from_tool_output(raw: str, max_items: int = 6) -> str
         if parsed_row is None:
             continue
         raw_title, research_id, raw_suffix = parsed_row
-        title = re.sub(r"\s+", " ", raw_title).strip()
+        title = _rx(r"\s+").sub(" ", raw_title).strip()
         if len(title) > 110:
             title = title[:107].rstrip() + "..."
-        suffix = re.sub(r"\s+", " ", raw_suffix).strip()
+        suffix = _rx(r"\s+").sub(" ", raw_suffix).strip()
         rows.append(f"- [{title}](#research-{research_id}) {suffix}".rstrip())
         if len(rows) >= max_items:
             break
     if not rows:
         return "\n".join(lines[: max_items + 1])
-    total_match = re.search(r"\((\d+)\s+items?\)", lines[0], re.IGNORECASE)
+    total_match = _rx(r"\((\d+)\s+items?\)", re.IGNORECASE).search(lines[0])
     total = int(total_match.group(1)) if total_match else len(rows)
     if total > len(rows):
         rows.append(f"- ...and {total - len(rows)} more research reports")
@@ -5166,7 +4448,7 @@ def _skills_list_summary_from_tool_output(raw: str, max_items: int = 8) -> str:
     rows: list[tuple[str, str]] = []
     totals = {"Published": 0, "Drafts": 0}
     for line in lines:
-        section_match = re.match(r"^##\s+(Published|Drafts)\b", line, re.IGNORECASE)
+        section_match = _rx(r"^##\s+(Published|Drafts)\b", re.IGNORECASE).match(line)
         if section_match:
             section = section_match.group(1).title()
             continue
@@ -5178,8 +4460,8 @@ def _skills_list_summary_from_tool_output(raw: str, max_items: int = 8) -> str:
         parsed_row = _skill_listing_row(line)
         if parsed_row is not None:
             raw_name, parenthesized_meta, draft_meta, _description = parsed_row
-            name = re.sub(r"\s+", " ", raw_name).strip()
-            meta = re.sub(r"\s+", " ", (parenthesized_meta or draft_meta or label).strip())
+            name = _rx(r"\s+").sub(" ", raw_name).strip()
+            meta = _rx(r"\s+").sub(" ", (parenthesized_meta or draft_meta or label).strip())
             rows.append((label, f"- [{name}](#skill-{quote(name, safe='')}) ({meta})"))
         else:
             rows.append((label, line[:96].rstrip() + ("..." if len(line) > 96 else "")))
@@ -5219,13 +4501,10 @@ def _skills_list_summary_from_tool_output(raw: str, max_items: int = 8) -> str:
 def _calendar_detail_requested(text: str) -> bool:
     """Whether a calendar listing answer should preserve event details."""
     t = (text or "").lower()
-    if not re.search(r"\b(calendar|event|events|schedule|appointment|appointments)\b", t):
+    if not _rx(r"\b(calendar|event|events|schedule|appointment|appointments)\b").search(t):
         return False
     return bool(
-        re.search(
-            r"\b(description|descriptions|detail|details|note|notes|passphrase|phrase|where|location|agenda|about)\b",
-            t,
-        )
+        _rx(r"\b(description|descriptions|detail|details|note|notes|passphrase|phrase|where|location|agenda|about)\b").search(t)
     )
 
 
@@ -5278,17 +4557,17 @@ def _calendar_list_summary_from_tool_output(
     if not isinstance(raw, str) or not raw.strip():
         return ""
     text = raw[4:].strip() if raw.startswith("AI: ") else raw.strip()
-    if re.search(r"\bno events between\b", text, re.IGNORECASE):
+    if _rx(r"\bno events between\b", re.IGNORECASE).search(text):
         query = str(user_text or "").lower()
-        if re.search(r"\btoday(?:'?s)?\b", query):
+        if _rx(r"\btoday(?:'?s)?\b").search(query):
             return "You have no events today."
-        if re.search(r"\btomorrow(?:'?s)?\b", query):
+        if _rx(r"\btomorrow(?:'?s)?\b").search(query):
             return "You have no events tomorrow."
         return text.splitlines()[0]
 
     def format_when(value: str) -> str:
-        raw_when = re.sub(r"\s+", " ", value or "").strip()
-        all_day_match = re.match(r"^(\d{4}-\d{2}-\d{2})\s*\(all day\)$", raw_when, re.IGNORECASE)
+        raw_when = _rx(r"\s+").sub(" ", value or "").strip()
+        all_day_match = _rx(r"^(\d{4}-\d{2}-\d{2})\s*\(all day\)$", re.IGNORECASE).match(raw_when)
         if all_day_match:
             try:
                 parsed = datetime.fromisoformat(all_day_match.group(1))
@@ -5296,14 +4575,13 @@ def _calendar_list_summary_from_tool_output(
             except ValueError:
                 return raw_when
 
-        parts = re.split(r"\s*->\s*", raw_when, maxsplit=1)
+        parts = _rx(r"\s*->\s*").split(raw_when, maxsplit=1)
         if len(parts) != 2:
             return raw_when
         try:
             start = datetime.fromisoformat(parts[0].replace("Z", "+00:00"))
             end = datetime.fromisoformat(parts[1].replace("Z", "+00:00"))
             if start.tzinfo is not None:
-                from src.user_time import user_timezone
                 start = start.astimezone(user_timezone())
                 end = end.astimezone(user_timezone())
         except (TypeError, ValueError):
@@ -5324,15 +4602,15 @@ def _calendar_list_summary_from_tool_output(
         parsed_row = _calendar_listing_row(line)
         if parsed_row is None:
             if include_details and current_item_idx >= 0:
-                detail = re.sub(r"\s+", " ", line).strip()
+                detail = _rx(r"\s+").sub(" ", line).strip()
                 if detail and not detail.startswith("-"):
                     items[current_item_idx] = f"{items[current_item_idx]} — {detail}"
             continue
         raw_when, raw_title, raw_event_id, raw_suffix = parsed_row
-        when = re.sub(r"\s+", " ", raw_when).strip()
-        title = re.sub(r"\s+", " ", raw_title).strip()
+        when = _rx(r"\s+").sub(" ", raw_when).strip()
+        title = _rx(r"\s+").sub(" ", raw_title).strip()
         event_id = raw_event_id.strip()
-        suffix = re.sub(r"\s+", " ", raw_suffix).strip()
+        suffix = _rx(r"\s+").sub(" ", raw_suffix).strip()
         label = f"[{title}](#event-{event_id}) — {format_when(when)}"
         if suffix:
             label += f" {suffix}"
@@ -5341,7 +4619,7 @@ def _calendar_list_summary_from_tool_output(
     if not items:
         return ""
 
-    total_match = re.search(r"Found\s+(\d+)\s+event", text, re.IGNORECASE)
+    total_match = _rx(r"Found\s+(\d+)\s+event", re.IGNORECASE).search(text)
     total = int(total_match.group(1)) if total_match else len(items)
     lines = [f"I found {total} calendar event{'s' if total != 1 else ''} in that range:"]
     shown = items[:max_items]
@@ -5387,7 +4665,7 @@ _ORDINAL_RRULE_PREFIXES = {
 
 def _ordinal_weekday_monthly_rrule_from_text(text: str) -> Optional[str]:
     """Return an RRULE for "2nd Thursday of the month" style requests."""
-    q = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    q = _rx(r"\s+").sub(" ", str(text or "").lower()).strip()
     if not q or "month" not in q:
         return None
     byday: list[str] = []
@@ -5404,12 +4682,12 @@ def _ordinal_weekday_monthly_rrule_from_text(text: str) -> Optional[str]:
 
 def _ambiguous_ordinal_weekday_of_week(text: str) -> Optional[str]:
     """Detect contradictory "first and last Monday of the week" requests."""
-    q = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    q = _rx(r"\s+").sub(" ", str(text or "").lower()).strip()
     if not q or "month" in q:
         return None
-    if not re.search(r"\bweek\b", q):
+    if not _rx(r"\bweek\b").search(q):
         return None
-    if not re.search(r"\bfirst\b", q) or not re.search(r"\blast\b", q):
+    if not _rx(r"\bfirst\b").search(q) or not _rx(r"\blast\b").search(q):
         return None
     for name in _ORDINAL_WEEKDAY_CODES:
         if re.search(rf"\b{name}\b", q):
@@ -5471,14 +4749,9 @@ def _normalize_calendar_list_range_args(
     if action not in {"list", "list_events", "lis_events"}:
         return args, False
 
-    from datetime import date, datetime, timedelta
 
     if today is None:
-        try:
-            from src.user_time import now_user_local
-            today_date = now_user_local().date()
-        except Exception:
-            today_date = date.today()
+        today_date = now_user_local().date()
     elif isinstance(today, datetime):
         today_date = today.date()
     elif isinstance(today, date):
@@ -5516,13 +4789,9 @@ def _normalize_calendar_list_range_args(
         end = (today_date + timedelta(days=7)).isoformat()
 
     if not start or not end:
-        broad_calendar_read = bool(re.search(
-            r"\bwhat(?:['’]?s|\s+is)\s+on\s+(?:my|our|the)\s+calendar\b|"
+        broad_calendar_read = bool(_rx(r"\bwhat(?:['’]?s|\s+is)\s+on\s+(?:my|our|the)\s+calendar\b|"
             r"\b(?:list|show|check)\s+(?:me\s+)?(?:my|our|the)?\s*"
-            r"(?:calendar|calendar\s+events|schedule)\b",
-            str(user_text or ""),
-            re.IGNORECASE,
-        ))
+            r"(?:calendar|calendar\s+events|schedule)\b", re.IGNORECASE).search(str(user_text or "")))
         if not broad_calendar_read:
             return args, False
         prompt_bounds = _calendar_bounds_for_prompt(user_text, today=today_date)
@@ -5546,14 +4815,9 @@ def _normalize_calendar_list_range_args(
 
 
 def _calendar_bounds_for_prompt(text: str, *, today: Any = None) -> Optional[tuple[str, str]]:
-    from datetime import date, datetime, timedelta
 
     if today is None:
-        try:
-            from src.user_time import now_user_local
-            today_date = now_user_local().date()
-        except Exception:
-            today_date = date.today()
+        today_date = now_user_local().date()
     elif isinstance(today, datetime):
         today_date = today.date()
     elif isinstance(today, date):
@@ -5561,19 +4825,19 @@ def _calendar_bounds_for_prompt(text: str, *, today: Any = None) -> Optional[tup
     else:
         today_date = datetime.strptime(str(today)[:10], "%Y-%m-%d").date()
 
-    q = re.sub(r"\s+", " ", str(text or "").lower()).strip()
-    q = re.sub(r"\btodays\b", "today's", q)
-    q = re.sub(r"\btomorrows\b", "tomorrow's", q)
+    q = _rx(r"\s+").sub(" ", str(text or "").lower()).strip()
+    q = _rx(r"\btodays\b").sub("today's", q)
+    q = _rx(r"\btomorrows\b").sub("tomorrow's", q)
     if not q:
         return None
-    if re.search(r"\btoday\b", q) and re.search(r"\btomorrow\b", q):
+    if _rx(r"\btoday\b").search(q) and _rx(r"\btomorrow\b").search(q):
         return today_date.isoformat(), (today_date + timedelta(days=2)).isoformat()
-    if re.search(r"\btoday\b|\btonight\b", q):
+    if _rx(r"\btoday\b|\btonight\b").search(q):
         return today_date.isoformat(), (today_date + timedelta(days=1)).isoformat()
-    if re.search(r"\btomorrow\b", q):
+    if _rx(r"\btomorrow\b").search(q):
         day = today_date + timedelta(days=1)
         return day.isoformat(), (day + timedelta(days=1)).isoformat()
-    if re.search(r"\b(?:latest|upcoming|coming up|next events?|next appointments?)\b", q):
+    if _rx(r"\b(?:latest|upcoming|coming up|next events?|next appointments?)\b").search(q):
         return today_date.isoformat(), (today_date + timedelta(days=14)).isoformat()
     month_names = {
         "january": 1, "february": 2, "march": 3, "april": 4,
@@ -5582,12 +4846,12 @@ def _calendar_bounds_for_prompt(text: str, *, today: Any = None) -> Optional[tup
     }
     for name, month in month_names.items():
         if re.search(rf"\b{name}\b", q):
-            year_match = re.search(r"\b(20\d{2})\b", q)
+            year_match = _rx(r"\b(20\d{2})\b").search(q)
             year = int(year_match.group(1)) if year_match else today_date.year
             start = date(year, month, 1)
             end = date(year + (1 if month == 12 else 0), 1 if month == 12 else month + 1, 1)
             return start.isoformat(), end.isoformat()
-    if re.search(r"\b(?:recurring|repeat(?:ing)?|trash|travel)\b", q):
+    if _rx(r"\b(?:recurring|repeat(?:ing)?|trash|travel)\b").search(q):
         return today_date.isoformat(), (today_date + timedelta(days=365)).isoformat()
     return today_date.isoformat(), (today_date + timedelta(days=30)).isoformat()
 
@@ -5603,8 +4867,8 @@ def _parse_simple_calendar_tool_request(
     # Chat input commonly omits apostrophes.  Normalize only these intent
     # words so "whats my calendar" and "whats todays calendar" retain the
     # same semantics as their punctuated forms.
-    q = re.sub(r"\bwhats\b", "what's", q)
-    q = re.sub(r"\btodays\b", "today's", q)
+    q = _rx(r"\bwhats\b").sub("what's", q)
+    q = _rx(r"\btodays\b").sub("today's", q)
     if not q:
         return None
 
@@ -5613,27 +4877,18 @@ def _parse_simple_calendar_tool_request(
     if _is_personal_tool_definition_turn(q):
         return None
 
-    calendar_mutation_requested = bool(re.search(
-        r"\b(?:add|create|schedule|book|move|reschedule|rename|update|change|edit|delete|remove|cancel)\b",
-        q,
-    ))
+    calendar_mutation_requested = bool(_rx(r"\b(?:add|create|schedule|book|move|reschedule|rename|update|change|edit|delete|remove|cancel)\b").search(q))
     refs = _recent_odysseus_anchor_refs(messages or [], history_session)
     contextual_event_lookup = bool(
         refs.get("event_uid")
-        and re.search(r"\b(?:show|list|check|what(?:'s| is| are)?|when|find|see)\b", q)
-        and re.search(r"\b(?:it|this|that|entry|item|prep|block)\b", q)
+        and _rx(r"\b(?:show|list|check|what(?:'s| is| are)?|when|find|see)\b").search(q)
+        and _rx(r"\b(?:it|this|that|entry|item|prep|block)\b").search(q)
     )
     if not calendar_mutation_requested and (
         (
-            re.search(
-                r"\b(?:show|list|check|what(?:'s| is| are)?|when|find|see)\b"
-                r"|\b(?:do\s+i\s+have|are\s+there)\b",
-                q,
-            )
-            and re.search(
-                r"\b(?:calendar|events?|meetings?|appointments?|schedule|recurring|trash|travel)\b",
-                q,
-            )
+            _rx(r"\b(?:show|list|check|what(?:'s| is| are)?|when|find|see)\b"
+                r"|\b(?:do\s+i\s+have|are\s+there)\b").search(q)
+            and _rx(r"\b(?:calendar|events?|meetings?|appointments?|schedule|recurring|trash|travel)\b").search(q)
         )
         or contextual_event_lookup
     ):
@@ -5643,9 +4898,9 @@ def _parse_simple_calendar_tool_request(
         args: dict[str, Any] = {"action": "list_events", "start": bounds[0], "end": bounds[1]}
         if contextual_event_lookup and refs.get("event_title"):
             args["query"] = refs["event_title"]
-        elif re.search(r"\btrash\b", q):
+        elif _rx(r"\btrash\b").search(q):
             args["query"] = "trash"
-        elif re.search(r"\btravel\b", q):
+        elif _rx(r"\btravel\b").search(q):
             args["query"] = "travel"
         return "manage_calendar", json.dumps(args, ensure_ascii=False)
 
@@ -5654,8 +4909,8 @@ def _parse_simple_calendar_tool_request(
         r"\b(?:change|update|set|retag)\b(?=\s)",
         r"\s+(?:the\s+)?(.+?)\s+tag\s+to\s+#?([a-z][a-z0-9_-]{1,30})\b",
     )
-    if tag_captures is not None and re.search(r"\b(?:calendar|event|trip|meeting|appointment)\b", q):
-        title = re.sub(r"\s+", " ", tag_captures[0]).strip(" .")
+    if tag_captures is not None and _rx(r"\b(?:calendar|event|trip|meeting|appointment)\b").search(q):
+        title = _rx(r"\s+").sub(" ", tag_captures[0]).strip(" .")
         if title:
             return "manage_calendar", json.dumps({
                 "action": "update_event",
@@ -5669,33 +4924,25 @@ def _parse_simple_calendar_tool_request(
 def _parse_ambiguous_calendar_date_ask_user(text: str) -> Optional[tuple[str, str]]:
     value = str(text or "").strip()
     q = value.lower()
-    if not q or not re.search(r"\b(?:event|calendar|reservation|dinner|lunch|meeting|appointment)\b", q):
+    if not q or not _rx(r"\b(?:event|calendar|reservation|dinner|lunch|meeting|appointment)\b").search(q):
         return None
-    if not re.search(r"\b(?:add|create|schedule|book|event)\b", q):
+    if not _rx(r"\b(?:add|create|schedule|book|event)\b").search(q):
         return None
-    if not re.search(r"\bnext\s+month\b", q):
+    if not _rx(r"\bnext\s+month\b").search(q):
         return None
     # An ordinal weekday is a complete, deterministic date specification once
     # the request supplies "next month" (for example, "the last Wednesday of
     # next month").  Do not preempt a capable model with an unnecessary
     # ask_user turn merely because the user did not spell out a calendar day.
-    if re.search(
-        r"\b(?:first|second|third|fourth|last)\s+"
+    if _rx(r"\b(?:first|second|third|fourth|last)\s+"
         r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
-        r"(?:\s+of\s+(?:the\s+)?next\s+month)?",
-        q,
-    ):
+        r"(?:\s+of\s+(?:the\s+)?next\s+month)?").search(q):
         return None
-    if re.search(r"\b(?:20\d{2}-\d{2}-\d{2}|\b\d{1,2}/\d{1,2}\b|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}\b", q):
+    if _rx(r"\b(?:20\d{2}-\d{2}-\d{2}|\b\d{1,2}/\d{1,2}\b|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}\b").search(q):
         return None
-    if not re.search(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b", q):
+    if not _rx(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b").search(q):
         return None
-    try:
-        from src.user_time import now_user_local
-        today = now_user_local().date()
-    except Exception:
-        from datetime import date
-        today = date.today()
+    today = now_user_local().date()
     month = today.month + 1
     year = today.year
     if month == 13:
@@ -5705,7 +4952,7 @@ def _parse_ambiguous_calendar_date_ask_user(text: str) -> Optional[tuple[str, st
         "", "January", "February", "March", "April", "May", "June",
         "July", "August", "September", "October", "November", "December",
     ][month]
-    place_match = re.search(r"\b(?:at|in)\s+(.+?)(?:\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\s+reservation|\s+remind|$)", value, re.IGNORECASE)
+    place_match = _rx(r"\b(?:at|in)\s+(.+?)(?:\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\s+reservation|\s+remind|$)", re.IGNORECASE).search(value)
     place = place_match.group(1).strip(" .") if place_match else "the event"
     question = f"What day in {month_name} {year} is {place}?"
     return "ask_user", json.dumps({
@@ -5743,32 +4990,23 @@ def _normalize_calendar_create_relative_args(
     if not raw_start:
         return args, False
 
-    from datetime import date, datetime, timedelta
 
     user_text = last_user or ""
-    user_mentions_timezone = bool(re.search(
-        r"\b(?:utc|gmt|jst|pst|pdt|est|edt|cst|cdt|mst|mdt|"
-        r"[a-z]+/[a-z_]+|timezone|time\s*zone)\b",
-        user_text,
-        re.IGNORECASE,
-    ))
+    user_mentions_timezone = bool(_rx(r"\b(?:utc|gmt|jst|pst|pdt|est|edt|cst|cdt|mst|mdt|"
+        r"[a-z]+/[a-z_]+|timezone|time\s*zone)\b", re.IGNORECASE).search(user_text))
 
     def _strip_iso_timezone(value: Any) -> tuple[Any, bool]:
         text = str(value or "").strip()
         if not text:
             return value, False
-        stripped = re.sub(r"(?:[Zz]|[+\-]\d{2}:?\d{2})$", "", text).strip()
+        stripped = _rx(r"(?:[Zz]|[+\-]\d{2}:?\d{2})$").sub("", text).strip()
         return stripped, stripped != text
 
     mentions_tomorrow = bool(
-        re.search(r"\b(?:tomorrow|tmrw|tmr)\b", user_text, re.IGNORECASE)
+        _rx(r"\b(?:tomorrow|tmrw|tmr)\b", re.IGNORECASE).search(user_text)
     )
-    weekday_match = re.search(
-        r"\b(?:(?:this|next)\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
-        user_text,
-        re.IGNORECASE,
-    )
-    if weekday_match and re.search(r"\b(?:every|each|weekly|recurr(?:ing|ence)?)\b", user_text, re.IGNORECASE):
+    weekday_match = _rx(r"\b(?:(?:this|next)\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", re.IGNORECASE).search(user_text)
+    if weekday_match and _rx(r"\b(?:every|each|weekly|recurr(?:ing|ence)?)\b", re.IGNORECASE).search(user_text):
         weekday_match = None
 
     if not user_mentions_timezone and not mentions_tomorrow and not weekday_match:
@@ -5804,14 +5042,10 @@ def _normalize_calendar_create_relative_args(
     if not mentions_tomorrow and not weekday_match:
         return args, False
 
-    if re.search(r"\b20\d{2}-\d{1,2}-\d{1,2}\b", user_text):
+    if _rx(r"\b20\d{2}-\d{1,2}-\d{1,2}\b").search(user_text):
         return args, False
 
-    try:
-        from src.user_time import now_user_local
-        today = now_user_local().date()
-    except Exception:
-        today = date.today()
+    today = now_user_local().date()
     if mentions_tomorrow:
         expected_date = today + timedelta(days=1)
     else:
@@ -5873,15 +5107,10 @@ def _recover_manage_email_tool_block(
     """Map stale compact-router manage_email aliases onto real tools."""
     if block.tool_type in {"mark_email_state", "mcp__email__mark_email_state"}:
         raw = block.content or ""
-        try:
-            args = json.loads(raw or "{}")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            args = {}
-        if not isinstance(args, dict):
-            args = {}
+        args = _json_object(raw)
         action = str(args.get("action") or "").strip().lower()
         if action not in {"mark_read", "mark_unread"}:
-            action = "mark_unread" if re.search(r"\bunread\b", last_user or "", re.IGNORECASE) else "mark_read"
+            action = "mark_unread" if _rx(r"\bunread\b", re.IGNORECASE).search(last_user or "") else "mark_read"
         normalized = {
             "action": action,
             "uid": args.get("uid") or args.get("message_uid") or args.get("id"),
@@ -5894,12 +5123,7 @@ def _recover_manage_email_tool_block(
     if block.tool_type != "manage_email":
         return block
     raw = block.content or ""
-    try:
-        args = json.loads(raw or "{}")
-    except (TypeError, ValueError, json.JSONDecodeError):
-        args = {}
-    if not isinstance(args, dict):
-        args = {}
+    args = _json_object(raw)
     action = str(args.get("action") or "").strip().lower()
 
     if action in {"list", "list_email", "list_emails", "latest", "latest_email"}:
@@ -5996,50 +5220,50 @@ def _email_list_summary_from_tool_output(
     """Format list_emails output for chat without an LLM pass."""
     if not isinstance(raw, str) or not raw.strip():
         return ""
-    account_errors = bool(re.search(r"\[EMAIL ACCOUNT ERRORS:", raw, re.IGNORECASE))
-    if account_errors and not re.search(r"^\s*\d+\.\s+\*\*", raw, re.MULTILINE):
+    account_errors = bool(_rx(r"\[EMAIL ACCOUNT ERRORS:", re.IGNORECASE).search(raw))
+    if account_errors and not _rx(r"^\s*\d+\.\s+\*\*", re.MULTILINE).search(raw):
         return (
             "I couldn't check the inbox because one or more email accounts are "
             "currently unavailable. No reliable empty-inbox result was returned."
         )
     if (not account_errors
-            and re.search(r"\b(no emails?|found 0 email|0 email)\b", raw, re.IGNORECASE)):
+            and _rx(r"\b(no emails?|found 0 email|0 email)\b", re.IGNORECASE).search(raw)):
         return "No emails found."
 
     parsed: list[dict[str, str]] = []
     current: dict[str, str] | None = None
     for line in raw.splitlines():
-        m = re.match(r"^\s*\d+\.\s+\*\*(.*?)\*\*\s*$", line)
+        m = _rx(r"^\s*\d+\.\s+\*\*(.*?)\*\*\s*$").match(line)
         if m:
             if current:
                 parsed.append(current)
-            current = {"subject": re.sub(r"\s+", " ", m.group(1)).strip()}
+            current = {"subject": _rx(r"\s+").sub(" ", m.group(1)).strip()}
             continue
         if current is None:
             continue
-        fm = re.match(r"^\s*From:\s*(.+?)\s*$", line)
+        fm = _rx(r"^\s*From:\s*(.+?)\s*$").match(line)
         if fm:
-            current["from"] = re.sub(r"\s+", " ", fm.group(1)).strip()
+            current["from"] = _rx(r"\s+").sub(" ", fm.group(1)).strip()
             continue
-        dm = re.match(r"^\s*Date:\s*(.+?)\s*$", line)
+        dm = _rx(r"^\s*Date:\s*(.+?)\s*$").match(line)
         if dm:
-            current["date"] = re.sub(r"\s+", " ", dm.group(1)).strip()
+            current["date"] = _rx(r"\s+").sub(" ", dm.group(1)).strip()
             continue
-        um = re.match(r"^\s*UID:\s*(.+?)\s*$", line)
+        um = _rx(r"^\s*UID:\s*(.+?)\s*$").match(line)
         if um:
-            current["uid"] = re.sub(r"\s+", " ", um.group(1)).strip()
+            current["uid"] = _rx(r"\s+").sub(" ", um.group(1)).strip()
             continue
-        am = re.match(r"^\s*Account:\s*(.+?)\s*$", line)
+        am = _rx(r"^\s*Account:\s*(.+?)\s*$").match(line)
         if am:
-            current["account"] = re.sub(r"\s+", " ", am.group(1)).strip()
+            current["account"] = _rx(r"\s+").sub(" ", am.group(1)).strip()
             continue
-        atm = re.match(r"^\s*Attachments?:\s*(.+?)\s*$", line, re.IGNORECASE)
+        atm = _rx(r"^\s*Attachments?:\s*(.+?)\s*$", re.IGNORECASE).match(line)
         if atm:
-            current["attachments"] = re.sub(r"\s+", " ", atm.group(1)).strip()
+            current["attachments"] = _rx(r"\s+").sub(" ", atm.group(1)).strip()
             continue
-        sm = re.match(r"^\s*Summary:\s*(.+?)\s*$", line)
+        sm = _rx(r"^\s*Summary:\s*(.+?)\s*$").match(line)
         if sm:
-            current["summary"] = re.sub(r"\s+", " ", sm.group(1)).strip()
+            current["summary"] = _rx(r"\s+").sub(" ", sm.group(1)).strip()
             continue
     if current:
         parsed.append(current)
@@ -6051,10 +5275,10 @@ def _email_list_summary_from_tool_output(
         if attachments_only:
             return "No emails with attachments found."
         return ""
-    total_match = re.search(r"Found\s+(\d+)\s+email", raw, re.IGNORECASE)
+    total_match = _rx(r"Found\s+(\d+)\s+email", re.IGNORECASE).search(raw)
     raw_total = int(total_match.group(1)) if total_match else len(parsed)
     total = len(parsed) if attachments_only else raw_total
-    account_context = bool(re.search(r"\[EMAIL ACCOUNT CONTEXT:", raw))
+    account_context = bool(_rx(r"\[EMAIL ACCOUNT CONTEXT:").search(raw))
     if unread_requested and account_context and not attachments_only:
         grouped: dict[str, list[dict[str, str]]] = {}
         for item in parsed:
@@ -6096,9 +5320,9 @@ def _email_list_summary_from_tool_output(
 def _single_email_uid_from_tool_output(raw: str) -> str:
     """Return the only UID in a one-result email list/search output."""
     text = str(raw or "")
-    if not re.search(r"\bFound\s+1\s+email", text, re.IGNORECASE):
+    if not _rx(r"\bFound\s+1\s+email", re.IGNORECASE).search(text):
         return ""
-    matches = re.findall(r"^\s*UID:\s*(.+?)\s*$", text, re.MULTILINE)
+    matches = _rx(r"^\s*UID:\s*(.+?)\s*$", re.MULTILINE).findall(text)
     return matches[0].strip() if len(matches) == 1 else ""
 
 
@@ -6112,7 +5336,7 @@ def _visible_response_text(text: str) -> str:
     # still emitting its closing token. Everything before that orphan closer
     # is internal analysis; only the text after it belongs in chat.
     if "</think>" in value.lower():
-        value = re.split(r"</think>", value, flags=re.IGNORECASE)[-1]
+        value = _rx(r"</think>", re.IGNORECASE).split(value)[-1]
     for char in _INVISIBLE_RESPONSE_CHARS:
         value = value.replace(char, "")
     value = _strip_incomplete_tool_markup_tail(value)
@@ -6150,25 +5374,25 @@ def _email_subject_uid_pairs_from_tool_output(raw: str) -> list[tuple[str, str]]
 
     def flush_current() -> None:
         nonlocal current_subject, current_uid
-        subject = re.sub(r"\s+", " ", current_subject or "").strip()
-        uid = re.sub(r"\s+", " ", current_uid or "").strip()
+        subject = _rx(r"\s+").sub(" ", current_subject or "").strip()
+        uid = _rx(r"\s+").sub(" ", current_uid or "").strip()
         if subject and uid:
             pairs.append((subject, uid))
         current_subject = ""
         current_uid = ""
 
     for line in raw.splitlines():
-        list_match = re.match(r"^\s*\d+\.\s+\*\*(.*?)\*\*\s*$", line)
+        list_match = _rx(r"^\s*\d+\.\s+\*\*(.*?)\*\*\s*$").match(line)
         if list_match:
             flush_current()
             current_subject = list_match.group(1).strip()
             continue
-        subject_match = re.match(r"^\s*\*\*Subject:\*\*\s*(.*?)\s*$", line)
+        subject_match = _rx(r"^\s*\*\*Subject:\*\*\s*(.*?)\s*$").match(line)
         if subject_match:
             flush_current()
             current_subject = subject_match.group(1).strip()
             continue
-        uid_match = re.match(r"^\s*(?:\*\*)?UID(?:\*\*)?:\s*(.+?)\s*$", line)
+        uid_match = _rx(r"^\s*(?:\*\*)?UID(?:\*\*)?:\s*(.+?)\s*$").match(line)
         if uid_match:
             current_uid = uid_match.group(1).strip()
             continue
@@ -6200,28 +5424,7 @@ def _linkify_email_titles_from_tool_events(answer: str, tool_events: list[dict[s
             subject_to_uid.setdefault(subject, uid)
     if not subject_to_uid:
         return text
-
-    subjects = sorted(subject_to_uid, key=len, reverse=True)
-    linked_lines: list[str] = []
-    for line in text.splitlines():
-        if "#email-" in line:
-            linked_lines.append(line)
-            continue
-        updated = line
-        for subject in subjects:
-            if subject not in updated:
-                continue
-            uid = subject_to_uid[subject]
-            label = subject.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
-            link = f"[{label}](#email-{uid})"
-            bold_pattern = re.compile(rf"\*\*{re.escape(subject)}\*\*")
-            if bold_pattern.search(updated):
-                updated = bold_pattern.sub(f"**{link}**", updated, count=1)
-                break
-            updated = updated.replace(subject, link, 1)
-            break
-        linked_lines.append(updated)
-    return "\n".join(linked_lines)
+    return _linkify_titles(text, subject_to_uid, "email")
 
 
 def _calendar_title_uid_pairs_from_tool_event(event: dict[str, Any]) -> list[tuple[str, str]]:
@@ -6229,7 +5432,7 @@ def _calendar_title_uid_pairs_from_tool_event(event: dict[str, Any]) -> list[tup
     seen: set[tuple[str, str]] = set()
 
     def add_pair(title: Any, uid: Any) -> None:
-        clean_title = re.sub(r"\s+", " ", str(title or "")).strip()
+        clean_title = _rx(r"\s+").sub(" ", str(title or "")).strip()
         clean_uid = str(uid or "").strip()
         if len(clean_title) < 3 or not clean_uid:
             return
@@ -6273,28 +5476,7 @@ def _linkify_calendar_titles_from_tool_events(answer: str, tool_events: list[dic
             title_to_uid.setdefault(title, uid)
     if not title_to_uid:
         return text
-
-    titles = sorted(title_to_uid, key=len, reverse=True)
-    linked_lines: list[str] = []
-    for line in text.splitlines():
-        if "#event-" in line:
-            linked_lines.append(line)
-            continue
-        updated = line
-        for title in titles:
-            if title not in updated:
-                continue
-            uid = title_to_uid[title]
-            label = title.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
-            link = f"[{label}](#event-{uid})"
-            bold_pattern = re.compile(rf"\*\*{re.escape(title)}\*\*")
-            if bold_pattern.search(updated):
-                updated = bold_pattern.sub(f"**{link}**", updated, count=1)
-                break
-            updated = updated.replace(title, link, 1)
-            break
-        linked_lines.append(updated)
-    return "\n".join(linked_lines)
+    return _linkify_titles(text, title_to_uid, "event")
 
 
 def _has_successful_calendar_list_evidence(tool_events: list[dict[str, Any]]) -> bool:
@@ -6308,13 +5490,7 @@ def _has_successful_calendar_list_evidence(tool_events: list[dict[str, Any]]) ->
             continue
         command = str(event.get("command") or "").strip()
         output = str(event.get("output") or "").strip()
-        action = ""
-        try:
-            parsed = json.loads(command)
-            if isinstance(parsed, dict):
-                action = str(parsed.get("action") or "").strip().lower()
-        except Exception:
-            action = command.splitlines()[0].strip().lower() if command else ""
+        action = _tool_block_action(command)
         if action in {"list", "list_events"}:
             return True
         if output.startswith("Found ") and "event" in output.lower():
@@ -6372,7 +5548,7 @@ def _strip_terminal_delimited_value(
 
 
 def _email_sender_name(value: str) -> str:
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = _rx(r"\s+").sub(" ", str(value or "")).strip()
     if not text:
         return ""
     text = _strip_terminal_delimited_value(text, "(", ")", required="@").strip()
@@ -6381,7 +5557,7 @@ def _email_sender_name(value: str) -> str:
 
 
 def _email_account_label(value: str) -> str:
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = _rx(r"\s+").sub(" ", str(value or "")).strip()
     if not text:
         return ""
     return _strip_terminal_delimited_value(text, "<", ">").strip() or text
@@ -6417,7 +5593,7 @@ def _format_email_attachment_summary_item(item: dict[str, str]) -> str:
 
 def _email_attachment_list_requested(user_text: str) -> bool:
     text = str(user_text or "")
-    return bool(re.search(r"\battachments?\b|\battached\b|\bpdfs?\b|\bfiles?\b", text, re.IGNORECASE))
+    return bool(_rx(r"\battachments?\b|\battached\b|\bpdfs?\b|\bfiles?\b", re.IGNORECASE).search(text))
 
 
 def _email_read_summary_from_tool_output(raw: str) -> str:
@@ -6434,21 +5610,21 @@ def _email_read_summary_from_tool_output(raw: str) -> str:
         if in_body:
             body_lines.append(line)
             continue
-        m = re.match(r"^\*\*Subject:\*\*\s*(.*)$", line)
+        m = _rx(r"^\*\*Subject:\*\*\s*(.*)$").match(line)
         if m:
-            subject = re.sub(r"\s+", " ", m.group(1)).strip()
+            subject = _rx(r"\s+").sub(" ", m.group(1)).strip()
             continue
-        m = re.match(r"^\*\*From:\*\*\s*(.*)$", line)
+        m = _rx(r"^\*\*From:\*\*\s*(.*)$").match(line)
         if m:
-            from_ = re.sub(r"\s+", " ", m.group(1)).strip()
+            from_ = _rx(r"\s+").sub(" ", m.group(1)).strip()
             continue
-        m = re.match(r"^\*\*Date:\*\*\s*(.*)$", line)
+        m = _rx(r"^\*\*Date:\*\*\s*(.*)$").match(line)
         if m:
-            date = re.sub(r"\s+", " ", m.group(1)).strip()
+            date = _rx(r"\s+").sub(" ", m.group(1)).strip()
             continue
-        m = re.match(r"^\*\*UID:\*\*\s*(.*)$", line)
+        m = _rx(r"^\*\*UID:\*\*\s*(.*)$").match(line)
         if m:
-            uid = re.sub(r"\s+", " ", m.group(1)).strip()
+            uid = _rx(r"\s+").sub(" ", m.group(1)).strip()
             continue
     if not any((subject, from_, date, uid, body_lines)):
         return ""
@@ -6472,11 +5648,7 @@ def _email_read_summary_from_tool_output(raw: str) -> str:
             stripped = body_line.strip()
             if skipping_headers and (
                 not stripped
-                or re.match(
-                    r"^(?:From|To|Cc|Bcc|Subject|Message-ID|In-Reply-To|References|Date):\s*",
-                    stripped,
-                    re.IGNORECASE,
-                )
+                or _rx(r"^(?:From|To|Cc|Bcc|Subject|Message-ID|In-Reply-To|References|Date):\s*", re.IGNORECASE).match(stripped)
             ):
                 continue
             skipping_headers = False
@@ -6504,15 +5676,15 @@ def _email_attachment_summary_from_tool_output(raw: str) -> str:
         if in_content:
             content_lines.append(line)
             continue
-        m = re.match(r"^Attachment downloaded to:\s*`?(.+?)`?\s*$", line)
+        m = _rx(r"^Attachment downloaded to:\s*`?(.+?)`?\s*$").match(line)
         if m:
             path = m.group(1).strip()
             continue
-        m = re.match(r"^Filename:\s*(.+?)\s*$", line)
+        m = _rx(r"^Filename:\s*(.+?)\s*$").match(line)
         if m:
             filename = m.group(1).strip()
             continue
-        m = re.match(r"^Size:\s*(.+?)\s*$", line)
+        m = _rx(r"^Size:\s*(.+?)\s*$").match(line)
         if m:
             size = m.group(1).strip()
             continue
@@ -6573,12 +5745,12 @@ def _email_read_evidence_from_tool_output(raw: str, *, max_body_chars: int = 600
     # Older cached messages can contain a non-multipart HTML body. Keep the
     # factual text but never feed style tags and Outlook markup into another
     # model round.
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-    text = re.sub(r"</(?:p|div|li|tr|h[1-6])\s*>", "\n", text, flags=re.IGNORECASE)
+    text = _rx(r"<br\s*/?>", re.IGNORECASE).sub("\n", text)
+    text = _rx(r"</(?:p|div|li|tr|h[1-6])\s*>", re.IGNORECASE).sub("\n", text)
     text = strip_angle_tags(text)
     text = html.unescape(text)
     text = _strip_horizontal_space_before_lf(text)
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    text = _rx(r"\n{3,}").sub("\n\n", text).strip()
     if len(text) > max_body_chars:
         text = text[:max_body_chars].rstrip() + "\n[...email truncated]"
     return text
@@ -6587,11 +5759,7 @@ def _email_read_evidence_from_tool_output(raw: str, *, max_body_chars: int = 600
 def _is_terse_email_lookup_followup(text: str) -> bool:
     value = str(text or "").strip()
     value = value.rstrip("?.!").rstrip()
-    return bool(re.fullmatch(
-        r"(?:and|so|well|still|then|okay|ok|did you find it(?: yet)?|what did you find)",
-        value,
-        re.IGNORECASE,
-    ))
+    return bool(_rx(r"(?:and|so|well|still|then|okay|ok|did you find it(?: yet)?|what did you find)", re.IGNORECASE).fullmatch(value))
 
 
 def _email_lookup_request_from_messages(messages: list[dict], last_user: str) -> str:
@@ -6616,18 +5784,10 @@ def _email_fact_lookup_requested(user_text: str) -> bool:
     text = str(user_text or "").strip()
     if not text:
         return False
-    if re.search(
-        r"\b(?:open|show|display|read)\b.{0,24}\b(?:email|message|thread|it|them)\b",
-        text,
-        re.IGNORECASE,
-    ):
+    if _rx(r"\b(?:open|show|display|read)\b.{0,24}\b(?:email|message|thread|it|them)\b", re.IGNORECASE).search(text):
         return False
-    return bool(re.search(
-        r"\b(?:find|locate|which|where|what|when|who|how much|address|amount|date|deadline|"
-        r"reservation|invoice|receipt|property|contract|attachment|said|say|mention|contained?)\b",
-        text,
-        re.IGNORECASE,
-    ))
+    return bool(_rx(r"\b(?:find|locate|which|where|what|when|who|how much|address|amount|date|deadline|"
+        r"reservation|invoice|receipt|property|contract|attachment|said|say|mention|contained?)\b", re.IGNORECASE).search(text))
 
 
 _EMAIL_TERMINAL_ACTION_TOOLS = {
@@ -6690,10 +5850,10 @@ def _email_compact_summary_from_read_summaries(summaries: list[str], user_text: 
                 body_start = idx + 1
                 break
         body = "\n".join(lines[body_start:]).strip() if body_start else ""
-        body = re.sub(r"\s+", " ", body).strip()
-        body = re.sub(r"(?i)\bplease capture the action, deadline, and owner if present\..*?$", "", body).strip()
-        body = re.sub(r"(?i)\breference item \d+ in the follow-up notes\.", "", body).strip()
-        body = re.sub(r"\s+", " ", body).strip()
+        body = _rx(r"\s+").sub(" ", body).strip()
+        body = _rx(r"(?i)\bplease capture the action, deadline, and owner if present\..*?$").sub("", body).strip()
+        body = _rx(r"(?i)\breference item \d+ in the follow-up notes\.").sub("", body).strip()
+        body = _rx(r"\s+").sub(" ", body).strip()
         if len(body) > 180:
             body = body[:180].rsplit(" ", 1)[0].rstrip() + "..."
         items.append({
@@ -6707,11 +5867,11 @@ def _email_compact_summary_from_read_summaries(summaries: list[str], user_text: 
         return ""
     noun = "emails" if len(items) != 1 else "email"
     scope = "latest "
-    if re.search(r"\blast\s+week\b", user_text or "", re.IGNORECASE):
+    if _rx(r"\blast\s+week\b", re.IGNORECASE).search(user_text or ""):
         scope = "last week's "
-    elif re.search(r"\blast\s+month\b", user_text or "", re.IGNORECASE):
+    elif _rx(r"\blast\s+month\b", re.IGNORECASE).search(user_text or ""):
         scope = "last month's "
-    elif re.search(r"\blast\s+year\b", user_text or "", re.IGNORECASE):
+    elif _rx(r"\blast\s+year\b", re.IGNORECASE).search(user_text or ""):
         scope = "last year's "
     lines = [f"Summary of your {scope}{noun}:"]
     for item in items:
@@ -6733,11 +5893,11 @@ def _email_compact_summary_from_read_summaries(summaries: list[str], user_text: 
 
 
 def _email_summary_requested(text: str) -> bool:
-    return bool(re.search(r"\b(?:summari[sz]e|summary|tldr|recap|brief|rundown)\b", str(text or ""), re.IGNORECASE))
+    return bool(_rx(r"\b(?:summari[sz]e|summary|tldr|recap|brief|rundown)\b", re.IGNORECASE).search(str(text or "")))
 
 
 def _email_count_requested(text: str) -> bool:
-    return bool(re.search(r"\b(?:how\s+many|count|number\s+of|total)\b.{0,60}\b(?:emails?|messages?|mail)\b|\b(?:emails?|messages?|mail)\b.{0,60}\b(?:how\s+many|count|number\s+of|total)\b", str(text or ""), re.IGNORECASE))
+    return bool(_rx(r"\b(?:how\s+many|count|number\s+of|total)\b.{0,60}\b(?:emails?|messages?|mail)\b|\b(?:emails?|messages?|mail)\b.{0,60}\b(?:how\s+many|count|number\s+of|total)\b", re.IGNORECASE).search(str(text or "")))
 
 
 def _email_direct_listing_requested(text: str) -> bool:
@@ -6746,13 +5906,13 @@ def _email_direct_listing_requested(text: str) -> bool:
         return False
     if _email_summary_requested(q) or _email_count_requested(q):
         return False
-    if re.search(r"\b(?:urgent|important|priority|spam|junk|phishing|unsubscribe|attachment\s+content|what\s+does|what\s+did|say|said|says)\b", q):
+    if _rx(r"\b(?:urgent|important|priority|spam|junk|phishing|unsubscribe|attachment\s+content|what\s+does|what\s+did|say|said|says)\b").search(q):
         return False
     return bool(
-        re.search(r"\b(?:show|list|display|view)\b.{0,50}\b(?:my\s+)?(?:inbox|emails?|mail|messages)\b", q)
-        or re.search(r"\b(?:what(?:'s|\s+is|\s+are)?|check)\b.{0,30}\b(?:my\s+)?(?:inbox|emails?|mail|messages)\b", q)
-        or re.search(r"\b(?:latest|newest|recent|last\s+\d+)\s+(?:emails?|messages|mail)\b", q)
-        or re.search(r"\b(?:emails?|messages|mail)\s+(?:from\s+)?(?:today|yesterday|last\s+week|last\s+month|last\s+year)\b", q)
+        _rx(r"\b(?:show|list|display|view)\b.{0,50}\b(?:my\s+)?(?:inbox|emails?|mail|messages)\b").search(q)
+        or _rx(r"\b(?:what(?:'s|\s+is|\s+are)?|check)\b.{0,30}\b(?:my\s+)?(?:inbox|emails?|mail|messages)\b").search(q)
+        or _rx(r"\b(?:latest|newest|recent|last\s+\d+)\s+(?:emails?|messages|mail)\b").search(q)
+        or _rx(r"\b(?:emails?|messages|mail)\s+(?:from\s+)?(?:today|yesterday|last\s+week|last\s+month|last\s+year)\b").search(q)
     )
 
 
@@ -6778,16 +5938,16 @@ def _email_urgent_summary_from_read_summaries(summaries: list[str]) -> str:
         haystack = f"{subject}\n{body}".lower()
         score = 0
         reasons: list[str] = []
-        if re.search(r"\bdeadline\b|\btomorrow\b|\bby\s+\d{1,2}:?\d{0,2}\b", haystack):
+        if _rx(r"\bdeadline\b|\btomorrow\b|\bby\s+\d{1,2}:?\d{0,2}\b").search(haystack):
             score += 40
             reasons.append("has a deadline")
-        if re.search(r"\baction needed\b|\bplease review\b|\bsend\b|\bconfirm\b", haystack):
+        if _rx(r"\baction needed\b|\bplease review\b|\bsend\b|\bconfirm\b").search(haystack):
             score += 30
             reasons.append("asks for action")
-        if re.search(r"\bbefore sending\b|\bsanity-check\b|\bwider team\b", haystack):
+        if _rx(r"\bbefore sending\b|\bsanity-check\b|\bwider team\b").search(haystack):
             score += 25
             reasons.append("blocks an outbound send")
-        if re.search(r"\bchanged\b|\blatest version\b|\bnumbers\b", haystack):
+        if _rx(r"\bchanged\b|\blatest version\b|\bnumbers\b").search(haystack):
             score += 15
             reasons.append("may affect dependent work")
         if not reasons:
@@ -6830,13 +5990,13 @@ def _email_accounts_summary_from_tool_output(raw: str, max_items: int = 8) -> st
         stripped = line.strip()
         if not stripped:
             continue
-        m = re.match(r"^-\s+\*\*(.*?)\*\*(.*)$", stripped)
+        m = _rx(r"^-\s+\*\*(.*?)\*\*(.*)$").match(stripped)
         if m:
             if current:
                 rows.append(current)
                 if len(rows) >= max_items:
                     break
-            current = re.sub(r"\s+", " ", (m.group(1) + m.group(2)).strip())
+            current = _rx(r"\s+").sub(" ", (m.group(1) + m.group(2)).strip())
             continue
         if current and stripped.lower().startswith("email:"):
             email = stripped.split(":", 1)[1].strip()
@@ -6846,7 +6006,7 @@ def _email_accounts_summary_from_tool_output(raw: str, max_items: int = 8) -> st
         rows.append(current)
     if not rows:
         return text.splitlines()[0] if text else ""
-    total_match = re.search(r"Found\s+(\d+)\s+email account", text, re.IGNORECASE)
+    total_match = _rx(r"Found\s+(\d+)\s+email account", re.IGNORECASE).search(text)
     total = int(total_match.group(1)) if total_match else len(rows)
     lines = [f"Email accounts ({total}):"]
     lines.extend(f"- {row}" for row in rows)
@@ -6874,7 +6034,7 @@ def _web_fetch_summary_from_tool_output(raw: str) -> str:
             source = stripped.split(":", 1)[1].strip()
             continue
         body_lines.append(stripped)
-    body = re.sub(r"\s+", " ", " ".join(body_lines)).strip()
+    body = _rx(r"\s+").sub(" ", " ".join(body_lines)).strip()
     if len(body) > 600:
         body = body[:600].rstrip() + "..."
     if title and source:
@@ -6902,132 +6062,6 @@ def _load_mcp_disabled_map() -> Dict[str, set]:
         db.close()
     return disabled_map
 
-# System prompt that tells the LLM about available tools.
-# Always injected — the LLM decides whether to use them.
-_AGENT_PREAMBLE = """\
-You are an AI assistant with tool access. You can run shell commands, execute Python, search the web, \
-read/write files, create and edit documents, generate images, manage memories, and more. \
-To use a tool, write a fenced code block with the tool name as the language tag. \
-The block executes automatically and you see the output."""
-
-_AGENT_RULES = """\
-## Rules
-- Only use tools when needed. Don't search for things you already know.
-- For web lookup/search/latest/current requests, use `web_search` or `web_fetch`. Do NOT use `bash`, `python`, `curl`, `requests`, or scraping code for web lookup unless web tools are disabled or already failed.
-- If `web_search` is listed in this prompt, web search is available. Do NOT tell the user search/web tools are unavailable.
-- These exact tags execute automatically. For showing code examples, use ```shell, ```sh, ```py, etc. instead.
-- Multiple tool blocks per response OK. 60s timeout per tool, 10K char output limit.
-- Code/content >15 lines → ```create_document (NOT in chat). Short snippets OK in chat.
-- Long-form or structured writing is a document by default when the user asks to write/create/make/generate it and the answer would be more than a short paragraph. Use create_document instead of dumping the full content in chat.
-- Editing an existing document: ALWAYS use ```edit_document with FIND/REPLACE blocks. Do NOT rewrite the whole document with ```update_document unless genuinely changing more than half of it.
-- BIAS TOWARD ACTION on edit requests. If the user says "edit out X", "remove the Y paragraph", "change Z" — JUST DO IT with your best interpretation. Don't ask for clarification on minor ambiguity. The user can undo or re-prompt if wrong.
-- AFTER A TOOL SUCCEEDS, do not second-guess. The success message ("Document edited: v2, 1 edit") means it worked. Reply in ONE short sentence confirming what was done. No re-checking, no replaying the diff in your head, no validation theater.
-- AFTER A TOOL FAILS (timeout, error, "Unknown action", "not found"), DO NOT GO SILENT. The user expects a follow-up: either retry with a fix (e.g. correct args, longer-running form, run `tail -f /tmp/foo.log` to see progress, split into smaller steps), OR explicitly tell them "this didn't work, want me to try X instead?". A failed tool is not a stopping condition — only a successful one is.
-- YOU DECLARE WHEN THE JOB IS DONE — not a timer. Keep taking concrete steps while the task still needs them; you have plenty of rounds, so don't rush to quit just because you've made a few calls. There are exactly three ways to end a turn: (1) DONE — before you declare it, sanity-check that every concrete thing the user asked for actually exists or succeeded (file written, edit applied, command exited clean); then stop calling tools and write the final answer (that IS your "done" signal); (2) BLOCKED — you genuinely can't proceed (a capability is missing, permission denied, or data you can't obtain), so say plainly what's blocking you, in a sentence or two, and stop; (3) keep going with the single most useful next step. The only wrong moves are trailing off mid-task without one of these, and repeating a call you already ran.
-- Calendar: call `manage_calendar` with `action=list_calendars` FIRST before create/update/delete operations. If a create/update request is missing a required date, time, or target event, use `ask_user` once with a short question; do not guess a reservation/event date, and do not write a long ambiguity analysis. For open-ended dates, include an option like "Exact date" and ask the user to type it.
-- BULK email actions ("delete all those", "mark all as read", "archive these", "delete all spam", "mark these 19 read") → use the `bulk_email` tool ONCE with either the exact `uids` list from the latest `list_emails` result or `all_unread: true`. NEVER just say you deleted/archived/marked messages unless a delete/archive/mark/bulk email tool call succeeded. NEVER loop mark_email_read / archive_email / delete_email one message at a time — that floods the context and can blow the token budget. One bulk_email call handles the whole set.
-- Suspected spam workflow: first list/search/scan and explain suspicious candidates with UID, sender, subject, and reason. Before deleting, moving to Junk, unsubscribing, or blocking a sender, ask for confirmation with `ask_user` unless the user explicitly commanded the exact action. After approval, use `bulk_email` with action="junk" for messages and `block_sender` for sender rules. Do not block senders silently.
-- Email UIDs are the values after `UID:` in tool output, not list row numbers. For example, row `1.` with `UID: 90186` must use `"90186"`, never `"1"`.
-- "Last/latest/newest email" means call `list_emails` with `max_results: 1`, `unread_only: false`, and the right `account`, then read the UID returned by that tool if full content is needed. NEVER use a table row number like "#18" as an email UID.
-- Plain "list/show/check my inbox/emails" means latest inbox mail, including read messages. Do not set `unread_only: true` unless the user explicitly asks for unread/needs attention.
-- If the user asks for multiple specific emails and you call `read_email` more than once, your final answer MUST include every successfully read email, clearly separated and linked by UID. Do not answer with only the last email you read.
-- Multiple email accounts: if tool output says "Other accounts" or the user asks "my Gmail?", "other inbox?", "work mail?", "custom domain mail?", or names any mailbox/account, DO NOT answer from memory. Call `list_email_accounts` if needed, then call `list_emails`/`read_email`/`bulk_email` with the exact `account` value for that mailbox. Account names are user-defined labels; if the user typo-matches a known account, use the closest listed account instead of claiming it does not exist. NEVER use `app_api` or `/api/email/accounts` to discover email accounts; that route is owner-filtered in tool context and can falsely return empty.
-- User identity facts/preferences ("my name is <name>", "I live in <place>", "I prefer concise replies", "call me <name>") → use `manage_memory` with action=add. NEVER use `manage_contact` for facts about the user unless the user explicitly says to create/update a contact and provides contact details such as an email or phone.
-- When the prompt contains "Selected notes and todos", treat that content as already-provided reference context. Use it directly when it answers the request; do not call `manage_notes` to list/search/view the same notes, and do not ask for permission merely to use the selected context. Call `manage_notes` only when the user requests a note change or the selected context is insufficient and a fresh lookup is needed.
-- "Create/add/write a note" / "notes" / "todos" / "remind me to X at <time>" → use `manage_notes`. Do NOT store notes in `manage_memory`; memory is for persistent facts/preferences about the user, not note content. For reminders, include a `due_date`; for todos, use `note_type=checklist` when appropriate.
-- "Do X every morning / daily / on a schedule / automatically" (e.g. "summarize my inbox every morning") → this is a request to CREATE A SCHEDULED TASK, not to do X once right now. Call `manage_tasks` with action=create (prompt = what to do, schedule + cron/time). Do NOT just perform the action inline this turn — the user wants it to recur. After creating, return a clickable `[Task name](#task-<id>)` link and tell them it'll run on schedule and show in the Tasks panel. If you also want to show a sample of this run, do that AFTER creating the task, not instead of it.
-- There is NO generic sleep / auto-wakeup / resume-after-this-turn primitive. Background jobs and subagent-style work should return a job/task id and notify the session automatically when finished; do not sleep or poll for their progress. If the user explicitly asks you to retry or do something later, call `manage_tasks` with action=create, `task_type=llm`, `schedule=once`, and a self-contained prompt. NEVER claim you will wake up, retry later, or handle something later unless a `manage_tasks` create call succeeds.
-
-## UI conventions
-- When you reference an entity by ID in your reply, render it as a STANDARD markdown link with a hash-prefixed anchor. The frontend converts these into clickable jump buttons:
-  - Sessions / chats: `[Name](#session-<id>)`
-  - Documents: `[Title](#document-<id>)`
-  - Notes: `[Title](#note-<id>)`
-  - Gallery images: `[Caption](#image-<id>)`
-  - Emails (use the UID from list_emails/read_email output): `[Subject](#email-<uid>)`
-  - Calendar events (use the uid from manage_calendar): `[Summary](#event-<uid>)` — opens the calendar on that day
-  - Tasks: `[Task name](#task-<id>)`
-  - Skills: `[skill-name](#skill-<name>)`
-  - Research jobs: `[Topic](#research-<session_id>)`
-- The format is `[link text](#kind-<id>)` — text in square brackets, anchor in parens. NOT `[name] [#kind-id]` and NOT `[#kind-id]`. That's plain text and the user can't click it.
-- Use this inside lists, tables, prose — anywhere. Tables: `| Name | Open |` rows like `| Big Chat | [open](#session-abc123) |` work fine.
-- Examples:
-  - After `create_session` returns id `89effa28`: "Created [New Chat](#session-89effa28) — click to switch."
-  - Listing five sessions:
-    ```
-    1. [Big Chat](#session-abc123) — 2h ago
-    2. [Code Review](#session-def456) — 5h ago
-    3. [Note Taking](#session-ghi789) — 1d ago
-    ```
-"""
-
-_API_AGENT_RULES = """\
-## Rules
-- Prefer native tool/function calling when tools are needed.
-- Only call tools when they materially help answer the request.
-- You MUST use tools to take action — do not describe what you would do. Act, don't narrate.
-- For web lookup/search/latest/current requests, call `web_search` or `web_fetch`. Do NOT use shell, Python, curl, requests, or scraping code for web lookup unless web tools are unavailable or already failed.
-- If `web_search` is listed in this prompt, web search is available. Do NOT tell the user search/web tools are unavailable.
-- For products, hardware, software, launches, and releases, distinguish announcement date from release/ship/availability date. Do not call an announced future product "current" or "available" unless the evidence says it is shipping/available now.
-- Keep answers concise unless the user asks for depth.
-- For long code or content, use document tools instead of pasting large blocks into chat.
-- Long-form or structured writing is a document by default when the user asks to write/create/make/generate it and the answer would be more than a short paragraph. Call create_document instead of dumping the full content in chat.
-- Editing an existing document: ALWAYS use `edit_document` with find/replace. Only use `update_document` for genuine full rewrites (>50% changed) — do NOT echo the entire file back for small edits.
-- If the active editor document is an email draft/compose window, treat that open email as the target for "write this", "write the email", "reply with...", "make it say...", "draft this", and similar requests. Do NOT create another document, search/list/manage documents, or open a different reply unless the user explicitly asks. Edit the open email draft with `edit_document` or `update_document`; preserve To/Cc/Bcc/Subject/In-Reply-To/References/X-* header lines unless the user asks to change them.
-- "Give suggestions / feedback / review / how can I improve this / what would make it better" about the OPEN document → call `suggest_document`, do NOT write a prose list of ideas in chat. It creates inline accept/reject bubbles on the doc. Give concrete `find`/`replace`/`reason` items. To suggest an ADDITION (e.g. "add a bow to the SVG", a new section), set `find` to a short existing anchor snippet and `replace` to that same snippet PLUS the new content. Only answer in prose when no document is open, or the request is purely conceptual with no concrete change to propose.
-- BIAS TOWARD ACTION on edit requests. If the user says "edit out X", "remove the Y paragraph", "change Z" — call the edit tool with your best interpretation. Don't ask for clarification on minor ambiguity. The user can undo.
-- AFTER A TOOL SUCCEEDS, do not second-guess. A success response means it worked. Reply in ONE short sentence confirming what was done. No verification thinking, no re-analyzing — move on.
-- AFTER A TOOL FAILS, DO NOT GO SILENT. The user expects a follow-up: retry with a fix, run a diagnostic (`tail`, `ls`, `which`), or explicitly tell them what didn't work and what you'll try next. Failure is not a stopping condition.
-- YOU DECLARE WHEN THE JOB IS DONE — not a timer. Keep taking concrete steps while the task still needs them; don't quit early just because you've made a few calls. Three ways to end a turn: (1) DONE — before declaring it, verify every concrete deliverable the user asked for actually exists or succeeded; then stop calling tools and write the final answer (that IS your "done" signal); (2) BLOCKED — you can't proceed (missing capability, permission denied, unobtainable data), so state plainly what's blocking you and stop; (3) keep going with the single most useful next step. Never trail off mid-task without (1) or (2), and never repeat a call you already ran.
-- Calendar: call `manage_calendar` with `action=list_calendars` FIRST before create/update/delete operations. If a create/update request is missing a required date, time, or target event, use `ask_user` once with a short question; do not guess a reservation/event date, and do not write a long ambiguity analysis. For open-ended dates, include an option like "Exact date" and ask the user to type it.
-- "Create/add/write a note" / "notes" / "todos" / "remind me to X at <time>" → use `manage_notes`. Do NOT store notes in `manage_memory`; memory is for persistent facts/preferences about the user, not note content. For reminders, include a `due_date`; for todos, use `note_type=checklist` when appropriate. `manage_tasks` is for RECURRING background AI jobs, NOT for one-off user reminders.
-- "Disable/turn off/enable/turn on <tool>" (shell, search, research, browser, documents, incognito, etc.) → call `ui_control` with `toggle <name> <on|off>`. Aliases accepted: shell→bash, search→web, deepresearch→research, documents→document_editor. NEVER record this as a memory — the user wants the toggle flipped, not a note about preferring it.
-- "Research X" / "do research on X" / "look into Y" / "deep dive on Z" → call `trigger_research` with `topic`. This starts a live job that appears in the Deep Research sidebar (streams progress + final report). **Do NOT use `web_search` for these** — saw the agent do a plain web_search for "do research on X" when the user wanted the deep-research job. "research X" is a deep-research request, not a quick lookup. (web_search is only for a single quick fact mid-task.) Do NOT POST /api/research/start via app_api either — blocked. After starting, tell the user it's running in the Deep Research sidebar. Only if the user explicitly wants it inline/quick should you fall back to web_search.
-- "Open <panel>" (documents, library, gallery, calendar/schedule, email, inbox, sessions, brain/memories, skills, settings, theme, notes, cookbook) → call `ui_control` with `open_panel <name>`. Panel aliases: library/doc/docs/document→documents, images→gallery, calendar/schedule→calendar, mail/inbox/emails→email, chats/history→sessions, memory/memories→brain, preferences→settings, appearance/themes→theme, models/serve/serving→cookbook. CRITICAL: "open memory/memories/brain" / "open skills" / "open calendar/schedule" / "open notes" / "open documents" / "open cookbook" / "open theme" means OPEN THE PANEL — call `ui_control`, NOT a manage/list tool. But "show/list/what are my skills|notes|memories" means list them in chat with `manage_skills`, `manage_notes`, or `manage_memory`. The "manage_*" tools list contents in chat; `ui_control open_panel` opens the visual modal the user is asking for.
-- "Write/draft/send a reply saying X" for an open/read email → call `draft_email_reply` with the email `uid`/`folder`/`account` and `body` containing the drafted reply. This opens an Odysseus email draft document and DOES NOT send. Do NOT call `reply_to_email` unless the user explicitly says to send immediately.
-- "Open/start a reply", "open a reply to <sender>", "draft a reply window" with no requested body → find/read the email if needed, then call `draft_email_reply` with the UID/folder/account.
-- Bulk email actions ("delete all those", "archive these", "mark all read") require a real email tool call. Use `bulk_email` once with UIDs from the latest `list_emails` result and the same `account`; never claim success without the tool result.
-- Suspected spam: review first, then ask the user to confirm moving to Junk, blocking sender, unsubscribing, keeping, or deleting. Use `ask_user` for this decision unless the user already gave the exact action. Use `bulk_email` action="junk" for moving messages and `block_sender` for sender block rules.
-- Email UIDs are the values after `UID:` in tool output, not list row numbers. For example, row `1.` with `UID: 90186` must use `"90186"`, never `"1"`.
-- "Last/latest/newest email" means call `list_emails` with `max_results: 1`, `unread_only: false`, and the right `account`, then read the UID returned by that tool if full content is needed. NEVER use a table row number like "#18" as an email UID.
-- Plain "list/show/check my inbox/emails" means latest inbox mail, including read messages. Do not set `unread_only: true` unless the user explicitly asks for unread/needs attention.
-- If the user asks for multiple specific emails and you call `read_email` more than once, your final answer MUST include every successfully read email, clearly separated and linked by UID. Do not answer with only the last email you read.
-- Multiple email accounts: if tool output says "Other accounts" or the user asks "my Gmail?", "other inbox?", "work mail?", "custom domain mail?", or names any mailbox/account, DO NOT answer from memory or infer it is the same inbox. Call `list_email_accounts` if needed, then call `list_emails`/`read_email`/`bulk_email` with the exact `account` value for that mailbox. Account names are user-defined labels; if the user typo-matches a known account, use the closest listed account instead of claiming it does not exist. NEVER use `app_api` or `/api/email/accounts` to discover email accounts; that route is owner-filtered in tool context and can falsely return empty.
-- User identity facts/preferences ("my name is <name>", "I live in <place>", "I prefer concise replies", "call me <name>") → use `manage_memory` with action=add. NEVER use `manage_contact` for facts about the user unless the user explicitly says to create/update a contact and provides contact details such as an email or phone.
-- You are running INSIDE Odysseus — there is no OpenWebUI, ChatGPT, or external chat backend to query. All chats/sessions live in THIS app and are accessed via `list_sessions` (or `manage_session` with `action=list`), and deleted via `manage_session` with `action=delete`. Do NOT shell out to find sqlite files, curl localhost:8080, or grep for routers — those don't exist here. If `list_sessions` returns rows, that IS the source of truth.
-- After `list_sessions`, preserve the returned `[Chat title](#session-<id>)` links in your user-facing reply. Do not rewrite chat lists as plain tables with non-clickable titles.
-- "Cookbook" = the LLM-serving subsystem (NOT chat sessions, NOT a recipe app). Routing:
-  • "What's running" / "what's serving" / "show my cookbook" / "is anything up" → **first action MUST be `list_served_models` (no args)**. The tool is ALWAYS available. Do not run `ps aux`, do not `curl localhost:8000`, do not `which vllm`. Even if you don't remember seeing the tool listed, it IS available — call it. The output IS the source of truth (it tracks diffusion models, vLLM, SGLang, llama.cpp, Ollama, etc. — anything spawned via the cookbook, including remote hosts that `ps aux` here can't see).
-  • "What's downloading" / "show downloads" → `list_downloads` (always available).
-  • "What models do I have" → `list_cached_models` (always available).
-  • "Kill / stop / shut down" → `stop_served_model` (or `cancel_download`) with the session_id from the list.
-  • Searching for a model → `search_hf_models`.
-  • Downloading or serving a model → these run on a SERVER. If the user names one ("on gpu-box", "on the gpu box") pass `host=`. If they DON'T name one, the tool defaults to the cookbook's currently-selected server (NOT localhost). When there are multiple servers and it's genuinely ambiguous which they mean, call `list_cookbook_servers` and ask. Only download to localhost when the user explicitly says "locally" / "on this machine" (pass `local=true`).
-  • Image/inpainting/diffusion serve requests ("serve inpaint", "SDXL inpainting", "image model") → use `serve_model` with a built-in image command. Apple/MLX image repos use `python3 scripts/mlx_image_server.py --model <repo> --port 8100`; non-MLX Diffusers repos use `python3 scripts/diffusion_server.py --model <repo> --port 8100`. Do NOT use `mlx_lm.server` for image models, do NOT invent modules like `diffusers_api_server`, and do NOT use bash/ssh/pip directly. The Cookbook route copies the server script to remote hosts and registers the image endpoint.
-  • Launching a saved preset explicitly ("run my preset", "start the saved SD 3.5 preset", "use the existing preset") → `list_serve_presets`, then `serve_preset {name: "..."}`. Do NOT fabricate a tmux command — the user already saved working ones from the UI. Only fall back to raw `serve_model` if no preset matches and the autonomous launch tool is not appropriate.
-  • Launching a model the user names ("serve minimax m2.7 on gpu-box") with NO preset → `serve_model {repo_id, cmd, host}`. The cookbook route OWNS tmux session creation AND state-file registration AND UI live-refresh — bypassing it produces an orphan the UI can never see. After launching, call `list_served_models` to verify readiness. If it reports a diagnosis and suggested adjusted command, retry with `serve_model` using that command instead of asking the user to debug raw tmux logs.
-  • Adopting an already-running tmux session (someone or a prior bash launch started a server, but it's not in the cookbook) → `adopt_served_model {host, tmux_session, model, port}`. This registers it in cookbook_state.json AND adds it as a chat endpoint so the user can pick it in the model dropdown. Use this whenever you find a running server that the cookbook doesn't know about.
-  • After ANY successful serve (preset or raw or adopted), the cookbook's serve flow auto-adds the model as an endpoint. If for some reason it didn't (e.g. the launch was external), call `adopt_served_model` to fix both at once, or `manage_endpoints` with action=add to register the URL manually.
-  **Anti-pattern (CRITICAL — saw the agent do this and it produced an orphan session invisible to the UI):** `ssh <host> 'tmux new-session ... vllm serve ...'` via bash. THIS IS WRONG even when it "works". The launch must go through `serve_model` so the cookbook route creates the tmux session AND writes the task to cookbook_state.json. If the user asks for a launch and you reach for bash/ssh/tmux, STOP — call `serve_model` instead. Bash launches don't show up in the Cookbook UI, can't be `stop_served_model`'d, and don't survive a UI refresh.
-  Anti-pattern (DO NOT do this — saw it twice): "I don't see list_served_models in my tool list, let me try bash ps aux." → wrong. The tool IS available. Just call it.
-  Anti-pattern: POSTing to `/api/cookbook/state` via `app_api` — that overwrites the whole state file (presets and all). Blocked. Use serve_preset / serve_model / stop_served_model.
-
-## UI conventions
-- When referencing an entity by ID, render it as a STANDARD markdown link with a hash-prefixed anchor — the frontend renders these as clickable jump buttons:
-  - Sessions / chats: `[Name](#session-<id>)`
-  - Documents: `[Title](#document-<id>)`
-  - Notes: `[Title](#note-<id>)`
-  - Gallery images: `[Caption](#image-<id>)`
-  - Emails (use the UID from list_emails/read_email output): `[Subject](#email-<uid>)`
-  - Calendar events (use the uid from manage_calendar): `[Summary](#event-<uid>)` — opens the calendar on that day
-  - Tasks: `[Task name](#task-<id>)`
-  - Skills: `[skill-name](#skill-<name>)`
-  - Research jobs: `[Topic](#research-<session_id>)`
-- The format is `[link text](#kind-<id>)` — text in square brackets, anchor in parens. NOT `[name] [#kind-id]` and NOT `[#kind-id]`. That's plain text and the user can't click it.
-- Use this inside lists, tables, prose — anywhere. Tables: `| Big Chat | [open](#session-abc123) |` works.
-- Examples:
-  - After `create_session` returns id `89effa28`: "Created [New Chat](#session-89effa28) — click to switch."
-  - Listing sessions: "1. [Big Chat](#session-abc123) — 2h ago, 2. [Code Review](#session-def456) — 5h ago\""""
 
 _AGENT_PREAMBLE = """\
 You are an AI assistant with tool access. Only the tools listed below are available for this turn.
@@ -7268,11 +6302,8 @@ def _blocked_network_recovery_tools(events: Sequence[Dict[str, Any]]) -> Set[str
                         if isinstance(item, dict) and item.get("type") == "text"
                     )
         for content in candidates:
-            if re.match(
-                r"^(?:bash|python): ad-hoc HTTP (?:downloads are|access is) disabled "
-                r"when native web tools are available\.",
-                content.strip(),
-            ):
+            if _rx(r"^(?:bash|python): ad-hoc HTTP (?:downloads are|access is) disabled "
+                r"when native web tools are available\.").match(content.strip()):
                 return {"pdf_extract", "web_fetch", "web_search"}
     return set()
 
@@ -7303,12 +6334,8 @@ def _compact_native_route_tools(
             not path.startswith("/workspace/fixtures/")
             for path in _explicit_workspace_files(text)
         )
-        and re.search(
-            r"(?:\b(?:create|generate|save|write|render|export|produce|build|make)\b|"
-            r"创建|生成|保存|写入|写在|输出|放进|制作|截取|剪辑|拼接|导出)",
-            text,
-            re.IGNORECASE,
-        )
+        and _rx(r"(?:\b(?:create|generate|save|write|render|export|produce|build|make)\b|"
+            r"创建|生成|保存|写入|写在|输出|放进|制作|截取|剪辑|拼接|导出)", re.IGNORECASE).search(text)
     )
     _workspace_paths = _explicit_workspace_files(text)
     workspace_generator_request = bool(
@@ -7338,12 +6365,8 @@ def _compact_native_route_tools(
         if _looks_like_youtube_tool_turn(text):
             compact.add("youtube_tool")
 
-    named_online_document = bool(re.search(
-        r"https?://|\bPDFs?\b|\b(?:paper|report|study)\b[\s\S]{0,240}"
-        r"\b(?:table|benchmark|extract|scores?|metrics?)\b",
-        text,
-        re.IGNORECASE,
-    ))
+    named_online_document = bool(_rx(r"https?://|\bPDFs?\b|\b(?:paper|report|study)\b[\s\S]{0,240}"
+        r"\b(?:table|benchmark|extract|scores?|metrics?)\b", re.IGNORECASE).search(text))
     if named_online_document:
         compact.update(original & {"web_search", "web_fetch", "pdf_extract"})
         # A local artifact task may mention a report/table/study while still
@@ -7372,12 +6395,8 @@ def _compact_native_route_tools(
                 not path.startswith("/workspace/fixtures/")
                 for path in _explicit_workspace_files(text)
             )
-            and re.search(
-                r"(?:\b(?:create|generate|save|write|render|export|produce|build|make)\b|"
-                r"创建|生成|保存|写入|写在|输出|放进|制作|截取|剪辑|拼接|导出)",
-                text,
-                re.IGNORECASE,
-            )
+            and _rx(r"(?:\b(?:create|generate|save|write|render|export|produce|build|make)\b|"
+                r"创建|生成|保存|写入|写在|输出|放进|制作|截取|剪辑|拼接|导出)", re.IGNORECASE).search(text)
         ):
             compact.discard("bash")
         _browser_render = _local_media_needs_browser_render(text)
@@ -7387,7 +6406,7 @@ def _compact_native_route_tools(
             # schema/security filters still decide whether it is executable.
             compact.add("private_browser")
         if (
-            not re.search(r"https?://", text, re.IGNORECASE)
+            not _rx(r"https?://", re.IGNORECASE).search(text)
             and not _local_media_needs_web_lookup(text)
         ):
             _irrelevant_local_media_web_tools = set(WEB_TOOL_NAMES) | {
@@ -7407,12 +6426,8 @@ def _compact_native_route_tools(
             not path.startswith("/workspace/fixtures/")
             for path in _explicit_workspace_files(text)
         )
-        and re.search(
-            r"(?:\b(?:create|generate|save|write|render|export|produce|build|make)\b|"
-            r"创建|生成|保存|写入|写在|输出|放进|制作|截取|剪辑|拼接|导出)",
-            text,
-            re.IGNORECASE,
-        )
+        and _rx(r"(?:\b(?:create|generate|save|write|render|export|produce|build|make)\b|"
+            r"创建|生成|保存|写入|写在|输出|放进|制作|截取|剪辑|拼接|导出)", re.IGNORECASE).search(text)
     ):
         # Artifact completion is an execution contract.  The semantic RAG
         # result can contain only media readers (as happened for a video ->
@@ -7451,10 +6466,10 @@ def _compact_native_route_tools(
         if tool in original and any(phrase in text for phrase in phrases):
             compact.add(tool)
 
-    if "memory" in domains or re.search(r"\b(?:remember|memory|memories)\b", q):
+    if "memory" in domains or _rx(r"\b(?:remember|memory|memories)\b").search(q):
         compact.add("manage_memory")
 
-    if "skills" in domains or re.search(r"\b(?:skill|skills|tdd|skill library)\b", q):
+    if "skills" in domains or _rx(r"\b(?:skill|skills|tdd|skill library)\b").search(q):
         compact.add("manage_skills")
 
     if "ui" in domains:
@@ -7463,14 +6478,11 @@ def _compact_native_route_tools(
     if "sessions" in domains:
         compact.update(original & _DOMAIN_TOOL_MAP["sessions"])
 
-    if re.search(r"\b(?:ask_teacher|chat_with_model)\b", q):
+    if _rx(r"\b(?:ask_teacher|chat_with_model)\b").search(q):
         compact.update(original & {"ask_teacher", "chat_with_model", "list_models"})
 
-    explicit_cookbook_request = bool(re.search(
-        r"\b(?:serve|download|load|stop|host)\s+(?:a\s+|the\s+)?(?:model|checkpoint)\b"
-        r"|\b(?:model\s+endpoint|served\s+model|vllm|ollama|hugging\s*face)\b",
-        q,
-    ))
+    explicit_cookbook_request = bool(_rx(r"\b(?:serve|download|load|stop|host)\s+(?:a\s+|the\s+)?(?:model|checkpoint)\b"
+        r"|\b(?:model\s+endpoint|served\s+model|vllm|ollama|hugging\s*face)\b").search(q))
     if "cookbook" in domains and (
         not workspace_artifact_request or explicit_cookbook_request
     ):
@@ -7487,12 +6499,9 @@ def _compact_native_route_tools(
         })
 
     explicit_email_request = bool(
-        re.search(
-            r"\b(?:e-?mail|emails|mailbox|inbox|attachment|attachments|newsletter|"
+        _rx(r"\b(?:e-?mail|emails|mailbox|inbox|attachment|attachments|newsletter|"
             r"mailing\s+list|sender|senders|spam|phishing|junk)\b"
-            r"|(?:邮件|收件箱|发件箱|草稿|附件|发件人|垃圾邮件|钓鱼邮件)",
-            q,
-        )
+            r"|(?:邮件|收件箱|发件箱|草稿|附件|发件人|垃圾邮件|钓鱼邮件)").search(q)
     )
     emailish = explicit_email_request or (
         "email" in domains and not workspace_artifact_request
@@ -7502,18 +6511,18 @@ def _compact_native_route_tools(
         # kit. File reads remain useful for request-scoped attachments and
         # cross-source workflows, while shell/code/search schemas distract
         # compact models unless another detected domain explicitly needs them.
-        if "web" not in domains and not re.search(r"https?://", q):
+        if "web" not in domains and not _rx(r"https?://").search(q):
             compact.difference_update({"web_search", "web_fetch"})
         if "files" not in domains and not workspace_artifact_request:
             compact.difference_update({"bash", "python", "grep", "glob"})
         compact.update(_COMPACT_EMAIL_READ_TOOLS)
-        if re.search(r"\b(?:search|find|look\s+for)\b|(?:搜索|查找)", q):
+        if _rx(r"\b(?:search|find|look\s+for)\b|(?:搜索|查找)").search(q):
             compact.add("search_emails")
-        if re.search(r"\battachments?\b|附件", q):
+        if _rx(r"\battachments?\b|附件").search(q):
             compact.add("download_attachment")
-        reply_intent = bool(re.search(r"\b(?:reply|respond|response)\b|(?:回复|回信)", q))
-        draft_intent = bool(re.search(r"\b(?:draft|write|compose)\b|(?:草稿|撰写|写邮件)", q))
-        send_intent = bool(re.search(r"\b(?:send|tell\s+them)\b|(?:发送|发邮件|通知)", q))
+        reply_intent = bool(_rx(r"\b(?:reply|respond|response)\b|(?:回复|回信)").search(q))
+        draft_intent = bool(_rx(r"\b(?:draft|write|compose)\b|(?:草稿|撰写|写邮件)").search(q))
+        send_intent = bool(_rx(r"\b(?:send|tell\s+them)\b|(?:发送|发邮件|通知)").search(q))
         if reply_intent or draft_intent or send_intent:
             compact.add("resolve_contact")
         if reply_intent:
@@ -7524,18 +6533,15 @@ def _compact_native_route_tools(
             compact.add("draft_email")
         if send_intent:
             compact.add("send_email")
-        if re.search(
-            r"\b(?:archive|delete|trash|remove|mark|read|unread|favorite|unfavorite|done|undone|unarchive)\b"
-            r"|(?:归档|删除|移除|标记已读|标记未读|收藏|取消收藏)",
-            q,
-        ):
+        if _rx(r"\b(?:archive|delete|trash|remove|mark|read|unread|favorite|unfavorite|done|undone|unarchive)\b"
+            r"|(?:归档|删除|移除|标记已读|标记未读|收藏|取消收藏)").search(q):
             compact.update(_COMPACT_EMAIL_ACTION_TOOLS)
-        if re.search(r"\b(?:spam|phishing|junk|block|blocked|suspicious)\b|(?:垃圾邮件|钓鱼邮件|拦截|可疑)", q):
+        if _rx(r"\b(?:spam|phishing|junk|block|blocked|suspicious)\b|(?:垃圾邮件|钓鱼邮件|拦截|可疑)").search(q):
             compact.update(_COMPACT_EMAIL_SPAM_TOOLS)
-        if re.search(r"\b(?:unsubscribe|newsletter|mailing list)\b|(?:退订|取消订阅|邮件列表)", q):
+        if _rx(r"\b(?:unsubscribe|newsletter|mailing list)\b|(?:退订|取消订阅|邮件列表)").search(q):
             compact.update(_COMPACT_EMAIL_UNSUBSCRIBE_TOOLS)
 
-    if "contacts" in domains or re.search(r"\b(?:contact|contacts|phone|address book)\b", q):
+    if "contacts" in domains or _rx(r"\b(?:contact|contacts|phone|address book)\b").search(q):
         compact.update(original & _DOMAIN_TOOL_MAP["contacts"])
 
     # File operations and workspace discovery form one capability bundle.
@@ -7574,12 +6580,8 @@ def _compact_native_route_tools(
             not path.startswith("/workspace/fixtures/")
             for path in _explicit_workspace_files(text)
         )
-        and re.search(
-            r"(?:\b(?:create|generate|save|write|render|export|produce|build|make)\b|"
-            r"创建|生成|保存|写入|写在|输出|放进|制作|截取|剪辑|拼接|导出)",
-            text,
-            re.IGNORECASE,
-        )
+        and _rx(r"(?:\b(?:create|generate|save|write|render|export|produce|build|make)\b|"
+            r"创建|生成|保存|写入|写在|输出|放进|制作|截取|剪辑|拼接|导出)", re.IGNORECASE).search(text)
         else set()
     )
     if (
@@ -7587,12 +6589,8 @@ def _compact_native_route_tools(
             not path.startswith("/workspace/fixtures/")
             for path in _explicit_workspace_files(text)
         )
-        and re.search(
-            r"(?:\b(?:create|generate|save|write|render|export|produce|build|make)\b|"
-            r"创建|生成|保存|写入|写在|输出|放进|制作|截取|剪辑|拼接|导出)",
-            text,
-            re.IGNORECASE,
-        )
+        and _rx(r"(?:\b(?:create|generate|save|write|render|export|produce|build|make)\b|"
+            r"创建|生成|保存|写入|写在|输出|放进|制作|截取|剪辑|拼接|导出)", re.IGNORECASE).search(text)
         and workspace_generator_request
     ):
         _artifact_mutation_tools.add("bash")
@@ -7653,7 +6651,7 @@ def _compact_native_artifact_tools(
         # report"). Preserve those bounded readers; local-media reproduction
         # routes can safely discard them unless external lookup is explicit.
         allowed.update(original & (set(WEB_TOOL_NAMES) | {"web_fetch", "pdf_extract"}))
-    if _local_media_needs_web_lookup(value) or re.search(r"https?://", value, re.IGNORECASE):
+    if _local_media_needs_web_lookup(value) or _rx(r"https?://", re.IGNORECASE).search(value):
         allowed.update(WEB_TOOL_NAMES)
         allowed.update({"web_fetch", "pdf_extract"})
     if (
@@ -7665,7 +6663,7 @@ def _compact_native_artifact_tools(
         )
     ):
         allowed.update({"bash", "manage_bg_jobs"})
-    if re.search(r"\b(?:edit|modify|patch|fix|repair|update|change)\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:edit|modify|patch|fix|repair|update|change)\b", re.IGNORECASE).search(value):
         allowed.update({"edit_file", "apply_patch", "grep", "glob"})
 
     compact = original & allowed
@@ -7703,7 +6701,7 @@ def _compact_native_media_analysis_tools(
         if "extract_text" in original:
             return {"extract_text"}
         allowed.discard("transcribe_media")
-    if _local_media_needs_web_lookup(text) or re.search(r"https?://", text, re.IGNORECASE):
+    if _local_media_needs_web_lookup(text) or _rx(r"https?://", re.IGNORECASE).search(text):
         allowed.update(WEB_TOOL_NAMES)
     if _local_media_needs_browser_render(text):
         allowed.add("private_browser")
@@ -8186,30 +7184,6 @@ def _section_text(name: str, default: str) -> str:
     return val if isinstance(val, str) and val.strip() else default
 
 
-def _compact_tool_line(name: str, section: str) -> str:
-    """One-line fenced-tool usage hint for compact/local prompts."""
-    text = (section or "").strip()
-    if not text:
-        return f"- `{name}`"
-    if text.startswith("- "):
-        return text
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    usage = []
-    in_fence = False
-    for ln in lines:
-        if ln.startswith("```"):
-            usage.append(ln)
-            in_fence = not in_fence
-            if len(usage) >= 3:
-                break
-            continue
-        if in_fence and len(usage) < 3:
-            usage.append(ln)
-    if usage:
-        return f"- `{name}` — " + " ".join(usage)
-    return f"- `{name}` — " + lines[0][:160]
-
-
 def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool = False) -> str:
     """Build the system prompt with only the specified tools included."""
     disabled = disabled_tools or set()
@@ -8268,14 +7242,13 @@ def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool 
     return "\n\n".join(parts)
 
 
-# Legacy: full prompt with all tools (fallback when RAG unavailable)
+# Full prompt with all tools, the fallback when RAG is unavailable.
 AGENT_SYSTEM_PROMPT = _assemble_prompt(set(TOOL_SECTIONS.keys()))
 
 
 _cached_base_prompt = None
 _cached_base_prompt_key = None
 
-# Constants — moved out of hot paths to avoid per-request/per-round allocation
 # Hosts whose endpoints natively support OpenAI-style function calling.
 # When the active endpoint is one of these, the agent sends FUNCTION_TOOL_SCHEMAS
 # (so the model emits `tool_calls` directly) instead of relying on the model
@@ -8331,58 +7304,51 @@ def _is_ollama_openai_compat_url(endpoint_url: str) -> bool:
     streaming is uneven. Some local models terminate after a token when schemas
     are present. Keep native schemas opt-in via ModelEndpoint.supports_tools.
     """
-    try:
-        parsed = urlparse(endpoint_url or "")
-    except Exception:
-        return False
+    parsed = urlparse(endpoint_url or "")
     path = (parsed.path or "").rstrip("/")
     return parsed.port == 11434 and (path == "/v1" or path.startswith("/v1/"))
 
 
-def _is_local_openai_compat_url(endpoint_url: str) -> bool:
-    try:
-        parsed = urlparse(endpoint_url or "")
-    except Exception:
-        return False
-    host = (parsed.hostname or "").lower()
-    path = (parsed.path or "").rstrip("/")
-    if not (path == "/v1" or path.startswith("/v1/")):
-        return False
-    if host in {"localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal"}:
-        return True
-    if host.startswith("192.168.") or host.startswith("10."):
-        return True
-    if host.startswith("172."):
-        try:
-            second = int(host.split(".")[1])
-            return 16 <= second <= 31
-        except Exception:
-            return False
-    return False
-
-
 def _endpoint_lookup_keys(endpoint_url: str) -> List[str]:
     """Candidate ModelEndpoint.base_url keys for a runtime chat URL."""
+    from src.endpoint_resolver import normalize_base
+
     raw = (endpoint_url or "").strip()
     keys: List[str] = []
-
-    def add(value: str):
-        value = (value or "").strip()
-        if value and value not in keys:
-            keys.append(value)
+    for value in (raw, normalize_base(raw)):
         trimmed = value.rstrip("/")
-        if trimmed and trimmed not in keys:
-            keys.append(trimmed)
-        if trimmed and f"{trimmed}/" not in keys:
-            keys.append(f"{trimmed}/")
+        keys += [value, trimmed, f"{trimmed}/" if trimmed else ""]
+    return [key for key in dict.fromkeys(keys) if key]
 
-    add(raw)
-    try:
-        from src.endpoint_resolver import normalize_base
-        add(normalize_base(raw))
-    except Exception:
-        pass
-    return keys
+
+def _route_endpoints(db, endpoint_url: str, owner: Optional[str], endpoint_id: Optional[str] = None) -> list:
+    """ModelEndpoint rows for a runtime route: by id when given, else by base URL."""
+    from core.database import ModelEndpoint
+    from src.auth_helpers import owner_filter
+
+    def scoped(query):
+        return owner_filter(query, ModelEndpoint, owner) if owner else query
+
+    if endpoint_id:
+        rows = scoped(db.query(ModelEndpoint).filter(ModelEndpoint.id == endpoint_id)).all()
+        if rows:
+            return rows
+    keys = _endpoint_lookup_keys(endpoint_url)
+    return scoped(db.query(ModelEndpoint).filter(ModelEndpoint.base_url.in_(keys))).all()
+
+
+def _endpoints_matching_headers(endpoints: list, headers: Dict, owner: Optional[str]) -> list:
+    """Keep the endpoints whose stored credentials build exactly these request headers."""
+    from src.endpoint_resolver import build_headers, resolve_endpoint_runtime
+
+    expected = {str(key).lower(): str(value) for key, value in headers.items()}
+    matched = []
+    for candidate in endpoints:
+        runtime_base, api_key = resolve_endpoint_runtime(candidate, owner=owner)
+        built = build_headers(api_key, runtime_base)
+        if {str(key).lower(): str(value) for key, value in built.items()} == expected:
+            matched.append(candidate)
+    return matched
 
 
 def _agent_route_tool_mode(
@@ -8401,45 +7367,15 @@ def _agent_route_tool_mode(
         return True, False, False
     endpoint_supports: Optional[bool] = None
     try:
-        from core.database import SessionLocal as _SL, ModelEndpoint as _ME
+        from core.database import SessionLocal
 
-        db = _SL()
+        db = SessionLocal()
         try:
-            endpoints = []
-            seen_ids = set()
-            for key in _endpoint_lookup_keys(endpoint_url):
-                query = db.query(_ME).filter(_ME.base_url == key)
-                if owner:
-                    from src.auth_helpers import owner_filter
-
-                    query = owner_filter(query, _ME, owner)
-                rows = query.all() if hasattr(query, "all") else [query.first()]
-                for row in rows:
-                    row_id = getattr(row, "id", None)
-                    if row is not None and row_id not in seen_ids:
-                        seen_ids.add(row_id)
-                        endpoints.append(row)
-            endpoint = None
+            endpoints = _route_endpoints(db, endpoint_url, owner)
             if headers is not None:
-                from src.endpoint_resolver import build_headers, resolve_endpoint_runtime
-
-                expected_headers = {
-                    str(key).lower(): str(value)
-                    for key, value in (headers or {}).items()
-                }
-                for candidate in endpoints:
-                    runtime_base, api_key = resolve_endpoint_runtime(candidate, owner=owner)
-                    candidate_headers = {
-                        str(key).lower(): str(value)
-                        for key, value in build_headers(api_key, runtime_base).items()
-                    }
-                    if candidate_headers == expected_headers:
-                        endpoint = candidate
-                        break
-            elif endpoints:
-                endpoint = endpoints[0]
-            if endpoint is not None:
-                endpoint_supports = endpoint.supports_tools
+                endpoints = _endpoints_matching_headers(endpoints, headers, owner)
+            if endpoints:
+                endpoint_supports = endpoints[0].supports_tools
         finally:
             db.close()
     except Exception as exc:
@@ -8485,50 +7421,13 @@ def _configured_model_tool_surface(
     if not model:
         return ""
     try:
-        from core.database import SessionLocal as _SL, ModelEndpoint as _ME
+        from core.database import SessionLocal
 
-        db = _SL()
+        db = SessionLocal()
         try:
-            endpoints = []
-            seen_ids = set()
-            if endpoint_id:
-                query = db.query(_ME).filter(_ME.id == endpoint_id)
-                if owner:
-                    from src.auth_helpers import owner_filter
-
-                    query = owner_filter(query, _ME, owner)
-                endpoints = [row for row in [query.first()] if row is not None]
-            if not endpoints:
-                for key in _endpoint_lookup_keys(endpoint_url):
-                    query = db.query(_ME).filter(_ME.base_url == key)
-                    if owner:
-                        from src.auth_helpers import owner_filter
-
-                        query = owner_filter(query, _ME, owner)
-                    rows = query.all() if hasattr(query, "all") else [query.first()]
-                    for row in rows:
-                        row_id = getattr(row, "id", None)
-                        if row is not None and row_id not in seen_ids:
-                            seen_ids.add(row_id)
-                            endpoints.append(row)
-            if headers is not None and endpoints:
-                from src.endpoint_resolver import build_headers, resolve_endpoint_runtime
-
-                expected_headers = {
-                    str(key).lower(): str(value)
-                    for key, value in (headers or {}).items()
-                }
-                matched = []
-                for candidate in endpoints:
-                    runtime_base, api_key = resolve_endpoint_runtime(candidate, owner=owner)
-                    candidate_headers = {
-                        str(key).lower(): str(value)
-                        for key, value in build_headers(api_key, runtime_base).items()
-                    }
-                    if candidate_headers == expected_headers:
-                        matched.append(candidate)
-                if matched:
-                    endpoints = matched
+            endpoints = _route_endpoints(db, endpoint_url, owner, endpoint_id)
+            if headers is not None:
+                endpoints = _endpoints_matching_headers(endpoints, headers, owner) or endpoints
             for endpoint in endpoints:
                 modes = _parse_model_tool_modes(getattr(endpoint, "model_tool_modes", None))
                 mode = _model_tool_mode_for_model(modes, model)
@@ -8812,16 +7711,12 @@ def _looks_like_workspace_coding_request(text: str) -> bool:
     text = str(text or "")
     if not text.strip():
         return False
-    if re.match(
-        r"^\s*(?:how\s+(?:do|can)\s+i|can\s+you\s+explain|what\s+is|"
-        r"why\s+(?:does|is|are))\b",
-        text,
-        re.IGNORECASE,
-    ):
+    if _rx(r"^\s*(?:how\s+(?:do|can)\s+i|can\s+you\s+explain|what\s+is|"
+        r"why\s+(?:does|is|are))\b", re.IGNORECASE).match(text):
         return False
     if _looks_like_explicit_browser_interaction(text):
         return False
-    if re.search(r"\b(?:pull request|pr|diff|patch)\b", text, re.IGNORECASE):
+    if _rx(r"\b(?:pull request|pr|diff|patch)\b", re.IGNORECASE).search(text):
         return True
     action = _WORKSPACE_CODE_ACTION_RE.search(text)
     if not action:
@@ -8856,17 +7751,13 @@ def _looks_like_unattended_clarification(text: str) -> bool:
     if not visible:
         return False
     tail = visible[-1200:]
-    return bool(re.search(
-        r"\b(?:would|do)\s+you\s+(?:like|want)\s+me\s+to\b"
+    return bool(_rx(r"\b(?:would|do)\s+you\s+(?:like|want)\s+me\s+to\b"
         r"|\bshall\s+i\b"
         r"|\bcould\s+you\s+(?:please\s+)?(?:share|upload|provide|send|attach)\b"
         r"|\bplease\s+(?:share|upload|provide|send|attach)\b"
         r"|\bi\s+should\s+ask\s+the\s+user\b"
         r"|\bwhich\s+(?:option|approach|one)\s+(?:would|do)\s+you\s+(?:prefer|want)\b"
-        r"|\bplease\s+(?:choose|select|let\s+me\s+know)\b",
-        tail,
-        re.IGNORECASE,
-    ))
+        r"|\bplease\s+(?:choose|select|let\s+me\s+know)\b", re.IGNORECASE).search(tail))
 
 
 def _tui_read_only_inspection_turn(text: str) -> bool:
@@ -8880,19 +7771,11 @@ def _tui_read_only_inspection_turn(text: str) -> bool:
     # cap before the agent could edit anything.
     for mutation in _TUI_MUTATING_REQUEST_RE.finditer(text):
         prefix = text[: mutation.start()]
-        if not re.search(
-            r"\b(?:do\s+not|don't|dont|without|never)\b(?:\s+\w+){0,4}\s*$",
-            prefix,
-            re.IGNORECASE,
-        ):
+        if not _rx(r"\b(?:do\s+not|don't|dont|without|never)\b(?:\s+\w+){0,4}\s*$", re.IGNORECASE).search(prefix):
             return False
     return bool(
-        re.search(
-            r"\b(?:do\s+not|don't|dont|without|read[- ]only|only)\b.*\b(?:edit|change|write|modify)\b"
-            r"|\b(?:file|line|evidence|bug|issue|problem|report)\b",
-            text,
-            re.IGNORECASE,
-        )
+        _rx(r"\b(?:do\s+not|don't|dont|without|read[- ]only|only)\b.*\b(?:edit|change|write|modify)\b"
+            r"|\b(?:file|line|evidence|bug|issue|problem|report)\b", re.IGNORECASE).search(text)
     )
 
 
@@ -8912,18 +7795,10 @@ def _is_explicit_local_network_request(text: str) -> bool:
     text = str(text or "")
     if not _LOCAL_NETWORK_REFERENCE_RE.search(text):
         return False
-    web_reference = bool(re.search(
-        r"\b(?:search|look\s*up|lookup|browse|google)\b(?:\s+\w+){0,5}\s+"
-        r"(?:web|internet|online)\b|\b(?:web|internet|online)\b",
-        text,
-        re.IGNORECASE,
-    ))
-    negated_web = bool(re.search(
-        r"\b(?:do\s+not|don't|dont|without|no)\b(?:\s+\w+){0,3}\s+"
-        r"(?:web|internet|online)\b",
-        text,
-        re.IGNORECASE,
-    ))
+    web_reference = bool(_rx(r"\b(?:search|look\s*up|lookup|browse|google)\b(?:\s+\w+){0,5}\s+"
+        r"(?:web|internet|online)\b|\b(?:web|internet|online)\b", re.IGNORECASE).search(text))
+    negated_web = bool(_rx(r"\b(?:do\s+not|don't|dont|without|no)\b(?:\s+\w+){0,3}\s+"
+        r"(?:web|internet|online)\b", re.IGNORECASE).search(text))
     return not (web_reference and not negated_web)
 
 
@@ -8970,42 +7845,21 @@ def _looks_like_explicit_tui_app_or_external_request(text: str) -> bool:
     # web search. Honor that constraint at classification time, before the
     # route can expose web_search and let a compact model drift into it. Keep
     # genuine affirmative requests such as "search the web ..." external.
-    negated_web = re.search(
-        r"\b(?:do\s+not|don't|dont|without|no)\b(?:\s+\w+){0,3}\s+"
-        r"(?:web|internet|online)\b",
-        text,
-        re.IGNORECASE,
-    )
-    affirmative_web = re.search(
-        r"\b(?:search|look\s*up|lookup|browse|google)\b(?:\s+\w+){0,5}\s+"
-        r"(?:the\s+)?(?:web|internet|online)\b",
-        text,
-        re.IGNORECASE,
-    )
+    negated_web = _rx(r"\b(?:do\s+not|don't|dont|without|no)\b(?:\s+\w+){0,3}\s+"
+        r"(?:web|internet|online)\b", re.IGNORECASE).search(text)
+    affirmative_web = _rx(r"\b(?:search|look\s*up|lookup|browse|google)\b(?:\s+\w+){0,5}\s+"
+        r"(?:the\s+)?(?:web|internet|online)\b", re.IGNORECASE).search(text)
     if negated_web and not affirmative_web:
-        without_negated_web = re.sub(
-            r"\b(?:do\s+not|don't|dont|without|no)\b(?:\s+\w+){0,3}\s+"
-            r"(?:web|internet|online)\b",
-            " ",
-            text,
-            flags=re.IGNORECASE,
-        )
+        without_negated_web = _rx(r"\b(?:do\s+not|don't|dont|without|no)\b(?:\s+\w+){0,3}\s+"
+            r"(?:web|internet|online)\b", re.IGNORECASE).sub(" ", text)
         if not _TUI_APP_OR_EXTERNAL_REFERENCE_RE.search(without_negated_web):
             return False
     # The generic ``on <hostname>`` detector also matches phrases such as
     # "models running on Odysseus". Model/cookbook language is an app/backend
     # request unless the user explicitly names a network operation.
-    if _looks_like_local_computer_request(text) and not re.search(
-        r"\b(?:lan|local\s+ip|ip\s+address|tailscale|ssh|dns|arp|"
-        r"ip\s+route|default\s+route|subnet|network\s+interface)\b",
-        text,
-        re.IGNORECASE,
-    ) and not re.search(
-        r"\b(?:models?|cookbook|serve|serving|served|vllm|sglang|ollama|qwen|"
-        r"gemma|llama|mistral|minimax)\b",
-        text,
-        re.IGNORECASE,
-    ):
+    if _looks_like_local_computer_request(text) and not _rx(r"\b(?:lan|local\s+ip|ip\s+address|tailscale|ssh|dns|arp|"
+        r"ip\s+route|default\s+route|subnet|network\s+interface)\b", re.IGNORECASE).search(text) and not _rx(r"\b(?:models?|cookbook|serve|serving|served|vllm|sglang|ollama|qwen|"
+        r"gemma|llama|mistral|minimax)\b", re.IGNORECASE).search(text):
         return False
     return not _looks_like_workspace_coding_request(text)
 
@@ -9125,22 +7979,14 @@ def _web_search_unavailable_for_turn(
     # "Find/inspect the local project" is a filesystem request even when the
     # word "search" makes intent classification label it as web. Removing the
     # web tool must not short-circuit the agent before workspace routing runs.
-    if re.search(
-        r"\b(?:local|current|this|active)(?:\s+\w+){0,3}\s+"
-        r"(?:project|repo(?:sitory)?|workspace|codebase|folder|directory|files?)\b",
-        text,
-        re.IGNORECASE,
-    ) or _EXPLICIT_WORKSPACE_REFERENCE_RE.search(text):
+    if _rx(r"\b(?:local|current|this|active)(?:\s+\w+){0,3}\s+"
+        r"(?:project|repo(?:sitory)?|workspace|codebase|folder|directory|files?)\b", re.IGNORECASE).search(text) or _EXPLICIT_WORKSPACE_REFERENCE_RE.search(text):
         return False
     # Existing app data such as saved research is a local registry lookup, not
     # a request for current web research. Do not turn a disabled web toggle
     # into a misleading capability error for these reads.
-    if re.search(
-        r"\b(?:saved|existing|past|my)\s+(?:research|reports?)\b"
-        r"|\b(?:list|show|open|read|find)\b.{0,30}\b(?:research|reports?)\b",
-        text,
-        re.IGNORECASE,
-    ):
+    if _rx(r"\b(?:saved|existing|past|my)\s+(?:research|reports?)\b"
+        r"|\b(?:list|show|open|read|find)\b.{0,30}\b(?:research|reports?)\b", re.IGNORECASE).search(text):
         return False
     return not _looks_like_workspace_coding_request(text)
 
@@ -9148,12 +7994,8 @@ def _web_search_unavailable_for_turn(
 def _streamed_tool_markup_complete(text: str) -> bool:
     """Whether a buffered textual tool call has reached its closing tag."""
     return bool(
-        re.search(
-            r"</\s*(?:｜｜DSML｜｜\s*)?(?:tool_calls|invoke|tool_call)\s*>"
-            r"|<｜tool▁call▁end｜>",
-            str(text or ""),
-            re.IGNORECASE,
-        )
+        _rx(r"</\s*(?:｜｜DSML｜｜\s*)?(?:tool_calls|invoke|tool_call)\s*>"
+            r"|<｜tool▁call▁end｜>", re.IGNORECASE).search(str(text or ""))
     )
 
 
@@ -9166,7 +8008,7 @@ def _streamed_tool_markup_starts(text: str) -> bool:
     marker = value.rfind("<")
     if marker < 0:
         return False
-    tail = re.sub(r"\s+", "", value[marker:]).casefold()
+    tail = _rx(r"\s+").sub("", value[marker:]).casefold()
     return bool(tail) and any(
         prefix.startswith(tail)
         for prefix in ("<tool_call", "<invoke", "<｜tool▁call▁begin｜>")
@@ -9305,14 +8147,10 @@ def _tui_turn_targets_local_workspace(
         # explicitly local work, but not enough to hijack general chat such as
         # "Where is Sweden?" or typo follow-ups like "sned links".
         return bool(
-            re.search(
-                r"\b(?:local|current|active|this)\s+"
+            _rx(r"\b(?:local|current|active|this)\s+"
                 r"(?:project|repo(?:sitory)?|codebase|workspace|folder|directory|files?)\b"
                 r"|\b(?:inspect|search|find|list|show)\b.{0,40}\b"
-                r"(?:project|repo(?:sitory)?|codebase|workspace|folder|directory|files?)\b",
-                text,
-                re.IGNORECASE,
-            )
+                r"(?:project|repo(?:sitory)?|codebase|workspace|folder|directory|files?)\b", re.IGNORECASE).search(text)
             or _looks_like_workspace_coding_request(text)
         )
     if _explicitly_references_missing_workspace(
@@ -9355,21 +8193,13 @@ def _tui_local_no_web_recovery_turn(
     if not _tui_host_bridge_is_usable(client_runtime_context):
         return False
     value = str(text or "")
-    if not re.search(
-        r"\b(?:do\s+not|don't|dont|without|no)\b(?:\s+\w+){0,3}\s+"
-        r"(?:web|internet|online|github|website)\b",
-        value,
-        re.IGNORECASE,
-    ):
+    if not _rx(r"\b(?:do\s+not|don't|dont|without|no)\b(?:\s+\w+){0,3}\s+"
+        r"(?:web|internet|online|github|website)\b", re.IGNORECASE).search(value):
         return False
     return bool(
-        re.search(
-            r"\b(?:my\s+computer|local\s+(?:project|repo(?:sitory)?|codebase|"
+        _rx(r"\b(?:my\s+computer|local\s+(?:project|repo(?:sitory)?|codebase|"
             r"workspace|folder|directory)|current\s+(?:project|repo(?:sitory)?|"
-            r"workspace|directory))\b",
-            value,
-            re.IGNORECASE,
-        )
+            r"workspace|directory))\b", re.IGNORECASE).search(value)
         or _looks_like_local_computer_request(value)
     )
 
@@ -9403,22 +8233,14 @@ def _tui_local_no_web_request_turn(
     ):
         return False
     value = str(text or "")
-    if not re.search(
-        r"\b(?:do\s+not|don't|dont|without|no)\b(?:\s+\w+){0,3}\s+"
-        r"(?:web|internet|online|github|website)\b",
-        value,
-        re.IGNORECASE,
-    ):
+    if not _rx(r"\b(?:do\s+not|don't|dont|without|no)\b(?:\s+\w+){0,3}\s+"
+        r"(?:web|internet|online|github|website)\b", re.IGNORECASE).search(value):
         return False
     return bool(
         _looks_like_local_computer_request(value)
-        or re.search(
-            r"\b(?:local\s+(?:project|repo(?:sitory)?|codebase|workspace|folder|directory|files?)|"
+        or _rx(r"\b(?:local\s+(?:project|repo(?:sitory)?|codebase|workspace|folder|directory|files?)|"
             r"current\s+(?:project|repo(?:sitory)?|codebase|workspace|folder|directory)|"
-            r"active\s+(?:project|repo(?:sitory)?|codebase|workspace|folder|directory))\b",
-            value,
-            re.IGNORECASE,
-        )
+            r"active\s+(?:project|repo(?:sitory)?|codebase|workspace|folder|directory))\b", re.IGNORECASE).search(value)
         or _tui_turn_targets_local_workspace(
             value,
             workspace=workspace,
@@ -9449,17 +8271,13 @@ def _tui_prebridge_local_workspace_request_turn(
         return False
     if _looks_like_explicit_tui_personal_domain_request(value):
         return False
-    if re.fullmatch(r"(?:test|tests?|pytest)\s+now", value, re.IGNORECASE):
+    if _rx(r"(?:test|tests?|pytest)\s+now", re.IGNORECASE).fullmatch(value):
         return True
     if _looks_like_workspace_coding_request(value):
         return True
     return bool(
-        re.search(
-            r"\b(?:run|execute|rerun|re-run)\b.{0,40}\b(?:tests?|test suite|pytest)\b"
-            r"|\b(?:bash|shell)\s+block\b",
-            value,
-            re.IGNORECASE,
-        )
+        _rx(r"\b(?:run|execute|rerun|re-run)\b.{0,40}\b(?:tests?|test suite|pytest)\b"
+            r"|\b(?:bash|shell)\s+block\b", re.IGNORECASE).search(value)
     )
 
 
@@ -9484,23 +8302,6 @@ def _tui_local_tool_constrained_turn(
     )
 
 
-def _should_use_workspace_toolset(
-    text: str,
-    workspace: Optional[str],
-    domains: Set[str],
-    *,
-    active_document_relevant: bool = False,
-) -> bool:
-    """Decide whether an active workspace should win domain tool selection."""
-    if not workspace or active_document_relevant:
-        return False
-    selected = {str(item or "") for item in (domains or set())}
-    # A file domain is explicit enough to win over incidental words such as
-    # "notes.py" in an email or calendar request. Without it, an active
-    # workspace must not hijack personal-assistant or web domains.
-    return "files" in selected
-
-
 def _route_tui_local_workspace_tools(
     tools: Optional[Set[str]],
     *,
@@ -9521,36 +8322,24 @@ def _route_tui_local_workspace_tools(
     routed = _tui_local_execution_allowlist(text)
     source_tools = set(tools or set())
     local_reference = bool(
-        re.search(
-            r"\b(?:workspace|repo(?:sitory)?|project|codebase|folder|directory|"
+        _rx(r"\b(?:workspace|repo(?:sitory)?|project|codebase|folder|directory|"
             r"file|files|path|cwd|working\s+directory|git|commit|branch|"
-            r"test|tests|parser|code)\b",
-            str(text or ""),
-            re.IGNORECASE,
-        )
+            r"test|tests|parser|code)\b", re.IGNORECASE).search(str(text or ""))
     )
     # "current directory", "latest commit", and similar phrases describe
     # host-local state. Treating current/latest as web intent here defeats the
     # TUI bridge and sends coding/network prompts to the search tool.
     explicit_external_lookup = bool(
-        re.search(
-            r"\b(?:web|internet|online|github|url|website)\b",
-            str(text or ""),
-            re.IGNORECASE,
-        )
+        _rx(r"\b(?:web|internet|online|github|url|website)\b", re.IGNORECASE).search(str(text or ""))
         or (
             not local_reference
-            and re.search(r"\b(?:latest|current)\b", str(text or ""), re.IGNORECASE)
+            and _rx(r"\b(?:latest|current)\b", re.IGNORECASE).search(str(text or ""))
         )
     )
     # "Do not search the web" is a local-only constraint, not permission to
     # add web tools. Avoid letting a negated word trigger the external route.
-    if re.search(
-        r"\b(?:do\s+not|don't|dont|without|no)\b(?:\s+\w+){0,3}\s+"
-        r"(?:web|internet|online|github|website)\b",
-        str(text or ""),
-        re.IGNORECASE,
-    ):
+    if _rx(r"\b(?:do\s+not|don't|dont|without|no)\b(?:\s+\w+){0,3}\s+"
+        r"(?:web|internet|online|github|website)\b", re.IGNORECASE).search(str(text or "")):
         explicit_external_lookup = False
     if explicit_external_lookup:
         routed.update(source_tools & {"web_search", "web_fetch"})
@@ -9558,7 +8347,7 @@ def _route_tui_local_workspace_tools(
             name for name in source_tools
             if str(name).startswith(_BROWSER_MCP_PREFIX)
         )
-    if re.search(r"\b(?:skill|skills|tdd)\b", str(text or ""), re.IGNORECASE):
+    if _rx(r"\b(?:skill|skills|tdd)\b", re.IGNORECASE).search(str(text or "")):
         routed.update(source_tools & {"manage_skills"})
     if _looks_like_workspace_coding_request(str(text or "")):
         routed.update({"grep", "ls", "glob", "read_file"})
@@ -9584,7 +8373,7 @@ def _tui_local_execution_allowlist(text: str) -> Set[str]:
     """
     value = str(text or "")
     allowed = {"host_shell", "ask_user", "update_plan"}
-    if re.search(r"\b(?:skill|skills|tdd)\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:skill|skills|tdd)\b", re.IGNORECASE).search(value):
         allowed.add("manage_skills")
     if _looks_like_workspace_coding_request(value):
         allowed.update({"grep", "ls", "glob", "read_file"})
@@ -9653,35 +8442,16 @@ def _tui_local_test_runner_command(*, full: bool = False) -> str:
 def _tui_explicit_full_test_request(text: str) -> bool:
     """True only when the user clearly asks for the whole test suite."""
     return bool(
-        re.search(
-            r"\b(?:full|all|entire|complete|exhaustive|whole)\b.{0,50}"
-            r"\b(?:tests?|test suite|pytest)\b",
-            str(text or ""),
-            re.IGNORECASE,
-        )
-        or re.search(
-            r"\b(?:tests?|test suite|pytest)\b.{0,50}"
-            r"\b(?:full|all|entire|complete|exhaustive|whole)\b",
-            str(text or ""),
-            re.IGNORECASE,
-        )
+        _rx(r"\b(?:full|all|entire|complete|exhaustive|whole)\b.{0,50}"
+            r"\b(?:tests?|test suite|pytest)\b", re.IGNORECASE).search(str(text or ""))
+        or _rx(r"\b(?:tests?|test suite|pytest)\b.{0,50}"
+            r"\b(?:full|all|entire|complete|exhaustive|whole)\b", re.IGNORECASE).search(str(text or ""))
     )
 
 
 def _tui_local_smoke_test_runner_command() -> str:
     """Return a bounded fallback without assuming a particular repository."""
     return _tui_local_test_runner_command()
-
-
-def _tui_smoke_test_request(text: str) -> bool:
-    value = str(text or "")
-    return bool(
-        re.search(r"^\s*test\s+now\s*[.!?]?\s*$", value, re.IGNORECASE)
-        or re.search(r"^\s*(?:run|rerun|re-run)\s+tests?\s+now\s*[.!?]?\s*$", value, re.IGNORECASE)
-        or
-        re.search(r"\b(?:quick|smoke|focused|bounded|small)\b.{0,60}\btests?\b", value, re.IGNORECASE)
-        or re.search(r"\btests?\b.{0,60}\b(?:quick|smoke|focused|bounded|small)\b", value, re.IGNORECASE)
-    )
 
 
 def _tui_local_test_runner_host_shell_content(text: str = "") -> str:
@@ -9697,18 +8467,14 @@ def _tui_normalize_pytest_command(command: str) -> Optional[str]:
     """Keep an explicit pytest target while selecting the correct interpreter."""
 
     value = str(command or "").strip()
-    match = re.fullmatch(
-        r"(?:(?:python(?:3(?:\.\d+)?)?|py)\s+-m\s+pytest|pytest)(?P<args>.*)",
-        value,
-        re.IGNORECASE | re.DOTALL,
-    )
+    match = _rx(r"(?:(?:python(?:3(?:\.\d+)?)?|py)\s+-m\s+pytest|pytest)(?P<args>.*)", re.IGNORECASE | re.DOTALL).fullmatch(value)
     if not match:
         return None
     try:
         args = shlex.split(match.group("args") or "")
     except ValueError:
         return None
-    if any(re.search(r"[;&|`$<>]", arg) for arg in args):
+    if any(_rx(r"[;&|`$<>]").search(arg) for arg in args):
         return None
     suffix = f" {shlex.join(args)}" if args else ""
     return f'{_tui_python_runner_setup()}"$runner" -m pytest{suffix}'
@@ -9728,26 +8494,14 @@ def _tui_local_fallback_shell_command(
     value = str(text or "")
     if _TUI_MUTATING_REQUEST_RE.search(value) and not allow_workspace_probe_for_mutation:
         return None
-    if re.search(
-        r"\b(?:bash|shell)\s+block\b|\b(?:do|run|execute)\b.{0,20}\b(?:a\s+)?bash\s+block\b",
-        value,
-        re.IGNORECASE,
-    ):
+    if _rx(r"\b(?:bash|shell)\s+block\b|\b(?:do|run|execute)\b.{0,20}\b(?:a\s+)?bash\s+block\b", re.IGNORECASE).search(value):
         return "pwd; whoami; uname -srm"
-    if re.search(
-        r"\btest\s+now\b|\b(?:run|execute|rerun|re-run)\b.{0,40}\b(?:tests?|test suite|pytest)\b",
-        value,
-        re.IGNORECASE,
-    ):
+    if _rx(r"\btest\s+now\b|\b(?:run|execute|rerun|re-run)\b.{0,40}\b(?:tests?|test suite|pytest)\b", re.IGNORECASE).search(value):
         if _tui_explicit_full_test_request(value):
             return _tui_local_test_runner_command()
         return _tui_local_smoke_test_runner_command()
-    if re.search(
-        r"\b(?:search|scan|find|look(?:\s+for|\s+up)?)\b.{0,40}"
-        r"\b(?:my\s+)?(?:local\s+)?(?:project|repo(?:sitory)?|codebase)s?\b",
-        value,
-        re.IGNORECASE,
-    ) and re.search(r"\b(?:working\s+on|projects|repositories|codebases|local\s+project)\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:search|scan|find|look(?:\s+for|\s+up)?)\b.{0,40}"
+        r"\b(?:my\s+)?(?:local\s+)?(?:project|repo(?:sitory)?|codebase)s?\b", re.IGNORECASE).search(value) and _rx(r"\b(?:working\s+on|projects|repositories|codebases|local\s+project)\b", re.IGNORECASE).search(value):
         return (
             "printf '%s\\n' \"workspace=$PWD\"; "
             "printf '%s\\n' 'git_roots:'; "
@@ -9764,13 +8518,9 @@ def _tui_local_fallback_shell_command(
             "| grep -Ev '(^|/)(\\.git|\\.agents|\\.venv|node_modules|__pycache__|venv)(/|$)' "
             "| sort -u | head -80"
         )
-    if re.search(
-        r"\b(?:work\s+on|work\s+in|edit|modify|fix|debug)\b"
+    if _rx(r"\b(?:work\s+on|work\s+in|edit|modify|fix|debug)\b"
         r".{0,80}\b(?:project|repo(?:sitory)?|codebase|source|app|cli|tui|"
-        r"frontend|backend)\b",
-        value,
-        re.IGNORECASE,
-    ):
+        r"frontend|backend)\b", re.IGNORECASE).search(value):
         # Give the model one bounded, authoritative project fact. The host
         # bridge owns the user's cwd; do not make a backend/container listing
         # the first step of a coding task.
@@ -9796,12 +8546,8 @@ def _tui_local_fallback_shell_command(
                 "ip -o -4 addr show; ip route show default"
             )
         return "ip -o -4 addr show; ip route show default"
-    if re.search(
-        r"\b(?:project|repo(?:sitory)?|codebase|folder|directory|file|files|"
-        r"computer|workspace|current\s+directory|test(?:s)?)\b",
-        value,
-        re.IGNORECASE,
-    ):
+    if _rx(r"\b(?:project|repo(?:sitory)?|codebase|folder|directory|file|files|"
+        r"computer|workspace|current\s+directory|test(?:s)?)\b", re.IGNORECASE).search(value):
         return "pwd; ls -la"
     return "pwd"
 
@@ -9874,12 +8620,12 @@ def _looks_like_malformed_tui_tool_call(text: str) -> bool:
     value = str(text or "")
     if not value.strip():
         return False
-    if not re.search(r"\b(?:hos[_ -]?shell|host[_ -]?shell)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:hos[_ -]?shell|host[_ -]?shell)\b", re.IGNORECASE).search(value):
         return False
     return bool(
-        re.search(r"\bparameter\s*=", value, re.IGNORECASE)
-        or re.search(r"\b(?:command|parameter)\s*(?:=|\n)", value, re.IGNORECASE)
-        or re.search(r"</?(?:command|parameter|hos[_ -]?shell|host[_ -]?shell)\b", value, re.IGNORECASE)
+        _rx(r"\bparameter\s*=", re.IGNORECASE).search(value)
+        or _rx(r"\b(?:command|parameter)\s*(?:=|\n)", re.IGNORECASE).search(value)
+        or _rx(r"</?(?:command|parameter|hos[_ -]?shell|host[_ -]?shell)\b", re.IGNORECASE).search(value)
     )
 
 
@@ -9925,13 +8671,9 @@ def _tui_network_summary(output: str, target: Optional[str]) -> str:
     """Render bounded network evidence without relying on router prose."""
     value = str(output or "")
     name = str(target or "the requested host")
-    addresses = re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", value)
+    addresses = _rx(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").findall(value)
     resolved = addresses[0] if addresses else None
-    lan_match = re.search(
-        r"\b(?:wlan|wifi|eth|en|wl)[\w.:-]*\s+inet\s+((?:\d{1,3}\.){3}\d{1,3})/",
-        value,
-        re.IGNORECASE,
-    )
+    lan_match = _rx(r"\b(?:wlan|wifi|eth|en|wl)[\w.:-]*\s+inet\s+((?:\d{1,3}\.){3}\d{1,3})/", re.IGNORECASE).search(value)
     lines = []
     if resolved:
         lines.append(f"{name} resolves to `{resolved}`.")
@@ -9958,11 +8700,7 @@ def _tui_normalize_network_host_command(
     interpolated as raw model text.
     """
     request = str(request_text or "")
-    if re.search(
-        r"\b(?:ping|reach|reachable|connectivity|connection|latency|packet\s+loss)\b",
-        request,
-        re.IGNORECASE,
-    ):
+    if _rx(r"\b(?:ping|reach|reachable|connectivity|connection|latency|packet\s+loss)\b", re.IGNORECASE).search(request):
         return None
     text = _tui_host_command_text(command)
     try:
@@ -9983,7 +8721,7 @@ def _tui_normalize_network_host_command(
             continue
         if part.startswith("-"):
             continue
-        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", part):
+        if _rx(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}").fullmatch(part):
             target = part
             break
     if not target:
@@ -10148,12 +8886,8 @@ def _is_native_artifact_workspace_turn(
         return True
     return bool(
         explicit_outputs
-        and re.search(
-            r"(?:\b(?:create|generate|save|write|render|export|produce|build|make)\b|"
-            r"创建|生成|保存|写入|写在|输出|放进|制作|截取|剪辑|拼接|导出)",
-            text,
-            re.IGNORECASE,
-        )
+        and _rx(r"(?:\b(?:create|generate|save|write|render|export|produce|build|make)\b|"
+            r"创建|生成|保存|写入|写在|输出|放进|制作|截取|剪辑|拼接|导出)", re.IGNORECASE).search(text)
     )
 
 
@@ -10256,7 +8990,7 @@ def _is_self_contained_workspace_sequence(text: str) -> bool:
     value = str(text or "").strip()
     if not _WORKSPACE_FILE_TARGET_RE.search(value):
         return False
-    if not re.search(r"\b(?:then|and\s+then|after(?:wards?)?)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:then|and\s+then|after(?:wards?)?)\b", re.IGNORECASE).search(value):
         return False
     return len(_WORKSPACE_CODE_ACTION_RE.findall(value)) >= 2
 
@@ -10273,7 +9007,7 @@ def _is_casual_low_signal(text: str) -> bool:
     # Allow a short vocative/address after the opener without hardcoding the
     # address term itself: "hey man", "yo dude", "sup <name>". Longer tails are
     # more likely to be an actual request and should get normal context/tooling.
-    tail_words = re.findall(r"[A-Za-z0-9_'-]+", tail)
+    tail_words = _rx(r"[A-Za-z0-9_'-]+").findall(tail)
     return len(tail_words) <= 2
 
 
@@ -10286,18 +9020,15 @@ def _is_ambiguous_short_low_signal(text: str) -> bool:
     assistant should answer or ask for clarification without touching data.
     """
     value = str(text or "").strip().lower()
-    words = re.findall(r"[a-z0-9][a-z0-9'_-]*", value)
+    words = _rx(r"[a-z0-9][a-z0-9'_-]*").findall(value)
     if not words or len(words) > 4:
         return False
-    if re.search(
-        r"\b(?:list|show|find|search|look|lookup|look\s+up|read|open|run|execute|test|"
+    if _rx(r"\b(?:list|show|find|search|look|lookup|look\s+up|read|open|run|execute|test|"
         r"create|make|write|edit|change|delete|fix|debug|inspect|review|parse|parser|"
         r"bug|issue|send|reply|save|remember|"
         r"email|mail|inbox|calendar|meeting|task|note|memory|document|file|"
         r"workspace|project|repo|code|model|server|web|internet|url|ssh|dns|"
-        r"ip|network|chat|session|contact)s?\b",
-        value,
-    ):
+        r"ip|network|chat|session|contact)s?\b").search(value):
         return False
     return True
 
@@ -10488,14 +9219,11 @@ def _is_contextual_link_followup(messages: List[Dict], text: str) -> bool:
     URLs for that topic, so the compact router needs web_search surfaced.
     """
     latest = str(text or "").strip().lower()
-    if not re.fullmatch(
-        r"(?:(?:send|sned|share|give|show)?\s*(?:me\s+)?(?:the\s+)?"
+    if not _rx(r"(?:(?:send|sned|share|give|show)?\s*(?:me\s+)?(?:the\s+)?"
         r"(?:links?|urls?|sources?)"
         r"(?:\s+(?:for|to|from)\s+(?:those|that|them|these|it|this|the\s+(?:sites?|websites?|resources?|sources?)))?"
         r"|(?:for|to|from)\s+(?:those|that|them|these|it|this|the\s+(?:sites?|websites?|resources?|sources?)))"
-        r"\s*(?:please|pls)?[.!?]?",
-        latest,
-    ):
+        r"\s*(?:please|pls)?[.!?]?").fullmatch(latest):
         return False
     seen_latest_user = False
     chunks: list[str] = []
@@ -10522,25 +9250,19 @@ def _is_contextual_link_followup(messages: List[Dict], text: str) -> bool:
             break
     recent = "\n".join(chunks).lower()
     return bool(
-        re.search(r"\b(?:websites?|sites?|links?|urls?|sources?|resources?)\b", recent)
-        and re.search(
-            r"\b(?:public domain|wikimedia|met(?:ropolitan)? museum|rijksmuseum|smithsonian|library of congress|internet archive|art institute)\b",
-            recent,
-        )
+        _rx(r"\b(?:websites?|sites?|links?|urls?|sources?|resources?)\b").search(recent)
+        and _rx(r"\b(?:public domain|wikimedia|met(?:ropolitan)? museum|rijksmuseum|smithsonian|library of congress|internet archive|art institute)\b").search(recent)
     )
 
 
 def _is_terse_link_request(text: str) -> bool:
     """True for short links/sources fragments that need context to be actionable."""
     return bool(
-        re.fullmatch(
-            r"(?:(?:send|sned|share|give|show)?\s*(?:me\s+)?(?:the\s+)?"
+        _rx(r"(?:(?:send|sned|share|give|show)?\s*(?:me\s+)?(?:the\s+)?"
             r"(?:links?|urls?|sources?)"
             r"(?:\s+(?:for|to|from)\s+(?:those|that|them|these|it|this|the\s+(?:sites?|websites?|resources?|sources?)))?"
             r"|(?:for|to|from)\s+(?:those|that|them|these|it|this|the\s+(?:sites?|websites?|resources?|sources?)))"
-            r"\s*(?:please|pls)?[.!?]?",
-            str(text or "").lower().strip(),
-        )
+            r"\s*(?:please|pls)?[.!?]?").fullmatch(str(text or "").lower().strip())
     )
 
 
@@ -10563,12 +9285,12 @@ def _contextual_link_followup_topic(messages: List[Dict], text: str) -> str:
                 for block in content
                 if isinstance(block, dict)
             )
-        chunk = re.sub(r"\s+", " ", str(content or "")).strip()
+        chunk = _rx(r"\s+").sub(" ", str(content or "")).strip()
         if not chunk:
             continue
         if role == "user" and len(chunk) <= 180:
             return chunk
-        if re.search(r"\bpublic domain\b", chunk, re.IGNORECASE):
+        if _rx(r"\bpublic domain\b", re.IGNORECASE).search(chunk):
             return "public domain art websites"
     return "the previous public web/resource topic"
 
@@ -10606,12 +9328,9 @@ def _assistant_requested_followup(messages: List[Dict]) -> bool:
         text = str(content or "").lower()
         if "?" not in text:
             return False
-        return bool(re.search(
-            r"\b(what would you like|what should|what do you want|which one|which model|"
+        return bool(_rx(r"\b(what would you like|what should|what do you want|which one|which model|"
             r"what.+(?:todo|to-do|list|document|email|model|server|item)|"
-            r"any specific|give me|tell me)\b",
-            text,
-        ))
+            r"any specific|give me|tell me)\b").search(text))
     return False
 
 
@@ -10758,21 +9477,21 @@ def _domain_tools_from_previous_assistant_turn(
                             event.get("output"),
                         )
                     ).lower()
-                    if re.search(r"\bskills?\b", panel_text):
+                    if _rx(r"\bskills?\b").search(panel_text):
                         domains.add("skills")
-                    if re.search(r"\b(?:memory|memories|brain)\b", panel_text):
+                    if _rx(r"\b(?:memory|memories|brain)\b").search(panel_text):
                         domains.add("memory")
-                    if re.search(r"\b(?:calendar|events?)\b", panel_text):
+                    if _rx(r"\b(?:calendar|events?)\b").search(panel_text):
                         domains.add("notes_calendar_tasks")
-                    if re.search(r"\b(?:tasks?|reminders?)\b", panel_text):
+                    if _rx(r"\b(?:tasks?|reminders?)\b").search(panel_text):
                         domains.add("tasks")
-                    if re.search(r"\b(?:notes?|checklists?)\b", panel_text):
+                    if _rx(r"\b(?:notes?|checklists?)\b").search(panel_text):
                         domains.add("notes_calendar_tasks")
-                    if re.search(r"\b(?:documents?|docs?)\b", panel_text):
+                    if _rx(r"\b(?:documents?|docs?)\b").search(panel_text):
                         domains.add("documents")
-                    if re.search(r"\b(?:cookbook|models?|servers?|downloads?)\b", panel_text):
+                    if _rx(r"\b(?:cookbook|models?|servers?|downloads?)\b").search(panel_text):
                         domains.add("cookbook")
-                    if re.search(r"\b(?:email|mail|inbox)\b", panel_text):
+                    if _rx(r"\b(?:email|mail|inbox)\b").search(panel_text):
                         domains.add("email")
                 if tool == "ask_user":
                     ask_text = " ".join(
@@ -10791,14 +9510,11 @@ def _domain_tools_from_previous_assistant_turn(
                             else "",
                         )
                     ).lower()
-                    if re.search(
-                        r"\b(?:calendar|events?|meeting|appointment|birthday|reservation|reminder)\b",
-                        ask_text,
-                    ):
+                    if _rx(r"\b(?:calendar|events?|meeting|appointment|birthday|reservation|reminder)\b").search(ask_text):
                         domains.add("notes_calendar_tasks")
-                    if re.search(r"\b(?:email|mail|inbox|message|reply|sender)\b", ask_text):
+                    if _rx(r"\b(?:email|mail|inbox|message|reply|sender)\b").search(ask_text):
                         domains.add("email")
-                    if re.search(r"\b(?:note|notes|todo|checklist)\b", ask_text):
+                    if _rx(r"\b(?:note|notes|todo|checklist)\b").search(ask_text):
                         domains.add("notes_calendar_tasks")
         if domains:
             return domains
@@ -10808,11 +9524,7 @@ def _domain_tools_from_previous_assistant_turn(
 
 
 def _has_explicit_local_path(text: str) -> bool:
-    return bool(re.search(
-        r"(?:^|[\s'\"`])(?:/workspace(?:/|\b)|/tmp/|/home/|~/|\.{1,2}/)[^\s'\"`]*",
-        str(text or ""),
-        re.IGNORECASE,
-    ))
+    return bool(_rx(r"(?:^|[\s'\"`])(?:/workspace(?:/|\b)|/tmp/|/home/|~/|\.{1,2}/)[^\s'\"`]*", re.IGNORECASE).search(str(text or "")))
 
 
 def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, object]:
@@ -10844,12 +9556,8 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     # Short imperative domain requests such as "List my skills" are still
     # actionable. Do not let the low-signal fast path discard their domain
     # before deterministic tool seeding runs.
-    explicit_short_domain = bool(re.search(
-        r"\b(?:skill|skills|tdd|memory|memories|calendar|events?|tasks?|notes?|documents?|docs?|email|emails?|inbox|cookbook|theme|served\s+models?|models?\s+(?:currently\s+)?(?:running|serving|served))\b"
-        r"|(?:邮件|收件箱|草稿|日历|日程|会议|预约|提醒|待办|笔记|清单|文档|联系人)",
-        text,
-        re.IGNORECASE,
-    )) or _has_explicit_local_path(text)
+    explicit_short_domain = bool(_rx(r"\b(?:skill|skills|tdd|memory|memories|calendar|events?|tasks?|notes?|documents?|docs?|email|emails?|inbox|cookbook|theme|served\s+models?|models?\s+(?:currently\s+)?(?:running|serving|served))\b"
+        r"|(?:邮件|收件箱|草稿|日历|日程|会议|预约|提醒|待办|笔记|清单|文档|联系人)", re.IGNORECASE).search(text)) or _has_explicit_local_path(text)
     if not text or ((bool(_LOW_SIGNAL_RE.match(text)) or _is_casual_low_signal(text)) and not explicit_short_domain):
         return {
             "low_signal": True,
@@ -10921,11 +9629,8 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         + _BARE_WEB_DOMAIN_RE,
         q,
     ))
-    _explicit_web_retrieval = bool(re.search(
-        r"https?://|www\.|\b(?:web|internet|online|google|website|url|browse|browser)\b|"
-        r"\b(?:search|look\s+up|find)\b.{0,30}\b(?:web|internet|online)\b",
-        q,
-    ))
+    _explicit_web_retrieval = bool(_rx(r"https?://|www\.|\b(?:web|internet|online|google|website|url|browse|browser)\b|"
+        r"\b(?:search|look\s+up|find)\b.{0,30}\b(?:web|internet|online)\b").search(q))
     _explicit_local_input = _has_explicit_local_path(retrieval_query)
     if _explicit_local_input:
         domains.add("files")
@@ -10970,11 +9675,8 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     # Short, concrete local actions are easy to mistake for casual chat when
     # they omit a language or explicit filename. Keep them on the agent path
     # so WebUI and no-bridge sessions do not answer instead of acting.
-    _workspace_reference_negated = bool(re.search(
-        r"\b(?:do\s+not|don't|dont|without|no)\b(?:\s+\w+){0,3}\s+"
-        r"(?:use|inspect|search|work\s+in|access)\s+(?:the\s+)?workspace\b",
-        q,
-    ))
+    _workspace_reference_negated = bool(_rx(r"\b(?:do\s+not|don't|dont|without|no)\b(?:\s+\w+){0,3}\s+"
+        r"(?:use|inspect|search|work\s+in|access)\s+(?:the\s+)?workspace\b").search(q))
     if has(
         r"\b(?:run|execute|rerun|re-run)\s+(?:the\s+)?(?:tests?|test suite|pytest)\b",
         r"\b(?:read|inspect|open|show|summari[sz]e|find|list)\b.{0,60}\b"
@@ -10984,12 +9686,8 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         r"default\s+route|subnet|network\s+interface|neighbor\s+table)\b",
     ) and not _workspace_reference_negated:
         domains.add("files")
-    if not re.match(
-        r"^\s*(?:how\s+(?:do|can)\s+i|can\s+you\s+explain|what\s+is|"
-        r"why\s+(?:does|is|are))\b",
-        text,
-        re.IGNORECASE,
-    ) and has(
+    if not _rx(r"^\s*(?:how\s+(?:do|can)\s+i|can\s+you\s+explain|what\s+is|"
+        r"why\s+(?:does|is|are))\b", re.IGNORECASE).match(text) and has(
         r"\b(run|execute|test|debug|fix|save|create|edit|read|open)\b.{0,40}\b("
         r"python|javascript|typescript|java|c\+\+|cpp|c#|csharp|rust|go|golang|"
         r"ruby|php|swift|kotlin|bash|shell|html|css|sql|code|script|program|game"
@@ -11015,12 +9713,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("files")
     if has(r"\b(contact|contacts|phone|phone number|address book|vcard)\b"):
         domains.add("contacts")
-    # API-integration intent — calling a configured service via the api_call
-    # tool. Without this the #3794 repro ("Use the api_call tool to call Home
-    # Assistant GET /api/states") matched no domain, classified as low-signal,
-    # and the tool never reached the schema filter. Detect it explicitly so the
-    # "integrations" domain seeds api_call deterministically (see
-    # _DOMAIN_TOOL_MAP), independent of embedding retrieval.
+    # API-integration intent seeds api_call deterministically; it matches no other domain.
     if has(r"\bapi[ _]call\b", r"\bintegrations?\b",
            r"\b(?:home ?assistant|miniflux|gitea|linkding|jellyfin)\b"):
         domains.add("integrations")
@@ -11045,13 +9738,10 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
 def _looks_like_explicit_notes_only_turn(text: str) -> bool:
     """Whether a request is exclusively about the user's notes domain."""
     value = str(text or "").lower()
-    if not re.search(r"\b(?:note|notes|notebook|written down|wrote down|jotted down|saved item)\b", value):
+    if not _rx(r"\b(?:note|notes|notebook|written down|wrote down|jotted down|saved item)\b").search(value):
         return False
-    if re.search(
-        r"\b(?:calendar|event|meeting|appointment|schedule|email|mail|documents?|"
-        r"file|repo|repository|code|\.py\b|\.js\b|test(?:s)?|memory|chat|session)\b",
-        value,
-    ):
+    if _rx(r"\b(?:calendar|event|meeting|appointment|schedule|email|mail|documents?|"
+        r"file|repo|repository|code|\.py\b|\.js\b|test(?:s)?|memory|chat|session)\b").search(value):
         return False
     return True
 
@@ -11059,15 +9749,12 @@ def _looks_like_explicit_notes_only_turn(text: str) -> bool:
 def _looks_like_implicit_notes_turn(text: str) -> bool:
     """Recognize saved-note references that do not literally say "note"."""
     value = str(text or "").lower()
-    if re.search(r"\b(?:saved\s+file|file\s+from\s+my\s+workspace)\b", value):
+    if _rx(r"\b(?:saved\s+file|file\s+from\s+my\s+workspace)\b").search(value):
         return False
-    return bool(re.search(
-        r"\b(?:what\s+i\s+wrote\s+down|write\s+down|wrote\s+down|"
+    return bool(_rx(r"\b(?:what\s+i\s+wrote\s+down|write\s+down|wrote\s+down|"
         r"saved\s+(?:item|thought|idea|reminder|entry)|"
         r"(?:packing|shopping|grocery)\s+list|under\s+[\w-]+\s+"
-        r"(?:caveats?|notes?|ideas?))\b",
-        value,
-    ))
+        r"(?:caveats?|notes?|ideas?))\b").search(value))
 
 
 _EXACT_FILE_PATH_RE = r"(?:\"[^\"]+\"|'[^']+'|(?:~|\.\.?)/[^\s,，、;；]+|[^\s,，、;；]+\.[A-Za-z0-9]{1,12})"
@@ -11084,13 +9771,9 @@ def _clean_file_edit_value(value: object) -> str:
 def _parse_exact_file_replacement(text: str) -> Optional[dict[str, str]]:
     """Parse only a single unambiguous old-value -> new-value file edit."""
     value = str(text or "").strip()
-    guard_value = re.sub(r"(`[^`]*`|\"[^\"]*\"|'[^']*')", "", value)
-    if not value or re.search(
-        r"\b(?:inspect|read|open|show|review|examine|look|fix|refactor|"
-        r"verify|then|first|before)\b",
-        guard_value,
-        re.IGNORECASE,
-    ):
+    guard_value = _rx(r"(`[^`]*`|\"[^\"]*\"|'[^']*')").sub("", value)
+    if not value or _rx(r"\b(?:inspect|read|open|show|review|examine|look|fix|refactor|"
+        r"verify|then|first|before)\b", re.IGNORECASE).search(guard_value):
         return None
     path = rf"(?P<path>{_EXACT_FILE_PATH_RE})"
     patterns = (
@@ -11145,12 +9828,8 @@ def _parse_inspection_file_replacement(text: str) -> Optional[dict[str, str]]:
     # Quoted replacements are unambiguous. Prefer them over the natural
     # language fallback so phrases such as "the exact text `...`" are not
     # accidentally included in old_string.
-    action_match = re.search(
-        r"\breplace\s+(?:the\s+exact\s+text\s+)?`(?P<old>[^`]+)`\s+"
-        r"(?:with|by)\s+`(?P<new>[^`]+)`",
-        value,
-        re.IGNORECASE,
-    )
+    action_match = _rx(r"\breplace\s+(?:the\s+exact\s+text\s+)?`(?P<old>[^`]+)`\s+"
+        r"(?:with|by)\s+`(?P<new>[^`]+)`", re.IGNORECASE).search(value)
     action_values: tuple[str | None, str | None] | None = (
         (action_match.group("old"), action_match.group("new"))
         if action_match is not None
@@ -11193,7 +9872,7 @@ def _reconcile_inspection_edit_with_read(
         return edit
     old = str(edit.get("old_string") or "").strip().rstrip(".,;:")
     new = str(edit.get("new_string") or "").strip().rstrip(".,;:")
-    match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s+from\s+(.+)", old)
+    match = _rx(r"([A-Za-z_][A-Za-z0-9_]*)\s+from\s+(.+)").fullmatch(old)
     if not match or not new:
         return edit
     name, old_value = match.groups()
@@ -11210,53 +9889,6 @@ def _reconcile_inspection_edit_with_read(
         f"{assignment.group('indent')}{quote}{new}{quote}{assignment.group('suffix')}"
     )
     return {**edit, "old_string": old_line, "new_string": new_line}
-
-
-def _minimal_native_tool_prompt(tool_names: Set[str]) -> str:
-    """Build compact disambiguation rules for a deliberately small tool set."""
-    names = {str(name or "") for name in (tool_names or set())}
-    rules: list[str] = []
-    if "manage_notes" in names:
-        rules.append(
-            "## Notes tool rule\n"
-            "When the user explicitly asks about a note or notes, call `manage_notes`, "
-            "not `manage_documents`. An explicit note or notes request uses "
-            "`manage_notes` instead. Use `action: \"search\"` to find a note and "
-            "`action: \"view\"` to open a returned note. Do not infer that a note "
-            "is a document just because it contains prose."
-        )
-    if names & {"manage_documents", "create_document", "edit_document", "update_document"}:
-        rules.append(
-            "## Document tool rule\n"
-            "Use document tools only for editor documents or an explicit document "
-            "request. Do not use document tools for personal notes when `manage_notes` "
-            "is available."
-        )
-    if names & {"search_emails", "list_emails", "read_email", "mcp__email__search_emails"}:
-        rules.append(
-            "## Email tool rule\n"
-            "Use `search_emails` to find a specific topic or sender, then use the "
-            "returned UID with `read_email` when the user asks for the message body. "
-            "Use `list_emails` only for an explicit inbox/list/latest request."
-        )
-    if "manage_memory" in names:
-        rules.append(
-            "## Memory tool rule\n"
-            "Use `manage_memory` for saved-memory operations. Do not treat injected "
-            "memory context alone as a search result; call the tool when the user "
-            "asks to search, list, view, or change saved memories. For a broad "
-            "`list` request, do not paste every memory entry into chat: report the "
-            "total and category counts, and direct the user to the memory panel "
-            "or a focused search. Only quote entries when the user asks for a "
-            "specific memory or explicitly asks to see the full contents."
-        )
-    if "search_chats" in names:
-        rules.append(
-            "## Chat-search tool rule\n"
-            "Use `search_chats` for a past chat or conversation lookup; do not claim "
-            "to have searched prior chats from the current context alone."
-        )
-    return "\n\n".join(rules)
 
 
 def _turn_targets_active_document(intent: Dict[str, object], last_user: str, active_document) -> bool:
@@ -11282,62 +9914,41 @@ def _turn_targets_active_document(intent: Dict[str, object], last_user: str, act
     text = str(last_user or "").strip().lower()
     if not text:
         return False
-    if is_email_doc and re.search(
-        r"\b("
+    if is_email_doc and _rx(r"\b("
         r"email|mail|reply|respond|response|draft|compose|send|"
         r"tell them|tell her|tell him|say|write|make it say|"
         r"japanese|japan|polite|formal|tone|style"
-        r")\b",
-        text,
-    ):
+        r")\b").search(text):
         return True
     # Deictic writing references point at the visible editor even when the user
     # never says "document".  Keep this ownership signal narrow so an unrelated
     # request such as "fact check the stock market" does not inherit a stale tab.
-    if re.search(
-        r"\b(?:"
+    if _rx(r"\b(?:"
         r"what\s+(?:i(?:['’]?m|\s+am|\s+was|\s+have\s+been)|we(?:['’]?re|\s+are|\s+were|\s+have\s+been))\s+"
         r"(?:writing|drafting|working\s+on)|"
         r"what\s+(?:i|we)\s+wrote|"
         r"(?:my|our)\s+(?:writing|draft|document|text)"
-        r")\b",
-        text,
-    ):
+        r")\b").search(text):
         return True
-    if re.search(
-        r"\b(?:make|change|update|fix|edit|rewrite|rework|revise|replace|remove|delete|add|append|insert|set|turn)\b"
+    if _rx(r"\b(?:make|change|update|fix|edit|rewrite|rework|revise|replace|remove|delete|add|append|insert|set|turn)\b"
         r".{0,80}\b(?:day\s*\d+|row|rows|column|columns|table|section|chapter|part|paragraph|line|lines|"
-        r"title|heading|body|intro|introduction|conclusion|schedule|itinerary|draft|content)\b",
-        text,
-    ):
+        r"title|heading|body|intro|introduction|conclusion|schedule|itinerary|draft|content)\b").search(text):
         return True
-    if re.search(
-        r"\b(?:day\s*\d+|row|rows|column|columns|table|section|chapter|part|paragraph|line|lines|"
+    if _rx(r"\b(?:day\s*\d+|row|rows|column|columns|table|section|chapter|part|paragraph|line|lines|"
         r"title|heading|body|intro|introduction|conclusion|schedule|itinerary)\b"
-        r".{0,80}\b(?:make|change|update|fix|edit|rewrite|rework|revise|replace|remove|delete|add|append|insert|set|turn)\b",
-        text,
-    ):
+        r".{0,80}\b(?:make|change|update|fix|edit|rewrite|rework|revise|replace|remove|delete|add|append|insert|set|turn)\b").search(text):
         return True
-    if re.search(
-        r"\b(?:add|insert|include|apply|put)\b.+\b(?:to it|to this|there|in it|in this|in the text|in the document)\b",
-        text,
-    ):
+    if _rx(r"\b(?:add|insert|include|apply|put)\b.+\b(?:to it|to this|there|in it|in this|in the text|in the document)\b").search(text):
         return True
-    if re.search(
-        r"\b(?:make it|make this|expand it|expand this|extend it|extend this|continue it|continue this)\b.*\b(?:longer|shorter|bigger|smaller|more detailed|more concise|expanded|extended)?\b",
-        text,
-    ):
+    if _rx(r"\b(?:make it|make this|expand it|expand this|extend it|extend this|continue it|continue this)\b.*\b(?:longer|shorter|bigger|smaller|more detailed|more concise|expanded|extended)?\b").search(text):
         return True
-    return bool(re.search(
-        r"\b("
+    return bool(_rx(r"\b("
         r"document|doc|draft|text|poem|story|essay|outline|letter|paragraph|"
         r"stanza|line|title|heading|section|sentence|word|caps|uppercase|"
         r"lowercase|rewrite|reword|style|tone|suggest|suggestions|feedback|"
         r"improve|edit|change|remove|delete|replace|add another|append|"
         r"original text|in the document|the document|this document"
-        r")\b",
-        text,
-    ))
+        r")\b").search(text))
 
 
 def _active_document_mutation_requires_tool(
@@ -11355,11 +9966,8 @@ def _active_document_mutation_requires_tool(
     # polished reply in chat and leave the actual sendable draft untouched.
     if _is_email_document_obj(active_document) and _email_reply_draft_requested(text):
         return True
-    return bool(re.search(
-        r"\b(?:edit|change|update|fix|rewrite|reword|revise|replace|remove|delete|add|append|"
-        r"insert|shorten|expand|make|turn)\b",
-        text,
-    ))
+    return bool(_rx(r"\b(?:edit|change|update|fix|rewrite|reword|revise|replace|remove|delete|add|append|"
+        r"insert|shorten|expand|make|turn)\b").search(text))
 
 
 def _has_successful_active_document_mutation(tool_events: Sequence[Dict[str, Any]]) -> bool:
@@ -11397,13 +10005,9 @@ def _minimal_saved_memory_message(messages: List[Dict]) -> Optional[Dict]:
         if not source.startswith("saved memory:"):
             continue
         content = str(message.get("content") or "")
-        content = re.sub(r"(?m)^\s*Source:\s*saved memory:[^\n]*\n?", "", content)
+        content = _rx(r"(?m)^\s*Source:\s*saved memory:[^\n]*\n?").sub("", content)
         content = content.replace("Core facts about the user:", "")
-        content = re.sub(
-            r"Memory context\. Do not reference unless the user asks about these topics\.\s*",
-            "",
-            content,
-        )
+        content = _rx(r"Memory context\. Do not reference unless the user asks about these topics\.\s*").sub("", content)
         for line in content.splitlines():
             line = line.strip()
             if not line.startswith("- "):
@@ -11438,7 +10042,7 @@ def _resolved_tool_event_name(event: dict[str, Any]) -> str:
         return tool
     for key in ("desc", "command", "output"):
         value = str(event.get(key) or "")
-        m = re.search(r"\bmcp__[\w_]+\b", value)
+        m = _rx(r"\bmcp__[\w_]+\b").search(value)
         if m:
             return m.group(0)
     return tool
@@ -11644,9 +10248,9 @@ def _has_recent_email_tool_context(messages: List[Dict], *, max_messages: int = 
                     if isinstance(event, dict) and _resolved_tool_event_name(event) in _EMAIL_CONTEXT_TOOL_NAMES:
                         return True
         text = str(message.get("content") or "")
-        if re.search(r"\bUID:\s*\d+\b", text) and re.search(r"\b(?:From|Subject):\b", text):
+        if _rx(r"\bUID:\s*\d+\b").search(text) and _rx(r"\b(?:From|Subject):\b").search(text):
             return True
-        if re.search(r"\(#email-\d+\)|#email-\d+\b", text):
+        if _rx(r"\(#email-\d+\)|#email-\d+\b").search(text):
             return True
     return False
 
@@ -11669,18 +10273,14 @@ def _latest_email_reference_from_recent_tool_context(messages: List[Dict]) -> di
                 continue
             command = str(event.get("command") or "").strip()
             ref: dict[str, str] = {}
-            try:
-                parsed = json.loads(command or "{}")
-                if isinstance(parsed, dict):
-                    for key in ("uid", "folder", "account"):
-                        value = str(parsed.get(key) or "").strip()
-                        if value:
-                            ref[key] = value
-            except Exception:
-                pass
+            parsed = _json_object(command)
+            for key in ("uid", "folder", "account"):
+                value = str(parsed.get(key) or "").strip()
+                if value:
+                    ref[key] = value
             output = str(event.get("output") or "")
             if not ref.get("uid"):
-                uid_match = re.search(r"^\s*(?:\*\*)?UID(?:\*\*)?:\s*(\S+)\s*$", output, re.MULTILINE)
+                uid_match = _rx(r"^\s*(?:\*\*)?UID(?:\*\*)?:\s*(\S+)\s*$", re.MULTILINE).search(output)
                 if uid_match:
                     ref["uid"] = uid_match.group(1).strip()
             if not ref.get("folder"):
@@ -11711,8 +10311,8 @@ def _recent_mentioned_email_reference(messages: List[Dict]) -> dict[str, str]:
         text = str(message.get("content") or "")
         if not text:
             continue
-        refs = re.findall(r"#email-(\d+)\b", text)
-        refs.extend(re.findall(r"\bUID:?\s*(\d+)\b", text, re.IGNORECASE))
+        refs = _rx(r"#email-(\d+)\b").findall(text)
+        refs.extend(_rx(r"\bUID:?\s*(\d+)\b", re.IGNORECASE).findall(text))
         ordered_refs: list[str] = []
         for ref in refs:
             if ref and ref not in ordered_refs:
@@ -11721,13 +10321,13 @@ def _recent_mentioned_email_reference(messages: List[Dict]) -> dict[str, str]:
             continue
         singular_context = (
             len(ordered_refs) == 1
-            or bool(re.search(r"\b(?:found it|the email is|that fits|the one|the match|containing)\b", text, re.IGNORECASE))
+            or bool(_rx(r"\b(?:found it|the email is|that fits|the one|the match|containing)\b", re.IGNORECASE).search(text))
         )
         if not singular_context:
             continue
         uid = ordered_refs[-1]
         ref: dict[str, str] = {"uid": uid, "folder": "INBOX"}
-        account_match = re.search(r"\bAccount:\s*(?:[^<\n]*<([^>\n]+)>|([^\n]+))", text)
+        account_match = _rx(r"\bAccount:\s*(?:[^<\n]*<([^>\n]+)>|([^\n]+))").search(text)
         if account_match:
             account = (account_match.group(1) or account_match.group(2) or "").strip()
             if account:
@@ -11760,21 +10360,21 @@ def _suggested_reply_from_recent_assistant(messages: List[Dict]) -> str:
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
         text = str(message.get("content") or "")
-        if not re.search(r"\bsuggested reply\b", text, re.IGNORECASE):
+        if not _rx(r"\bsuggested reply\b", re.IGNORECASE).search(text):
             continue
-        if not re.search(r"\bopen\b.{0,80}\breply draft\b|\breply draft\b.{0,80}\bedit\b", text, re.IGNORECASE | re.DOTALL):
+        if not _rx(r"\bopen\b.{0,80}\breply draft\b|\breply draft\b.{0,80}\bedit\b", re.IGNORECASE | re.DOTALL).search(text):
             continue
-        after = re.split(r"\*\*Suggested reply:\*\*|Suggested reply:", text, flags=re.IGNORECASE, maxsplit=1)
+        after = _rx(r"\*\*Suggested reply:\*\*|Suggested reply:", re.IGNORECASE).split(text, maxsplit=1)
         if len(after) < 2:
             continue
         body_section = _split_before_assistant_prompt(after[1])
         lines: list[str] = []
         for raw_line in body_section.splitlines():
-            line = re.sub(r"^\s*>\s?", "", raw_line).rstrip()
+            line = _rx(r"^\s*>\s?").sub("", raw_line).rstrip()
             if line.strip() or lines:
                 lines.append(line)
         body = "\n".join(lines).strip()
-        body = re.sub(r"\n{3,}", "\n\n", body).strip()
+        body = _rx(r"\n{3,}").sub("\n\n", body).strip()
         if body:
             return body
     return ""
@@ -11825,18 +10425,14 @@ def _recent_spam_candidates_from_tool_context(messages: List[Dict]) -> list[dict
             if _resolved_tool_event_name(event) not in {"scan_spam", "mcp__email__scan_spam"}:
                 continue
             output = str(event.get("output") or "")
-            if not re.search(r"\blikely spam candidate", output, re.IGNORECASE):
+            if not _rx(r"\blikely spam candidate", re.IGNORECASE).search(output):
                 continue
-            scan_args: dict[str, Any] = {}
-            with contextlib.suppress(TypeError, ValueError, json.JSONDecodeError):
-                parsed_scan_args = json.loads(str(event.get("command") or "{}"))
-                if isinstance(parsed_scan_args, dict):
-                    scan_args = parsed_scan_args
+            scan_args = _json_object(str(event.get("command") or ""))
             scan_folder = str(scan_args.get("folder") or "INBOX").strip() or "INBOX"
             candidates: list[dict[str, str]] = []
             current: dict[str, str] | None = None
             for line in output.splitlines():
-                item_match = re.match(r"^\s*\d+\.\s+\*\*(.*?)\*\*\s*$", line)
+                item_match = _rx(r"^\s*\d+\.\s+\*\*(.*?)\*\*\s*$").match(line)
                 if item_match:
                     if current and current.get("uid"):
                         candidates.append(current)
@@ -11854,7 +10450,7 @@ def _recent_spam_candidates_from_tool_context(messages: List[Dict]) -> list[dict
                 ):
                     match = re.match(pattern, line)
                     if match:
-                        value = re.sub(r"\s+", " ", match.group(1)).strip()
+                        value = _rx(r"\s+").sub(" ", match.group(1)).strip()
                         current[key] = value
                         if key == "account":
                             selector = _email_account_selector_from_label(value)
@@ -11872,17 +10468,14 @@ def _contextual_spam_confirmation_action(text: str) -> str:
     q = str(text or "").strip().lower()
     if not q:
         return ""
-    if re.search(r"\b(?:keep|leave|ignore|cancel|never\s*mind|do\s+nothing)\b", q):
+    if _rx(r"\b(?:keep|leave|ignore|cancel|never\s*mind|do\s+nothing)\b").search(q):
         return "keep"
-    wants_junk = bool(re.search(
-        r"\b(?:move|send|put|mark)\s+(?:them|these|those|it|the\s+(?:messages?|emails?))\s+"
-        r"(?:as|to|into)\s+(?:junk|spam)\b",
-        q,
-    ))
-    wants_block = bool(re.search(r"\bblock(?:\s+(?:the|their|its))?\s+senders?\b", q)) and not bool(
-        re.search(r"\b(?:do\s+not|don'?t|without|not)\s+block\b", q)
+    wants_junk = bool(_rx(r"\b(?:move|send|put|mark)\s+(?:them|these|those|it|the\s+(?:messages?|emails?))\s+"
+        r"(?:as|to|into)\s+(?:junk|spam)\b").search(q))
+    wants_block = bool(_rx(r"\bblock(?:\s+(?:the|their|its))?\s+senders?\b").search(q)) and not bool(
+        _rx(r"\b(?:do\s+not|don'?t|without|not)\s+block\b").search(q)
     )
-    wants_delete = bool(re.search(r"\b(?:delete|trash|remove)\b", q))
+    wants_delete = bool(_rx(r"\b(?:delete|trash|remove)\b").search(q))
     if wants_junk and wants_block:
         return "junk_and_block"
     if wants_block:
@@ -11957,7 +10550,7 @@ def _spam_action_success_summary(tool_events: list[dict[str, Any]], action: str)
         output = str(event.get("output") or "").strip()
         if not output:
             continue
-        if re.search(r"\b(?:failed|error)\b", output, re.IGNORECASE):
+        if _rx(r"\b(?:failed|error)\b", re.IGNORECASE).search(output):
             continue
         parts.append(output)
     if parts:
@@ -11988,20 +10581,16 @@ def _contextual_spam_confirmation_blocks(
     if not candidates:
         return []
 
-    singular_reference = bool(re.search(
-        r"\b(?:first|that|this|the\s+(?:first|message|email)|it|exact)\b"
+    singular_reference = bool(_rx(r"\b(?:first|that|this|the\s+(?:first|message|email)|it|exact)\b"
         r"|\b(?:message|email)\b.{0,40}\b(?:you\s+just\s+)?(?:identified|mentioned|selected)\b"
-        r"|\bthe\s+[^.?!]{0,40}\b(?:message|email)\b",
-        str(text or ""),
-        re.IGNORECASE,
-    )) and not bool(re.search(r"\b(?:all|every|them|these|those)\b", str(text or ""), re.IGNORECASE))
+        r"|\bthe\s+[^.?!]{0,40}\b(?:message|email)\b", re.IGNORECASE).search(str(text or ""))) and not bool(_rx(r"\b(?:all|every|them|these|those)\b", re.IGNORECASE).search(str(text or "")))
     if singular_reference:
         candidate_uids = {str(item.get("uid") or "").strip() for item in candidates}
         synthesized_uid = ""
         for message in reversed(messages or []):
             if not isinstance(message, dict) or message.get("role") != "assistant":
                 continue
-            linked_uids = re.findall(r"#email-([^\s)\]]+)", str(message.get("content") or ""))
+            linked_uids = _rx(r"#email-([^\s)\]]+)").findall(str(message.get("content") or ""))
             synthesized_uid = next((uid for uid in linked_uids if uid in candidate_uids), "")
             if synthesized_uid:
                 break
@@ -12054,8 +10643,8 @@ def _looks_like_other_email_attachment_followup(text: str) -> bool:
     if not q:
         return False
     return bool(
-        re.search(r"\b(?:other|another|earlier|previous|prior)\s+(?:one|email|message|attachment|file|bundle)?\b", q)
-        or re.fullmatch(r"(?:and\s+)?(?:the\s+)?other\s+one[?.!]?", q)
+        _rx(r"\b(?:other|another|earlier|previous|prior)\s+(?:one|email|message|attachment|file|bundle)?\b").search(q)
+        or _rx(r"(?:and\s+)?(?:the\s+)?other\s+one[?.!]?").fullmatch(q)
     )
 
 
@@ -12072,11 +10661,8 @@ def _recent_downloaded_attachment_uids(messages: List[Dict]) -> set[str]:
                 continue
             if _resolved_tool_event_name(event) not in {"download_attachment", "mcp__email__download_attachment"}:
                 continue
-            try:
-                parsed = json.loads(str(event.get("command") or "{}"))
-            except Exception:
-                parsed = {}
-            if isinstance(parsed, dict) and parsed.get("uid"):
+            parsed = _json_object(str(event.get("command") or ""))
+            if parsed.get("uid"):
                 uids.add(str(parsed.get("uid") or "").strip())
     return {uid for uid in uids if uid}
 
@@ -12085,7 +10671,7 @@ def _email_rows_from_list_output(raw: str) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     current: dict[str, str] | None = None
     for line in str(raw or "").splitlines():
-        subject_match = re.match(r"^\s*\d+\.\s+\*\*(.*?)\*\*\s*$", line)
+        subject_match = _rx(r"^\s*\d+\.\s+\*\*(.*?)\*\*\s*$").match(line)
         if subject_match:
             if current:
                 rows.append(current)
@@ -12102,7 +10688,7 @@ def _email_rows_from_list_output(raw: str) -> list[dict[str, str]]:
         ):
             match = re.match(pattern, line)
             if match:
-                current[key] = re.sub(r"\s+", " ", match.group(1)).strip()
+                current[key] = _rx(r"\s+").sub(" ", match.group(1)).strip()
                 break
     if current:
         rows.append(current)
@@ -12143,18 +10729,18 @@ def _email_bulk_blocks_from_search_output(
 def _named_email_row_from_recent_list_context(messages: List[Dict], text: str) -> dict[str, str]:
     """Resolve follow-ups like "start with Owen's email" to a row from the last list."""
     q = str(text or "").strip()
-    if not q or not re.search(r"\b(?:email|message|mail|start|begin|first|open|read|look at)\b", q, re.IGNORECASE):
+    if not q or not _rx(r"\b(?:email|message|mail|start|begin|first|open|read|look at)\b", re.IGNORECASE).search(q):
         return {}
     words = {
         word.lower().rstrip("'s")
-        for word in re.findall(r"\b[A-Z][A-Za-z]{2,}\b", q)
+        for word in _rx(r"\b[A-Z][A-Za-z]{2,}\b").findall(q)
         if word.lower() not in {"let", "lets", "start", "begin", "email", "message", "mail"}
     }
     if not words:
         # Handle casual lowercase names in follow-ups: "owens email".
         words = {
             word.rstrip("'s")
-            for word in re.findall(r"\b[a-z]{4,}\b", q.lower())
+            for word in _rx(r"\b[a-z]{4,}\b").findall(q.lower())
             if word not in {"with", "start", "begin", "email", "emails", "message", "messages", "mail", "read", "open", "look"}
         }
     if not words:
@@ -12206,8 +10792,8 @@ def _attachment_content_requested(text: str) -> bool:
     if not q:
         return False
     return bool(
-        re.search(r"\b(?:attachment|attachments|attached|pdf|file|files|csv|packet|bundle)\b", q)
-        and re.search(r"\b(?:open|read|show|summari[sz]e|what|contents?|says?)\b", q)
+        _rx(r"\b(?:attachment|attachments|attached|pdf|file|files|csv|packet|bundle)\b").search(q)
+        and _rx(r"\b(?:open|read|show|summari[sz]e|what|contents?|says?)\b").search(q)
     )
 
 
@@ -12297,39 +10883,36 @@ def _looks_like_email_body_followup(text: str) -> bool:
     q = str(text or "").strip().lower()
     if not q:
         return False
-    if re.search(r"\b(?:attachment|attached|pdf|csv|file)\b", q):
+    if _rx(r"\b(?:attachment|attached|pdf|csv|file)\b").search(q):
         return False
-    return bool(re.search(
-        r"\b(?:what(?:'s|\s+is)?|read|open|show|summari[sz]e)\b"
+    return bool(_rx(r"\b(?:what(?:'s|\s+is)?|read|open|show|summari[sz]e)\b"
         r".{0,80}\b(?:email|message|mail|it|that)\b"
-        r"|\b(?:email|message|mail)\b.{0,80}\b(?:say|said|says|body|content)\b",
-        q,
-    ))
+        r"|\b(?:email|message|mail)\b.{0,80}\b(?:say|said|says|body|content)\b").search(q))
 
 
 def _contextual_email_action_request(text: str) -> str:
     q = str(text or "").strip().lower()
     if not q:
         return ""
-    if not re.search(r"\b(?:email|message|mail|it|this|that)\b", q):
+    if not _rx(r"\b(?:email|message|mail|it|this|that)\b").search(q):
         return ""
-    if re.search(r"\b(?:delete|remove|trash|bin)\b", q):
+    if _rx(r"\b(?:delete|remove|trash|bin)\b").search(q):
         return "delete"
-    if re.search(r"\b(?:archive|move\s+out\s+of\s+inbox)\b", q):
+    if _rx(r"\b(?:archive|move\s+out\s+of\s+inbox)\b").search(q):
         return "archive"
-    if re.search(r"\b(?:unarchive|restore\s+to\s+inbox|move\s+back\s+to\s+inbox)\b", q):
+    if _rx(r"\b(?:unarchive|restore\s+to\s+inbox|move\s+back\s+to\s+inbox)\b").search(q):
         return "unarchive"
-    if re.search(r"\b(?:favorite|favourite|star)\b", q) and not re.search(r"\b(?:unfavorite|unfavourite|unstar|remove\s+(?:the\s+)?star)\b", q):
+    if _rx(r"\b(?:favorite|favourite|star)\b").search(q) and not _rx(r"\b(?:unfavorite|unfavourite|unstar|remove\s+(?:the\s+)?star)\b").search(q):
         return "favorite"
-    if re.search(r"\b(?:unfavorite|unfavourite|unstar|remove\s+(?:the\s+)?star)\b", q):
+    if _rx(r"\b(?:unfavorite|unfavourite|unstar|remove\s+(?:the\s+)?star)\b").search(q):
         return "unfavorite"
-    if re.search(r"\b(?:mark)\b.{0,30}\b(?:done|complete|completed)\b|\b(?:done|complete|completed)\b.{0,30}\b(?:mark)\b", q):
+    if _rx(r"\b(?:mark)\b.{0,30}\b(?:done|complete|completed)\b|\b(?:done|complete|completed)\b.{0,30}\b(?:mark)\b").search(q):
         return "mark_done"
-    if re.search(r"\b(?:mark)\b.{0,30}\b(?:undone|not\s+done|incomplete)\b|\b(?:undone|not\s+done|incomplete)\b.{0,30}\b(?:mark)\b", q):
+    if _rx(r"\b(?:mark)\b.{0,30}\b(?:undone|not\s+done|incomplete)\b|\b(?:undone|not\s+done|incomplete)\b.{0,30}\b(?:mark)\b").search(q):
         return "mark_undone"
-    if re.search(r"\b(?:mark)\b.{0,30}\b(?:read|seen)\b|\b(?:read|seen)\b.{0,30}\b(?:mark)\b", q):
+    if _rx(r"\b(?:mark)\b.{0,30}\b(?:read|seen)\b|\b(?:read|seen)\b.{0,30}\b(?:mark)\b").search(q):
         return "mark_read"
-    if re.search(r"\b(?:mark)\b.{0,30}\b(?:unread|unseen)\b|\b(?:unread|unseen)\b.{0,30}\b(?:mark)\b", q):
+    if _rx(r"\b(?:mark)\b.{0,30}\b(?:unread|unseen)\b|\b(?:unread|unseen)\b.{0,30}\b(?:mark)\b").search(q):
         return "mark_unread"
     return ""
 
@@ -12341,9 +10924,9 @@ def _inherited_contextual_email_action_request(messages: List[Dict], text: str) 
         return ""
     if _contextual_email_action_request(q):
         return ""
-    if not re.match(r"^(?:also|and|same|that\s+too|do\s+the\s+same)\b", q):
+    if not _rx(r"^(?:also|and|same|that\s+too|do\s+the\s+same)\b").match(q):
         return ""
-    if not re.search(r"\b(?:email|message|mail|last|latest|newest|recent)\b", q):
+    if not _rx(r"\b(?:email|message|mail|last|latest|newest|recent)\b").search(q):
         return ""
     for message in reversed(messages or []):
         if not isinstance(message, dict) or message.get("role") != "user":
@@ -12371,23 +10954,23 @@ def _email_action_tool_succeeded(tool_events: list[dict[str, Any]], action: str)
         if _resolved_tool_event_name(event) not in wanted:
             continue
         output = str(event.get("output") or "")
-        if re.search(r"\bfailed\b|\berror\b|\bconnection refused\b", output, re.IGNORECASE):
+        if _rx(r"\bfailed\b|\berror\b|\bconnection refused\b", re.IGNORECASE).search(output):
             continue
-        if action == "delete" and re.search(r"\bDeleted\b", output):
+        if action == "delete" and _rx(r"\bDeleted\b").search(output):
             return True
-        if action == "archive" and re.search(r"\bArchived\b", output):
+        if action == "archive" and _rx(r"\bArchived\b").search(output):
             return True
-        if action in {"mark_read", "mark_unread"} and re.search(r"\bMarked\b", output):
+        if action in {"mark_read", "mark_unread"} and _rx(r"\bMarked\b").search(output):
             return True
-        if action == "favorite" and re.search(r"\bfavorite\b", output):
+        if action == "favorite" and _rx(r"\bfavorite\b").search(output):
             return True
-        if action == "unfavorite" and re.search(r"\bnot favorite\b", output):
+        if action == "unfavorite" and _rx(r"\bnot favorite\b").search(output):
             return True
-        if action == "unarchive" and re.search(r"\bUnarchived\b", output):
+        if action == "unarchive" and _rx(r"\bUnarchived\b").search(output):
             return True
-        if action == "mark_done" and re.search(r"\bdone\b", output):
+        if action == "mark_done" and _rx(r"\bdone\b").search(output):
             return True
-        if action == "mark_undone" and re.search(r"\bundone\b", output):
+        if action == "mark_undone" and _rx(r"\bundone\b").search(output):
             return True
     return False
 
@@ -12399,29 +10982,24 @@ def _email_state_bulk_terminal_summary(tool_events: list[dict[str, Any]], user_t
         if _resolved_tool_event_name(event) not in {"manage_email_state", "mcp__email__manage_email_state"}:
             continue
         output = str(event.get("output") or "")
-        if re.search(r"\bfailed\b|\berror\b|\bconnection refused\b", output, re.IGNORECASE):
+        if _rx(r"\bfailed\b|\berror\b|\bconnection refused\b", re.IGNORECASE).search(output):
             continue
-        try:
-            args = json.loads(str(event.get("command") or "{}"))
-        except Exception:
-            args = {}
-        if not isinstance(args, dict):
-            continue
+        args = _json_object(str(event.get("command") or ""))
         action = str(args.get("action") or "").lower().strip()
         uid = str(args.get("uid") or "").strip()
         if not action or not uid:
             continue
-        if action == "mark_done" and not re.search(r"\bdone\b", output, re.IGNORECASE):
+        if action == "mark_done" and not _rx(r"\bdone\b", re.IGNORECASE).search(output):
             continue
-        if action == "mark_undone" and not re.search(r"\bundone\b", output, re.IGNORECASE):
+        if action == "mark_undone" and not _rx(r"\bundone\b", re.IGNORECASE).search(output):
             continue
-        if action == "favorite" and not re.search(r"\bfavorite\b", output, re.IGNORECASE):
+        if action == "favorite" and not _rx(r"\bfavorite\b", re.IGNORECASE).search(output):
             continue
-        if action == "unfavorite" and not re.search(r"\bnot favorite\b", output, re.IGNORECASE):
+        if action == "unfavorite" and not _rx(r"\bnot favorite\b", re.IGNORECASE).search(output):
             continue
-        if action == "unarchive" and not re.search(r"\bunarchived\b", output, re.IGNORECASE):
+        if action == "unarchive" and not _rx(r"\bunarchived\b", re.IGNORECASE).search(output):
             continue
-        if action in {"mark_read", "mark_unread"} and not re.search(r"\bmarked\b", output, re.IGNORECASE):
+        if action in {"mark_read", "mark_unread"} and not _rx(r"\bmarked\b", re.IGNORECASE).search(output):
             continue
         state_events.append((action, uid))
 
@@ -12447,11 +11025,11 @@ def _email_state_bulk_terminal_summary(tool_events: list[dict[str, Any]], user_t
         return f"Done. The {noun} is {phrase}."
 
     scope = ""
-    if re.search(r"\blast\s+week\b", user_text or "", re.IGNORECASE):
+    if _rx(r"\blast\s+week\b", re.IGNORECASE).search(user_text or ""):
         scope = " from last week"
-    elif re.search(r"\blast\s+month\b", user_text or "", re.IGNORECASE):
+    elif _rx(r"\blast\s+month\b", re.IGNORECASE).search(user_text or ""):
         scope = " from last month"
-    elif re.search(r"\blast\s+year\b", user_text or "", re.IGNORECASE):
+    elif _rx(r"\blast\s+year\b", re.IGNORECASE).search(user_text or ""):
         scope = " from last year"
     return f"Done. {count} emails{scope} are {phrase}."
 
@@ -12464,32 +11042,26 @@ def _looks_like_contextual_email_followup(messages: List[Dict], text: str) -> bo
         return False
     if _looks_like_explicit_email_action_turn(q):
         return True
-    if re.search(
-        r"\b(?:calendar|meeting|event|appointment|task|reminder|note|notes|document|doc|file|"
-        r"web|internet|online|search|google|model|server|cookbook|memory|remember)\b",
-        q,
-    ):
+    if _rx(r"\b(?:calendar|meeting|event|appointment|task|reminder|note|notes|document|doc|file|"
+        r"web|internet|online|search|google|model|server|cookbook|memory|remember)\b").search(q):
         return False
     return bool(
         len(q) <= 160
-        and re.search(
-            r"\b(?:what|who|which|when|where|why|how|open|read|show|summari[sz]e|reply|respond|"
+        and _rx(r"\b(?:what|who|which|when|where|why|how|open|read|show|summari[sz]e|reply|respond|"
             r"say|said|says|mean|about|that|this|it|him|her|them|first|second|third|next|"
-            r"other|another|previous|prior|last|latest|newest|recent)\b",
-            q,
-        )
+            r"other|another|previous|prior|last|latest|newest|recent)\b").search(q)
     )
 
 
 def _recent_odysseus_anchor_refs(messages: List[Dict], history_session: Any = None) -> dict[str, str]:
     refs: dict[str, str] = {}
-    note_re = re.compile(r"#note-([0-9a-fA-F-]{8,64})")
-    event_re = re.compile(r"#event-([0-9a-fA-F-]{8,64})")
-    event_link_target_re = re.compile(r"[0-9a-fA-F-]{8,64}")
-    task_re = re.compile(r"(?:#task-|Created task '[^']+' \(id:\s*)([0-9a-fA-F-]{8,64})")
-    document_re = re.compile(r"(?:#document-|doc_id['\"]?\s*[:=]\s*['\"]?)([0-9a-fA-F-]{8,64})")
-    memory_re = re.compile(r"(?:memory_id['\"]?\s*[:=]\s*['\"]?|Memory id:\s*)([0-9a-fA-F-]{8,64})", re.IGNORECASE)
-    memory_compact_re = re.compile(r"`([0-9a-fA-F-]{8,64})`\s+—")
+    note_re = _rx(r"#note-([0-9a-fA-F-]{8,64})")
+    event_re = _rx(r"#event-([0-9a-fA-F-]{8,64})")
+    event_link_target_re = _rx(r"[0-9a-fA-F-]{8,64}")
+    task_re = _rx(r"(?:#task-|Created task '[^']+' \(id:\s*)([0-9a-fA-F-]{8,64})")
+    document_re = _rx(r"(?:#document-|doc_id['\"]?\s*[:=]\s*['\"]?)([0-9a-fA-F-]{8,64})")
+    memory_re = _rx(r"(?:memory_id['\"]?\s*[:=]\s*['\"]?|Memory id:\s*)([0-9a-fA-F-]{8,64})", re.IGNORECASE)
+    memory_compact_re = _rx(r"`([0-9a-fA-F-]{8,64})`\s+—")
 
     candidates: list[Any] = list(messages[-12:])
     if history_session is not None:
@@ -12658,7 +11230,7 @@ def _ordinal_collection_mutation_target(
         )
     }.get(raw_ordinal)
     if index is None:
-        number = re.match(r"\d+", raw_ordinal)
+        number = _rx(r"\d+").match(raw_ordinal)
         index = int(number.group()) if number else 0
     if index < 1:
         return ""
@@ -12687,19 +11259,14 @@ def _ordinal_collection_mutation_target(
                 continue
             if event.get("error") is True or event.get("exit_code") not in (None, 0):
                 continue
-            try:
-                args = event.get("command") or {}
-                if isinstance(args, str):
-                    args = json.loads(args)
-            except (TypeError, json.JSONDecodeError):
-                args = {}
-            if not isinstance(args, dict) or str(args.get("action") or "").lower() != expected_action:
+            args = _json_object(event.get("command") or {})
+            if str(args.get("action") or "").lower() != expected_action:
                 continue
             output = str(event.get("output") or "")
             if family == "tasks":
                 identifiers = [found.strip() for found in _numbered_row_parenthesized_ids(output)]
             else:
-                identifiers = re.findall(r"\]\(#event-([A-Za-z0-9_-]+)\)", output)
+                identifiers = _rx(r"\]\(#event-([A-Za-z0-9_-]+)\)").findall(output)
             if 1 <= index <= len(identifiers):
                 return identifiers[index - 1]
     return ""
@@ -12719,11 +11286,7 @@ def _recent_odysseus_note_title(messages: List[Dict], history_session: Any = Non
             if not skipped_latest_user:
                 skipped_latest_user = True
             else:
-                match = re.search(
-                    r"\bnote\s+(?:titled|called|named)\s+(.+?)(?:\s+with\b|[.!?]\s*$|$)",
-                    content,
-                    re.IGNORECASE,
-                )
+                match = _rx(r"\bnote\s+(?:titled|called|named)\s+(.+?)(?:\s+with\b|[.!?]\s*$|$)", re.IGNORECASE).search(content)
                 if match:
                     title = match.group(1).strip(" .\"'")
                     if title:
@@ -12734,13 +11297,7 @@ def _recent_odysseus_note_title(messages: List[Dict], history_session: Any = Non
         for event in reversed(metadata.get("tool_events") or []):
             if not isinstance(event, dict) or _resolved_tool_event_name(event) != "manage_notes":
                 continue
-            command = str(event.get("command") or "").strip()
-            try:
-                args = json.loads(command)
-            except (TypeError, json.JSONDecodeError):
-                args = None
-            if not isinstance(args, dict):
-                continue
+            args = _json_object(str(event.get("command") or "").strip())
             action = str(args.get("action") or "").strip().lower()
             if action not in {"add", "create"}:
                 continue
@@ -12766,11 +11323,11 @@ def _looks_like_recent_reference(text: str, noun: str) -> bool:
 
 
 def _user_named_explicit_title(text: str) -> bool:
-    return bool(re.search(r"\b(?:titled|called|named|with title)\s+['\"]?[^'\"]+", text or "", re.IGNORECASE))
+    return bool(_rx(r"\b(?:titled|called|named|with title)\s+['\"]?[^'\"]+", re.IGNORECASE).search(text or ""))
 
 
 def _extract_followup_content_update(text: str) -> str:
-    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    value = _rx(r"\s+").sub(" ", str(text or "")).strip()
     patterns = (
         r"\breply\s+that\s+(.+)$",
         r"\brespond\s+that\s+(.+)$",
@@ -12805,21 +11362,17 @@ def _active_email_reader_reply_body(text: str, active_email: Optional[Dict[str, 
     if not active_email or not active_email.get("uid"):
         return ""
     value = str(text or "").strip()
-    if not re.search(r"\b(?:write|write\s+back|draft|compose|respond|reply|start|open)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:write|write\s+back|draft|compose|respond|reply|start|open)\b", re.IGNORECASE).search(value):
         return ""
-    if not re.search(r"\b(?:reply|response|respond|write\s+back|draft\b.*\bback|draft\b.*\bresponse)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:reply|response|respond|write\s+back|draft\b.*\bback|draft\b.*\bresponse)\b", re.IGNORECASE).search(value):
         return ""
-    if not re.search(
-        r"\b(?:this|that|the\s+open|current)\s+email\b|"
+    if not _rx(r"\b(?:this|that|the\s+open|current)\s+email\b|"
         r"\bemail\s+that'?s\s+open\b|"
         r"\bemail\s+i\s+(?:have\s+)?open\b|"
         r"\bopen\s+email\b|"
         r"\bto\s+this\s+email\b|"
         r"\bthis\s+message\b|"
-        r"\bwrite\s+back\s+saying\b",
-        value,
-        re.IGNORECASE,
-    ):
+        r"\bwrite\s+back\s+saying\b", re.IGNORECASE).search(value):
         return ""
     explicit = _extract_followup_content_update(value)
     if explicit:
@@ -12837,25 +11390,21 @@ def _active_email_reader_reply_body(text: str, active_email: Optional[Dict[str, 
 
 def _email_reply_draft_requested(text: str) -> bool:
     value = str(text or "")
-    if re.search(r"\b(?:send|sent|send\s+now|reply\s+and\s+send)\b", value, re.IGNORECASE):
+    if _rx(r"\b(?:send|sent|send\s+now|reply\s+and\s+send)\b", re.IGNORECASE).search(value):
         return False
-    if re.search(r"\b(?:reply|respond|write\s+back)\b", value, re.IGNORECASE) and re.search(
-        r"\b(?:saying|say|that|with)\b",
-        value,
-        re.IGNORECASE,
-    ):
+    if _rx(r"\b(?:reply|respond|write\s+back)\b", re.IGNORECASE).search(value) and _rx(r"\b(?:saying|say|that|with)\b", re.IGNORECASE).search(value):
         return True
     return bool(
-        re.search(r"\b(?:draft|write|compose|open|start)\b", value, re.IGNORECASE)
-        and re.search(r"\b(?:reply|response|respond|write\s+back)\b", value, re.IGNORECASE)
+        _rx(r"\b(?:draft|write|compose|open|start)\b", re.IGNORECASE).search(value)
+        and _rx(r"\b(?:reply|response|respond|write\s+back)\b", re.IGNORECASE).search(value)
     )
 
 
 def _email_reply_suggestion_requested(text: str) -> bool:
     value = str(text or "")
     return bool(
-        re.search(r"\b(?:suggest|recommend|propose|help\s+me\s+(?:answer|respond|reply)|how\s+should\s+i\s+(?:answer|respond|reply))\b", value, re.IGNORECASE)
-        and re.search(r"\b(?:reply|response|respond|answer|write\s+back|email)\b", value, re.IGNORECASE)
+        _rx(r"\b(?:suggest|recommend|propose|help\s+me\s+(?:answer|respond|reply)|how\s+should\s+i\s+(?:answer|respond|reply))\b", re.IGNORECASE).search(value)
+        and _rx(r"\b(?:reply|response|respond|answer|write\s+back|email)\b", re.IGNORECASE).search(value)
     )
 
 
@@ -12864,24 +11413,16 @@ def _email_send_requested(text: str) -> bool:
     if _email_reply_draft_requested(value):
         return False
     return bool(
-        re.search(r"\b(?:send|sent|send\s+now)\b", value, re.IGNORECASE)
-        or re.search(
-            r"\b(?:email|message)\s+(?:to\s+)?[A-Za-z][^\n]{0,80}\b(?:saying|that|with)\b",
-            value,
-            re.IGNORECASE,
-        )
+        _rx(r"\b(?:send|sent|send\s+now)\b", re.IGNORECASE).search(value)
+        or _rx(r"\b(?:email|message)\s+(?:to\s+)?[A-Za-z][^\n]{0,80}\b(?:saying|that|with)\b", re.IGNORECASE).search(value)
     )
 
 
 def _email_immediate_send_requested(text: str) -> bool:
     value = str(text or "")
     return bool(
-        re.search(
-            r"\b(?:send\s+(?:(?:an?|the)\s+)?(?:email|message|reply)\s+now|send\s+(?:it\s+)?now|send\s+now|actually\s+send|deliver\s+(?:it\s+)?now|send\s+immediately|send\s+for\s+real)\b",
-            value,
-            re.IGNORECASE,
-        )
-        or re.search(r"(?:直接|立即|马上)(?:发送|发出|寄出)", value)
+        _rx(r"\b(?:send\s+(?:(?:an?|the)\s+)?(?:email|message|reply)\s+now|send\s+(?:it\s+)?now|send\s+now|actually\s+send|deliver\s+(?:it\s+)?now|send\s+immediately|send\s+for\s+real)\b", re.IGNORECASE).search(value)
+        or _rx(r"(?:直接|立即|马上)(?:发送|发出|寄出)").search(value)
     )
 
 
@@ -12890,12 +11431,8 @@ def _email_draft_review_requested(text: str) -> bool:
 
     value = str(text or "")
     return bool(
-        re.search(
-            r"\b(?:draft|save|keep|leave)\b[^.\n]{0,80}\b(?:draft|for\s+review|for\s+approval)\b",
-            value,
-            re.IGNORECASE,
-        )
-        or re.search(r"(?:仅|只)?(?:保存|保留)?(?:为|成)?草稿|(?:审批|审核)[^。\n]{0,24}草稿", value)
+        _rx(r"\b(?:draft|save|keep|leave)\b[^.\n]{0,80}\b(?:draft|for\s+review|for\s+approval)\b", re.IGNORECASE).search(value)
+        or _rx(r"(?:仅|只)?(?:保存|保留)?(?:为|成)?草稿|(?:审批|审核)[^。\n]{0,24}草稿").search(value)
     )
 
 
@@ -12913,18 +11450,14 @@ def _email_mutation_forbidden(text: str, tool_name: str) -> bool:
     bare_tool = str(tool_name or "").removeprefix("mcp__email__")
     if bare_tool not in _EMAIL_MUTATION_TOOLS:
         return False
-    value = re.sub(r"\s+", " ", str(text or "")).strip()
-    negative_scopes = re.findall(
-        r"\b(?:do\s+not|don't|without|never)\b[^.\n]{0,120}?"
-        r"(?=\band\s+(?:do\s+not|don't|never)\b|[.\n]|$)",
-        value,
-        re.IGNORECASE,
-    )
+    value = _rx(r"\s+").sub(" ", str(text or "")).strip()
+    negative_scopes = _rx(r"\b(?:do\s+not|don't|without|never)\b[^.\n]{0,120}?"
+        r"(?=\band\s+(?:do\s+not|don't|never)\b|[.\n]|$)", re.IGNORECASE).findall(value)
     broad_read_only = any(
-        re.search(r"\b(?:modify|change|alter|mutate|take\s+action|anything)\b", scope, re.I)
+        _rx(r"\b(?:modify|change|alter|mutate|take\s+action|anything)\b", re.I).search(scope)
         and (
-            re.search(r"\b(?:e-?mail|mail|message|inbox|anything|take\s+action)\b", scope, re.I)
-            or not re.search(r"\b(?:calendar|event|document|note|task|memory)\b", scope, re.I)
+            _rx(r"\b(?:e-?mail|mail|message|inbox|anything|take\s+action)\b", re.I).search(scope)
+            or not _rx(r"\b(?:calendar|event|document|note|task|memory)\b", re.I).search(scope)
         )
         for scope in negative_scopes
     )
@@ -12952,7 +11485,7 @@ def _email_mutation_forbidden(text: str, tool_name: str) -> bool:
 
 
 def _send_recipient_name_from_request(text: str) -> str:
-    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    value = _rx(r"\s+").sub(" ", str(text or "")).strip()
     patterns = (
         r"\b(?:send|write|compose)\s+(?:an?\s+)?(?:email|message)\s+to\s+([A-Z][A-Za-z0-9_. '-]{0,80}?)(?=\s+(?:saying|that|with|about)\b|$)",
         r"\b(?:email|message)\s+([A-Z][A-Za-z0-9_. '-]{0,80}?)(?=\s+(?:saying|that|with|about)\b|$)",
@@ -12961,22 +11494,18 @@ def _send_recipient_name_from_request(text: str) -> str:
         match = re.search(pattern, value, re.IGNORECASE)
         if not match:
             continue
-        name = re.sub(r"\s+", " ", match.group(1)).strip(" .'\"")
-        if name and not re.search(r"@", name):
+        name = _rx(r"\s+").sub(" ", match.group(1)).strip(" .'\"")
+        if name and not _rx(r"@").search(name):
             return name
     return ""
 
 
 def _contact_lookup_did_not_resolve_email(output: str) -> bool:
     value = str(output or "")
-    if re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", value):
+    if _rx(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}").search(value):
         return False
     return bool(
-        re.search(
-            r"\b(?:no\s+(?:matching\s+)?contacts?|not\s+found|couldn'?t\s+find|unable\s+to\s+find|0\s+contacts?)\b",
-            value,
-            re.IGNORECASE,
-        )
+        _rx(r"\b(?:no\s+(?:matching\s+)?contacts?|not\s+found|couldn'?t\s+find|unable\s+to\s+find|0\s+contacts?)\b", re.IGNORECASE).search(value)
     )
 
 
@@ -12990,7 +11519,7 @@ def _email_reply_body_from_request(text: str) -> str:
 
 
 def _is_generic_email_reply_body(body: str) -> bool:
-    value = re.sub(r"\s+", " ", str(body or "")).strip().lower()
+    value = _rx(r"\s+").sub(" ", str(body or "")).strip().lower()
     return value in {
         "hi, thanks for your email. i'll take care of it.",
         "hi, thanks for your email. i'll take a look and get back to you.",
@@ -13021,7 +11550,7 @@ def _contextual_summary_fragment(text: str) -> str:
 
 def _contextual_email_subject(text):
     """Read the legacy Subject heading without partitioning newline runs."""
-    for keyword in re.finditer(r"\bsubject", text, re.I):
+    for keyword in _rx(r"\bsubject", re.I).finditer(text):
         # Optional formatting is tried in the regex's original greedy order.
         # There are only twelve prefix alternatives, each with disjoint spaces.
         for bold in (True, False):
@@ -13061,16 +11590,16 @@ def _contextual_reply_body_from_recent_email_context(messages: List[Dict]) -> st
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
         text = str(message.get("content") or "")
-        if not re.search(r"#email-\d+|\bUID\s*:?\s*\d+\b", text, re.IGNORECASE):
+        if not _rx(r"#email-\d+|\bUID\s*:?\s*\d+\b", re.IGNORECASE).search(text):
             continue
         subject = ""
         summary = ""
         def _clean_fragment(raw: str) -> str:
             cleaned = replace_markdown_links_with_labels(str(raw or ""))
-            cleaned = re.sub(r"[*_`>#]+", "", cleaned)
-            return re.sub(r"\s+", " ", cleaned).strip(" .[]\"'")
+            cleaned = _rx(r"[*_`>#]+").sub("", cleaned)
+            return _rx(r"\s+").sub(" ", cleaned).strip(" .[]\"'")
 
-        link_match = re.search(r"\[([^\]\n]{4,120})\]\(#email-\d+\)", text)
+        link_match = _rx(r"\[([^\]\n]{4,120})\]\(#email-\d+\)").search(text)
         if link_match:
             subject = _clean_fragment(link_match.group(1))
         if not subject:
@@ -13088,36 +11617,27 @@ def _contextual_reply_body_from_recent_email_context(messages: List[Dict]) -> st
             body = "Thanks for sending this over."
         if summary:
             body += f" I have it noted that {summary[0].lower() + summary[1:] if summary else summary}."
-        if re.search(r"\battach(?:ment|ed)|\bpdf\b|\binvoice\b|\bfile\b", text, re.IGNORECASE):
+        if _rx(r"\battach(?:ment|ed)|\bpdf\b|\binvoice\b|\bfile\b", re.IGNORECASE).search(text):
             body += " I will review the attachment and let you know if anything is missing."
         else:
             body += " I will review the details and follow up if anything is missing."
-        return f"Hi,\n\n{body}\n\nBest,\nAlex"
+        return f"Hi,\n\n{body}"
     return ""
 
 
 def _email_uid_from_read_context(command: str, output: str) -> str:
     for raw in (command, output):
-        try:
-            parsed = json.loads(raw or "{}")
-            if isinstance(parsed, dict) and parsed.get("uid"):
-                return str(parsed.get("uid") or "").strip()
-        except Exception:
-            pass
-        match = re.search(r"^\s*UID:\s*(\S+)\s*$", str(raw or ""), re.MULTILINE)
+        uid = _json_object(raw).get("uid")
+        if uid:
+            return str(uid).strip()
+        match = _rx(r"^\s*UID:\s*(\S+)\s*$", re.MULTILINE).search(str(raw or ""))
         if match:
             return match.group(1).strip()
     return ""
 
 
 def _email_folder_from_read_context(command: str) -> str:
-    try:
-        parsed = json.loads(command or "{}")
-        if isinstance(parsed, dict) and parsed.get("folder"):
-            return str(parsed.get("folder") or "INBOX").strip() or "INBOX"
-    except Exception:
-        pass
-    return "INBOX"
+    return str(_json_object(command).get("folder") or "").strip() or "INBOX"
 
 
 def _build_active_email_draft_reply_content(raw: str, reply_text: str) -> str:
@@ -13140,9 +11660,9 @@ def _build_active_email_draft_reply_content(raw: str, reply_text: str) -> str:
 
 
 def _extract_followup_location_update(text: str) -> str:
-    match = re.search(r"\blocation\s+(?:to|as)\s+(.+)$", text or "", re.IGNORECASE)
+    match = _rx(r"\blocation\s+(?:to|as)\s+(.+)$", re.IGNORECASE).search(text or "")
     if not match:
-        match = re.search(r"\bat\s+([A-Z][\w\s-]{1,80})\.?$", text or "")
+        match = _rx(r"\bat\s+([A-Z][\w\s-]{1,80})\.?$").search(text or "")
     return match.group(1).strip().strip("\"' .") if match else ""
 
 
@@ -13284,11 +11804,11 @@ def _minimal_odysseus_doc_messages(messages: List[Dict], active_document, stream
 
 def _looks_like_notes_turn(text: str) -> bool:
     q = (text or "").lower()
-    if re.search(r"\b(notes?|todos?|to-?do|checklists?|reminders?)\b", q):
+    if _rx(r"\b(notes?|todos?|to-?do|checklists?|reminders?)\b").search(q):
         return True
-    if re.search(r"\b(?:take|jot|write down|add|create|make)\b.{0,80}\b(?:note|todo|to-?do|checklist|reminder)\b", q):
+    if _rx(r"\b(?:take|jot|write down|add|create|make)\b.{0,80}\b(?:note|todo|to-?do|checklist|reminder)\b").search(q):
         return True
-    if re.search(r"\b(?:buy|pick ?up|pickup)\b", q) and not re.search(r"\b(?:calendar|event|meeting|appointment|schedule)\b", q):
+    if _rx(r"\b(?:buy|pick ?up|pickup)\b").search(q) and not _rx(r"\b(?:calendar|event|meeting|appointment|schedule)\b").search(q):
         return True
     return _looks_like_implicit_notes_turn(text)
 
@@ -13296,9 +11816,9 @@ def _looks_like_notes_turn(text: str) -> bool:
 def _looks_like_notes_calendar_followup(text: str) -> bool:
     q = (text or "").lower()
     return bool(
-        re.search(r"\b(?:now\s+)?(?:delete|remove|cancel|update|change|move|edit|pin|unpin|tag|retag|rename)\b.{0,80}\b(?:it|that|this|event|appointment|meeting|note|reminder|task|checklist|todo|list)\b", q)
-        or re.search(r"\b(?:delete|remove|update|change|edit|pin|unpin|tag|retag|rename)\b.{0,80}\b(?:packing|shopping|grocery)\s+list\b", q)
-        or re.search(r"\b(?:delete|remove|cancel)\s+(?:it|that|this)\b", q)
+        _rx(r"\b(?:now\s+)?(?:delete|remove|cancel|update|change|move|edit|pin|unpin|tag|retag|rename)\b.{0,80}\b(?:it|that|this|event|appointment|meeting|note|reminder|task|checklist|todo|list)\b").search(q)
+        or _rx(r"\b(?:delete|remove|update|change|edit|pin|unpin|tag|retag|rename)\b.{0,80}\b(?:packing|shopping|grocery)\s+list\b").search(q)
+        or _rx(r"\b(?:delete|remove|cancel)\s+(?:it|that|this)\b").search(q)
     )
 
 
@@ -13306,9 +11826,9 @@ def _contextual_calendar_action_request(text: str) -> str:
     q = str(text or "").strip().lower()
     if not q:
         return ""
-    if not re.search(r"\b(?:it|this|that|event|appointment|meeting|calendar)\b", q):
+    if not _rx(r"\b(?:it|this|that|event|appointment|meeting|calendar)\b").search(q):
         return ""
-    if re.search(r"\b(?:delete|remove|cancel|get\s+rid\s+of)\b", q):
+    if _rx(r"\b(?:delete|remove|cancel|get\s+rid\s+of)\b").search(q):
         return "delete_event"
     return ""
 
@@ -13320,17 +11840,14 @@ def _calendar_context_owns_ambiguous_mutation(
 ) -> bool:
     """Prefer a concrete recent event over the generic task-state fallback."""
     q = str(text or "").strip().lower()
-    if not q or re.search(r"\b(?:tasks?|scheduled\s+tasks?|automation|job)\b", q):
+    if not q or _rx(r"\b(?:tasks?|scheduled\s+tasks?|automation|job)\b").search(q):
         return False
-    if not re.search(
-        r"\b(?:delete|remove|cancel|move|shift|reschedule|change|update|rename|edit)\b",
-        q,
-    ):
+    if not _rx(r"\b(?:delete|remove|cancel|move|shift|reschedule|change|update|rename|edit)\b").search(q):
         return False
     refs = _recent_odysseus_anchor_refs(messages, history_session)
     if not refs.get("event_uid"):
         return False
-    if re.search(r"\b(?:it|this|that|entry|event|appointment|meeting|reservation)\b", q):
+    if _rx(r"\b(?:it|this|that|entry|event|appointment|meeting|reservation)\b").search(q):
         return True
     title = str(refs.get("event_title") or "").strip().lower()
     return bool(title and title in q)
@@ -13339,10 +11856,10 @@ def _calendar_context_owns_ambiguous_mutation(
 def _looks_like_explicit_email_action_turn(text: str) -> bool:
     q = (text or "").lower()
     return bool(
-        re.search(r"\b(?:email|emails|mail|inbox|gmail)\b", q)
-        or re.search(r"\b(?:reply|respond|response|forward)\b", q)
-        or re.search(r"\b(?:send|compose|draft|write)\b.{0,50}\b(?:email|mail|reply|response)\b", q)
-        or re.search(r"\b(?:open|read|show|view|check|list)\b.{0,50}\b(?:emails?|mail|inbox|messages?)\b", q)
+        _rx(r"\b(?:email|emails|mail|inbox|gmail)\b").search(q)
+        or _rx(r"\b(?:reply|respond|response|forward)\b").search(q)
+        or _rx(r"\b(?:send|compose|draft|write)\b.{0,50}\b(?:email|mail|reply|response)\b").search(q)
+        or _rx(r"\b(?:open|read|show|view|check|list)\b.{0,50}\b(?:emails?|mail|inbox|messages?)\b").search(q)
     )
 
 
@@ -13394,17 +11911,14 @@ def _minimal_datetime_context_message(messages: List[Dict]) -> Optional[Dict]:
 
 
 def _looks_like_memory_identity_turn(text: str) -> bool:
-    q = re.sub(r"[^a-z0-9\s'?]", " ", (text or "").lower())
-    q = re.sub(r"\bhwho\b", "who", q)
-    return bool(re.search(
-        r"\b("
+    q = _rx(r"[^a-z0-9\s'?]").sub(" ", (text or "").lower())
+    q = _rx(r"\bhwho\b").sub("who", q)
+    return bool(_rx(r"\b("
         r"who am i|who i am|what'?s my name|what is my name|where do i live|"
         r"what do you know about me|about me|relate to me|use what you know|"
         r"remember\b|forget\b|my preference|my preferences|i prefer|"
         r"my memory|memories about me"
-        r")\b",
-        q,
-    ))
+        r")\b").search(q))
 
 
 def _minimal_odysseus_general_messages(messages: List[Dict], include_memory: bool = False) -> List[Dict]:
@@ -13497,19 +12011,11 @@ def _normalize_ody_qwen_text_artifacts(text: str, *, strip_edges: bool = True) -
     # Qwen tool-router checkpoints occasionally leak tokenizer delimiters into
     # the visible answer after a forced synthesis round. They are transport
     # markers, not user-facing content.
-    fixed = re.sub(r"\|(?:start|end)\|", "", fixed)
-    fixed = re.sub(r"\bHi!HowcanIhelpyou\?", "Hi! How can I help you?", fixed)
-    fixed = re.sub(
-        r"\bCanyouclarifywhichlinksyoumean\?",
-        "Can you clarify which links you mean?",
-        fixed,
-    )
-    fixed = re.sub(
-        r"\bWhichlocalprojecshouldIlisfilesfor\?",
-        "Which local project should I list files for?",
-        fixed,
-    )
-    fixed = re.sub(r"\bDone\.\s*Done\.\s*$", "Done.", fixed)
+    fixed = _rx(r"\|(?:start|end)\|").sub("", fixed)
+    fixed = _rx(r"\bHi!HowcanIhelpyou\?").sub("Hi! How can I help you?", fixed)
+    fixed = _rx(r"\bCanyouclarifywhichlinksyoumean\?").sub("Can you clarify which links you mean?", fixed)
+    fixed = _rx(r"\bWhichlocalprojecshouldIlisfilesfor\?").sub("Which local project should I list files for?", fixed)
+    fixed = _rx(r"\bDone\.\s*Done\.\s*$").sub("Done.", fixed)
     for pattern, replacement in _ODY_QWEN_TEXT_FIXES:
         if replacement is None:
             continue
@@ -13551,10 +12057,10 @@ def _looks_like_ody_qwen_leaked_tool_text(text: str) -> bool:
 
 def _contains_email_draft_headers(text: str) -> bool:
     """Recognize the legacy To/Subject/footer shape with ordered fixed scans."""
-    to_match = re.search(r"\bTo:", text, re.IGNORECASE)
+    to_match = _rx(r"\bTo:", re.IGNORECASE).search(text)
     if to_match is None:
         return False
-    subject = re.search(r"\bSubject:", text[to_match.end() + 1:], re.IGNORECASE)
+    subject = _rx(r"\bSubject:", re.IGNORECASE).search(text[to_match.end() + 1:])
     if subject is None:
         return False
     subject_end = to_match.end() + 1 + subject.end()
@@ -13566,13 +12072,7 @@ def _ody_qwen_terminal_tool_summary(tool_event: dict[str, Any], user_text: str =
     tool_name = _resolved_tool_event_name(tool_event)
     output = str(tool_event.get("output") or "")
     command = str(tool_event.get("command") or "")
-    action = ""
-    try:
-        args = json.loads(command or "{}")
-        if isinstance(args, dict):
-            action = str(args.get("action") or "").lower()
-    except Exception:
-        action = command.strip().splitlines()[0].lower()
+    action = _tool_block_action(command)
 
     if tool_name == "manage_notes" and action == "view":
         return output.removeprefix("AI: ").strip()
@@ -13620,18 +12120,18 @@ def _ody_qwen_terminal_tool_summary(tool_event: dict[str, Any], user_text: str =
         return _skills_list_summary_from_tool_output(output)
     if tool_name in {"list_emails", "mcp__email__list_emails"}:
         if _email_count_requested(user_text):
-            total_match = re.search(r"Found\s+(\d+)\s+email", output, re.IGNORECASE)
+            total_match = _rx(r"Found\s+(\d+)\s+email", re.IGNORECASE).search(output)
             if total_match:
                 count = int(total_match.group(1))
-                scope = " last week" if re.search(r"\blast\s+week\b", user_text or "", re.IGNORECASE) else ""
+                scope = " last week" if _rx(r"\blast\s+week\b", re.IGNORECASE).search(user_text or "") else ""
                 return f"You have {count} email{'s' if count != 1 else ''}{scope}."
         if user_text and not _email_direct_listing_requested(user_text):
             return ""
         return _email_list_summary_from_tool_output(
             output,
             attachments_only=_email_attachment_list_requested(user_text),
-            unread_requested=bool(re.search(r"\bunread\b", user_text or "", re.IGNORECASE))
-            or bool(re.search(r'"unread_only"\s*:\s*true', command, re.IGNORECASE)),
+            unread_requested=bool(_rx(r"\bunread\b", re.IGNORECASE).search(user_text or ""))
+            or bool(_rx(r'"unread_only"\s*:\s*true', re.IGNORECASE).search(command)),
         )
     if tool_name in {"search_emails", "mcp__email__search_emails"}:
         if user_text and not _email_direct_listing_requested(user_text):
@@ -13665,14 +12165,14 @@ def _ody_qwen_terminal_tool_summary(tool_event: dict[str, Any], user_text: str =
         if "sent" in lowered:
             return "Email sent."
     if tool_name in {"draft_email", "mcp__email__draft_email", "draft_email_reply", "mcp__email__draft_email_reply", "ai_draft_email_reply", "mcp__email__ai_draft_email_reply"}:
-        if re.search(r"\bcreated\b.+\b(?:email|reply|compose)\s+draft\b", output, re.IGNORECASE):
+        if _rx(r"\bcreated\b.+\b(?:email|reply|compose)\s+draft\b", re.IGNORECASE).search(output):
             return "Created an Odysseus email draft document for review."
     if tool_name in {"reply_to_email", "mcp__email__reply_to_email"}:
         if "replied" in output.lower():
             return "Replied to the email."
     if tool_name in {"bulk_email", "mcp__email__bulk_email"}:
         lowered = output.lower()
-        if "failed" not in lowered and "error" not in lowered and re.search(r"\bdone\b", lowered):
+        if "failed" not in lowered and "error" not in lowered and _rx(r"\bdone\b").search(lowered):
             return output.strip()
     if tool_name in {"block_sender", "mcp__email__block_sender"}:
         lowered = output.lower()
@@ -13700,13 +12200,10 @@ def _ody_qwen_terminal_tool_summary(tool_event: dict[str, Any], user_text: str =
     if tool_name == "ui_control":
         lowered_command = command.lower()
         if "open_panel" in lowered_command:
-            panel = "panel"
-            with contextlib.suppress(Exception):
-                parsed = json.loads(command or "{}")
-                if isinstance(parsed, dict):
-                    panel = str(parsed.get("panel") or parsed.get("name") or panel)
+            parsed = _json_object(command)
+            panel = str(parsed.get("panel") or parsed.get("name") or "panel")
             if panel == "panel":
-                match = re.search(r"open_panel\s+([a-z_]+)", lowered_command)
+                match = _rx(r"open_panel\s+([a-z_]+)").search(lowered_command)
                 if match:
                     panel = match.group(1)
             return f"The {panel.replace('_', ' ')} panel is open."
@@ -13721,17 +12218,8 @@ def _ody_qwen_terminal_tool_summary(tool_event: dict[str, Any], user_text: str =
     } and action == "list":
         return output.removeprefix("AI: ").strip()
     if tool_name == "host_shell":
-        command = ""
-        try:
-            parsed = json.loads(command or "{}")
-        except Exception:
-            parsed = {}
-        try:
-            parsed = json.loads(str(tool_event.get("command") or "") or "{}")
-        except Exception:
-            parsed = {}
-        if isinstance(parsed, dict):
-            command = str(parsed.get("command") or parsed.get("cmd") or "").strip()
+        parsed = _json_object(command)
+        command = str(parsed.get("command") or parsed.get("cmd") or "").strip()
         body = output.strip()
         if command and body:
             return f"```bash\n$ {command}\n{body}\n```"
@@ -13742,10 +12230,10 @@ def _ody_qwen_terminal_tool_summary(tool_event: dict[str, Any], user_text: str =
         body = output.strip()
         # `ls -la` always prints the dot entries. Turn that implementation
         # detail into the concise answer the user asked for.
-        if re.match(r"^\s*ls\b", shell_command, re.IGNORECASE):
+        if _rx(r"^\s*ls\b", re.IGNORECASE).match(shell_command):
             listing_names = []
             for line in body.splitlines():
-                if re.match(r"^[bcdlps-][rwxStTs-]{9}\s", line.strip()):
+                if _rx(r"^[bcdlps-][rwxStTs-]{9}\s").match(line.strip()):
                     parts = line.split(maxsplit=8)
                     if len(parts) == 9:
                         listing_names.append(parts[-1].split(" -> ", 1)[0])
@@ -13784,12 +12272,7 @@ def _tui_verified_coding_summary(tool_events: list[dict[str, Any]]) -> str:
     for event in tool_events or []:
         tool = _resolved_tool_event_name(event)
         raw = str(event.get("command") or "").strip()
-        try:
-            args = json.loads(raw)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            args = {}
-        if not isinstance(args, dict):
-            args = {}
+        args = _json_object(raw)
         if tool in {"write_file", "edit_file", "apply_patch"}:
             path = str(args.get("path") or "").strip()
             if path and path not in changed and tool_result_is_successful(event):
@@ -13800,11 +12283,7 @@ def _tui_verified_coding_summary(tool_events: list[dict[str, Any]]) -> str:
                 or args.get("command")
                 or raw
             ).strip()
-            if re.search(
-                r"(?:pytest|npm\s+(?:run\s+)?test|make\s+test|go\s+test|cargo\s+test)",
-                command,
-                re.IGNORECASE,
-            ):
+            if _rx(r"(?:pytest|npm\s+(?:run\s+)?test|make\s+test|go\s+test|cargo\s+test)", re.IGNORECASE).search(command):
                 status = "passed" if event.get("exit_code") == 0 else "failed"
                 verification.append(f"`{command}` {status}")
     lines = ["Done."]
@@ -13866,13 +12345,9 @@ def _looks_like_success_claim(text: str) -> bool:
 def _latest_email_action_needs_followup(user_text: str, tool_records: list[dict]) -> bool:
     """Return true when list_emails is only a locator for a requested action."""
     text = user_text or ""
-    if not re.search(r"\b(?:latest|last|newest|most recent)\b", text, re.IGNORECASE):
+    if not _rx(r"\b(?:latest|last|newest|most recent)\b", re.IGNORECASE).search(text):
         return False
-    if not re.search(
-        r"\b(?:open|read|show|display|view|draft|write|compose|reply|respond|send|archive|delete|trash|remove)\b",
-        text,
-        re.IGNORECASE,
-    ):
+    if not _rx(r"\b(?:open|read|show|display|view|draft|write|compose|reply|respond|send|archive|delete|trash|remove)\b", re.IGNORECASE).search(text):
         return False
     for record in tool_records or []:
         if record.get("tool_name") not in {"list_emails", "mcp__email__list_emails"}:
@@ -13886,11 +12361,11 @@ def _latest_email_action_needs_followup(user_text: str, tool_records: list[dict]
 def _parse_qwen_task_mutation_request(user_text: str) -> str:
     """Return the requested manage_tasks mutation, if a list result is a locator."""
     text = user_text or ""
-    if re.search(r"\b(?:pause|suspend|disable)\b", text, re.IGNORECASE):
+    if _rx(r"\b(?:pause|suspend|disable)\b", re.IGNORECASE).search(text):
         return "pause"
-    if re.search(r"\b(?:resume|unpause|enable|restart)\b", text, re.IGNORECASE):
+    if _rx(r"\b(?:resume|unpause|enable|restart)\b", re.IGNORECASE).search(text):
         return "resume"
-    if re.search(r"\b(?:delete|remove|trash|cancel)\b", text, re.IGNORECASE):
+    if _rx(r"\b(?:delete|remove|trash|cancel)\b", re.IGNORECASE).search(text):
         return "delete"
     return ""
 
@@ -13898,9 +12373,9 @@ def _parse_qwen_task_mutation_request(user_text: str) -> str:
 def _single_task_id_from_manage_tasks_list(raw: str) -> str:
     """Extract the sole task id from a bounded manage_tasks list result."""
     text = str(raw or "")
-    if not re.search(r"\bFound\s+1\s+tasks?\b", text, re.IGNORECASE):
+    if not _rx(r"\bFound\s+1\s+tasks?\b", re.IGNORECASE).search(text):
         return ""
-    matches = re.findall(r"^\s*\d+\.\s+.+?\s+\(([^)\n]+)\)", text, re.MULTILINE)
+    matches = _rx(r"^\s*\d+\.\s+.+?\s+\(([^)\n]+)\)", re.MULTILINE).findall(text)
     if len(matches) != 1:
         return ""
     task_id = matches[0].strip()
@@ -13940,12 +12415,8 @@ def _normalize_truncated_document_tool_fences(text: str) -> str:
     marker = r"<<<(?:FIND|REPLACE|SUGGEST|REASON|END)>>>"
     normalized = re.sub(rf"(?<!\n)({marker})", r"\n\1", normalized)
     normalized = re.sub(rf"({marker})(?=\S)", r"\1\n", normalized)
-    normalized = re.sub(
-        r"(<<<(?:REPLACE|SUGGEST|REASON)>>>)\n(<<<END>>>)",
-        r"\1\n\n\2",
-        normalized,
-    )
-    normalized = re.sub(r"\n(```)", r"\1", normalized)
+    normalized = _rx(r"(<<<(?:REPLACE|SUGGEST|REASON)>>>)\n(<<<END>>>)").sub(r"\1\n\n\2", normalized)
+    normalized = _rx(r"\n(```)").sub(r"\1", normalized)
     return normalized
 
 
@@ -13977,12 +12448,7 @@ def _normalize_stream_document_fences(text: str, target_tool: str = "create_docu
             body = "\n".join(lines)
         return f"```{target_tool}\n{body}"
 
-    return re.sub(
-        r"```documen(?:t)?\s*\n([\s\S]*?)(?=\n```|$)",
-        repl,
-        text,
-        flags=re.IGNORECASE,
-    )
+    return _rx(r"```documen(?:t)?\s*\n([\s\S]*?)(?=\n```|$)", re.IGNORECASE).sub(repl, text)
 
 
 def _document_stream_events(block: ToolBlock) -> list[dict]:
@@ -14173,7 +12639,7 @@ def _substantive_answer_after_failed_tools(
     visible = _strip_think_blocks(str(text or "")).strip()
     if len(visible) < 400 or not tool_result_records:
         return False
-    trailing_sentence = re.split(r"(?<=[.!?])\s+", visible)[-1].strip()
+    trailing_sentence = _rx(r"(?<=[.!?])\s+").split(visible)[-1].strip()
     if _is_tool_preamble(trailing_sentence):
         return False
     return all(
@@ -14188,7 +12654,7 @@ def _is_tool_preamble(text: str) -> bool:
     # Some reasoning parsers omit the opening tag but leave a closing marker
     # immediately before the visible tool preamble. Do not let that transport
     # residue turn an unfinished action into a substantive final answer.
-    visible = re.sub(r"^</think>\s*", "", visible, flags=re.IGNORECASE).strip()
+    visible = _rx(r"^</think>\s*", re.IGNORECASE).sub("", visible).strip()
     if (
         not visible
         or len(visible) > 180
@@ -14196,24 +12662,16 @@ def _is_tool_preamble(text: str) -> bool:
         or "```" in visible
     ):
         return False
-    if re.fullmatch(
-        r"(?:the\s+)?user\s+(?:asks|asked|is asking|wants|requested)\b[^\n]{0,140}[:.!]?",
-        visible,
-        re.IGNORECASE,
-    ):
+    if _rx(r"(?:the\s+)?user\s+(?:asks|asked|is asking|wants|requested)\b[^\n]{0,140}[:.!]?", re.IGNORECASE).fullmatch(visible):
         return True
-    return bool(re.fullmatch(
-        r"(?:now\s+)?(?:let me|i['’]?ll|i will|i['’]?m\s+(?:preparing|planning)\s+to|i am\s+(?:preparing|planning)\s+to|i['’]?m|i am|i need to|we need to|i should|"
+    return bool(_rx(r"(?:now\s+)?(?:let me|i['’]?ll|i will|i['’]?m\s+(?:preparing|planning)\s+to|i am\s+(?:preparing|planning)\s+to|i['’]?m|i am|i need to|we need to|i should|"
         r"we should|i must|we must|going to|let's)\s+"
         r"(?:now\s+)?"
         r"(?:(?:carefully|methodically|systematically|closely|further)\s+){0,2}"
         r"(?:(?:try|attempt)(?:\s+to|\s+(?:a|another)(?:\s+different)?)\s+)?"
         r"(?:continue|continuing|check|fetch|read|watch|inspect|examine|analy[sz]e|verify|scan|re-?scan|refine|request|review|track|trace|look\s+(?:at|up)|search|find|query|"
         r"view|run|test|use|open|get|pull|grab|call|visit|navigate|extract|export|render|save)\b"
-        r"[^\n]{0,260}[:.!]?",
-        visible,
-        re.IGNORECASE,
-    ))
+        r"[^\n]{0,260}[:.!]?", re.IGNORECASE).fullmatch(visible))
 
 
 def _tui_broad_host_read_reason(
@@ -14229,18 +12687,16 @@ def _tui_broad_host_read_reason(
     # intent. Reclassifying shell syntax such as ``pwd && find`` as a fresh
     # user turn lets broad reads bypass the bounded host-bridge policy.
     text = _tui_host_command_text(command)
-    if re.search(r"\bfind\s+(?:[./]|/home|/tmp)(?:\s|$)", text, re.IGNORECASE) and not re.search(
-        r"(?:^|\s)-(?:maxdepth|mindepth)\b", text, re.IGNORECASE
-    ):
+    if _rx(r"\bfind\s+(?:[./]|/home|/tmp)(?:\s|$)", re.IGNORECASE).search(text) and not _rx(r"(?:^|\s)-(?:maxdepth|mindepth)\b", re.IGNORECASE).search(text):
         return "Use a bounded find with -maxdepth, or use rg --files with a focused path."
-    if re.search(r"(?:^|[;&|]\s*)cat\s+[^|;&]+", text, re.IGNORECASE):
-        if not re.search(r"\b(?:head|tail|sed|rg|grep|awk)\b", text, re.IGNORECASE):
+    if _rx(r"(?:^|[;&|]\s*)cat\s+[^|;&]+", re.IGNORECASE).search(text):
+        if not _rx(r"\b(?:head|tail|sed|rg|grep|awk)\b", re.IGNORECASE).search(text):
             manifest_names = {
                 "package.json", "pyproject.toml", "setup.cfg", "setup.py",
                 "requirements.txt", "makefile", "cargo.toml", "go.mod",
                 "pom.xml", "composer.json", "gemfile", "justfile",
             }
-            cat_paths = re.findall(r"\bcat\s+([^\s;&|]+)", text, re.IGNORECASE)
+            cat_paths = _rx(r"\bcat\s+([^\s;&|]+)", re.IGNORECASE).findall(text)
             if not cat_paths or any(Path(path).name.lower() not in manifest_names for path in cat_paths):
                 return "Do not dump a whole source file. Use rg for symbols and sed -n for a focused line range."
     return None
@@ -14251,11 +12707,8 @@ def _tui_host_command_text(command: str) -> str:
     text = str(command or "").strip()
     if not text.startswith("{"):
         return text
-    try:
-        payload = json.loads(text)
-    except (TypeError, ValueError):
-        return text
-    if not isinstance(payload, dict):
+    payload = _json_object(text)
+    if not payload:
         return text
     for key in ("command", "cmd", "shell"):
         value = payload.get(key)
@@ -14276,15 +12729,9 @@ def _tui_bounded_host_read_command(command: str) -> Optional[tuple[str, str]]:
     if not text or any(token in text for token in ("|", ";", "`", "$(")):
         return None
 
-    find_match = re.fullmatch(
-        r"(?P<prefix>(?:(?:pwd|cd\s+[^&|;]+)\s*&&\s*)?)"
-        r"find\s+(?P<root>\S+)(?P<rest>.*)",
-        text,
-        re.IGNORECASE,
-    )
-    if find_match and not re.search(
-        r"(?:^|\s)-(?:maxdepth|mindepth)\b", text, re.IGNORECASE
-    ):
+    find_match = _rx(r"(?P<prefix>(?:(?:pwd|cd\s+[^&|;]+)\s*&&\s*)?)"
+        r"find\s+(?P<root>\S+)(?P<rest>.*)", re.IGNORECASE).fullmatch(text)
+    if find_match and not _rx(r"(?:^|\s)-(?:maxdepth|mindepth)\b", re.IGNORECASE).search(text):
         root = find_match.group("root")
         rest = find_match.group("rest").strip()
         bounded = (
@@ -14293,11 +12740,7 @@ def _tui_bounded_host_read_command(command: str) -> Optional[tuple[str, str]]:
         )
         return bounded, "find limited to -maxdepth 2"
 
-    cat_match = re.fullmatch(
-        r"(?P<prefix>(?:cd\s+[^&]+&&\s*)?)cat\s+(?P<path>.+)",
-        text,
-        re.IGNORECASE,
-    )
+    cat_match = _rx(r"(?P<prefix>(?:cd\s+[^&]+&&\s*)?)cat\s+(?P<path>.+)", re.IGNORECASE).fullmatch(text)
     if cat_match:
         try:
             parts = shlex.split(cat_match.group("path"))
@@ -14317,12 +12760,6 @@ def _is_odysseus_qwen_model(model: str) -> bool:
         (model or "").lower().startswith("odysseus-qwen3")
         or is_odysseus_merged_tools_model(model)
     )
-
-
-def _is_odysseus_qwen_native(model: str) -> bool:
-    """Recognize the supported local Qwen 3.6/3.8 27B MLX family."""
-    value = str(model or "").lower()
-    return bool(re.search(r"\bqwen3(?:\.?(?:6|8))-27b-(?:mlx|fp8)(?:\b|[-_/])", value))
 
 
 def _is_deepseek_flash_vision_model(model: str) -> bool:
@@ -14559,18 +12996,8 @@ def _build_system_prompt(
 
     set_active_model(model)
 
-    # Current date/time for every agent request. This is user-local when the
-    # browser provided timezone headers, with a server-local fallback.
-    #
-    # IMPORTANT: this is intentionally NOT prepended into agent_prompt (the
-    # system message) anymore. Its text changes every minute, and local
-    # OpenAI-compatible backends (llama.cpp / LM Studio) key their KV-cache
-    # prefix off the system message byte-for-byte — mixing ever-changing
-    # timestamp text into the (already large, tool-laden) agent system prompt
-    # would invalidate the cached prefix on every single request, forcing a
-    # full prompt re-evaluation each turn (issue #2927). It's built here as a
-    # standalone *user*-role message and inserted near the end of the array,
-    # right alongside _doc_message / _skills_message, below.
+    # Current date/time as a user-role message, not in the system prompt: its text changes
+    # every minute and would break local backends' byte-exact KV-cache prefix.
     _datetime_message = None
     try:
         from src.user_time import current_datetime_context_message
@@ -14927,20 +13354,10 @@ def _build_system_prompt(
     if not suppress_local_context and not suppress_skills:
         try:
             last_user = _extract_last_user_message(messages)
-            # Respect the user's skills-enabled toggle (mirrors memory_enabled).
-            # When off, don't inject relevant skills into the prompt.
-            _skills_on = True
-            _prefs = {}
-            try:
-                from routes.prefs_routes import _load_for_user as _load_prefs
-                _prefs = _load_prefs(owner) or {}
-                _skills_on = (
-                    _prefs.get("skills_enabled", True)
-                    and getattr(history_session, "skill_injection_enabled", True) is not False
-                )
-            except Exception:
-                pass
-            if (last_user or active_skill_names) and _skills_on:
+            # The session-level skills toggle reaches here folded into suppress_skills.
+            from routes.prefs_routes import _load_for_user as _load_prefs
+            _prefs = _load_prefs(owner) or {}
+            if (last_user or active_skill_names) and _prefs.get("skills_enabled", True):
                 from services.memory.skills import SkillsManager
                 from src.constants import DATA_DIR
                 sm = SkillsManager(DATA_DIR)
@@ -15224,20 +13641,14 @@ def _build_base_prompt(
     If relevant_tools is provided (from RAG retrieval), only those tools
     are shown with full descriptions. Otherwise falls back to full prompt.
     """
-    from src.tool_index import ALWAYS_AVAILABLE
 
     disabled = set(disabled_tools or [])
     if not get_setting("image_gen_enabled", False):
         disabled.add("generate_image")
 
     if relevant_tools is not None:
-        # RAG mode: trust the relevant_tools set as already-composed.
-        # get_tools_for_query starts from ALWAYS_AVAILABLE and may
-        # *discard* tools that conflict with the query's intent (e.g.
-        # drop manage_memory for clear contact-save patterns). Unioning
-        # ALWAYS_AVAILABLE back in here used to silently undo those
-        # drops. Only force-include the irreducible loop primitives
-        # (ask_user, update_plan) as belt-and-suspenders.
+        # RAG mode: relevant_tools is already composed and may have dropped tools on purpose,
+        # so only the loop primitives are forced in.
         tool_names = set(relevant_tools) | {"ask_user", "update_plan"}
         if needs_admin:
             tool_names |= _ADMIN_TOOLS
@@ -15418,20 +13829,9 @@ def _resolve_tool_blocks(
             ]
             used_native = True
     if not used_native:
-        # Native function-calling models (GPT/Claude/Grok/Qwen3/DeepSeek-V, etc.)
-        # have a reliable structured channel for real tool invocations. When such
-        # a model emits no native tool_calls, any ```bash/```python/```json fence
-        # in its prose is virtually always an illustrative example for the user
-        # (e.g. "here's the command you'd run"), not an attempted tool call —
-        # executing it causes accidental runs and clarification loops (#3222).
-        #
-        # Gate ONLY that fenced-block pattern for native models, not the whole
-        # parser: explicit [TOOL_CALL]/<invoke>/<tool_code>/DSML markup that
-        # leaks into content as text is never illustrative — it's a real call
-        # the model couldn't emit on its structured channel (e.g. DeepSeek-V
-        # falling back to DSML). Dropping the whole parser would silently lose
-        # those too. Non-native / textual-only models keep every pattern,
-        # fenced blocks included, since that's their *only* tool channel.
+        # A native model's code fences in prose are examples, not calls, so skip
+        # fenced blocks for it. Explicit [TOOL_CALL]/<invoke>/DSML markup is
+        # still a real call it could not emit on the structured channel.
         tool_blocks = parse_tool_blocks(
             round_response,
             skip_fenced=(is_api_model and not allow_fenced_for_api),
@@ -15646,7 +14046,7 @@ def _recover_fenced_media_shell_command(
         command = match.group("body").strip()
         if not command:
             continue
-        command = re.sub(r"\\\r?\n[ \t]*", " ", command)
+        command = _rx(r"\\\r?\n[ \t]*").sub(" ", command)
         if "\n" in command or "\r" in command:
             continue
         try:
@@ -15721,7 +14121,7 @@ def _normalize_required_artifact_write_paths(
 
 
 def _artifact_lock_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+    return _rx(r"[^a-z0-9]+").sub("", str(value or "").casefold())
 
 
 def _metric_lock_matches(header: str, metric: str) -> bool:
@@ -15742,27 +14142,17 @@ def _resolved_value_locks_from_tool_events(
     """Extract machine-checkable value locks from structured pdf_extract output."""
 
     locks: dict[str, dict[str, Optional[str]]] = {}
-    pattern = re.compile(
-        r"Resolved requested values by coordinate join:\s*(?P<model>[^|\n]+)"
-        r"(?P<body>[^\n]*)",
-        re.IGNORECASE,
-    )
+    pattern = _rx(r"Resolved requested values by coordinate join:\s*(?P<model>[^|\n]+)"
+        r"(?P<body>[^\n]*)", re.IGNORECASE)
     for event in tool_events or ():
         if not isinstance(event, dict):
             continue
         if str(event.get("tool") or "") != "pdf_extract":
             continue
         output = str(event.get("output") or "")
-        for json_line in re.finditer(
-            r"^Resolved values JSON:\s*(?P<payload>\{.*\})\s*$",
-            output,
-            re.IGNORECASE | re.MULTILINE,
-        ):
-            try:
-                payload = json.loads(json_line.group("payload"))
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(payload, dict):
+        for json_line in _rx(r"^Resolved values JSON:\s*(?P<payload>\{.*\})\s*$", re.IGNORECASE | re.MULTILINE).finditer(output):
+            payload = _json_object(json_line.group("payload"))
+            if not payload:
                 continue
             model = str(payload.get("model") or "").strip()
             raw_values = payload.get("values")
@@ -15792,21 +14182,14 @@ def _resolved_value_locks_from_tool_events(
                 part = part.strip()
                 if not part:
                     continue
-                missing = re.search(
-                    r"requested metrics not found:\s*(?P<metrics>.+)$",
-                    part,
-                    re.IGNORECASE,
-                )
+                missing = _rx(r"requested metrics not found:\s*(?P<metrics>.+)$", re.IGNORECASE).search(part)
                 if missing:
-                    for metric in re.split(r"\s*,\s*", missing.group("metrics")):
+                    for metric in _rx(r"\s*,\s*").split(missing.group("metrics")):
                         metric = metric.strip()
                         if metric:
                             values[metric] = None
                     continue
-                metric_match = re.match(
-                    r"(?P<metric>[A-Za-z0-9_.+-]+)\s*=\s*(?P<value>[-+]?\d+(?:\.\d+)?)$",
-                    part,
-                )
+                metric_match = _rx(r"(?P<metric>[A-Za-z0-9_.+-]+)\s*=\s*(?P<value>[-+]?\d+(?:\.\d+)?)$").match(part)
                 if metric_match:
                     values[metric_match.group("metric")] = metric_match.group("value")
     return locks
@@ -15905,11 +14288,7 @@ def _append_tool_results(
         if not isinstance(record, dict) or record.get("tool_name") != "private_browser":
             continue
         raw_content = str(record.get("content") or "")
-        try:
-            browser_args = json.loads(raw_content or "{}")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            browser_args = {}
-        action = str((browser_args or {}).get("action") or "").strip().lower()
+        action = str(_json_object(raw_content).get("action") or "").strip().lower()
         if action in {"snapshot", "read"} or (
             action == "batch" and "snapshot" in raw_content.lower()
         ):
@@ -15954,14 +14333,8 @@ def _append_tool_results(
                 text + "\n[Prior tool images retired after inspection; timestamps remain in tool results.]"
             ).strip()
     image_blocks = []
-    # A contact sheet is already a bounded visual observation. Replaying all
-    # eight recent sheets on every round made multimodal histories balloon far
-    # beyond the configured model context (the r5 benchmark reached ~122k
-    # input tokens with a 32k context), which caused slow loops and discarded
-    # final answers. Keep a small recent visual-result window while allowing a
-    # deliberate override for models with a larger verified context. Do not
-    # truncate frames within one result: a single contact sheet/inspection
-    # result is one bounded observation and its frames belong together.
+    # Replaying every recent contact sheet each round overflows the model context, so keep a
+    # small recent visual window; frames within one result stay together.
     try:
         max_visual_images = max(
             1,
@@ -16020,13 +14393,7 @@ def _append_tool_results(
                 _m.pop("reasoning_content", None)
     if used_native and native_tool_calls:
         assistant_msg = {"role": "assistant"}
-        # When the model emitted ONLY tool calls (no prose), content must be
-        # null, NOT an empty string. Google Gemini's OpenAI-compatible endpoint
-        # and Ollama both reject an assistant message that carries tool_calls
-        # alongside empty-string content with HTTP 400 ("contents is not
-        # specified" / a JSON parse error), which aborts every tool-using turn
-        # at the follow-up round. null (i.e. omitted text) is the spec-correct
-        # form the OpenAI SDK itself emits, and OpenAI/Anthropic accept it too.
+        # A tool-call-only message needs null content: Gemini and Ollama reject empty-string content.
         assistant_msg["content"] = round_response if round_response.strip() else None
         if round_reasoning and include_reasoning_content:
             assistant_msg["reasoning_content"] = round_reasoning
@@ -16038,10 +14405,7 @@ def _append_tool_results(
                     "name": tc.get("name", ""),
                     "arguments": tc.get("arguments", "{}"),
                 },
-                # Gemini 3 requires the opaque thought_signature it returned with
-                # each function call to be echoed back on the follow-up turn, or
-                # the next request 400s. Replay it when present; other providers
-                # never emit it (their payload builders just ignore the field).
+                # Gemini 3 needs its thought_signature echoed back on the follow-up turn.
                 **({"extra_content": tc["extra_content"]} if tc.get("extra_content") else {}),
             }
             for j, tc in enumerate(native_tool_calls)
@@ -16098,23 +14462,14 @@ def _append_tool_results(
             messages.append(visual_evidence)
     else:
         tool_output_text = "\n\n".join(tool_results)
-        # An approved-action replay injects the sealed tool result with no
-        # assistant prose for that round, which used to append an assistant turn
-        # whose content was "". Anthropic's Messages API rejects a non-final
-        # assistant message with empty content (HTTP 400), so the resumed turn
-        # died before the model saw the result. A turn carrying neither prose nor
-        # reasoning has nothing to say to any provider, so skip it entirely.
+        # Anthropic rejects a non-final assistant message with empty content, so skip a turn
+        # that carries neither prose nor reasoning.
         if round_response.strip() or round_reasoning:
             msg = {"role": "assistant", "content": round_response}
             if round_reasoning and include_reasoning_content:
                 msg["reasoning_content"] = round_reasoning
             messages.append(msg)
-        # Tool output (shell/python stdout, file reads, fetched pages, email
-        # bodies, MCP results) is sourced from outside the server. Wrap it as
-        # untrusted data so prompt-injection inside a tool result is treated as
-        # data, not instructions — same hardening as skills (#788) and the
-        # web/RAG context. THREAT_MODEL.md lists tool output as a surface that
-        # must go through untrusted_context_message.
+        # Tool output comes from outside the server, so it goes in as untrusted data.
         arm_tool_gate = any(
             tool_result_should_arm_gate(
                 record.get("tool_name"),
@@ -16143,7 +14498,7 @@ def _compact_web_search_tool_text_for_model(text: str, max_chars: int = 3200) ->
     distracted by long boilerplate page bodies. Preserve source titles/URLs
     and snippets; omit most fetched-page text unless no summary exists.
     """
-    raw = re.sub(r"\r\n?", "\n", str(text or "")).strip()
+    raw = _rx(r"\r\n?").sub("\n", str(text or "")).strip()
     if not raw or len(raw) <= max_chars:
         return raw
 
@@ -16153,24 +14508,20 @@ def _compact_web_search_tool_text_for_model(text: str, max_chars: int = 3200) ->
         if end != -1:
             parts.append(raw[: end + 3].strip())
 
-    query_match = re.search(r"^Query:\s*(.+)$", raw, re.MULTILINE)
+    query_match = _rx(r"^Query:\s*(.+)$", re.MULTILINE).search(raw)
     if query_match:
         parts.append(f"Query: {query_match.group(1).strip()}")
 
-    summary_match = re.search(
-        r"SEARCH RESULTS SUMMARY:\n[-]+\n(?P<body>.*?)(?:\n={10,}\nFETCHED PAGE CONTENT:|\n={10,}\nEND OF WEB SEARCH|\Z)",
-        raw,
-        re.DOTALL,
-    )
+    summary_match = _rx(r"SEARCH RESULTS SUMMARY:\n[-]+\n(?P<body>.*?)(?:\n={10,}\nFETCHED PAGE CONTENT:|\n={10,}\nEND OF WEB SEARCH|\Z)", re.DOTALL).search(raw)
     if summary_match:
-        summary = re.sub(r"\n{3,}", "\n\n", summary_match.group("body").strip())
+        summary = _rx(r"\n{3,}").sub("\n\n", summary_match.group("body").strip())
         parts.append("SEARCH RESULTS SUMMARY:\n" + summary)
     else:
         fetched_idx = raw.find("FETCHED PAGE CONTENT:")
         parts.append(raw[:fetched_idx if fetched_idx >= 0 else max_chars].strip())
 
     compact = "\n\n".join(part for part in parts if part).strip()
-    compact = re.sub(r"\n{3,}", "\n\n", compact)
+    compact = _rx(r"\n{3,}").sub("\n\n", compact)
     return compact[:max_chars].rstrip()
 
 
@@ -16217,10 +14568,8 @@ def _compute_final_metrics(
         tps = backend_gen_tps
     else:
         tps = output_tokens / total_duration if total_duration > 0 else 0
-    # Context % should describe the prompt Odysseus assembled, not provider
-    # billing/usage counters. Some providers report only the final agent round
-    # or cache-adjusted input, which made the displayed context jump from e.g.
-    # 44% to 5% even when the session history had not meaningfully changed.
+    # Context % describes the prompt Odysseus assembled; provider usage counters may cover
+    # only the last round or cache-adjusted input.
     if request_context_tokens:
         ctx_tokens = request_context_tokens
     elif last_round_input_tokens:
@@ -16284,6 +14633,13 @@ def _compute_final_metrics(
     return metrics
 
 
+def _pop_last_round(*round_lists: list) -> None:
+    """Drop a rejected round's entry from each per-round record list."""
+    for values in round_lists:
+        if values:
+            values.pop()
+
+
 def _usage_bucket(
     *,
     round_num: int,
@@ -16331,10 +14687,7 @@ def _usage_bucket_summary(usage_buckets: list) -> dict:
     }
 
 
-# ── Completion verifier ──
-# Tools whose effects produce a checkable artifact. A turn that used one of
-# these is "effectful" and worth an independent completion check; pure
-# read-only / Q&A turns are not.
+# Tools whose effects produce a checkable artifact, worth an independent completion check.
 _VERIFIER_EFFECTFUL_TOOLS = {
     "create_document", "update_document", "edit_document",
     "bash", "python", "write_file", "edit_file",
@@ -16369,54 +14722,38 @@ def _request_authorizes_workspace_mutation_completion(
 def _requested_post_edit_verification(text: str) -> bool:
     """Whether a coding request explicitly asks for a check after mutation."""
     value = str(text or "")
-    if not re.search(r"\b(?:create|edit|change|update|replace|modify|fix|write)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:create|edit|change|update|replace|modify|fix|write)\b", re.IGNORECASE).search(value):
         return False
     if _requested_verification_command(value):
         return True
-    if re.search(
-        r"\b(?:inspect|review|check|verify|read(?:\s+it)?\s+back)\b"
-        r".{0,100}\b(?:saved|written|created|output|file|artifact)\b",
-        value,
-        re.IGNORECASE | re.DOTALL,
-    ):
+    if _rx(r"\b(?:inspect|review|check|verify|read(?:\s+it)?\s+back)\b"
+        r".{0,100}\b(?:saved|written|created|output|file|artifact)\b", re.IGNORECASE | re.DOTALL).search(value):
         return True
-    return bool(re.search(
-        r"\b(?:then|after(?:wards)?|and)\b.{0,100}\b(?:run|execute|test|verify|check|inspect|review|read(?:\s+it)?\s+back|build|compile|lint)\b"
-        r"|\b(?:run|execute|test|verify|check|inspect|review|read(?:\s+it)?\s+back|build|compile|lint)\b.{0,100}\b(?:after|once|when)\b",
-        value,
-        re.IGNORECASE | re.DOTALL,
-    ))
+    return bool(_rx(r"\b(?:then|after(?:wards)?|and)\b.{0,100}\b(?:run|execute|test|verify|check|inspect|review|read(?:\s+it)?\s+back|build|compile|lint)\b"
+        r"|\b(?:run|execute|test|verify|check|inspect|review|read(?:\s+it)?\s+back|build|compile|lint)\b.{0,100}\b(?:after|once|when)\b", re.IGNORECASE | re.DOTALL).search(value))
 
 
 def _requested_artifact_readback(text: str) -> bool:
     """Whether verification specifically asks to inspect the saved artifact."""
 
     value = str(text or "")
-    return bool(re.search(
-        r"\b(?:inspect|review|check|verify|read(?:\s+it)?\s+back)\b"
+    return bool(_rx(r"\b(?:inspect|review|check|verify|read(?:\s+it)?\s+back)\b"
         r".{0,100}\b(?:saved|written|created|output|file|artifact)\b"
         r"|\b(?:saved|written|created|output|file|artifact)\b"
-        r".{0,100}\b(?:inspect|review|check|verify|read(?:\s+it)?\s+back)\b",
-        value,
-        re.IGNORECASE | re.DOTALL,
-    ))
+        r".{0,100}\b(?:inspect|review|check|verify|read(?:\s+it)?\s+back)\b", re.IGNORECASE | re.DOTALL).search(value))
 
 
 def _parse_explicit_file_creation(text: str) -> Optional[dict[str, str]]:
     """Extract a new-file request only when both path and body are quoted."""
     value = str(text or "").strip()
-    if not re.search(r"\b(?:create|make|write)\b", value, re.IGNORECASE):
+    if not _rx(r"\b(?:create|make|write)\b", re.IGNORECASE).search(value):
         return None
     path_match = re.search(
         rf"\b(?:create|make|write)\s+(?:a\s+)?(?:new\s+)?(?P<path>{_EXACT_FILE_PATH_RE})",
         value,
         re.IGNORECASE,
     )
-    body_match = re.search(
-        r"\b(?:containing|with\s+(?:the\s+)?content|whose\s+content\s+is)\s+`(?P<body>[^`]*)`",
-        value,
-        re.IGNORECASE | re.DOTALL,
-    )
+    body_match = _rx(r"\b(?:containing|with\s+(?:the\s+)?content|whose\s+content\s+is)\s+`(?P<body>[^`]*)`", re.IGNORECASE | re.DOTALL).search(value)
     if not path_match or not body_match:
         return None
     path = _clean_file_edit_value(str(path_match.group("path") or "").strip().rstrip("."))
@@ -16510,12 +14847,8 @@ def _explicit_local_media_inputs(text: str) -> list[str]:
     fixture_paths = [path for path in paths if path.startswith("/workspace/fixtures/")]
     if fixture_paths:
         return fixture_paths
-    creation_requested = bool(re.search(
-        r"(?:\b(?:create|generate|save|write|render|export|produce|build|make)\b|"
-        r"创建|生成|保存|写入|写在|输出|放进|制作|截取|剪辑|拼接|导出)",
-        str(text or ""),
-        re.IGNORECASE,
-    ))
+    creation_requested = bool(_rx(r"(?:\b(?:create|generate|save|write|render|export|produce|build|make)\b|"
+        r"创建|生成|保存|写入|写在|输出|放进|制作|截取|剪辑|拼接|导出)", re.IGNORECASE).search(str(text or "")))
     if creation_requested:
         return paths[:1] if len(paths) > 1 else []
     return paths
@@ -16577,24 +14910,16 @@ def _direct_source_media_extraction_requested(
         for path in artifact_paths
     ):
         return False
-    if re.search(
-        r"\b(?:chart|plot|diagram|illustration|recreat(?:e|ion)|reconstruct(?:ion)?|"
-        r"synthesi[sz]e|synthetic)\b|图表|曲线图|示意图|插图|重建|重绘|合成图",
-        value,
-        re.IGNORECASE,
-    ):
+    if _rx(r"\b(?:chart|plot|diagram|illustration|recreat(?:e|ion)|reconstruct(?:ion)?|"
+        r"synthesi[sz]e|synthetic)\b|图表|曲线图|示意图|插图|重建|重绘|合成图", re.IGNORECASE).search(value):
         return False
     # A clip/still that must be transformed is not a direct source export. It
     # needs the normal media mutation surface (typically ffmpeg via Bash),
     # while plain frame extraction remains on the provenance-safe exporter.
-    if re.search(
-        r"\b(?:\d+(?:\.\d+)?x\s*(?:speed|faster|slower)|speed\s*up|slow\s*down|"
+    if _rx(r"\b(?:\d+(?:\.\d+)?x\s*(?:speed|faster|slower)|speed\s*up|slow\s*down|"
         r"accelerat(?:e|ed|ion)|decelerat(?:e|ed|ion)|reverse|time[- ]?lapse|"
         r"transcod(?:e|ed|ing)|re[- ]?encod(?:e|ed|ing)|apply\s+(?:a\s+)?filter)\b|"
-        r"(?:\d+(?:\.\d+)?\s*倍速|倍速|加速|减速|慢放|快放|倒放|变速|滤镜)",
-        value,
-        re.IGNORECASE,
-    ):
+        r"(?:\d+(?:\.\d+)?\s*倍速|倍速|加速|减速|慢放|快放|倒放|变速|滤镜)", re.IGNORECASE).search(value):
         return False
     direct_media = r"(?:frames?|stills?|screenshots?|screen\s*grabs?|clips?|segments?)"
     direct_action = r"(?:save|export|extract|capture|grab|cut|crop)"
@@ -16629,7 +14954,7 @@ def _visible_media_caption_requested(text: str) -> bool:
 def _visual_text_extraction_requested(text: str) -> bool:
     """Return whether text must be read from video/image pixels, not audio."""
     value = str(text or "")
-    if re.search(r"\bOCR\b|optical\s+character\s+recognition", value, re.IGNORECASE):
+    if _rx(r"\bOCR\b|optical\s+character\s+recognition", re.IGNORECASE).search(value):
         return True
     visual = r"(?:ocr|on[- ]?screen|visible|displayed|shown|flashing|written|burned[- ]?in)"
     text_kind = r"(?:words?|text|captions?|subtitles?|labels?|titles?)"
@@ -16658,24 +14983,16 @@ def _local_media_needs_web_lookup(text: str) -> bool:
     # local presentation/video alone.  Questions are often phrased directly
     # ("has its code been open-sourced?") without words such as "verify" or
     # "look up", so recognize the external status request itself.
-    if re.search(
-        r"\b(?:has|have|is|was|whether|did)\b[\s\S]{0,100}"
+    if _rx(r"\b(?:has|have|is|was|whether|did)\b[\s\S]{0,100}"
         r"\b(?:code|implementation|repository|repo)\b[\s\S]{0,80}"
         r"\b(?:open[- ]?sourc(?:e|ed)|released?|available|public)\b|"
         r"\b(?:open[- ]?source|code)\s+(?:status|availability)\b|"
-        r"\b(?:github|gitlab)\s+(?:repo(?:sitory)?|release|link)\b",
-        value,
-        re.IGNORECASE,
-    ):
+        r"\b(?:github|gitlab)\s+(?:repo(?:sitory)?|release|link)\b", re.IGNORECASE).search(value):
         return True
-    if re.search(
-        r"\b(?:market\s+price|sell\s+for|worth\s+(?:now|today)|"
+    if _rx(r"\b(?:market\s+price|sell\s+for|worth\s+(?:now|today)|"
         r"(?:current|latest|today(?:'s)?)\s+(?:price|value|news|status|availability|"
         r"release|version|specifications?))\b|"
-        r"现价|市场价|卖多少钱|当前(?:价格|价值|消息|状态|版本)|最新(?:价格|消息|状态|版本)",
-        value,
-        re.IGNORECASE,
-    ):
+        r"现价|市场价|卖多少钱|当前(?:价格|价值|消息|状态|版本)|最新(?:价格|消息|状态|版本)", re.IGNORECASE).search(value):
         return True
 
     verification = (
@@ -16741,18 +15058,10 @@ def _existing_workspace_files(paths: list[str], workspace: Optional[str]) -> lis
 def _requested_verification_command(text: str, path: str = "") -> str:
     """Extract an explicitly requested verification command, if present."""
     value = str(text or "")
-    match = re.search(
-        r"\b(?:run|execute)\s+`(?P<command>[^`]+)`",
-        value,
-        re.IGNORECASE,
-    )
+    match = _rx(r"\b(?:run|execute)\s+`(?P<command>[^`]+)`", re.IGNORECASE).search(value)
     if match:
         return match.group("command").strip()
-    match = re.search(
-        r"\b(?:run|execute)\s+(?P<command>(?:python|pytest|npm|pnpm|yarn|make|cargo|go)\s+[^.;\n]+)",
-        value,
-        re.IGNORECASE,
-    )
+    match = _rx(r"\b(?:run|execute)\s+(?P<command>(?:python|pytest|npm|pnpm|yarn|make|cargo|go)\s+[^.;\n]+)", re.IGNORECASE).search(value)
     if match:
         return match.group("command").strip()
     script_paths = [
@@ -16762,11 +15071,7 @@ def _requested_verification_command(text: str, path: str = "") -> str:
     ]
     if (
         len(script_paths) == 1
-        and re.search(
-            r"\b(?:run|execute)\s+(?:(?:the|this|that)\s+)?(?:python\s+)?script\b",
-            value,
-            re.IGNORECASE,
-        )
+        and _rx(r"\b(?:run|execute)\s+(?:(?:the|this|that)\s+)?(?:python\s+)?script\b", re.IGNORECASE).search(value)
     ):
         return f"python {shlex.quote(script_paths[0])}"
     return ""
@@ -16879,13 +15184,13 @@ def _empty_response_fallback(
             if failed and output:
                 tool_name = str(event.get("tool") or "Tool").strip()
                 message = f"{tool_name} failed: {output}"
-                return message, f'data: {json.dumps({"delta": message})}\n\n'
+                return message, _sse({"delta": message})
         for event in reversed(tool_events):
             if str(event.get("tool") or "").strip() != "host_shell":
                 continue
             output = str(event.get("output") or "").strip()
             if output:
-                return output, f'data: {json.dumps({"delta": output})}\n\n'
+                return output, _sse({"delta": output})
         # Successful structured tools must never leave a blank assistant turn.
         # Reuse the deterministic renderer that handles normal terminal tool
         # completion. Context-only snapshots are evidence, not the user action,
@@ -16895,18 +15200,18 @@ def _empty_response_fallback(
                 continue
             summary = _ody_qwen_terminal_tool_summary(event)
             if summary:
-                return summary, f'data: {json.dumps({"type": "final_response", "content": summary})}\n\n'
+                return summary, _sse({"type": "final_response", "content": summary})
         for event in reversed(tool_events):
             if not isinstance(event, dict):
                 continue
             summary = _ody_qwen_terminal_tool_summary(event)
             if summary:
-                return summary, f'data: {json.dumps({"type": "final_response", "content": summary})}\n\n'
+                return summary, _sse({"type": "final_response", "content": summary})
         return full_response, None
     if _visible_response_text(round_reasoning):
         return round_reasoning, None
     _error_msg = "The model returned an empty response. Please try again or switch to a different model."
-    return _error_msg, f'data: {json.dumps({"delta": _error_msg})}\n\n'
+    return _error_msg, _sse({"delta": _error_msg})
 
 
 PLAN_MODE_DIRECTIVE = (
@@ -17012,7 +15317,7 @@ def _tool_call_signature(tool_type: str, content: str) -> str:
     try:
         parsed = json.loads(normalized)
     except (TypeError, ValueError, json.JSONDecodeError):
-        normalized = re.sub(r"\s+", " ", normalized)
+        normalized = _rx(r"\s+").sub(" ", normalized)
     else:
         if isinstance(parsed, (dict, list)):
             normalized = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
@@ -17123,7 +15428,7 @@ _WEB_SEARCH_CONVERSATION_PREFIX_RE = re.compile(
 def _web_search_meaningful_words(value: str) -> set[str]:
     return {
         word
-        for word in re.findall(r"[a-z0-9]+", str(value or "").lower())
+        for word in _rx(r"[a-z0-9]+").findall(str(value or "").lower())
         if len(word) > 2
         and word not in _WEB_SEARCH_QUERY_STOPWORDS
         and not _WEB_SEARCH_QUERY_FILLER_RE.fullmatch(word)
@@ -17143,87 +15448,37 @@ def _strip_web_search_conversation_prefix(query: str) -> str:
 def _web_search_query_from_user_text(user_text: str) -> str:
     """Build a conservative search query from the user's actual topic."""
     text = str(user_text or "")
-    text = re.sub(r"https?://\S+", " ", text)
+    text = _rx(r"https?://\S+").sub(" ", text)
     if ":" in text:
         prefix, suffix = text.rsplit(":", 1)
-        if re.search(r"\b(?:look|search|lookup|answer|source|links?|web|online)\b", prefix, re.IGNORECASE):
+        if _rx(r"\b(?:look|search|lookup|answer|source|links?|web|online)\b", re.IGNORECASE).search(prefix):
             text = suffix
-    text = re.sub(
-        r"\b(?:answer\s+with\s+\d+\s+(?:source\s+)?links?|with\s+\d+\s+(?:source\s+)?links?|"
-        r"include\s+\d+\s+(?:source\s+)?links?|cite\s+\d+\s+sources?)\b",
-        " ",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(
-        r"\b(?:use|prefer|check|from)\s+([a-z0-9][a-z0-9 .&'/-]{0,48}?)\s+"
-        r"(?:if\s+possible|where\s+possible|if\s+you\s+can)\b",
-        r"\1",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(
-        r"\b(?:if\s+possible|where\s+possible|if\s+you\s+can)\b",
-        " ",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(r"[^\w\s./$€¥%'-]+", " ", text)
+    text = _rx(r"\b(?:answer\s+with\s+\d+\s+(?:source\s+)?links?|with\s+\d+\s+(?:source\s+)?links?|"
+        r"include\s+\d+\s+(?:source\s+)?links?|cite\s+\d+\s+sources?)\b", re.IGNORECASE).sub(" ", text)
+    text = _rx(r"\b(?:use|prefer|check|from)\s+([a-z0-9][a-z0-9 .&'/-]{0,48}?)\s+"
+        r"(?:if\s+possible|where\s+possible|if\s+you\s+can)\b", re.IGNORECASE).sub(r"\1", text)
+    text = _rx(r"\b(?:if\s+possible|where\s+possible|if\s+you\s+can)\b", re.IGNORECASE).sub(" ", text)
+    text = _rx(r"[^\w\s./$€¥%'-]+").sub(" ", text)
     text = _WEB_SEARCH_QUERY_FILLER_RE.sub(" ", text)
-    text = re.sub(r"\b(?:whats|what's)\b", "what is", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s+", " ", text).strip(" ,.;:")
-    if re.match(r"\b(?:who|when|where|which|what|why|how)\b", text, re.IGNORECASE):
+    text = _rx(r"\b(?:whats|what's)\b", re.IGNORECASE).sub("what is", text)
+    text = _rx(r"\s+").sub(" ", text).strip(" ,.;:")
+    if _rx(r"\b(?:who|when|where|which|what|why|how)\b", re.IGNORECASE).match(text):
         words = text.split()
         return " ".join(words[:12]) if len(words) > 12 else text
-    text = re.sub(
-        r"\b(?:what\s+is|what\s+are|why\s+does|why\s+do|why\s+is|how\s+does|how\s+do|how\s+is|"
-        r"can\s+you|could\s+you|i\s+want\s+to\s+know)\b",
-        " ",
-        text,
-        flags=re.IGNORECASE,
-    )
+    text = _rx(r"\b(?:what\s+is|what\s+are|why\s+does|why\s+do|why\s+is|how\s+does|how\s+do|how\s+is|"
+        r"can\s+you|could\s+you|i\s+want\s+to\s+know)\b", re.IGNORECASE).sub(" ", text)
     text = " ".join(
         word
         for word in text.split()
         if word.lower() not in _WEB_SEARCH_QUERY_STOPWORDS
     )
-    text = re.sub(r"\s+", " ", text).strip(" ,.;:")
+    text = _rx(r"\s+").sub(" ", text).strip(" ,.;:")
     if not text:
         return str(user_text or "").strip()
     words = text.split()
     if len(words) > 12:
         text = " ".join(words[:12])
     return text
-
-
-def _web_search_query_drops_user_terms(user_text: str, query: str) -> bool:
-    """Detect search queries that over-normalize away the user's actual topic."""
-
-    user_query = _web_search_query_from_user_text(user_text)
-    user_words = _web_search_meaningful_words(user_query)
-    query_words = _web_search_meaningful_words(query)
-    if len(user_words) < 3 or not query_words:
-        return False
-    weak_words = {
-        "answer", "link", "links", "source", "sources", "search", "look", "lookup",
-        "online", "web", "latest", "current", "today", "news", "question", "asked",
-    }
-    anchors = {
-        word for word in user_words - weak_words
-        if len(word) >= 4 and not word.isdigit()
-    }
-    if len(anchors) < 2:
-        return False
-    missing = anchors - query_words
-    if not missing:
-        return False
-    # For short lookups, one omitted anchor can change the entity/title entirely
-    # ("What in the World's..." -> "What's..."). For broader queries, require a
-    # larger drop before overriding the model's wording.
-    if len(anchors) <= 5:
-        return True
-    return len(missing) / max(len(anchors), 1) >= 0.35
-    return ""
 
 
 def _web_search_query_has_topic(text: str) -> bool:
@@ -17256,12 +15511,9 @@ def _web_fetch_failure_needs_private_browser(result: Any) -> bool:
         or result.get("stdout")
         or ""
     ).lower()
-    return bool(re.search(
-        r"\b(?:no readable text|needs?\s+js|javascript|js-rendered|"
+    return bool(_rx(r"\b(?:no readable text|needs?\s+js|javascript|js-rendered|"
         r"rendered\s+dom|login|requires?\s+interaction|client-side|"
-        r"failed\s+to\s+extract\s+pdf\s+text|pdf\s+extraction\s+failed)\b",
-        text,
-    ))
+        r"failed\s+to\s+extract\s+pdf\s+text|pdf\s+extraction\s+failed)\b").search(text))
 
 
 def _private_browser_blocked_by_bot_check(result: Any) -> bool:
@@ -17273,12 +15525,9 @@ def _private_browser_blocked_by_bot_check(result: Any) -> bool:
     except Exception:
         text = str(result)
     text = text.lower()
-    return bool(re.search(
-        r"\b(?:cloudflare|security verification|verify you are not a bot|"
+    return bool(_rx(r"\b(?:cloudflare|security verification|verify you are not a bot|"
         r"malicious bots|prove your humanity|bot-verification|bot verification|"
-        r"captcha|access denied|blocked by network security)\b",
-        text,
-    ))
+        r"captcha|access denied|blocked by network security)\b").search(text))
 
 
 def _should_retry_empty_search_in_browser(
@@ -17322,7 +15571,7 @@ def _has_recent_web_tool_context(messages: List[Dict], *, max_messages: int = 6)
                     ):
                         return True
         text = _message_content_text(message)
-        if re.search(r"\b(?:web_search|web_fetch|private_browser|WEB SEARCH RESULTS|FETCHED PAGE CONTENT)\b", text):
+        if _rx(r"\b(?:web_search|web_fetch|private_browser|WEB SEARCH RESULTS|FETCHED PAGE CONTENT)\b").search(text):
             return True
     return False
 
@@ -17349,7 +15598,7 @@ def _has_recent_private_browser_context(messages: List[Dict], *, max_messages: i
                 for event in raw_events:
                     if isinstance(event, dict) and _resolved_tool_event_name(event) == "private_browser":
                         return True
-        if re.search(r"\bprivate_browser\b", _message_content_text(message)):
+        if _rx(r"\bprivate_browser\b").search(_message_content_text(message)):
             return True
     return False
 
@@ -17416,7 +15665,7 @@ def _is_contextual_web_search_followup(text: str) -> bool:
     value = str(text or "").strip()
     if not value:
         return False
-    words = re.findall(r"[a-z0-9][a-z0-9'_-]*", value.lower())
+    words = _rx(r"[a-z0-9][a-z0-9'_-]*").findall(value.lower())
     if len(words) > 7:
         return False
     if _CONTEXTUAL_WEB_RESOURCE_FOLLOWUP_RE.fullmatch(value):
@@ -17436,27 +15685,19 @@ def _looks_like_contextual_web_tool_followup(messages: List[Dict], latest: str) 
     value = str(latest or "").strip()
     if not value or _is_casual_low_signal(value):
         return False
-    words = re.findall(r"[a-z0-9][a-z0-9'_-]*", value.lower())
+    words = _rx(r"[a-z0-9][a-z0-9'_-]*").findall(value.lower())
     if len(words) > 14:
         return False
-    if re.search(
-        r"\b(?:email|emails|mail|inbox|calendar|meeting|event|task|reminder|note|notes|"
-        r"document|doc|file|repo|workspace|memory|remember|model|server|cookbook|gpu|download)\b",
-        value,
-        re.IGNORECASE,
-    ):
+    if _rx(r"\b(?:email|emails|mail|inbox|calendar|meeting|event|task|reminder|note|notes|"
+        r"document|doc|file|repo|workspace|memory|remember|model|server|cookbook|gpu|download)\b", re.IGNORECASE).search(value):
         return False
     return bool(
         _is_contextual_web_search_followup(value)
-        or re.search(
-            r"\b(?:open|read|show|check|source|sources|link|links|official|result|results|"
+        or _rx(r"\b(?:open|read|show|check|source|sources|link|links|official|result|results|"
             r"release|notes|changelog|security|fixes|compare|confirm|verify|more|deeper|"
             r"detail|details|website|site|page|find|found|can't\s+find|cannot\s+find|"
             r"couldn'?t\s+find|ram|memory|vram|specs?|specifications|available|availability|"
-            r"comments?|what\s+changed|what\s+about|which|why|how|when|where)\b",
-            value,
-            re.IGNORECASE,
-        )
+            r"comments?|what\s+changed|what\s+about|which|why|how|when|where)\b", re.IGNORECASE).search(value)
     )
 
 
@@ -17465,7 +15706,7 @@ def _looks_like_contextual_weather_status_followup(messages: List[Dict], latest:
     value = str(latest or "").strip()
     if not value:
         return False
-    words = re.findall(r"[a-z0-9][a-z0-9'_-]*", value.lower())
+    words = _rx(r"[a-z0-9][a-z0-9'_-]*").findall(value.lower())
     if len(words) > 8:
         return False
     if _EXPLICIT_COOKBOOK_STATUS_RE.search(value):
@@ -17520,7 +15761,6 @@ def _weather_tool_relevant(messages: List[Dict], latest: str) -> bool:
         # user message has been omitted from a compacted message window.
         break
     return _looks_like_contextual_weather_status_followup(messages, latest)
-    return False
 
 
 def _web_search_assistant_context_text(messages: List[Dict], last_user: str) -> str:
@@ -17537,14 +15777,14 @@ def _web_search_assistant_context_text(messages: List[Dict], last_user: str) -> 
         text = _strip_think_blocks(strip_tool_blocks(_message_content_text(msg))).strip()
         if not text or _looks_like_web_source_dump(text) or _is_tool_preamble(text):
             continue
-        if re.fullmatch(r"(?:hi|hello|hey)[!.]?(?:\s+how can i help(?: you)?[?!.]?)?", text, re.IGNORECASE):
+        if _rx(r"(?:hi|hello|hey)[!.]?(?:\s+how can i help(?: you)?[?!.]?)?", re.IGNORECASE).fullmatch(text):
             continue
-        if re.search(r"\b(?:email|calendar|task|reminder|document|file|repo|command)\b", text, re.IGNORECASE):
+        if _rx(r"\b(?:email|calendar|task|reminder|document|file|repo|command)\b", re.IGNORECASE).search(text):
             continue
         sentences = [
-            re.sub(r"\s+", " ", sentence).strip(" -*")
-            for sentence in re.split(r"(?<=[.!?])\s+", text)
-            if re.sub(r"\s+", " ", sentence).strip(" -*")
+            _rx(r"\s+").sub(" ", sentence).strip(" -*")
+            for sentence in _rx(r"(?<=[.!?])\s+").split(text)
+            if _rx(r"\s+").sub(" ", sentence).strip(" -*")
         ]
         if not sentences:
             continue
@@ -17592,13 +15832,9 @@ def _looks_like_contextual_public_web_followup(latest: str, contextual_text: str
     if not _is_contextual_web_search_followup(latest):
         return False
     return bool(
-        re.search(
-            r"\b(?:why|what\s+causes|how\s+do|how\s+does|look\s+up|search|current|today|"
+        _rx(r"\b(?:why|what\s+causes|how\s+do|how\s+does|look\s+up|search|current|today|"
             r"latest|official|release|changelog|release\s+notes|price|cost|weather|forecast|"
-            r"safe|dangerous|chemical|year|when)\b",
-            str(contextual_text or ""),
-            re.IGNORECASE,
-        )
+            r"safe|dangerous|chemical|year|when)\b", re.IGNORECASE).search(str(contextual_text or ""))
     )
 
 
@@ -17630,24 +15866,16 @@ def _web_search_context_candidate_score(text: str) -> tuple[int, int, int]:
     value = str(text or "")
     proper_anchor_count = sum(
         1
-        for token in re.findall(r"\b[A-Z][a-z]{2,}\b", value)
+        for token in _rx(r"\b[A-Z][a-z]{2,}\b").findall(value)
         if token.lower() in anchors
     )
-    web_intent = bool(re.search(
-        r"\b(?:look\s+up|search|current|today|latest|newest|official|release|"
+    web_intent = bool(_rx(r"\b(?:look\s+up|search|current|today|latest|newest|official|release|"
         r"changelog|release\s+notes|price|cost|weather|forecast|safe|dangerous|"
         r"chemical|year|when|specs?|specifications|available|availability|"
         r"ram|vram|memory|storage|compare|comparison|better|live|living|"
-        r"countries|country|schools?|nursery|education)\b",
-        value,
-        re.IGNORECASE,
-    ))
-    productish = bool(re.search(
-        r"\b(?:mac|iphone|ipad|apple|chip|cpu|gpu|laptop|desktop|computer|"
-        r"phone|camera|console|model|ruby|python|node|kubernetes)\b",
-        value,
-        re.IGNORECASE,
-    ))
+        r"countries|country|schools?|nursery|education)\b", re.IGNORECASE).search(value))
+    productish = bool(_rx(r"\b(?:mac|iphone|ipad|apple|chip|cpu|gpu|laptop|desktop|computer|"
+        r"phone|camera|console|model|ruby|python|node|kubernetes)\b", re.IGNORECASE).search(value))
     return (proper_anchor_count * 4 + len(anchors), int(productish), int(web_intent))
 
 
@@ -17677,16 +15905,12 @@ def _contextual_public_web_topic_text(
             continue
         distance += 1
         lowered = text.lower()
-        if re.search(r"\b(?:email|calendar|task|remind|reminder|note|document|file|repo)\b", lowered):
+        if _rx(r"\b(?:email|calendar|task|remind|reminder|note|document|file|repo)\b").search(lowered):
             continue
-        if re.search(
-            r"\b(?:why|what\s+causes|how\s+do|how\s+does|look\s+up|search|current|today|"
+        if _rx(r"\b(?:why|what\s+causes|how\s+do|how\s+does|look\s+up|search|current|today|"
             r"latest|official|release|changelog|release\s+notes|price|cost|weather|forecast|"
             r"safe|dangerous|chemical|year|when|where|compare|comparison|better|live|living|"
-            r"countries|country|schools?|nursery|education|youtube|videos?|uploads?|posts?|channels?)\b",
-            text,
-            re.IGNORECASE,
-        ):
+            r"countries|country|schools?|nursery|education|youtube|videos?|uploads?|posts?|channels?)\b", re.IGNORECASE).search(text):
             score = _web_search_context_candidate_score(text)
             if score[0] > 0:
                 candidates.append((score, -distance, text))
@@ -17720,11 +15944,11 @@ def _web_search_contextual_query_prefix(context_text: str) -> str:
         "youtube", "video", "videos", "upload", "uploads", "post", "posts", "channel", "channels",
     }
     words: list[str] = []
-    for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9'_-]*", value):
+    for token in _rx(r"[A-Za-z0-9][A-Za-z0-9'_-]*").findall(value):
         lowered = token.lower().strip("'_-")
         if not lowered or lowered in {"what", "about", "how", "where", "when", "which", "why"}:
             continue
-        is_product_id = bool(re.fullmatch(r"(?:[a-z]{1,8}\d{2,}|\d{3,}[a-z]{0,4})", lowered))
+        is_product_id = bool(_rx(r"(?:[a-z]{1,8}\d{2,}|\d{3,}[a-z]{0,4})").fullmatch(lowered))
         if lowered in anchors or lowered in facet_terms or is_product_id:
             if lowered not in words:
                 words.append(lowered)
@@ -17757,7 +15981,7 @@ def _web_followup_context_directive(
         text = _strip_think_blocks(strip_tool_blocks(_message_content_text(msg))).strip()
         if not text or _looks_like_web_source_dump(text) or _is_tool_preamble(text):
             continue
-        prior_answer = re.sub(r"\s+", " ", text).strip()
+        prior_answer = _rx(r"\s+").sub(" ", text).strip()
         if len(prior_answer) > 420:
             prior_answer = prior_answer[:420].rsplit(" ", 1)[0].rstrip(" ,.;:") + "..."
         break
@@ -17814,13 +16038,9 @@ def _web_search_query_supplies_visual_entity(user_text: str, query: str) -> bool
     model-generated query by prepending deictic phrases such as "this image".
     """
     user = str(user_text or "")
-    if not re.search(
-        r"\b(?:attached|provided|uploaded|shown|pictured)\s+"
+    if not _rx(r"\b(?:attached|provided|uploaded|shown|pictured)\s+"
         r"(?:image|photo|picture|screenshot)\b|"
-        r"\b(?:this|the)\s+(?:image|photo|picture|screenshot)\b",
-        user,
-        re.IGNORECASE,
-    ):
+        r"\b(?:this|the)\s+(?:image|photo|picture|screenshot)\b", re.IGNORECASE).search(user):
         return False
     user_words = _web_search_meaningful_words(user)
     query_words = _web_search_meaningful_words(query)
@@ -17880,7 +16100,7 @@ def _web_search_query_has_unasked_source_terms(user_text: str, query: str) -> bo
         return False
     if not _WEB_SEARCH_POLLUTION_RE.search(query_text):
         return False
-    if re.search(r"\b(?:site:|official\s+(?:site|website)|government|source|sources|links?)\b", user):
+    if _rx(r"\b(?:site:|official\s+(?:site|website)|government|source|sources|links?)\b").search(user):
         return False
     user_words = _web_search_meaningful_words(user)
     query_words = _web_search_meaningful_words(query_text)
@@ -17899,13 +16119,9 @@ def _private_browser_product_query(user_text: str) -> str:
     validated ref instead of guessing CSS selectors.
     """
 
-    text = re.sub(r"\s+", " ", str(user_text or "")).strip()
-    match = re.search(
-        r"\b(?:find|look\s+for|shop\s+for|search\s+for)\s+"
-        r"(?:me\s+)?(?:the\s+)?(?:best\s+)?",
-        text,
-        re.IGNORECASE,
-    )
+    text = _rx(r"\s+").sub(" ", str(user_text or "")).strip()
+    match = _rx(r"\b(?:find|look\s+for|shop\s+for|search\s+for)\s+"
+        r"(?:me\s+)?(?:the\s+)?(?:best\s+)?", re.IGNORECASE).search(text)
     if not match or match.end() >= len(text):
         return ""
     raw_query = text[match.end():]
@@ -17915,12 +16131,7 @@ def _private_browser_product_query(user_text: str) -> str:
     if query_end == 0:
         query_end = 1
     query = raw_query[:query_end].strip(" \t\r\n.,!?;:")
-    query = re.sub(
-        r"\s+(?:on|at|from)\s+(?:the\s+)?[A-Za-z0-9&.' -]{1,60}$",
-        "",
-        query,
-        flags=re.IGNORECASE,
-    ).strip()
+    query = _rx(r"\s+(?:on|at|from)\s+(?:the\s+)?[A-Za-z0-9&.' -]{1,60}$", re.IGNORECASE).sub("", query).strip()
     return query[:120] if 0 < len(query.split()) <= 12 else ""
 
 
@@ -18012,7 +16223,7 @@ def _incremental_qwen_visible_text(text: str) -> str:
     raw = str(text or "")
     if not raw:
         return ""
-    close_matches = list(re.finditer(r"</think>", raw, re.IGNORECASE))
+    close_matches = list(_rx(r"</think>", re.IGNORECASE).finditer(raw))
     if close_matches:
         return raw[close_matches[-1].end():].lstrip()
     stripped = raw.lstrip()
@@ -18033,29 +16244,19 @@ def _private_browser_product_catalog_ready(output: str) -> bool:
     """Return whether a browser snapshot contains enough product evidence."""
 
     text = str(output or "")
-    prices = re.findall(
-        r"\bPrice\s+(?:offer\s+)?(?:US\s*)?[$£€¥]\s*\d",
-        text,
-        re.IGNORECASE,
-    )
-    reviews = re.findall(
-        r"\b(?:Review|Rating):?\s*\d(?:\.\d+)?\b",
-        text,
-        re.IGNORECASE,
-    )
+    prices = _rx(r"\bPrice\s+(?:offer\s+)?(?:US\s*)?[$£€¥]\s*\d", re.IGNORECASE).findall(text)
+    reviews = _rx(r"\b(?:Review|Rating):?\s*\d(?:\.\d+)?\b", re.IGNORECASE).findall(text)
     return bool(
         len(prices) >= 2
         and len(reviews) >= 2
-        and re.search(r"\b(?:showing results|items? for|products? found)\b", text, re.IGNORECASE)
+        and _rx(r"\b(?:showing results|items? for|products? found)\b", re.IGNORECASE).search(text)
     )
 
 
 def _private_browser_open_needs_snapshot(action: str, output: str) -> bool:
     """Return whether a successful browser open still lacks actionable DOM refs."""
 
-    return str(action or "").strip().lower() == "open" and not re.search(
-        r"\[ref=e\d+\]", str(output or ""), re.IGNORECASE
-    )
+    return str(action or "").strip().lower() == "open" and not _rx(r"\[ref=e\d+\]", re.IGNORECASE).search(str(output or ""))
 
 
 def _private_browser_product_submit_needs_snapshot(
@@ -18066,36 +16267,22 @@ def _private_browser_product_submit_needs_snapshot(
     return bool(
         str(action or "").strip().lower() == "press"
         and str((args or {}).get("key") or "").strip().lower() == "enter"
-        and re.search(
-            r"\b(?:shop|shopping|buy|product|products|best|largest|chair|desk|table|sofa|bed)\b",
-            str(user_text or ""),
-            re.IGNORECASE,
-        )
+        and _rx(r"\b(?:shop|shopping|buy|product|products|best|largest|chair|desk|table|sofa|bed)\b", re.IGNORECASE).search(str(user_text or ""))
     )
 
 
 def _web_search_needs_official_product_evidence(user_text: str, query: str) -> bool:
     """Bias product spec/price/availability lookups toward official sources."""
     combined = f"{user_text or ''} {query or ''}".lower()
-    if not re.search(
-        r"\b(?:product|hardware|device|phone|laptop|desktop|computer|chip|cpu|gpu|"
-        r"mac|iphone|ipad|android|camera|console|kindle|tesla|car|model)\b",
-        combined,
-    ):
+    if not _rx(r"\b(?:product|hardware|device|phone|laptop|desktop|computer|chip|cpu|gpu|"
+        r"mac|iphone|ipad|android|camera|console|kindle|tesla|car|model)\b").search(combined):
         return False
-    if not re.search(
-        r"\b(?:current|latest|newest|available|availability|ship|shipping|release(?:d)?|"
+    if not _rx(r"\b(?:current|latest|newest|available|availability|ship|shipping|release(?:d)?|"
         r"launch(?:ed)?|price|pricing|cost|buy|shop|order|preorder|pre-order|spec|specs|"
-        r"specifications|vram|unified\s+memory|memory|ram|storage)\b",
-        combined,
-    ):
+        r"specifications|vram|unified\s+memory|memory|ram|storage)\b").search(combined):
         return False
-    return not re.search(
-        r"\b(?:official|manufacturer|vendor|store|shop|buy|specs?|specifications|"
-        r"availability|shipping)\b",
-        str(query or ""),
-        re.IGNORECASE,
-    )
+    return not _rx(r"\b(?:official|manufacturer|vendor|store|shop|buy|specs?|specifications|"
+        r"availability|shipping)\b", re.IGNORECASE).search(str(query or ""))
 
 
 def _web_search_query_from_block(block: ToolBlock) -> str:
@@ -18121,7 +16308,7 @@ def _normalize_native_tool_shell_wrapper(block: ToolBlock, user_text: str) -> To
     if block.tool_type != "bash":
         return block
     raw = str(block.content or "").strip()
-    if not raw or "\n" in raw or re.search(r"(?:&&|\|\||[;|<>`])", raw):
+    if not raw or "\n" in raw or _rx(r"(?:&&|\|\||[;|<>`])").search(raw):
         return block
     try:
         parts = shlex.split(raw)
@@ -18151,11 +16338,8 @@ def _normalize_pdf_extract_source_url(block: ToolBlock, user_text: str) -> ToolB
     """
     if block.tool_type != "pdf_extract":
         return block
-    try:
-        args = json.loads(str(block.content or ""))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return block
-    if not isinstance(args, dict):
+    args = _json_object(block.content)
+    if not args:
         return block
     called_url = str(args.get("url") or "").strip()
     if not called_url:
@@ -18169,7 +16353,7 @@ def _normalize_pdf_extract_source_url(block: ToolBlock, user_text: str) -> ToolB
             args["url"] = local_path
             return type(block)(block.tool_type, json.dumps(args, ensure_ascii=False))
     prompt_urls = []
-    for match in re.findall(r"https?://[^\s<>\"']+", str(user_text or "")):
+    for match in _rx(r"https?://[^\s<>\"']+").findall(str(user_text or "")):
         candidate = match.rstrip(".,;:!?)]}>")
         if urlparse(candidate).path.lower().endswith(".pdf") and candidate not in prompt_urls:
             prompt_urls.append(candidate)
@@ -18214,41 +16398,35 @@ def _normalize_pdf_extract_query_entities(
     """
     if block.tool_type != "pdf_extract":
         return block
-    try:
-        args = json.loads(str(block.content or ""))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return block
-    if not isinstance(args, dict):
+    args = _json_object(block.content)
+    if not args:
         return block
     query = str(args.get("query") or "").strip()
     if not query:
         return block
 
-    source = re.sub(r"https?://[^\s<>\"']+", " ", str(user_text or ""))
-    source = re.sub(r"(?:^|\s)/(?:workspace|home|tmp)/\S+", " ", source)
-    candidates = re.findall(
-        r"(?<![A-Za-z0-9/])"
+    source = _rx(r"https?://[^\s<>\"']+").sub(" ", str(user_text or ""))
+    source = _rx(r"(?:^|\s)/(?:workspace|home|tmp)/\S+").sub(" ", source)
+    candidates = _rx(r"(?<![A-Za-z0-9/])"
         r"[A-Za-z][A-Za-z0-9]*"
         r"(?:[-_.][A-Za-z0-9]+)+"
-        r"(?![A-Za-z0-9/])",
-        source,
-    )
+        r"(?![A-Za-z0-9/])").findall(source)
     excluded_suffixes = {
         "csv", "json", "jsonl", "pdf", "png", "jpg", "jpeg", "webp",
         "svg", "txt", "md", "py", "js", "html", "xml", "yaml", "yml",
     }
-    normalized_query = re.sub(r"[^a-z0-9]+", "", query.casefold())
+    normalized_query = _rx(r"[^a-z0-9]+").sub("", query.casefold())
     additions: list[str] = []
     for candidate in candidates:
         if len(candidate) > 80:
             continue
         if candidate.rsplit(".", 1)[-1].casefold() in excluded_suffixes:
             continue
-        normalized = re.sub(r"[^a-z0-9]+", "", candidate.casefold())
+        normalized = _rx(r"[^a-z0-9]+").sub("", candidate.casefold())
         if not normalized or normalized in normalized_query:
             continue
         if any(
-            normalized == re.sub(r"[^a-z0-9]+", "", prior.casefold())
+            normalized == _rx(r"[^a-z0-9]+").sub("", prior.casefold())
             for prior in additions
         ):
             continue
@@ -18267,18 +16445,15 @@ def _normalize_local_pdf_inspection_query(
     """Give an unscoped local-PDF inspection the user's table/model terms."""
     if block.tool_type != "inspect_media":
         return block
-    try:
-        args = json.loads(str(block.content or ""))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return block
-    if not isinstance(args, dict):
+    args = _json_object(block.content)
+    if not args:
         return block
     path = str(args.get("path") or "").strip().lower()
     if not path.endswith(".pdf"):
         return block
     if any(args.get(key) not in (None, "") for key in ("query", "page", "start")):
         return block
-    query = re.sub(r"\s+", " ", str(user_text or "")).strip()
+    query = _rx(r"\s+").sub(" ", str(user_text or "")).strip()
     if not query:
         return block
     args["query"] = query[:1200]
@@ -18309,29 +16484,20 @@ def _normalize_web_search_block_query(
     # Tool routers often copy the user's imperative wrapper verbatim. Search
     # providers rank that as a query about search engines (Google/Bing/Yahoo)
     # rather than the requested subject. Keep only the subject phrase.
-    cleaned = re.sub(
-        r"^\s*(?:please\s+)?(?:search|look\s+up)\s+"
-        r"(?:(?:the\s+)?(?:web|internet|online)\s+)?(?:for\s+)?",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
+    cleaned = _rx(r"^\s*(?:please\s+)?(?:search|look\s+up)\s+"
+        r"(?:(?:the\s+)?(?:web|internet|online)\s+)?(?:for\s+)?", re.IGNORECASE).sub("", cleaned)
     # Several self-hosted engines overweight the first token. Put the named
     # subject before the adjective for canonical-site lookups.
-    official_site = re.fullmatch(
-        r"(?:the\s+)?official\s+(?P<subject>.+?)\s+"
-        r"(?P<kind>website|web\s*site|site|homepage)",
-        cleaned.strip(),
-        re.IGNORECASE,
-    )
+    official_site = _rx(r"(?:the\s+)?official\s+(?P<subject>.+?)\s+"
+        r"(?P<kind>website|web\s*site|site|homepage)", re.IGNORECASE).fullmatch(cleaned.strip())
     if official_site:
         cleaned = (
             f"{official_site.group('subject')} official "
             f"{official_site.group('kind')}"
         )
     if "official links" in cleaned.lower() and "official link" not in user_lower:
-        cleaned = re.sub(r"\bofficial\s+links?\s*(?:for\s+)?", " ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"^\s*(?:what|how)\s+about\s+", "", cleaned, flags=re.IGNORECASE)
+        cleaned = _rx(r"\bofficial\s+links?\s*(?:for\s+)?", re.IGNORECASE).sub(" ", cleaned)
+    cleaned = _rx(r"^\s*(?:what|how)\s+about\s+", re.IGNORECASE).sub("", cleaned)
     # A model can preserve every word from a follow-up facet while forgetting
     # the subject established by the preceding web/browser turn.  For example,
     # after finding coffee shops in Todoroki it may search only "grilled cheese
@@ -18359,18 +16525,18 @@ def _normalize_web_search_block_query(
         ):
             prefix = _web_search_contextual_query_prefix(prior)
             if prefix:
-                cleaned = re.sub(r"\s+", " ", f"{prefix} {cleaned}").strip(" ,.;:")
+                cleaned = _rx(r"\s+").sub(" ", f"{prefix} {cleaned}").strip(" ,.;:")
     if _web_search_query_missing_context_anchor(user_text, cleaned):
         replacement = (
             _web_search_contextual_query_prefix(user_text)
             or _web_search_query_from_user_text(user_text)
         )
         if replacement:
-            cleaned = re.sub(r"\s+", " ", f"{replacement} {cleaned}").strip(" ,.;:")
+            cleaned = _rx(r"\s+").sub(" ", f"{replacement} {cleaned}").strip(" ,.;:")
     # Trust useful model-generated search terms. Everything below is for
     # literal wrapper/control phrases or polluted pseudo-queries.
     if _web_search_query_is_actionable(cleaned) and not _WEB_SEARCH_POLLUTION_RE.search(cleaned):
-        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.;:")
+        cleaned = _rx(r"\s+").sub(" ", cleaned).strip(" ,.;:")
         if cleaned == query:
             return block
         if raw.startswith("{"):
@@ -18407,40 +16573,16 @@ def _normalize_web_search_block_query(
         cleaned += " official specifications pricing availability shipping"
     if (
         _web_search_is_coordinate_query(user_text)
-        and re.search(r"\b(?:capital|capitals|major\s+cities?|largest\s+cities?)\b", cleaned, re.IGNORECASE)
-        and not re.search(r"\b(?:capital|capitals|major\s+cities?|largest\s+cities?)\b", user_lower, re.IGNORECASE)
+        and _rx(r"\b(?:capital|capitals|major\s+cities?|largest\s+cities?)\b", re.IGNORECASE).search(cleaned)
+        and not _rx(r"\b(?:capital|capitals|major\s+cities?|largest\s+cities?)\b", re.IGNORECASE).search(user_lower)
     ):
         replacement = _web_search_query_from_user_text(user_text)
         if replacement:
             cleaned = replacement
-    if re.search(r"\b(?:euro|euros|eur)\b|€", user_lower):
-        if not re.search(r"\bEUR\b|€", cleaned):
+    if _rx(r"\b(?:euro|euros|eur)\b|€").search(user_lower):
+        if not _rx(r"\bEUR\b|€").search(cleaned):
             cleaned += " EUR"
-        if re.search(r"\b(?:per\s+liter|per\s+litre|/l|fuel|petrol|gasoline|diesel)\b", user_lower, re.IGNORECASE) and "€/L" not in cleaned:
-            cleaned += " €/L"
-        if re.search(r"\b(?:price|cost|rate|converted|per\s+liter|per\s+litre|fuel|petrol|gasoline|diesel)\b", user_lower, re.IGNORECASE):
-            for term in ("converted", "exchange rate"):
-                if term not in cleaned.lower():
-                    cleaned += f" {term}"
-    if re.search(r"\bcat\b", user_lower) and re.search(r"\b(?:foam|foaming|white\s+foam)\b", user_lower) and re.search(r"\b(?:meds?|medicine|medication)\b", user_lower):
-        if "foaming" not in cleaned.lower():
-            cleaned += " foaming"
-        if not re.search(r"\b(?:medicine|medication)\b", cleaned, re.IGNORECASE):
-            cleaned += " medicine"
-        if "vet" not in cleaned.lower():
-            cleaned += " vet"
-        if "bitter" not in cleaned.lower():
-            cleaned += " bitter taste"
-    if re.search(r"\bsnails?\b", user_lower) and re.search(r"\b(?:bubble|bubbles|bubbling|foam|foaming)\b", user_lower):
-        for term in ("mucus", "stress", "irritation", "defense", "moisture"):
-            if term not in cleaned.lower():
-                cleaned += f" {term}"
-    if re.search(r"\b(?:swollen|swelling|puffed)\b", user_lower) and re.search(r"\b(?:battery|lithium)\b", user_lower):
-        if "unsafe" not in cleaned.lower():
-            cleaned += " unsafe"
-        if "fire" not in cleaned.lower():
-            cleaned += " fire risk"
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.;:")
+    cleaned = _rx(r"\s+").sub(" ", cleaned).strip(" ,.;:")
     if not cleaned or cleaned == query:
         return block
     if raw.startswith("{"):
@@ -18592,7 +16734,7 @@ def _web_search_queries_overlap(left: str, right: str) -> bool:
     """
     def words(value: str) -> list[str]:
         return [
-            word for word in re.findall(r"[a-z0-9]+", (value or "").lower())
+            word for word in _rx(r"[a-z0-9]+").findall((value or "").lower())
             if word not in _WEB_SEARCH_QUERY_STOPWORDS and len(word) > 1
         ]
 
@@ -18654,27 +16796,18 @@ def _web_search_queries_overlap(left: str, right: str) -> bool:
 
 
 def _web_search_is_coordinate_query(user_text: str) -> bool:
-    return bool(re.search(
-        r"\b(?:coordinates?|co-?ordinates?|lat(?:itude)?|lon(?:gitude)?|gps)\b",
-        str(user_text or ""),
-        re.IGNORECASE,
-    ))
+    return bool(_rx(r"\b(?:coordinates?|co-?ordinates?|lat(?:itude)?|lon(?:gitude)?|gps)\b", re.IGNORECASE).search(str(user_text or "")))
 
 
 def _web_search_coordinate_answer_from_text(user_text: str, text: str) -> str:
     if not _web_search_is_coordinate_query(user_text):
         return ""
-    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    raw = _rx(r"\s+").sub(" ", str(text or "")).strip()
     if not raw:
         return ""
     subject = _web_search_query_from_user_text(user_text)
-    subject = re.sub(
-        r"\b(?:where|what|coordinates?|co-?ordinates?|lat(?:itude)?|lon(?:gitude)?|gps|official|exact|uk)\b",
-        " ",
-        subject,
-        flags=re.IGNORECASE,
-    )
-    subject = re.sub(r"\s+", " ", subject).strip(" ,.;:") or "That location"
+    subject = _rx(r"\b(?:where|what|coordinates?|co-?ordinates?|lat(?:itude)?|lon(?:gitude)?|gps|official|exact|uk)\b", re.IGNORECASE).sub(" ", subject)
+    subject = _rx(r"\s+").sub(" ", subject).strip(" ,.;:") or "That location"
     if subject and subject != "That location":
         subject = subject[0].upper() + subject[1:]
     patterns = [
@@ -18693,161 +16826,19 @@ def _web_search_coordinate_answer_from_text(user_text: str, text: str) -> str:
 
 
 def _web_search_output_has_answer_evidence(user_text: str, output: str) -> bool:
-    lowered_user = str(user_text or "").lower()
-    lowered_output = re.sub(r"(?im)^\s*Query:\s*.*$", " ", str(output or "")).lower()
+    lowered_output = _rx(r"(?im)^\s*Query:\s*.*$").sub(" ", str(output or "")).lower()
     if not lowered_output.strip():
         return False
-    if re.search(
-        r"\b(?:no (?:search )?results(?: found)?|found 0 results?|0 results?|"
-        r"returned no results|did not return any results|could not find any results)\b",
-        lowered_output,
-    ):
+    if _rx(r"\b(?:no (?:search )?results(?: found)?|found 0 results?|0 results?|"
+        r"returned no results|did not return any results|could not find any results)\b").search(lowered_output):
         return False
-    if "official | english meaning" in lowered_output and "official links" in lowered_output:
-        return False
-    user_asked_definition = bool(re.search(r"\b(?:definition|define|meaning|dictionary)\b", lowered_user))
-    if not user_asked_definition:
-        # Judge dictionary contamination per structured result, not against the
-        # combined fetched-page corpus. A legitimate article can mention a city
-        # or company named Cambridge and must not invalidate unrelated sources.
-        result_rows = _web_search_result_snippets(output, limit=10)
-        dictionary_rows = 0
-        for row in result_rows:
-            identity = " ".join((row.get("title", ""), row.get("url", ""))).lower()
-            if re.search(
-                r"\b(?:cambridge dictionary|merriam(?:-webster)?|vocabulary\.com|"
-                r"dictionary\.com|collins dictionary)\b",
-                identity,
-            ):
-                dictionary_rows += 1
-        if result_rows and dictionary_rows >= max(1, (len(result_rows) + 1) // 2):
-            return False
     if _web_search_is_coordinate_query(user_text):
         return bool(_web_search_coordinate_answer_from_text(user_text, output))
-    if (
-        re.search(r"\b(?:euro|euros|eur)\b|€", lowered_user)
-        and re.search(r"\b(?:gas|gasoline|petrol|fuel|diesel)\b", lowered_user)
-        and re.search(r"\b(?:price|cost|per\s+liter|per\s+litre|/l)\b", lowered_user)
-    ):
-        subject_words = [
-            word for word in _web_search_meaningful_words(user_text)
-            if word not in {
-                "current", "today", "latest", "price", "cost", "petrol",
-                "gasoline", "fuel", "diesel", "liter", "litre", "euro",
-                "euros", "eur", "per",
-            }
-        ]
-        if subject_words:
-            country_pattern = "|".join(re.escape(word) for word in subject_words)
-            return bool(
-                re.search(rf"(?:{country_pattern}).{{0,180}}€|€.{{0,180}}(?:{country_pattern})", lowered_output, re.IGNORECASE | re.DOTALL)
-            )
-        return "€" in lowered_output
     return True
-
-
-def _web_search_fuel_euro_conversion_answer(user_text: str, output: str) -> str:
-    """Answer fuel EUR/liter questions when search gave fuel price plus FX evidence."""
-    user = str(user_text or "")
-    if not (
-        re.search(r"\b(?:euro|euros|eur)\b|€", user, re.IGNORECASE)
-        and re.search(r"\b(?:gas|gasoline|petrol|fuel|diesel)\b", user, re.IGNORECASE)
-        and re.search(r"\b(?:price|cost|per\s+liter|per\s+litre|/l)\b", user, re.IGNORECASE)
-    ):
-        return ""
-    raw = re.sub(r"\s+", " ", str(output or "")).strip()
-    if not raw:
-        return ""
-
-    subject_words = [
-        word for word in _web_search_meaningful_words(user)
-        if word not in {
-            "current", "today", "latest", "price", "cost", "petrol",
-            "gasoline", "gas", "fuel", "diesel", "liter", "litre",
-            "euro", "euros", "eur", "per", "what",
-        }
-    ]
-    subject = " ".join(word.capitalize() for word in subject_words[:3]) or "the requested location"
-    fuel_label = "diesel" if re.search(r"\bdiesel\b", user, re.IGNORECASE) else "petrol"
-
-    direct_eur_patterns = [
-        r"(?:petrol|gasoline|gas|fuel)[^.\n]{0,80}€\s*(\d+(?:[.,]\d+)?)\s*(?:/|per\s+)(?:l|liter|litre)",
-        r"€\s*(\d+(?:[.,]\d+)?)\s*(?:/|per\s+)(?:l|liter|litre)[^.\n]{0,80}(?:petrol|gasoline|gas|fuel)",
-        r"(?:petrol|gasoline|gas|fuel)[^.\n]{0,80}(\d+(?:[.,]\d+)?)\s*(?:EUR|€)\s*(?:/|per\s+)(?:l|liter|litre)",
-    ]
-    for pattern in direct_eur_patterns:
-        match = re.search(pattern, raw, re.IGNORECASE)
-        if match:
-            value = match.group(1).replace(",", ".")
-            return f"{fuel_label.capitalize()} in {subject} is about €{value} per liter."
-
-    usd_per_liter = None
-    usd_patterns = [
-        r"(?:gasoline|petrol|gas|fuel)[^.\n]{0,120}\$(\d+(?:[.,]\d+)?)\s*(?:/|per\s+)(?:l|liter|litre)",
-        r"\$(\d+(?:[.,]\d+)?)\s*(?:/|per\s+)(?:l|liter|litre)[^.\n]{0,120}(?:gasoline|petrol|gas|fuel)",
-        r"(?:gasoline|petrol|gas|fuel)[^.\n]{0,80}\$(\d+(?:[.,]\d+)?)\b",
-    ]
-    for pattern in usd_patterns:
-        match = re.search(pattern, raw, re.IGNORECASE)
-        if match:
-            usd_per_liter = float(match.group(1).replace(",", "."))
-            break
-
-    nok_per_liter = None
-    nok_patterns = [
-        r"(?:gasoline|petrol|gas|fuel)[^.\n]{0,120}(?:kr|NOK)\s*(\d+(?:[.,]\d+)?)\s*(?:/|per\s+)?(?:l|liter|litre)?",
-        r"(?:kr|NOK)\s*(\d+(?:[.,]\d+)?)\s*(?:/|per\s+)(?:l|liter|litre)[^.\n]{0,120}(?:gasoline|petrol|gas|fuel)",
-    ]
-    for pattern in nok_patterns:
-        match = re.search(pattern, raw, re.IGNORECASE)
-        if match:
-            nok_per_liter = float(match.group(1).replace(",", "."))
-            break
-
-    eur_per_usd = None
-    usd_per_eur = None
-    match = re.search(r"1\s*USD\s*(?:=|equals?|is)\s*(\d+(?:[.,]\d+)?)\s*(?:EUR|€)", raw, re.IGNORECASE)
-    if match:
-        eur_per_usd = float(match.group(1).replace(",", "."))
-    match = re.search(r"1\s*(?:EUR|€)\s*(?:=|equals?|is)\s*(?:US\$|\$|USD)?\s*(\d+(?:[.,]\d+)?)\s*(?:USD|US dollars?|\$)?", raw, re.IGNORECASE)
-    if match:
-        usd_per_eur = float(match.group(1).replace(",", "."))
-    match = re.search(r"\bEUR\s*/\s*USD\b[^0-9]{0,20}(\d+(?:[.,]\d+)?)", raw, re.IGNORECASE)
-    if match:
-        usd_per_eur = float(match.group(1).replace(",", "."))
-    match = re.search(r"\bUSD\s*/\s*EUR\b[^0-9]{0,20}(\d+(?:[.,]\d+)?)", raw, re.IGNORECASE)
-    if match:
-        eur_per_usd = float(match.group(1).replace(",", "."))
-
-    eur_per_nok = None
-    nok_per_eur = None
-    match = re.search(r"1\s*NOK\s*(?:=|equals?|is)\s*(\d+(?:[.,]\d+)?)\s*(?:EUR|€)", raw, re.IGNORECASE)
-    if match:
-        eur_per_nok = float(match.group(1).replace(",", "."))
-    match = re.search(r"1\s*(?:EUR|€)\s*(?:=|equals?|is)\s*(?:NOK|kr)?\s*(\d+(?:[.,]\d+)?)\s*(?:NOK|kr)?", raw, re.IGNORECASE)
-    if match:
-        nok_per_eur = float(match.group(1).replace(",", "."))
-
-    if usd_per_liter is not None and (eur_per_usd or usd_per_eur):
-        eur_value = usd_per_liter * eur_per_usd if eur_per_usd else usd_per_liter / usd_per_eur
-        return (
-            f"{fuel_label.capitalize()} in {subject} is about €{eur_value:.2f} per liter "
-            f"(converted from ${usd_per_liter:.3f} per liter)."
-        )
-    if nok_per_liter is not None and (eur_per_nok or nok_per_eur):
-        eur_value = nok_per_liter * eur_per_nok if eur_per_nok else nok_per_liter / nok_per_eur
-        return (
-            f"{fuel_label.capitalize()} in {subject} is about €{eur_value:.2f} per liter "
-            f"(converted from {nok_per_liter:.2f} NOK per liter)."
-        )
-    return ""
 
 
 def _web_search_answer_from_evidence(user_text: str, output: str) -> str:
     evidence = str(output or "")
-    converted_fuel_answer = _web_search_fuel_euro_conversion_answer(user_text, evidence)
-    if converted_fuel_answer:
-        return converted_fuel_answer
     compact = _compact_web_search_terminal_summary(evidence, user_text=user_text)
     if (
         not compact
@@ -18867,30 +16858,21 @@ def _web_search_answer_from_evidence(user_text: str, output: str) -> str:
 def _official_website_answer_from_search(user_text: str, output: str) -> str:
     """Resolve a canonical homepage for an explicit official-site lookup."""
 
-    request = re.sub(
-        r"^\s*(?:please\s+)?(?:search|look\s+up)\s+"
-        r"(?:(?:the\s+)?(?:web|internet|online)\s+)?(?:for\s+)?",
-        "",
-        str(user_text or "").strip(),
-        flags=re.IGNORECASE,
-    ).strip(" .?!")
-    match = re.fullmatch(
-        r"(?:the\s+)?official\s+(?P<before>.+?)\s+(?:website|web\s*site|site|homepage)"
-        r"|(?P<after>.+?)\s+official\s+(?:website|web\s*site|site|homepage)",
-        request,
-        re.IGNORECASE,
-    )
+    request = _rx(r"^\s*(?:please\s+)?(?:search|look\s+up)\s+"
+        r"(?:(?:the\s+)?(?:web|internet|online)\s+)?(?:for\s+)?", re.IGNORECASE).sub("", str(user_text or "").strip()).strip(" .?!")
+    match = _rx(r"(?:the\s+)?official\s+(?P<before>.+?)\s+(?:website|web\s*site|site|homepage)"
+        r"|(?P<after>.+?)\s+official\s+(?:website|web\s*site|site|homepage)", re.IGNORECASE).fullmatch(request)
     if not match:
         return ""
     subject = (match.group("before") or match.group("after") or "").strip()
     subject_tokens = {
-        token for token in re.findall(r"[a-z0-9]+", subject.lower()) if len(token) >= 3
+        token for token in _rx(r"[a-z0-9]+").findall(subject.lower()) if len(token) >= 3
     }
     if not subject_tokens:
         return ""
 
     candidates: list[tuple[int, str]] = []
-    for raw_url in re.findall(r"https?://[^\s<>)\]]+", str(output or "")):
+    for raw_url in _rx(r"https?://[^\s<>)\]]+").findall(str(output or "")):
         raw_url = raw_url.rstrip(".,;:'\"")
         parsed = urlparse(raw_url)
         host = parsed.netloc.lower().removeprefix("www.")
@@ -18898,7 +16880,7 @@ def _official_website_answer_from_search(user_text: str, output: str) -> str:
             "google.com", "bing.com", "search.yahoo.com", "duckduckgo.com",
         }:
             continue
-        host_tokens = set(re.findall(r"[a-z0-9]+", host))
+        host_tokens = set(_rx(r"[a-z0-9]+").findall(host))
         if not subject_tokens & host_tokens:
             continue
         path = parsed.path or "/"
@@ -18988,51 +16970,11 @@ def _unoffered_web_search_should_synthesize(
     )
 
 
-def _web_search_safety_touch_hygiene_postprocess(user_text: str, answer: str) -> str:
-    """Keep safety-touch web answers practical instead of just descriptive."""
-    text = str(answer or "").strip()
-    if not text:
-        return text
-    user = str(user_text or "")
-    if not re.search(r"\b(?:safe|okay|ok|dangerous|harmful|risk)\b", user, re.IGNORECASE):
-        return text
-    if not re.search(r"\b(?:touch|handle|hold|pick\s+up)\b", user, re.IGNORECASE):
-        return text
-    if re.search(r"\bwash(?:ing)?\s+(?:your\s+)?hands?\b", text, re.IGNORECASE):
-        return text
-    if not re.search(
-        r"\b(?:irritat|skin|eyes?|mucus|slime|bacteria|parasite|toxic|poison|infection|allerg|contaminat)\b",
-        text,
-        re.IGNORECASE,
-    ):
-        return text
-    return text.rstrip(" .") + ". If you do touch it, wash your hands afterward."
-
-
-def _web_search_requested_unit_postprocess(user_text: str, answer: str) -> str:
-    """Spell out compact units when the user asked for that unit in words."""
-    text = str(answer or "").strip()
-    if not text:
-        return text
-    user = str(user_text or "")
-    if (
-        re.search(r"\bper\s+(?:liter|litre)\b", user, re.IGNORECASE)
-        and re.search(r"/\s*l\b", text, re.IGNORECASE)
-        and not re.search(r"\b(?:liter|litre)\b", text, re.IGNORECASE)
-    ):
-        return re.sub(r"/\s*l\b", " per liter", text, flags=re.IGNORECASE)
-    return text
-
-
 def _looks_like_web_source_dump(text: str) -> bool:
     value = str(text or "")
-    return bool(re.search(
-        r"WEB SEARCH RESULTS|SEARCH RESULTS SUMMARY|```sources|\b\d+\s+Web sources\b|"
+    return bool(_rx(r"WEB SEARCH RESULTS|SEARCH RESULTS SUMMARY|```sources|\b\d+\s+Web sources\b|"
         r"(?:^|\n)\s*\d+\s*\n[^\n]{2,160}\n[a-z0-9.-]+\.[a-z]{2,}\b|"
-        r"Top results were:|Here are links for that topic",
-        value,
-        re.IGNORECASE,
-    ))
+        r"Top results were:|Here are links for that topic", re.IGNORECASE).search(value))
 
 
 def _looks_like_web_retry_preamble(text: str) -> bool:
@@ -19040,8 +16982,7 @@ def _looks_like_web_retry_preamble(text: str) -> bool:
     visible = _strip_think_blocks(strip_tool_blocks(str(text or ""))).strip()
     if not visible:
         return False
-    return bool(re.search(
-        r"\b(?:"
+    return bool(_rx(r"\b(?:"
         r"(?:search|results?)\s+(?:got|was|were|came\s+back|look(?:s|ed)?)\s+"
         r"(?:garbled|off[-\s]?topic|wrong|irrelevant|not\s+useful|unclear)|"
         r"(?:that|this)\s+search\s+(?:got|was|went)\s+(?:garbled|off[-\s]?topic|wrong)|"
@@ -19050,10 +16991,7 @@ def _looks_like_web_retry_preamble(text: str) -> bool:
         r"(?:i(?:'ll| will)|i\s+should)\s+(?:retry|search\s+(?:again|more\s+specifically)|"
         r"do\s+a\s+more\s+targeted\s+search)|"
         r"need\s+(?:a\s+)?(?:better|more\s+targeted|more\s+specific)\s+search"
-        r")\b",
-        visible,
-        re.IGNORECASE,
-    ))
+        r")\b", re.IGNORECASE).search(visible))
 
 
 def _web_model_reports_insufficient_evidence(text: str) -> bool:
@@ -19061,17 +16999,13 @@ def _web_model_reports_insufficient_evidence(text: str) -> bool:
     visible = _strip_think_blocks(strip_tool_blocks(str(text or ""))).strip()
     if not visible:
         return False
-    return bool(re.search(
-        r"\b(?:"
+    return bool(_rx(r"\b(?:"
         r"results?\s+(?:do(?:es)?\s+not|don['’]?t|did(?:\s+not|n['’]?t))\s+"
         r"(?:provide|contain|show|give|include).{0,45}(?:clear|definitive|specific|enough)|"
         r"(?:not|isn['’]?t|aren['’]?t)\s+enough\s+(?:clear\s+)?(?:evidence|information)|"
         r"couldn['’]?t\s+(?:find|verify|confirm)|unable\s+to\s+(?:find|verify|confirm)|"
         r"don['’]?t\s+have\s+(?:the\s+)?(?:actual|specific|enough)\s+(?:content|details?|information)"
-        r")\b",
-        visible,
-        re.IGNORECASE | re.DOTALL,
-    ))
+        r")\b", re.IGNORECASE | re.DOTALL).search(visible))
 
 
 def _looks_like_web_preamble_only_response(text: str) -> bool:
@@ -19083,7 +17017,7 @@ def _looks_like_web_preamble_only_response(text: str) -> bool:
         return False
     parts = [
         part.strip(" -")
-        for part in re.split(r"\n{2,}|(?<=[.!?])\s+(?=(?:Let me|I['’]?ll|I will|I need|I should|Going to|Let's)\b)", visible)
+        for part in _rx(r"\n{2,}|(?<=[.!?])\s+(?=(?:Let me|I['’]?ll|I will|I need|I should|Going to|Let's)\b)").split(visible)
         if part.strip(" -")
     ]
     if not parts:
@@ -19111,7 +17045,7 @@ def _web_search_terminal_summary_should_replace(model_text: str, summary: str) -
     if _substantive_web_model_answer(visible):
         return False
     summary_text = str(summary or "")
-    if re.search(r"\bnot enough clear evidence\b|\bTop results were:\b", summary_text, re.IGNORECASE):
+    if _rx(r"\bnot enough clear evidence\b|\bTop results were:\b", re.IGNORECASE).search(summary_text):
         return not _substantive_web_model_answer(visible)
     return True
 
@@ -19120,15 +17054,11 @@ def _web_search_result_snippets(output: str, *, limit: int = 4) -> list[dict[str
     """Extract title/snippet pairs from the local web_search renderer output."""
     raw = str(output or "")
     hits: list[dict[str, str]] = []
-    for match in re.finditer(
-        r"\[\d+\]\s+(?P<title>[^\n]+)\n"
+    for match in _rx(r"\[\d+\]\s+(?P<title>[^\n]+)\n"
         r"\s+URL:\s+(?P<url>\S+)\n"
-        r"\s+Snippet:\s+(?P<snippet>.*?)(?=\n\s*\[\d+\]\s+|\n={5,}|\nIMPORTANT INSTRUCTIONS:|\Z)",
-        raw,
-        flags=re.DOTALL,
-    ):
-        title = re.sub(r"\s+", " ", match.group("title")).strip()
-        snippet = re.sub(r"\s+", " ", match.group("snippet")).strip()
+        r"\s+Snippet:\s+(?P<snippet>.*?)(?=\n\s*\[\d+\]\s+|\n={5,}|\nIMPORTANT INSTRUCTIONS:|\Z)", re.DOTALL).finditer(raw):
+        title = _rx(r"\s+").sub(" ", match.group("title")).strip()
+        snippet = _rx(r"\s+").sub(" ", match.group("snippet")).strip()
         if title or snippet:
             hits.append({"title": title, "snippet": snippet, "url": match.group("url")})
         if len(hits) >= limit:
@@ -19141,15 +17071,10 @@ def _web_search_snippets_are_low_signal(user_text: str, hits: list[dict[str, str
         return True
     user_words = {
         word
-        for word in re.findall(r"[a-z0-9]+", str(user_text or "").lower())
+        for word in _rx(r"[a-z0-9]+").findall(str(user_text or "").lower())
         if len(word) > 2 and word not in _WEB_SEARCH_QUERY_STOPWORDS
     }
     combined = " ".join((hit.get("title", "") + " " + hit.get("snippet", "")).lower() for hit in hits)
-    if re.search(r"\b(?:cambridge dictionary|merriam-webster|vocabulary\.com)\b", combined) and not re.search(
-        r"\b(?:definition|meaning|dictionary|define)\b",
-        str(user_text or "").lower(),
-    ):
-        return True
     if not user_words:
         return False
     overlap = {word for word in user_words if word in combined}
@@ -19166,19 +17091,15 @@ def _web_search_snippet_synthesis(user_text: str, hits: list[dict[str, str]]) ->
     if coordinate_answer:
         return coordinate_answer
     user_words = _web_search_meaningful_words(user)
-    location_question = bool(re.search(r"^\s*(?:where\s+(?:is|are)|where'?s)\b", user, re.IGNORECASE))
+    location_question = bool(_rx(r"^\s*(?:where\s+(?:is|are)|where'?s)\b", re.IGNORECASE).search(user))
 
     def score_hit(hit: dict[str, str]) -> tuple[int, int]:
         text = f"{hit.get('title', '')} {hit.get('snippet', '')}".lower()
         score = sum(1 for word in user_words if word in text)
-        if location_question and re.search(
-            r"\b(?:located|borders?|country|city|town|region|continent|peninsula|"
-            r"northern|southern|eastern|western|central|north|south|east|west)\b",
-            text,
-            re.IGNORECASE,
-        ):
+        if location_question and _rx(r"\b(?:located|borders?|country|city|town|region|continent|peninsula|"
+            r"northern|southern|eastern|western|central|north|south|east|west)\b", re.IGNORECASE).search(text):
             score += 4
-        if re.search(r"\b(?:government|cabinet|prime minister|tourism|travel|startpage)\b", text, re.IGNORECASE):
+        if _rx(r"\b(?:government|cabinet|prime minister|tourism|travel|startpage)\b", re.IGNORECASE).search(text):
             score -= 1
         return (score, -len(text))
 
@@ -19186,15 +17107,11 @@ def _web_search_snippet_synthesis(user_text: str, hits: list[dict[str, str]]) ->
     useful: list[str] = []
     seen: set[str] = set()
     for hit in ranked_hits:
-        snippet = re.sub(r"\s+", " ", hit.get("snippet", "")).strip(" .")
-        title = re.sub(r"\s+", " ", hit.get("title", "")).strip(" .")
+        snippet = _rx(r"\s+").sub(" ", hit.get("snippet", "")).strip(" .")
+        title = _rx(r"\s+").sub(" ", hit.get("title", "")).strip(" .")
         candidate = snippet if len(snippet.split()) >= 7 else title
-        candidate = re.sub(
-            r"^\s*(?:[A-Z][a-z]{2,8}\s+\d{1,2},\s+\d{4}\s*[·:-]\s*)+",
-            "",
-            candidate,
-        ).strip()
-        candidate = re.sub(r"\b(?:Learn more|Read more|Click here)\b\.?", "", candidate, flags=re.IGNORECASE).strip(" .")
+        candidate = _rx(r"^\s*(?:[A-Z][a-z]{2,8}\s+\d{1,2},\s+\d{4}\s*[·:-]\s*)+").sub("", candidate).strip()
+        candidate = _rx(r"\b(?:Learn more|Read more|Click here)\b\.?", re.IGNORECASE).sub("", candidate).strip(" .")
         if not candidate:
             continue
         key = candidate.lower()[:120]
@@ -19207,80 +17124,31 @@ def _web_search_snippet_synthesis(user_text: str, hits: list[dict[str, str]]) ->
     if not useful:
         return "I searched, but the returned snippets did not contain enough clear evidence to answer reliably."
     joined = " ".join(sentence.rstrip(".") + "." for sentence in useful)
-    if re.search(r"\b(?:gas|gasoline|petrol|fuel)\b", user, re.IGNORECASE) and re.search(
-        r"\b(?:price|cost|how much)\b",
-        user,
-        re.IGNORECASE,
-    ):
-        price_figure_re = re.compile(
-            r"(?:\b(?:sek|eur|usd|nok|kr)\s*\d+(?:[.,]\d+)?|[€$]\s*\d+(?:[.,]\d+)?|"
-            r"\d+(?:[.,]\d+)?\s*(?:sek|eur|usd|nok|kr|€|\$))"
-            r"(?:\s*/\s*(?:l|liter|litre)|\s+per\s+(?:l|liter|litre))?",
-            re.IGNORECASE,
-        )
-        if price_figure_re.search(joined):
-            requested_euro = bool(re.search(r"\b(?:euro|euros|eur)\b|€", user, re.IGNORECASE))
-            requested_per_liter = bool(re.search(r"\b(?:per\s+liter|per\s+litre|/l|/liter|/litre)\b", user, re.IGNORECASE))
-            if requested_euro and requested_per_liter:
-                euro_price_sentences = [
-                    sentence.strip()
-                    for sentence in re.split(r"(?<=[.!?])\s+", joined)
-                    if re.search(r"[€]\s*\d+(?:[.,]\d+)?|\bEUR\s*\d+(?:[.,]\d+)?|\d+(?:[.,]\d+)?\s*(?:EUR|€)", sentence, re.IGNORECASE)
-                    and re.search(r"\b(?:/l|per\s+(?:l|liter|litre)|lit(?:er|re))\b", sentence, re.IGNORECASE)
-                ]
-                if euro_price_sentences:
-                    return " ".join(euro_price_sentences[:2])
-            return f"The fuel-price results indicate: {joined}"
-        return (
-            "I found relevant fuel-price results, but the returned snippets did not expose a current per-liter price. "
-            f"The useful source context was: {joined}"
-        )
-    if re.search(r"\b(?:smallest|largest|least populous|population)\b", user, re.IGNORECASE) and re.search(
-        r"\b(?:town|city|place|village|municipality)\b",
-        user,
-        re.IGNORECASE,
-    ):
-        if re.search(r"\bpopulation\b.*\b\d|\b\d[\d,]*\s+(?:people|inhabitants|population)\b", joined, re.IGNORECASE):
+    if _rx(r"\b(?:smallest|largest|least populous|population)\b", re.IGNORECASE).search(user) and _rx(r"\b(?:town|city|place|village|municipality)\b", re.IGNORECASE).search(user):
+        if _rx(r"\bpopulation\b.*\b\d|\b\d[\d,]*\s+(?:people|inhabitants|population)\b", re.IGNORECASE).search(joined):
             return f"The population results indicate: {joined}"
         return (
             "I found relevant population/listing results, but the returned snippets did not identify a definitive answer. "
             f"The useful source context was: {joined}"
         )
-    if re.search(r"\b(?:swollen|swelling|puffed)\b", user, re.IGNORECASE) and re.search(r"\b(?:battery|lithium)\b", user, re.IGNORECASE):
-        safety = " Treat a swollen lithium battery as unsafe because damaged cells can leak or catch fire; stop using or charging it and get it handled or replaced safely."
-        if not re.search(r"\b(?:unsafe|fire)\b", joined, re.IGNORECASE):
-            joined += safety
-    if re.search(r"\b(?:safe|okay|ok|dangerous|harmful)\b", user, re.IGNORECASE) and re.search(
-        r"\b(?:touch|handle|eat|use|wear|drink|take)\b",
-        user,
-        re.IGNORECASE,
-    ):
-        if re.search(r"\b(?:irritat|allerg|bacteria|parasite|toxic|poison|infection|unsafe|risk)\b", joined, re.IGNORECASE):
-            return (
-                "It is not risk-free; based on the search results, use caution and wash your hands after touching or handling it. "
-                f"The relevant evidence was: {joined}"
-            )
+    if _rx(r"\b(?:safe|okay|ok|dangerous|harmful)\b", re.IGNORECASE).search(user) and _rx(r"\b(?:touch|handle|eat|use|wear|drink|take)\b", re.IGNORECASE).search(user):
         return f"The safety-related results indicate: {joined}"
-    if re.search(r"\b(?:why|what causes|reason|explain)\b", user, re.IGNORECASE):
+    if _rx(r"\b(?:why|what causes|reason|explain)\b", re.IGNORECASE).search(user):
         explanatory_sentences = [
             sentence.strip()
-            for sentence in re.split(r"(?<=[.!?])\s+", joined)
-            if re.search(
-                r"\b(?:because|cause[sd]?|causes|due to|happens when|comes from|"
+            for sentence in _rx(r"(?<=[.!?])\s+").split(joined)
+            if _rx(r"\b(?:because|cause[sd]?|causes|due to|happens when|comes from|"
                 r"results? from|main causes?|primary causes?|is hungry|not rotten|"
                 r"gas(?:es)? build|buildup|decompos(?:e|es|ed|ing|ition)|"
-                r"swells?\s+up|pressure|stress|defense|moisture)\b",
-                sentence,
-                re.IGNORECASE,
-            )
+                r"swells?\s+up|pressure|stress|defense|moisture)\b", re.IGNORECASE).search(sentence)
         ]
         if explanatory_sentences:
             answer = " ".join(explanatory_sentences[:3])
-            if re.search(r"\bsmells?\b", user, re.IGNORECASE):
-                answer = re.sub(r"^\s*It\s+is\b", "It smells that way because it is", answer, flags=re.IGNORECASE)
+            if _rx(r"\bsmells?\b", re.IGNORECASE).search(user):
+                answer = _rx(r"^\s*It\s+is\b", re.IGNORECASE).sub("It smells that way because it is", answer)
             return answer
         return joined
-    if re.search(r"\b(?:price|cost|rate|how much|converted|per\s+liter|per\s+litre|per\s+ounce)\b", str(user_text or ""), re.IGNORECASE):
+    if _rx(r"\b(?:price|cost|rate|how much|converted|per\s+liter|per\s+litre|per\s+ounce)\b", re.IGNORECASE).search(str(user_text or "")):
         return f"The search results give these relevant figures/context: {joined}"
     return f"From the search results: {joined}"
 
@@ -19288,17 +17156,13 @@ def _web_search_snippet_synthesis(user_text: str, hits: list[dict[str, str]]) ->
 def _web_search_fetched_content_chunks(output: str, *, limit: int = 4) -> list[str]:
     """Extract answer-like evidence from fetched pages in the search artifact."""
     raw = str(output or "")
-    match = re.search(
-        r"FETCHED PAGE CONTENT:\s*-+\s*(?P<body>.*?)(?:={5,}\s*END OF WEB SEARCH RESULTS|IMPORTANT INSTRUCTIONS:|\Z)",
-        raw,
-        flags=re.DOTALL | re.IGNORECASE,
-    )
+    match = _rx(r"FETCHED PAGE CONTENT:\s*-+\s*(?P<body>.*?)(?:={5,}\s*END OF WEB SEARCH RESULTS|IMPORTANT INSTRUCTIONS:|\Z)", re.DOTALL | re.IGNORECASE).search(raw)
     if not match:
         return []
     body = match.group("body")
     chunks: list[str] = []
     seen: set[str] = set()
-    for block in re.split(r"\n(?=\[CONTENT(?:\s+\d+)?\]\s+From:)", body):
+    for block in _rx(r"\n(?=\[CONTENT(?:\s+\d+)?\]\s+From:)").split(body):
         block = block.strip()
         if not block:
             continue
@@ -19313,32 +17177,24 @@ def _web_search_fetched_content_chunks(output: str, *, limit: int = 4) -> list[s
             if section_match:
                 priority_parts.append(section_match.group(1))
         if not priority_parts:
-            content_match = re.search(
-                r"-{10,}\s*(.*?)(?=\n(?:Key Points|TL;DR|Important Quotes|Data / Statistics):|\Z)",
-                block,
-                flags=re.DOTALL,
-            )
+            content_match = _rx(r"-{10,}\s*(.*?)(?=\n(?:Key Points|TL;DR|Important Quotes|Data / Statistics):|\Z)", re.DOTALL).search(block)
             if content_match:
                 priority_parts.append(content_match.group(1)[:5000])
         for part in priority_parts:
-            text = re.sub(r"\s+", " ", part).strip(" -")
-            text = re.sub(r"<!--\s*SOURCES:.*?(?:-->|$)", " ", text, flags=re.IGNORECASE)
-            text = re.sub(r"\b(?:Skip to content|Main menu|Home >|Read more)\b\.?", "", text, flags=re.IGNORECASE)
-            for sentence in re.split(r"(?<=[.!?])\s+|(?:\s+-\s+)", text):
-                sentence = re.sub(r"\s+", " ", sentence).strip(" -*")
+            text = _rx(r"\s+").sub(" ", part).strip(" -")
+            text = _rx(r"<!--\s*SOURCES:.*?(?:-->|$)", re.IGNORECASE).sub(" ", text)
+            text = _rx(r"\b(?:Skip to content|Main menu|Home >|Read more)\b\.?", re.IGNORECASE).sub("", text)
+            for sentence in _rx(r"(?<=[.!?])\s+|(?:\s+-\s+)").split(text):
+                sentence = _rx(r"\s+").sub(" ", sentence).strip(" -*")
                 words = sentence.split()
                 if len(words) < 7 or len(words) > 70:
                     continue
-                if re.search(
-                    r"\b(?:cookie policy|privacy policy|subscribe|sign in|main menu|"
+                if _rx(r"\b(?:cookie policy|privacy policy|subscribe|sign in|main menu|"
                     r"special pages|all countries|move to sidebar|random article|"
                     r"help learn to edit|current events|cart is empty|continue shopping|"
                     r"have an account|about blog contact|free shipping|filed under|"
                     r"add comment share|in this article|i(?:'|’)ll explain|tell me if this sounds familiar)\b|"
-                    r"Home\s+›|^What caused this\b",
-                    sentence,
-                    re.IGNORECASE,
-                ):
+                    r"Home\s+›|^What caused this\b", re.IGNORECASE).search(sentence):
                     continue
                 key = sentence.lower()[:160]
                 if key in seen:
@@ -19355,7 +17211,7 @@ def _web_search_fetched_content_synthesis(user_text: str, chunks: list[str]) -> 
         return ""
     user_words = {
         word
-        for word in re.findall(r"[a-z0-9]+", str(user_text or "").lower())
+        for word in _rx(r"[a-z0-9]+").findall(str(user_text or "").lower())
         if len(word) > 2 and word not in _WEB_SEARCH_QUERY_STOPWORDS
     }
     if user_words:
@@ -19363,26 +17219,22 @@ def _web_search_fetched_content_synthesis(user_text: str, chunks: list[str]) -> 
         if not any(word in joined_lower for word in user_words):
             return ""
     explanatory = bool(
-        re.search(r"\b(?:why|how|what causes|reason|explain|summarize)\b", str(user_text or ""), re.IGNORECASE)
+        _rx(r"\b(?:why|how|what causes|reason|explain|summarize)\b", re.IGNORECASE).search(str(user_text or ""))
     )
     if explanatory:
         answer_like = [
             chunk for chunk in chunks
-            if re.search(
-                r"\b(?:because|cause[sd]?|causes|due to|happens when|comes from|"
+            if _rx(r"\b(?:because|cause[sd]?|causes|due to|happens when|comes from|"
                 r"results? from|main causes?|primary causes?|is hungry|not rotten|"
                 r"gas(?:es)? build|buildup|decompos(?:e|es|ed|ing|ition)|"
-                r"swells?\s+up|pressure|stress|defense|moisture)\b",
-                chunk,
-                re.IGNORECASE,
-            )
+                r"swells?\s+up|pressure|stress|defense|moisture)\b", re.IGNORECASE).search(chunk)
         ]
         if answer_like:
             chunks = answer_like
         else:
             return ""
     joined = " ".join(chunks[:3])
-    if re.search(r"\b(?:why|how|what causes|reason|explain)\b", str(user_text or ""), re.IGNORECASE):
+    if _rx(r"\b(?:why|how|what causes|reason|explain)\b", re.IGNORECASE).search(str(user_text or "")):
         return joined
     return f"From the fetched pages: {joined}"
 
@@ -19391,25 +17243,22 @@ def _public_question_misrouted_to_memory(user_text: str) -> bool:
     value = str(user_text or "").strip().lower()
     if not value:
         return False
-    if re.search(r"\b(?:memory|memories|remember|saved\s+memory|about\s+me|my\s+preference)\b", value):
+    if _rx(r"\b(?:memory|memories|remember|saved\s+memory|about\s+me|my\s+preference)\b").search(value):
         return False
     return bool(
-        re.search(r"\b(?:why|what\s+causes|look\s+up|search|find\s+out|is\s+it\s+dangerous|what\s+to\s+do)\b", value)
-        and re.search(
-            r"\b(?:cat|dog|snail|animal|battery|phone|lithium|kombucha|price|rate|cost|current|today|online)\b",
-            value,
-        )
+        _rx(r"\b(?:why|what\s+causes|look\s+up|search|find\s+out|is\s+it\s+dangerous|what\s+to\s+do)\b").search(value)
+        and _rx(r"\b(?:cat|dog|snail|animal|battery|phone|lithium|kombucha|price|rate|cost|current|today|online)\b").search(value)
     )
 
 
 def _compact_web_search_terminal_summary(output: str, user_text: str = "") -> str:
     """Compact fallback when a router repeats web_search instead of answering."""
     raw = str(output or "")
-    text = re.sub(r"\s+", " ", raw).strip()
+    text = _rx(r"\s+").sub(" ", raw).strip()
     coordinate_answer = _web_search_coordinate_answer_from_text(user_text, raw)
     if coordinate_answer:
         return coordinate_answer
-    if re.search(r"\b(?:why|how|what causes|reason|explain|summarize)\b", str(user_text or ""), re.IGNORECASE):
+    if _rx(r"\b(?:why|how|what causes|reason|explain|summarize)\b", re.IGNORECASE).search(str(user_text or "")):
         fetched_summary = _web_search_fetched_content_synthesis(
             user_text,
             _web_search_fetched_content_chunks(raw, limit=24),
@@ -19427,7 +17276,7 @@ def _compact_web_search_terminal_summary(output: str, user_text: str = "") -> st
         return fetched_summary
     if hits:
         titles = ", ".join(
-            re.sub(r"\s+", " ", hit.get("title", "")).strip(" -")
+            _rx(r"\s+").sub(" ", hit.get("title", "")).strip(" -")
             for hit in hits[:3]
             if hit.get("title")
         )
@@ -19436,31 +17285,22 @@ def _compact_web_search_terminal_summary(output: str, user_text: str = "") -> st
                 "I searched, but the returned snippets did not contain enough clear evidence to answer reliably. "
                 f"Top results were: {titles}."
             )
-    summary_match = re.search(
-        r"(?:SEARCH RESULTS SUMMARY:|WEB SEARCH RESULTS AND FETCHED CONTENT)(.*)",
-        raw,
-        flags=re.DOTALL | re.IGNORECASE,
-    )
+    summary_match = _rx(r"(?:SEARCH RESULTS SUMMARY:|WEB SEARCH RESULTS AND FETCHED CONTENT)(.*)", re.DOTALL | re.IGNORECASE).search(raw)
     if summary_match:
-        candidate = re.sub(r"\s+", " ", summary_match.group(1)).strip()
-        candidate = re.sub(r"^\-+\s*", "", candidate)
+        candidate = _rx(r"\s+").sub(" ", summary_match.group(1)).strip()
+        candidate = _rx(r"^\-+\s*").sub("", candidate)
         if candidate and not candidate.lower().startswith("query:"):
             return candidate[:1800].rstrip()
-    sources_match = re.search(r"```sources\s+(.*?)```", raw, flags=re.DOTALL | re.IGNORECASE)
+    sources_match = _rx(r"```sources\s+(.*?)```", re.DOTALL | re.IGNORECASE).search(raw)
     if sources_match:
-        source_text = re.sub(r"\s+", " ", sources_match.group(1)).strip()
-        entries = re.findall(r"\[\d+\]\s+(.+?)\s+(https?://\S+)", source_text)
+        source_text = _rx(r"\s+").sub(" ", sources_match.group(1)).strip()
+        entries = _rx(r"\[\d+\]\s+(.+?)\s+(https?://\S+)").findall(source_text)
         if entries:
-            titles = ", ".join(re.sub(r"\s+", " ", title).strip(" -") for title, _url in entries[:3])
+            titles = ", ".join(_rx(r"\s+").sub(" ", title).strip(" -") for title, _url in entries[:3])
             return f"I found sources for the topic, but not enough clear answer evidence to synthesize reliably. Top results included: {titles}."
     if not text:
         return "I found search results for that topic."
-    text = re.split(
-        r"={5,}\s*WEB SEARCH RESULTS AND FETCHED CONTENT|SEARCH RESULTS SUMMARY:",
-        text,
-        maxsplit=1,
-        flags=re.IGNORECASE,
-    )[0].strip()
+    text = _rx(r"={5,}\s*WEB SEARCH RESULTS AND FETCHED CONTENT|SEARCH RESULTS SUMMARY:", re.IGNORECASE).split(text, maxsplit=1)[0].strip()
     if text.lower().startswith("```sources"):
         text = "I found links for that topic."
     return text[:1800].rstrip()
@@ -19481,27 +17321,20 @@ def _status_only_shell_command(content: str) -> bool:
             payload = {}
         if isinstance(payload, dict):
             text = str(payload.get("command") or payload.get("cmd") or "").strip()
-    if not text or any(marker in text for marker in (">", "`", "$(")) or re.search(r"(?<!\|)\|(?!\|)", text):
+    if not text or any(marker in text for marker in (">", "`", "$(")) or _rx(r"(?<!\|)\|(?!\|)").search(text):
         return False
-    command = re.compile(
-        r"(?:echo|printf|test|true|false|:|exit)\b[^;&|]*"
-        r"(?:\s*(?:&&|\|\||;)\s*(?:echo|printf|test|true|false|:|exit)\b[^;&|]*)*",
-        re.IGNORECASE,
-    )
+    command = _rx(r"(?:echo|printf|test|true|false|:|exit)\b[^;&|]*"
+        r"(?:\s*(?:&&|\|\||;)\s*(?:echo|printf|test|true|false|:|exit)\b[^;&|]*)*", re.IGNORECASE)
     return bool(command.fullmatch(text))
 
 
 def _blocked_status_tool_round(tool_blocks: list[Any], text: str) -> bool:
     """Return true for a blocked claim followed only by status/no-op commands."""
     statement = _strip_think_blocks(str(text or "")).strip()
-    if not statement or re.search(r"\bnot\s+(?:blocked|stuck|finished)\b", statement, re.I):
+    if not statement or _rx(r"\bnot\s+(?:blocked|stuck|finished)\b", re.I).search(statement):
         return False
-    blocked_claim = re.search(
-        r"\b(?:blocked|cannot|can't|unable|not available|not possible|cannot proceed|"
-        r"no source|no way|not buildable|impossible)\b",
-        statement,
-        re.I,
-    )
+    blocked_claim = _rx(r"\b(?:blocked|cannot|can't|unable|not available|not possible|cannot proceed|"
+        r"no source|no way|not buildable|impossible)\b", re.I).search(statement)
     if not blocked_claim or not tool_blocks:
         return False
     return all(
@@ -19516,12 +17349,8 @@ def _false_unavailable_tool_claim(text: str, selected_tools: Optional[Set[str]])
     if not text or not selected_tools:
         return ""
     plain = _strip_think_blocks(strip_tool_blocks(str(text))).lower()
-    if not re.search(
-        r"\b(?:don'?t|do not|can'?t|cannot|unable|no)\b.{0,90}"
-        r"\b(?:tool|tools|access|available|loaded|enabled|integration)\b",
-        plain,
-        re.I | re.S,
-    ):
+    if not _rx(r"\b(?:don'?t|do not|can'?t|cannot|unable|no)\b.{0,90}"
+        r"\b(?:tool|tools|access|available|loaded|enabled|integration)\b", re.I | re.S).search(plain):
         return ""
     checks = (
         ("manage_calendar", r"\b(?:calendar|event|meeting|appointment|schedule|reminder)\b"),
@@ -19544,7 +17373,7 @@ def _false_unavailable_tool_claim(text: str, selected_tools: Optional[Set[str]])
         "mcp__email__list_emails",
         "mcp__email__read_email",
         "mcp__email__search_emails",
-    } and re.search(r"\b(?:email|emails|mail|inbox|message|messages)\b", plain, re.I):
+    } and _rx(r"\b(?:email|emails|mail|inbox|message|messages)\b", re.I).search(plain):
         return "email"
     return ""
 
@@ -19563,16 +17392,13 @@ def _read_only_shell_command(content: str) -> bool:
         return False
     # Shell pipelines are allowed only when every stage is one of the common
     # inspection commands. This intentionally rejects unknown/mutating syntax.
-    segments = re.split(r"&&|\|\||;|\|", text)
+    segments = _rx(r"&&|\|\||;|\|").split(text)
     if not segments or any(not segment.strip() for segment in segments):
         return False
-    allowed = re.compile(
-        r"^(?:pwd|ls|find|rg|grep|git\s+(?:status|diff|log|show|branch)|"
+    allowed = _rx(r"^(?:pwd|ls|find|rg|grep|git\s+(?:status|diff|log|show|branch)|"
         r"sed(?!\s+-i\b)|head|tail|cat|stat|file|wc|sort|uniq|cut|"
         r"ip|ipconfig|getent|nslookup|dig|arp|hostname|uname|whoami|"
-        r"echo|printf|test|true|false|:)\b",
-        re.IGNORECASE,
-    )
+        r"echo|printf|test|true|false|:)\b", re.IGNORECASE)
     return all(allowed.match(segment.strip()) for segment in segments)
 
 
@@ -19602,12 +17428,7 @@ def _workspace_mutation_tool_block(block: Any) -> bool:
     if tool_type in {"write_file", "edit_file", "apply_patch"}:
         return True
     if tool_type == "inspect_media":
-        try:
-            payload = json.loads(getattr(block, "content", "") or "{}")
-        except (TypeError, json.JSONDecodeError):
-            payload = {}
-        if not isinstance(payload, dict):
-            return False
+        payload = _json_object(getattr(block, "content", ""))
         if str(payload.get("output_path") or "").strip():
             return True
         exports = payload.get("exports")
@@ -19620,12 +17441,7 @@ def _workspace_mutation_tool_block(block: Any) -> bool:
             )
         )
     if tool_type == "private_browser":
-        try:
-            payload = json.loads(getattr(block, "content", "") or "{}")
-        except (TypeError, json.JSONDecodeError):
-            payload = {}
-        if not isinstance(payload, dict):
-            return False
+        payload = _json_object(getattr(block, "content", ""))
         action = str(payload.get("action") or "").strip().lower()
         if action == "screenshot":
             return bool(str(payload.get("path") or "").strip())
@@ -19730,7 +17546,7 @@ def _workspace_file_mutation_paths(block: Any) -> Set[str]:
     if tool_type == "apply_patch":
         return {
             path.strip()
-            for path in re.findall(r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+)$", raw, re.MULTILINE)
+            for path in _rx(r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+)$", re.MULTILINE).findall(raw)
             if path.strip().startswith("/workspace/")
         }
     return set()
@@ -19955,16 +17771,11 @@ def _artifact_recovery_messages(
         if tool_name == "write_file" and command:
             candidate = command.splitlines()[0].strip()
         elif tool_name == "edit_file":
-            try:
-                payload = json.loads(command or "{}")
-            except (TypeError, json.JSONDecodeError):
-                payload = {}
-            if isinstance(payload, Mapping):
-                candidate = str(payload.get("path") or "").strip()
+            candidate = str(_json_object(command).get("path") or "").strip()
         if (
             candidate.startswith("/workspace/")
             and candidate.casefold().endswith(".py")
-            and re.search(r"\b(?:matplotlib|plotly|seaborn)\b", command, re.I)
+            and _rx(r"\b(?:matplotlib|plotly|seaborn)\b", re.I).search(command)
         ):
             existing_plot_script = candidate
             break
@@ -19973,7 +17784,7 @@ def _artifact_recovery_messages(
         and _local_media_needs_browser_render(recovery_text)
         and any(
             event.get("exit_code") == 0
-            and re.search(r"\.(?:html?|xhtml)\b", str(event.get("command") or ""), re.IGNORECASE)
+            and _rx(r"\.(?:html?|xhtml)\b", re.IGNORECASE).search(str(event.get("command") or ""))
             for event in tool_events
             if isinstance(event, dict)
         )
@@ -20113,7 +17924,7 @@ def _artifact_source_evidence_ready(
     def _tokens(value: str) -> set[str]:
         return {
             token
-            for token in re.findall(r"[a-z0-9][a-z0-9.+-]{2,}", value.casefold())
+            for token in _rx(r"[a-z0-9][a-z0-9.+-]{2,}").findall(value.casefold())
             if token not in stop_words
         }
 
@@ -20128,9 +17939,7 @@ def _artifact_source_evidence_ready(
             continue
         if tool_name == "pdf_extract" and not external_verification_required:
             return True
-        if tool_name == "inspect_media" and re.search(
-            r"\bPDF has \d+ pages?\b", output, re.IGNORECASE
-        ) and not external_verification_required:
+        if tool_name == "inspect_media" and _rx(r"\bPDF has \d+ pages?\b", re.IGNORECASE).search(output) and not external_verification_required:
             return True
         if tool_name == "web_fetch" and len(output) >= 800:
             # Require two topic anchors so a generic arXiv landing page does
@@ -20300,20 +18109,16 @@ def _artifact_body_from_synthesis(response: str) -> str:
     # a normal content fence. Generic fence sanitization also recognizes those
     # labels as textual tool transports, so preserve a whole-response fence
     # before stripping actual tool markup.
-    fenced = re.fullmatch(r"```(?:[\w.+-]+)?\s*\n([\s\S]*?)\n```", raw)
+    fenced = _rx(r"```(?:[\w.+-]+)?\s*\n([\s\S]*?)\n```").fullmatch(raw)
     if fenced:
         body = fenced.group(1).strip()
     else:
         body = _strip_think_blocks(strip_tool_blocks(raw)).strip()
     if not body:
         return ""
-    unfinished = re.search(
-        r"(?:^|\n)\s*(?:let me|i'?ll|i will|i need to|i should|i must|"
+    unfinished = _rx(r"(?:^|\n)\s*(?:let me|i'?ll|i will|i need to|i should|i must|"
         r"we need to|we should|we must|going to|let's)\s+"
-        r"(?:check|find|inspect|look|open|read|search|verify|run|use|write|create)\b",
-        body,
-        re.IGNORECASE,
-    )
+        r"(?:check|find|inspect|look|open|read|search|verify|run|use|write|create)\b", re.IGNORECASE).search(body)
     if unfinished and len(body) < 400:
         return ""
     return body
@@ -20328,10 +18133,7 @@ def _artifact_body_matches_target(body: str, target: str) -> bool:
         return False
     if suffix in {".html", ".htm"}:
         probe = candidate[:2048].casefold()
-        return bool(re.search(
-            r"<(?:!doctype\s+html|html\b|head\b|body\b|main\b|div\b|canvas\b|svg\b|style\b|script\b)",
-            probe,
-        ))
+        return bool(_rx(r"<(?:!doctype\s+html|html\b|head\b|body\b|main\b|div\b|canvas\b|svg\b|style\b|script\b)").search(probe))
     if suffix == ".json":
         try:
             json.loads(candidate)
@@ -20663,23 +18465,6 @@ def _bounded_local_media_inspection_blocks(
     return allowed, len(allowed)
 
 
-def _bounded_local_pdf_inspection_blocks(
-    tool_blocks: Sequence[Any],
-    *,
-    local_pdf_turn: bool,
-    already_used: int,
-    limit: int = 2,
-) -> tuple[list[Any], int]:
-    """Compatibility wrapper for callers that only classify local PDFs."""
-
-    return _bounded_local_media_inspection_blocks(
-        tool_blocks,
-        local_media_turn=local_pdf_turn,
-        already_used=already_used,
-        limit=limit,
-    )
-
-
 def _browser_render_recovery_blocks(
     text: str,
     missing_artifacts: Sequence[str],
@@ -20722,18 +18507,9 @@ def _browser_render_recovery_blocks(
         if tool == "write_file":
             candidate = command.splitlines()[0].strip() if command else ""
         elif tool == "edit_file":
-            try:
-                payload = json.loads(command or "{}")
-            except (TypeError, json.JSONDecodeError):
-                payload = {}
-            if isinstance(payload, Mapping):
-                candidate = str(payload.get("path") or "").strip()
+            candidate = str(_json_object(command).get("path") or "").strip()
         elif tool == "apply_patch":
-            match = re.search(
-                r"^\*\*\* (?:Add|Update) File:\s*(?P<path>[^\n]+)$",
-                command,
-                re.MULTILINE,
-            )
+            match = _rx(r"^\*\*\* (?:Add|Update) File:\s*(?P<path>[^\n]+)$", re.MULTILINE).search(command)
             candidate = match.group("path").strip() if match else ""
         if Path(candidate).suffix.lower() in {".html", ".htm", ".xhtml"}:
             html_source = candidate
@@ -20794,18 +18570,9 @@ def _svg_render_recovery_blocks(
         if tool == "write_file":
             candidate = command.splitlines()[0].strip() if command else ""
         elif tool == "edit_file":
-            try:
-                payload = json.loads(command or "{}")
-            except (TypeError, json.JSONDecodeError):
-                payload = {}
-            if isinstance(payload, Mapping):
-                candidate = str(payload.get("path") or "").strip()
+            candidate = str(_json_object(command).get("path") or "").strip()
         elif tool == "apply_patch":
-            match = re.search(
-                r"^\*\*\* (?:Add|Update) File:\s*(?P<path>[^\n]+)$",
-                command,
-                re.MULTILINE,
-            )
+            match = _rx(r"^\*\*\* (?:Add|Update) File:\s*(?P<path>[^\n]+)$", re.MULTILINE).search(command)
             candidate = match.group("path").strip() if match else ""
         if Path(candidate).suffix.lower() == ".svg":
             svg_source = candidate
@@ -20878,18 +18645,9 @@ def _artifact_generator_execution_block(
         if tool_name == "write_file" and command:
             candidate = command.splitlines()[0].strip()
         elif tool_name == "edit_file":
-            try:
-                payload = json.loads(command or "{}")
-            except (TypeError, json.JSONDecodeError):
-                payload = {}
-            if isinstance(payload, Mapping):
-                candidate = str(payload.get("path") or "").strip()
+            candidate = str(_json_object(command).get("path") or "").strip()
         elif tool_name == "apply_patch":
-            match = re.search(
-                r"^\*\*\* (?:Add|Update) File:\s*(?P<path>[^\n]+)$",
-                command,
-                re.MULTILINE,
-            )
+            match = _rx(r"^\*\*\* (?:Add|Update) File:\s*(?P<path>[^\n]+)$", re.MULTILINE).search(command)
             candidate = match.group("path").strip() if match else ""
         return candidate if (
             candidate.startswith("/workspace/")
@@ -21125,14 +18883,14 @@ async def stream_agent_loop(
         return
 
     if turn_contract is not None:
-        yield 'data: ' + json.dumps({"type": "turn_contract", **turn_contract.audit()}) + '\n\n'
+        yield _sse({"type": "turn_contract", **turn_contract.audit()})
         if _blocks_before_inference(turn_contract):
             unavailable = ", ".join(sorted(turn_contract.unavailable))
             clarification = (
                 "I can’t perform this request with the currently permitted tools "
                 f"(unavailable: {unavailable}). I haven’t substituted another tool."
             )
-            yield 'data: ' + json.dumps({"delta": clarification}) + '\n\n'
+            yield _sse({"delta": clarification})
             yield 'data: [DONE]\n\n'
             return
 
@@ -21177,7 +18935,6 @@ async def stream_agent_loop(
     )
     if _sft_personal_fixture_mode:
         workspace = None
-        cwd = None
         if isinstance(client_runtime_context, dict):
             client_runtime_context = dict(client_runtime_context)
             for _key in (
@@ -21248,10 +19005,7 @@ async def stream_agent_loop(
             == "cook"
         )
     )
-    _caller_disabled_tools = set(disabled_tools or [])
-    if tool_policy:
-        _caller_disabled_tools.update(tool_policy.all_disabled_names())
-    disabled_tools = set(disabled_tools or [])
+    _caller_disabled_tools = set(_caller_hard_denials)
     if _unattended_native_runtime:
         # No client is available to answer a clarification card in a native
         # unattended run. Make this a hard request-scoped denial so prompt
@@ -21297,12 +19051,6 @@ async def stream_agent_loop(
         # public/non-admin users rather than trying to enumerate every tool.
         mcp_mgr = None
 
-    if plan_mode:
-        # Plan mode: investigate read-only, propose a plan, don't execute. The
-        # route also unions the read-only-disabled set, but enforce here too so
-        # the loop is safe regardless of caller. MCP stays available but is
-        # filtered to read-only tools below (after the disabled map is loaded).
-        disabled_tools.update(plan_mode_disabled_tools())
     if _sft_personal_fixture_mode:
         disabled_tools.update(_SFT_DISABLED_WORKSPACE_TOOLS)
 
@@ -21353,12 +19101,8 @@ async def stream_agent_loop(
     )
     _explicit_plan_only_turn = bool(
         _looks_like_explicit_plan_request(_last_user)
-        and re.search(r"\bplan\b", _last_user, re.IGNORECASE)
-        and not re.search(
-            r"\b(?:schedule|scheduled|recurring|every\s+(?:day|week|month)|daily|weekly|monthly|at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm))\b",
-            _last_user,
-            re.IGNORECASE,
-        )
+        and _rx(r"\bplan\b", re.IGNORECASE).search(_last_user)
+        and not _rx(r"\b(?:schedule|scheduled|recurring|every\s+(?:day|week|month)|daily|weekly|monthly|at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm))\b", re.IGNORECASE).search(_last_user)
     )
     if not _plan_tool_allowed:
         disabled_tools.add("update_plan")
@@ -21431,57 +19175,45 @@ async def stream_agent_loop(
             "results": f"Opening reply draft for email UID {_email_uid} with pre-filled body",
             "body": _early_active_email_reply_body.strip(),
         }
-        yield (
-            "data: "
-            + json.dumps({
-                "type": "tool_start",
-                "tool": "ui_control",
-                "command": _reply_command,
-                "full_command": _reply_command,
-                "round": 1,
-            })
-            + "\n\n"
-        )
-        yield f"data: {json.dumps({'type': 'ui_control', 'data': _ui_payload})}\n\n"
-        yield (
-            "data: "
-            + json.dumps({
-                "type": "tool_output",
-                "tool": "ui_control",
-                "command": _reply_command,
-                "output": _ui_payload["results"],
-                "ui_event": "open_email_reply",
-                "uid": _email_uid,
-                "folder": _email_folder,
-                "mode": "reply",
-                "body": _ui_payload["body"],
-            })
-            + "\n\n"
-        )
+        yield _sse({
+            "type": "tool_start",
+            "tool": "ui_control",
+            "command": _reply_command,
+            "full_command": _reply_command,
+            "round": 1,
+        })
+        yield _sse({'type': 'ui_control', 'data': _ui_payload})
+        yield _sse({
+            "type": "tool_output",
+            "tool": "ui_control",
+            "command": _reply_command,
+            "output": _ui_payload["results"],
+            "ui_event": "open_email_reply",
+            "uid": _email_uid,
+            "folder": _email_folder,
+            "mode": "reply",
+            "body": _ui_payload["body"],
+        })
         _reply_summary = "Reply draft opened. Nothing has been sent."
-        yield f"data: {json.dumps({'type': 'final_response', 'content': _reply_summary})}\n\n"
-        yield (
-            "data: "
-            + json.dumps({
-                "type": "metrics",
-                "data": {
-                    "model": model,
-                    "requested_model": model,
-                    "endpoint_id": requested_endpoint_id,
-                    "endpoint_label": requested_endpoint_label,
-                    "requested_endpoint_id": requested_endpoint_id,
-                    "requested_endpoint_label": requested_endpoint_label,
-                    "input_tokens": estimate_tokens(messages),
-                    "output_tokens": max(len(_reply_summary) // 4, 1),
-                    "total_time": 0,
-                    "response_time": 0,
-                    "agent_rounds": 0,
-                    "tool_calls": 1,
-                    "deterministic_active_email_reply": True,
-                },
-            })
-            + "\n\n"
-        )
+        yield _sse({'type': 'final_response', 'content': _reply_summary})
+        yield _sse({
+            "type": "metrics",
+            "data": {
+                "model": model,
+                "requested_model": model,
+                "endpoint_id": requested_endpoint_id,
+                "endpoint_label": requested_endpoint_label,
+                "requested_endpoint_id": requested_endpoint_id,
+                "requested_endpoint_label": requested_endpoint_label,
+                "input_tokens": estimate_tokens(messages),
+                "output_tokens": max(len(_reply_summary) // 4, 1),
+                "total_time": 0,
+                "response_time": 0,
+                "agent_rounds": 0,
+                "tool_calls": 1,
+                "deterministic_active_email_reply": True,
+            },
+        })
         yield "data: [DONE]\n\n"
         return
     _early_active_email_draft_update = (
@@ -21507,17 +19239,13 @@ async def stream_agent_loop(
         )
         _update_block = ToolBlock("update_document", _new_content)
         _cmd_display = _early_active_email_draft_update[:80]
-        yield (
-            "data: "
-            + json.dumps({
-                "type": "tool_start",
-                "tool": "update_document",
-                "command": _cmd_display,
-                "full_command": _cmd_display,
-                "round": 1,
-            })
-            + "\n\n"
-        )
+        yield _sse({
+            "type": "tool_start",
+            "tool": "update_document",
+            "command": _cmd_display,
+            "full_command": _cmd_display,
+            "round": 1,
+        })
         _desc, _result = await execute_tool_block(
             _update_block,
             session_id=session_id,
@@ -21532,53 +19260,45 @@ async def stream_agent_loop(
         _output = "Updated the active email draft."
         if isinstance(_result, dict) and _result.get("error"):
             _output = str(_result.get("error") or _output)
-        yield (
-            "data: "
-            + json.dumps({
-                "type": "tool_output",
-                "tool": "update_document",
-                "command": _cmd_display,
-                "output": _output,
-                "doc_id": (isinstance(_result, dict) and _result.get("doc_id")) or _doc_id,
-                "version": (isinstance(_result, dict) and _result.get("version")) or None,
-            })
-            + "\n\n"
-        )
+        yield _sse({
+            "type": "tool_output",
+            "tool": "update_document",
+            "command": _cmd_display,
+            "output": _output,
+            "doc_id": (isinstance(_result, dict) and _result.get("doc_id")) or _doc_id,
+            "version": (isinstance(_result, dict) and _result.get("version")) or None,
+        })
         _draft_summary = (
             "I couldn't update the active email draft."
             if isinstance(_result, dict) and _result.get("error")
             else "Updated the active email draft."
         )
-        yield f"data: {json.dumps({'type': 'final_response', 'content': _draft_summary})}\n\n"
-        yield (
-            "data: "
-            + json.dumps({
-                "type": "metrics",
-                "data": {
-                    "model": model,
-                    "requested_model": model,
-                    "endpoint_id": requested_endpoint_id,
-                    "endpoint_label": requested_endpoint_label,
-                    "requested_endpoint_id": requested_endpoint_id,
-                    "requested_endpoint_label": requested_endpoint_label,
-                    "input_tokens": estimate_tokens(messages),
-                    "output_tokens": max(len(_draft_summary) // 4, 1),
-                    "total_time": 0,
-                    "response_time": 0,
-                    "agent_rounds": 0,
-                    "tool_calls": 1,
-                    "deterministic_active_email_draft_update": True,
-                },
-            })
-            + "\n\n"
-        )
+        yield _sse({'type': 'final_response', 'content': _draft_summary})
+        yield _sse({
+            "type": "metrics",
+            "data": {
+                "model": model,
+                "requested_model": model,
+                "endpoint_id": requested_endpoint_id,
+                "endpoint_label": requested_endpoint_label,
+                "requested_endpoint_id": requested_endpoint_id,
+                "requested_endpoint_label": requested_endpoint_label,
+                "input_tokens": estimate_tokens(messages),
+                "output_tokens": max(len(_draft_summary) // 4, 1),
+                "total_time": 0,
+                "response_time": 0,
+                "agent_rounds": 0,
+                "tool_calls": 1,
+                "deterministic_active_email_draft_update": True,
+            },
+        })
         yield "data: [DONE]\n\n"
         return
     _early_active_document_append = (
         _extract_followup_content_update(_last_user)
         if active_document is not None
         and not _is_email_document_obj(active_document)
-        and re.search(r"\b(?:append|add)\b", _last_user, re.IGNORECASE)
+        and _rx(r"\b(?:append|add)\b", re.IGNORECASE).search(_last_user)
         else ""
     )
     # Blind append is only safe for plain prose. Logs, tables, checklists, and
@@ -21590,7 +19310,7 @@ async def stream_agent_loop(
         else ""
     )
     _active_doc_is_structured = bool(
-        re.search(r"(?m)^\s*\|.+\|\s*$|^\s*(?:[-*]\s+\[[ xX]\]|#{1,6}\s+)", _active_doc_text)
+        _rx(r"(?m)^\s*\|.+\|\s*$|^\s*(?:[-*]\s+\[[ xX]\]|#{1,6}\s+)").search(_active_doc_text)
     )
     if (
         _early_active_document_append
@@ -21616,17 +19336,13 @@ async def stream_agent_loop(
         )
         _update_block = ToolBlock("update_document", _new_content)
         _cmd_display = _append_text[:80]
-        yield (
-            "data: "
-            + json.dumps({
-                "type": "tool_start",
-                "tool": "update_document",
-                "command": _cmd_display,
-                "full_command": _cmd_display,
-                "round": 1,
-            })
-            + "\n\n"
-        )
+        yield _sse({
+            "type": "tool_start",
+            "tool": "update_document",
+            "command": _cmd_display,
+            "full_command": _cmd_display,
+            "round": 1,
+        })
         _desc, _result = await execute_tool_block(
             _update_block,
             session_id=session_id,
@@ -21656,82 +19372,39 @@ async def stream_agent_loop(
                 else None
             ),
         }
-        yield (
-            "data: "
-            + json.dumps({
-                "type": "tool_output",
-                "tool": "update_document",
-                "command": _cmd_display,
-                "output": _output,
-                "doc_id": (isinstance(_result, dict) and _result.get("doc_id")) or _doc_id,
-                "version": (isinstance(_result, dict) and _result.get("version")) or None,
-            })
-            + "\n\n"
-        )
+        yield _sse({
+            "type": "tool_output",
+            "tool": "update_document",
+            "command": _cmd_display,
+            "output": _output,
+            "doc_id": (isinstance(_result, dict) and _result.get("doc_id")) or _doc_id,
+            "version": (isinstance(_result, dict) and _result.get("version")) or None,
+        })
         _doc_summary = (
             "I couldn't update the active document."
             if isinstance(_result, dict) and _result.get("error")
             else "Updated the active document."
         )
-        yield f"data: {json.dumps({'type': 'final_response', 'content': _doc_summary})}\n\n"
-        yield (
-            "data: "
-            + json.dumps({
-                "type": "metrics",
-                "data": {
-                    "model": model,
-                    "requested_model": model,
-                    "endpoint_id": requested_endpoint_id,
-                    "endpoint_label": requested_endpoint_label,
-                    "requested_endpoint_id": requested_endpoint_id,
-                    "requested_endpoint_label": requested_endpoint_label,
-                    "input_tokens": estimate_tokens(messages),
-                    "output_tokens": max(len(_doc_summary) // 4, 1),
-                    "total_time": 0,
-                    "response_time": 0,
-                    "agent_rounds": 0,
-                    "tool_calls": 1,
-                    "tool_events": [_det_doc_tool_event],
-                    "deterministic_active_document_append": True,
-                },
-            })
-            + "\n\n"
-        )
-        yield "data: [DONE]\n\n"
-        return
-    _no_tool_boundary_answer = _qwen_no_tool_boundary_answer(_last_user)
-    if (
-        _no_tool_boundary_answer
-        and _contract_allows_early_completion(turn_contract)
-        and not plan_mode
-        and not approved_plan
-        and not guide_only
-        and not active_document
-        and not active_email
-    ):
-        yield f"data: {json.dumps({'delta': _no_tool_boundary_answer})}\n\n"
-        yield (
-            "data: "
-            + json.dumps({
-                "type": "metrics",
-                "data": {
-                    "model": model,
-                    "requested_model": model,
-                    "endpoint_id": requested_endpoint_id,
-                    "endpoint_label": requested_endpoint_label,
-                    "requested_endpoint_id": requested_endpoint_id,
-                    "requested_endpoint_label": requested_endpoint_label,
-                    "input_tokens": estimate_tokens(messages),
-                    "output_tokens": max(len(_no_tool_boundary_answer) // 4, 1),
-                    "total_time": 0,
-                    "response_time": 0,
-                    "agent_rounds": 0,
-                    "tool_calls": 0,
-                    "deterministic_no_tool_boundary": True,
-                },
-            })
-            + "\n\n"
-        )
+        yield _sse({'type': 'final_response', 'content': _doc_summary})
+        yield _sse({
+            "type": "metrics",
+            "data": {
+                "model": model,
+                "requested_model": model,
+                "endpoint_id": requested_endpoint_id,
+                "endpoint_label": requested_endpoint_label,
+                "requested_endpoint_id": requested_endpoint_id,
+                "requested_endpoint_label": requested_endpoint_label,
+                "input_tokens": estimate_tokens(messages),
+                "output_tokens": max(len(_doc_summary) // 4, 1),
+                "total_time": 0,
+                "response_time": 0,
+                "agent_rounds": 0,
+                "tool_calls": 1,
+                "tool_events": [_det_doc_tool_event],
+                "deterministic_active_document_append": True,
+            },
+        })
         yield "data: [DONE]\n\n"
         return
     _ody_memory_identity_turn = _looks_like_memory_identity_turn(_last_user)
@@ -21892,7 +19565,7 @@ async def stream_agent_loop(
             "No active workspace is set. Use `/workspace <path>`, "
             "`/workspace pick`, or `/workspace set /absolute/path`, then rerun the request."
         )
-        yield f"data: {json.dumps({'delta': msg})}\n\n"
+        yield _sse({'delta': msg})
         metrics = {
             "model": model,
             "requested_model": model,
@@ -21904,7 +19577,7 @@ async def stream_agent_loop(
             "tool_calls": 0,
             "missing_workspace": True,
         }
-        yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
+        yield _sse({'type': 'metrics', 'data': metrics})
         yield "data: [DONE]\n\n"
         return
     _exact_file_edit = _parse_exact_file_replacement(_last_user)
@@ -21933,17 +19606,13 @@ async def stream_agent_loop(
         # the TUI renders it like any other edit.
         exact_block = ToolBlock("edit_file", json.dumps(_exact_file_edit))
         exact_display = json.dumps(_exact_file_edit, ensure_ascii=False)
-        yield (
-            "data: "
-            + json.dumps({
-                "type": "tool_start",
-                "tool": "edit_file",
-                "command": exact_display,
-                "full_command": exact_display,
-                "round": 0,
-            })
-            + "\n\n"
-        )
+        yield _sse({
+            "type": "tool_start",
+            "tool": "edit_file",
+            "command": exact_display,
+            "full_command": exact_display,
+            "round": 0,
+        })
         _exact_desc, _exact_result = await execute_tool_block(
             exact_block,
             session_id=session_id,
@@ -21959,38 +19628,30 @@ async def stream_agent_loop(
             or (_exact_result or {}).get("error")
             or "(no output)"
         )
-        yield (
-            "data: "
-            + json.dumps({
-                "type": "tool_output",
-                "tool": "edit_file",
-                "command": exact_display,
-                "output": _truncate(_exact_output),
-                "exit_code": (_exact_result or {}).get("exit_code"),
-            })
-            + "\n\n"
-        )
+        yield _sse({
+            "type": "tool_output",
+            "tool": "edit_file",
+            "command": exact_display,
+            "output": _truncate(_exact_output),
+            "exit_code": (_exact_result or {}).get("exit_code"),
+        })
         if tool_result_is_successful(_exact_result or {}):
-            yield 'data: ' + json.dumps({"delta": "Done."}) + "\n\n"
+            yield _sse({"delta": "Done."})
         else:
             _exact_error = str((_exact_result or {}).get("error") or _exact_output)
             if "clarify which occurrence" not in _exact_error.lower():
                 _exact_error += "; clarify which occurrence should be changed"
-            yield 'data: ' + json.dumps({"delta": _exact_error}) + "\n\n"
-        yield (
-            "data: "
-            + json.dumps({
-                "type": "metrics",
-                "data": {
-                    "model": model,
-                    "requested_model": model,
-                    "agent_rounds": 0,
-                    "tool_calls": 1,
-                    "direct_exact_file_edit": True,
-                },
-            })
-            + "\n\n"
-        )
+            yield _sse({"delta": _exact_error})
+        yield _sse({
+            "type": "metrics",
+            "data": {
+                "model": model,
+                "requested_model": model,
+                "agent_rounds": 0,
+                "tool_calls": 1,
+                "direct_exact_file_edit": True,
+            },
+        })
         yield "data: [DONE]\n\n"
         return
     logger.info(
@@ -22014,42 +19675,38 @@ async def stream_agent_loop(
         logger.info("[agent] direct low-signal reply path for latest=%r", _last_user[:80])
         if _standalone_link_fragment_turn:
             direct_response = "Which links do you mean? Tell me the topic or website list."
-            yield f"data: {json.dumps({'delta': direct_response})}\n\n"
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "metrics",
-                    "data": {
-                        "model": model,
-                        "requested_model": model,
-                        "endpoint_id": requested_endpoint_id,
-                        "endpoint_label": requested_endpoint_label,
-                        "requested_endpoint_id": requested_endpoint_id,
-                        "requested_endpoint_label": requested_endpoint_label,
-                        "input_tokens": 0,
-                        "output_tokens": max(len(direct_response) // 4, 1),
-                        "total_time": 0,
-                        "response_time": 0,
-                        "agent_rounds": 0,
-                        "tool_calls": 0,
-                        "direct_low_signal": True,
-                        "deterministic_clarification": True,
-                        **_usage_bucket_summary([
-                            _usage_bucket(
-                                round_num=1,
-                                model=model,
-                                endpoint_id=requested_endpoint_id,
-                                endpoint_label=requested_endpoint_label,
-                                endpoint_cost_tracked=requested_endpoint_cost_tracked,
-                                input_tokens=0,
-                                output_tokens=max(len(direct_response) // 4, 1),
-                                usage_source="estimated",
-                            )
-                        ]),
-                    },
-                })
-                + "\n\n"
-            )
+            yield _sse({'delta': direct_response})
+            yield _sse({
+                "type": "metrics",
+                "data": {
+                    "model": model,
+                    "requested_model": model,
+                    "endpoint_id": requested_endpoint_id,
+                    "endpoint_label": requested_endpoint_label,
+                    "requested_endpoint_id": requested_endpoint_id,
+                    "requested_endpoint_label": requested_endpoint_label,
+                    "input_tokens": 0,
+                    "output_tokens": max(len(direct_response) // 4, 1),
+                    "total_time": 0,
+                    "response_time": 0,
+                    "agent_rounds": 0,
+                    "tool_calls": 0,
+                    "direct_low_signal": True,
+                    "deterministic_clarification": True,
+                    **_usage_bucket_summary([
+                        _usage_bucket(
+                            round_num=1,
+                            model=model,
+                            endpoint_id=requested_endpoint_id,
+                            endpoint_label=requested_endpoint_label,
+                            endpoint_cost_tracked=requested_endpoint_cost_tracked,
+                            input_tokens=0,
+                            output_tokens=max(len(direct_response) // 4, 1),
+                            usage_source="estimated",
+                        )
+                    ]),
+                },
+            })
             yield "data: [DONE]\n\n"
             return
         _merged_tools_model = (model or "").lower().startswith(
@@ -22171,7 +19828,7 @@ async def stream_agent_loop(
                 terminal_metadata["endpoint_cost_tracked"] = (
                     direct_actual_endpoint_cost_tracked
                 )
-            return f'data: {json.dumps({"type": "agent_terminal", "data": terminal_metadata})}\n\n'
+            return _sse({"type": "agent_terminal", "data": terminal_metadata})
 
         try:
             async for chunk in stream_llm_with_fallback(
@@ -22224,7 +19881,7 @@ async def stream_agent_loop(
                         continue
                     if data.get("type") == "model_response_ref":
                         data["round"] = 1
-                        yield f"data: {json.dumps(data)}\n\n"
+                        yield _sse(data)
                         continue
                     if data.get("type") == "model_actual":
                         direct_actual_model = data.get("model") or direct_actual_model
@@ -22233,7 +19890,7 @@ async def stream_agent_loop(
                         data["requested_endpoint_label"] = requested_endpoint_label
                         data["endpoint_id"] = direct_actual_endpoint_id
                         data["endpoint_label"] = direct_actual_endpoint_label
-                        yield f"data: {json.dumps(data)}\n\n"
+                        yield _sse(data)
                         continue
                     if data.get("type") == "fallback":
                         direct_actual_model = data.get("answered_by") or direct_actual_model
@@ -22266,7 +19923,7 @@ async def stream_agent_loop(
                                 continue
                             direct_response += cleaned_delta
                             data["delta"] = cleaned_delta
-                            yield f"data: {json.dumps(data)}\n\n"
+                            yield _sse(data)
                             continue
                         yield chunk
                         continue
@@ -22334,7 +19991,7 @@ async def stream_agent_loop(
                 return
 
         if direct_defer_visible:
-            yield f"data: {json.dumps({'delta': direct_response})}\n\n"
+            yield _sse({'delta': direct_response})
 
         duration = time.time() - direct_start
         direct_usage = _usage_bucket(
@@ -22392,7 +20049,7 @@ async def stream_agent_loop(
             if _direct_est is not None:
                 metrics["cost_usd"] = round(_direct_est, 6)
                 metrics["cost_source"] = "estimated"
-        yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
+        yield _sse({'type': 'metrics', 'data': metrics})
         yield "data: [DONE]\n\n"
         return
 
@@ -22418,7 +20075,6 @@ async def stream_agent_loop(
     if _relevant_tools:
         logger.info(f"[tool-rag] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
     if not guide_only and not _relevant_tools and _low_signal_turn:
-        from src.tool_index import ALWAYS_AVAILABLE
         if workspace:
             # An active workspace IS the file-work signal: a vague "look at the
             # project" means explore this folder. Surface only the READ-ONLY file
@@ -22437,7 +20093,7 @@ async def stream_agent_loop(
             logger.info("[tool-rag] Low-signal query; will run RAG retrieval")
     if not guide_only and not _relevant_tools:
         try:
-            from src.tool_index import get_tool_index, ALWAYS_AVAILABLE
+            from src.tool_index import get_tool_index
             try:
                 tool_idx = await asyncio.wait_for(
                     asyncio.to_thread(get_tool_index),
@@ -22488,7 +20144,7 @@ async def stream_agent_loop(
     # Fallback: if RAG unavailable, use keyword-based tool selection
     # instead of sending ALL tools (which overwhelms the model).
     if not guide_only and not _relevant_tools and _retrieval_query:
-        from src.tool_index import ALWAYS_AVAILABLE, ToolIndex
+        from src.tool_index import ToolIndex
         _relevant_tools = set(ALWAYS_AVAILABLE)
         ql = _retrieval_query.lower()
         for keywords, tools in ToolIndex._KEYWORD_HINTS.items():
@@ -22575,8 +20231,8 @@ async def stream_agent_loop(
             or bool(_parse_qwen_explicit_email_search_request(_last_user))
             or bool(_contextual_email_followup)
             or bool(
-                re.search(r"\b(?:open|read|show|view|check|list|what(?:'s|s|\\s+are)?)\b", _last_user, re.IGNORECASE)
-                and re.search(r"\b(?:inbox|emails?|messages?|mail)\b", _last_user, re.IGNORECASE)
+                _rx(r"\b(?:open|read|show|view|check|list|what(?:'s|s|\\s+are)?)\b", re.IGNORECASE).search(_last_user)
+                and _rx(r"\b(?:inbox|emails?|messages?|mail)\b", re.IGNORECASE).search(_last_user)
             )
         )
         _email_fetch_tools = {
@@ -22585,15 +20241,11 @@ async def stream_agent_loop(
             "ui_control",
         }
         _explicit_email_fetch_turn = _explicit_email_fetch_turn or bool(
-            re.search(
-                r"\b(?:any|urgent|important|priority|action\s+needed|unread|new|recent|latest|last|today'?s?|todays?)\b"
+            _rx(r"\b(?:any|urgent|important|priority|action\s+needed|unread|new|recent|latest|last|today'?s?|todays?)\b"
                 r"[^?\n.]{0,80}\b(?:inbox|emails?|messages?|mail)\b"
                 r"|"
                 r"\b(?:inbox|emails?|messages?|mail)\b"
-                r"[^?\n.]{0,80}\b(?:urgent|important|priority|action\s+needed|unread|new|recent|latest|last|today'?s?|todays?)\b",
-                _last_user,
-                re.IGNORECASE,
-            )
+                r"[^?\n.]{0,80}\b(?:urgent|important|priority|action\s+needed|unread|new|recent|latest|last|today'?s?|todays?)\b", re.IGNORECASE).search(_last_user)
         )
         if _active_email_draft_relevant and not _explicit_email_fetch_turn:
             # The open compose document already contains the recipient,
@@ -22627,7 +20279,6 @@ async def stream_agent_loop(
     # inspect files whose inline text was truncated or omitted.
     if not guide_only and uploaded_files:
         if _relevant_tools is None:
-            from src.tool_index import ALWAYS_AVAILABLE
             _relevant_tools = set(ALWAYS_AVAILABLE)
         _relevant_tools.update({"read_file", "grep", "ls", "manage_documents"})
         if _uploaded_read_only_turn:
@@ -22657,7 +20308,6 @@ async def stream_agent_loop(
                 sorted(forced_set),
             )
         elif _relevant_tools is None:
-            from src.tool_index import ALWAYS_AVAILABLE
             _relevant_tools = set(ALWAYS_AVAILABLE)
         if not _exact_forced_native_chain:
             _relevant_tools.update(forced_set)
@@ -22747,17 +20397,12 @@ async def stream_agent_loop(
         _intent["domains"] = set(_intent_domains)
     if not guide_only:
         _explicit_delegation_tools: Set[str] = set()
-        if re.search(r"\b(?:ask_teacher|chat_with_model)\b", _last_user, re.IGNORECASE) or re.search(
-            r"\b(?:ask|delegate|consult)\b.{0,40}\b(?:model|qwen|claude|gemini|deepseek)\b",
-            _last_user,
-            re.IGNORECASE,
-        ):
+        if _rx(r"\b(?:ask_teacher|chat_with_model)\b", re.IGNORECASE).search(_last_user) or _rx(r"\b(?:ask|delegate|consult)\b.{0,40}\b(?:model|qwen|claude|gemini|deepseek)\b", re.IGNORECASE).search(_last_user):
             _explicit_delegation_tools.update({"list_models", "chat_with_model", "ask_teacher"})
-        if re.search(r"\b(?:run|use|start)\b.{0,30}\bpipeline\b|\btwo-step\s+pipeline\b", _last_user, re.IGNORECASE):
+        if _rx(r"\b(?:run|use|start)\b.{0,30}\bpipeline\b|\btwo-step\s+pipeline\b", re.IGNORECASE).search(_last_user):
             _explicit_delegation_tools.update({"list_models", "chat_with_model", "pipeline"})
         if _explicit_delegation_tools:
             if _relevant_tools is None:
-                from src.tool_index import ALWAYS_AVAILABLE
                 _relevant_tools = set(ALWAYS_AVAILABLE)
             _relevant_tools.update(_explicit_delegation_tools - disabled_tools)
             logger.info(
@@ -22767,15 +20412,10 @@ async def stream_agent_loop(
     if (
         not guide_only
         and _plan_tool_allowed
-        and re.search(r"\bplan\b", _last_user, re.IGNORECASE)
-        and not re.search(
-            r"\b(?:schedule|scheduled|recurring|every\s+(?:day|week|month)|daily|weekly|monthly|at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm))\b",
-            _last_user,
-            re.IGNORECASE,
-        )
+        and _rx(r"\bplan\b", re.IGNORECASE).search(_last_user)
+        and not _rx(r"\b(?:schedule|scheduled|recurring|every\s+(?:day|week|month)|daily|weekly|monthly|at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm))\b", re.IGNORECASE).search(_last_user)
     ):
         if _relevant_tools is None:
-            from src.tool_index import ALWAYS_AVAILABLE
             _relevant_tools = set(ALWAYS_AVAILABLE)
         _relevant_tools.add("update_plan")
         _relevant_tools.discard("manage_tasks")
@@ -22824,7 +20464,6 @@ async def stream_agent_loop(
                 hidden_tools=frozenset(set(tool_policy.hidden_tools) - _web_turn_tools),
             )
         if _relevant_tools is None:
-            from src.tool_index import ALWAYS_AVAILABLE
             _relevant_tools = set(ALWAYS_AVAILABLE)
         _relevant_tools.update(_web_turn_tools)
         _non_web_domains = _intent_domains - {"web"}
@@ -22839,7 +20478,6 @@ async def stream_agent_loop(
     ):
         disabled_tools.difference_update(WEB_TOOL_NAMES)
         if _relevant_tools is None:
-            from src.tool_index import ALWAYS_AVAILABLE
             _relevant_tools = set(ALWAYS_AVAILABLE)
         _relevant_tools.update(WEB_TOOL_NAMES)
         _relevant_tools.difference_update({
@@ -22950,7 +20588,6 @@ async def stream_agent_loop(
             )
     if _has_tui_host_bridge and not _uploaded_read_only_turn:
         if _base_relevant_tools is None:
-            from src.tool_index import ALWAYS_AVAILABLE
             _base_relevant_tools = set(ALWAYS_AVAILABLE)
         _base_relevant_tools.add("host_shell")
     elif (
@@ -23165,12 +20802,10 @@ async def stream_agent_loop(
                 route_tools.add("private_browser")
         if _web_fetch_needs_private_browser and "private_browser" not in disabled_tools:
             if route_tools is None:
-                from src.tool_index import ALWAYS_AVAILABLE
                 route_tools = set(ALWAYS_AVAILABLE)
             route_tools.update({"web_search", "web_fetch", "private_browser"})
         if _private_browser_needs_static_fallback:
             if route_tools is None:
-                from src.tool_index import ALWAYS_AVAILABLE
                 route_tools = set(ALWAYS_AVAILABLE)
             route_tools.update({"web_search", "web_fetch"})
             route_tools.discard("private_browser")
@@ -23214,7 +20849,7 @@ async def stream_agent_loop(
             ):
                 route_tools.add("private_browser")
             if (
-                not re.search(r"https?://", _last_user, re.IGNORECASE)
+                not _rx(r"https?://", re.IGNORECASE).search(_last_user)
                 and not _local_media_needs_web_lookup(_last_user)
             ):
                 _irrelevant_local_media_web_tools = set(WEB_TOOL_NAMES) | {
@@ -23323,7 +20958,6 @@ async def stream_agent_loop(
         and "private_browser" not in disabled_tools
     ):
         if _relevant_tools is None:
-            from src.tool_index import ALWAYS_AVAILABLE
             _relevant_tools = set(ALWAYS_AVAILABLE)
         _relevant_tools.update({"web_search", "web_fetch", "private_browser"})
     # Model-family clamps and RAG selection run before the final TUI routing
@@ -23428,7 +21062,7 @@ async def stream_agent_loop(
         isinstance(client_runtime_context, dict)
         and str(client_runtime_context.get("surface") or "") == "odysseus-tui"
         and "manage_skills" in set(_relevant_tools or ())
-        and re.search(r"\b(?:skill|skills|tdd)\b", _last_user, re.IGNORECASE)
+        and _rx(r"\b(?:skill|skills|tdd)\b", re.IGNORECASE).search(_last_user)
         and tool_policy
         and not tool_policy.block_all_tool_calls
     ):
@@ -23572,7 +21206,7 @@ async def stream_agent_loop(
     if (
         isinstance(client_runtime_context, dict)
         and str(client_runtime_context.get("surface") or "") == "odysseus-tui"
-        and re.search(r"\b(?:skill|skills|tdd)\b", _last_user, re.IGNORECASE)
+        and _rx(r"\b(?:skill|skills|tdd)\b", re.IGNORECASE).search(_last_user)
         and tool_policy
         and not tool_policy.block_all_tool_calls
     ):
@@ -23697,12 +21331,8 @@ async def stream_agent_loop(
             and _workspace_artifacts
             and (
                 bool(_declared_native_artifacts)
-                or re.search(
-                r"(?:\b(?:create|generate|save|write|render|export|produce|build|make)\b|"
-                r"创建|生成|保存|写入|写在|输出|放进|制作|截取|剪辑|拼接|导出)",
-                _last_user,
-                re.IGNORECASE,
-                )
+                or _rx(r"(?:\b(?:create|generate|save|write|render|export|produce|build|make)\b|"
+                r"创建|生成|保存|写入|写在|输出|放进|制作|截取|剪辑|拼接|导出)", re.IGNORECASE).search(_last_user)
             )
         )
         _html_artifact_requested = bool(
@@ -23728,12 +21358,8 @@ async def stream_agent_loop(
                 )
             ):
                 _artifact_tools.add("bash")
-            _named_online_document = bool(re.search(
-                r"https?://|\bPDFs?\b|\b(?:paper|report|study)\b[\s\S]{0,240}"
-                r"\b(?:table|benchmark|extract|scores?|metrics?)\b",
-                _last_user,
-                re.IGNORECASE,
-            ))
+            _named_online_document = bool(_rx(r"https?://|\bPDFs?\b|\b(?:paper|report|study)\b[\s\S]{0,240}"
+                r"\b(?:table|benchmark|extract|scores?|metrics?)\b", re.IGNORECASE).search(_last_user))
             if _named_online_document:
                 _artifact_tools.update(
                     {"web_search", "web_fetch", "pdf_extract"}
@@ -23755,7 +21381,7 @@ async def stream_agent_loop(
                 # script, so suppress bash only when the task has no local
                 # execution workflow.
                 if (
-                    re.search(r"https?://", _last_user, re.IGNORECASE)
+                    _rx(r"https?://", re.IGNORECASE).search(_last_user)
                     and "bash" not in _artifact_tools
                 ):
                     _relevant_tools.discard("bash")
@@ -23763,7 +21389,7 @@ async def stream_agent_loop(
                     logger.info(
                         "[agent-intent] URL-backed document artifact task prefers structured tools (combined web artifact task prefers structured tools); bash hidden"
                     )
-                elif re.search(r"https?://", _last_user, re.IGNORECASE):
+                elif _rx(r"https?://", re.IGNORECASE).search(_last_user):
                     logger.info(
                         "[agent-intent] URL-backed multi-artifact workflow retains bash for local execution"
                     )
@@ -23848,7 +21474,7 @@ async def stream_agent_loop(
                 _base_relevant_tools.difference_update(_non_provenance_tools)
                 _local_media_tools.difference_update(_non_provenance_tools)
             if (
-                not re.search(r"https?://", _last_user, re.IGNORECASE)
+                not _rx(r"https?://", re.IGNORECASE).search(_last_user)
                 and not _local_media_needs_web_lookup(_last_user)
             ):
                 _irrelevant_web_tools = set(WEB_TOOL_NAMES) | {
@@ -23869,7 +21495,7 @@ async def stream_agent_loop(
         # A named SSH target can be an SSH config alias or a friendly Cookbook
         # server name. Expose the resolver alongside bash so the model can
         # inspect the intended host instead of treating hardware specs as web.
-        if re.search(r"\bssh\s+(?:into\s+|to\s+)?[A-Za-z0-9][A-Za-z0-9_.:-]*\b", _last_user, re.IGNORECASE):
+        if _rx(r"\bssh\s+(?:into\s+|to\s+)?[A-Za-z0-9][A-Za-z0-9_.:-]*\b", re.IGNORECASE).search(_last_user):
             if "list_cookbook_servers" not in _hard_blocked_tools:
                 _relevant_tools.add("list_cookbook_servers")
                 _base_relevant_tools.add("list_cookbook_servers")
@@ -24184,7 +21810,7 @@ async def stream_agent_loop(
                     _local_media_tools.add("pdf_extract")
                 route_tools.update(_local_media_tools - set(disabled_tools))
                 if (
-                    not re.search(r"https?://", _last_user, re.IGNORECASE)
+                    not _rx(r"https?://", re.IGNORECASE).search(_last_user)
                     and not _local_media_needs_web_lookup(_last_user)
                 ):
                     _irrelevant_local_media_web_tools = set(WEB_TOOL_NAMES) | {
@@ -24251,7 +21877,7 @@ async def stream_agent_loop(
                 is_local_endpoint(candidate_url)
                 and (
                     _is_odysseus_qwen_model(candidate_model)
-                    or re.search(r"(?:qwen3\.5|qwen35)", str(candidate_model or ""), re.I)
+                    or _rx(r"(?:qwen3\.5|qwen35)", re.I).search(str(candidate_model or ""))
                 )
             )
             external_source = [
@@ -24379,11 +22005,7 @@ async def stream_agent_loop(
             and not plan_mode
             and not approved_plan
             and not guide_only
-            # The minimal fallback is only safe when no routed application
-            # tool needs its full contract. Previously this branch replaced
-            # the selected management/app surface with a tiny chat prompt,
-            # then cleared MCP schemas, so explicit skills/memory/task turns
-            # could be routed correctly but arrive at the model unavailable.
+            # The minimal fallback is only safe when no routed app tool needs its full contract.
             and not (
                 set(route_tools or ())
                 & {
@@ -24624,7 +22246,7 @@ async def stream_agent_loop(
         context_length,
         {k: round(v, 3) for k, v in prep_timings.items()},
     )
-    yield f"data: {json.dumps({'type': 'agent_prep', 'data': {k: round(v, 3) for k, v in prep_timings.items()}})}\n\n"
+    yield _sse({'type': 'agent_prep', 'data': {k: round(v, 3) for k, v in prep_timings.items()}})
 
     full_response = ""
     _preemptive_calendar_final_emitted = False
@@ -24723,17 +22345,13 @@ async def stream_agent_loop(
     _qwen_terminal_summary_completed = False
     _tui_test_request = bool(
         _tui_local_execution_turn
-        and re.search(
-            r"\btest\s+now\b|\b(?:run|execute|rerun|re-run)\b.{0,40}\b(?:tests?|test suite|pytest)\b",
-            _last_user,
-            re.IGNORECASE,
-        )
+        and _rx(r"\btest\s+now\b|\b(?:run|execute|rerun|re-run)\b.{0,40}\b(?:tests?|test suite|pytest)\b", re.IGNORECASE).search(_last_user)
     )
     _tui_test_completed = False
     _tui_test_summary_text = ""
     _tui_bash_block_request = bool(
         _tui_local_execution_turn
-        and re.search(r"\b(?:bash|shell)\s+block\b", _last_user, re.IGNORECASE)
+        and _rx(r"\b(?:bash|shell)\s+block\b", re.IGNORECASE).search(_last_user)
     )
     _tui_bash_block_completed = False
     _tui_bash_block_output = ""
@@ -24742,22 +22360,14 @@ async def stream_agent_loop(
         and not _tui_test_request
         and not _tui_bash_block_request
         and not _tui_local_network_turn
-        and re.search(
-            r"\b(?:local\s+project|local\s+repo|local\s+codebase|workspace|"
+        and _rx(r"\b(?:local\s+project|local\s+repo|local\s+codebase|workspace|"
             r"top[- ]level\s+files|project\s+files|current\s+directory|"
-            r"my\s+computer)\b",
-            _last_user,
-            re.IGNORECASE,
-        )
+            r"my\s+computer)\b", re.IGNORECASE).search(_last_user)
     )
     _tui_project_discovery_request = bool(
         _tui_local_execution_turn
-        and re.search(
-            r"\b(?:search|scan|find|look(?:\s+for|\s+up)?)\b.{0,40}"
-            r"\b(?:my\s+)?(?:local\s+)?(?:project|repo(?:sitory)?|codebase)s?\b",
-            _last_user,
-            re.IGNORECASE,
-        )
+        and _rx(r"\b(?:search|scan|find|look(?:\s+for|\s+up)?)\b.{0,40}"
+            r"\b(?:my\s+)?(?:local\s+)?(?:project|repo(?:sitory)?|codebase)s?\b", re.IGNORECASE).search(_last_user)
     )
     _tui_project_discovery_summary_text = ""
     _tui_local_network_summary_text = ""
@@ -24840,19 +22450,11 @@ async def stream_agent_loop(
         })
     _memory_lookup_turn = bool(
         "memory" in _intent_domains
-        and re.search(r"\b(?:search|find|look\s*up|list|show|view)\b", _last_user, re.IGNORECASE)
-        and not re.search(
-            r"\b(?:delete|remove|add|save|remember|edit|update)\b",
-            _last_user,
-            re.IGNORECASE,
-        )
+        and _rx(r"\b(?:search|find|look\s*up|list|show|view)\b", re.IGNORECASE).search(_last_user)
+        and not _rx(r"\b(?:delete|remove|add|save|remember|edit|update)\b", re.IGNORECASE).search(_last_user)
     )
     _memory_search_calls = 0
-    _explicit_memory_list = bool(re.search(
-        r"\b(?:list|show|view)\b.{0,20}\b(?:all\s+)?(?:saved\s+)?memories\b",
-        _last_user,
-        re.IGNORECASE,
-    ))
+    _explicit_memory_list = bool(_rx(r"\b(?:list|show|view)\b.{0,20}\b(?:all\s+)?(?:saved\s+)?memories\b", re.IGNORECASE).search(_last_user))
     # Supervisor: how many times we've nudged the model after it announced
     # an action without emitting the tool call. Capped to prevent a model
     # that *can't* call the tool from looping forever.
@@ -24950,8 +22552,7 @@ async def stream_agent_loop(
     # Match the common phrasings + an action verb that maps to an available
     # tool, so we don't nudge on harmless transitional text like "let me
     # know what you think".
-    _INTENT_RE = re.compile(
-        r"(?:^|\n|[.!?]\s+)\s*(?:but\s+)?(?:now\s+)?"
+    _INTENT_RE = _rx(r"(?:^|\n|[.!?]\s+)\s*(?:but\s+)?(?:now\s+)?"
         r"(?:let me|i'?ll(?:\s+need\s+to)?|i will|i need to|we need to|need to|"
         r"i['’]?m\s+(?:preparing|planning)\s+to|i am\s+(?:preparing|planning)\s+to|i can(?:\s+now)?|"
         r"i['’]?m|i am|i should|we should|i must|we must|going to|let's)\s+"
@@ -24963,9 +22564,7 @@ async def stream_agent_loop(
         r"register|adopt|list|search|scan|find|query|hit|ping|test|use|perform|do|"
         r"create|generate|write|edit|fix|correct|revise|rebuild|update|complete|finish|calculate|compute|plot|chart|save|export|render|"
         r"provide|give|state|report|answer|respond|summarize|conclude|explain|compare|cite|synthesize)"
-        r"\b[^.\n]{0,140}",
-        re.IGNORECASE,
-    )
+        r"\b[^.\n]{0,140}", re.IGNORECASE)
 
     def _looks_like_unfinished_action_promise(text: str) -> bool:
         """Catch a trailing action/answer promise without scanning old prose.
@@ -24987,11 +22586,8 @@ async def stream_agent_loop(
             return False
         if trailing.endswith(":"):
             return True
-        if re.search(
-            r"(?:^|[。！？\n]\s*)(?:我需要|需要先|让我|先|接下来(?:我)?(?:会|要)?).{0,12}"
-            r"(?:查看|检查|读取|分析|继续|使用|调用)",
-            trailing[-240:],
-        ):
+        if _rx(r"(?:^|[。！？\n]\s*)(?:我需要|需要先|让我|先|接下来(?:我)?(?:会|要)?).{0,12}"
+            r"(?:查看|检查|读取|分析|继续|使用|调用)").search(trailing[-240:]):
             return True
         match = _INTENT_RE.search(trailing)
         return bool(match and match.end() >= len(trailing) - 40)
@@ -25207,20 +22803,14 @@ async def stream_agent_loop(
             workspace=workspace,
         )
         if approval_matches:
-            yield (
-                "data: "
-                + json.dumps(
-                    {
-                        "type": "tool_start",
-                        "tool": approved.tool_name,
-                        "command": approved_display[:240],
-                        "full_command": approved_display,
-                        "round": 0,
-                        "approved": True,
-                    }
-                )
-                + "\n\n"
-            )
+            yield _sse({
+                "type": "tool_start",
+                "tool": approved.tool_name,
+                "command": approved_display[:240],
+                "full_command": approved_display,
+                "round": 0,
+                "approved": True,
+            })
         approved_progress_q: asyncio.Queue = asyncio.Queue()
 
         async def _push_approved_progress(payload):
@@ -25249,19 +22839,13 @@ async def stream_agent_loop(
                 progress_event = await approved_progress_q.get()
                 if progress_event is None:
                     break
-                yield (
-                    "data: "
-                    + json.dumps(
-                        {
-                            "type": "tool_progress",
-                            "tool": approved.tool_name,
-                            "round": 0,
-                            "approved": True,
-                            **progress_event,
-                        }
-                    )
-                    + "\n\n"
-                )
+                yield _sse({
+                    "type": "tool_progress",
+                    "tool": approved.tool_name,
+                    "round": 0,
+                    "approved": True,
+                    **progress_event,
+                })
             desc, approved_result = await approved_tool_task
         finally:
             if not approved_tool_task.done():
@@ -25272,13 +22856,7 @@ async def stream_agent_loop(
                     pass
         total_tool_calls += 1
 
-        _approved_payload = {}
-        try:
-            _decoded_approved = json.loads(approved.content or "{}")
-            if isinstance(_decoded_approved, dict):
-                _approved_payload = _decoded_approved
-        except (TypeError, ValueError, json.JSONDecodeError):
-            pass
+        _approved_payload = _json_object(approved.content)
         _approved_action = str(_approved_payload.get("action") or "").strip().lower()
         if not _approved_action:
             _approved_lines = str(approved.content or "").strip().splitlines()
@@ -25320,7 +22898,7 @@ async def stream_agent_loop(
                     # search is a title lookup for a pending delete. Older
                     # turns must not contaminate a later standalone search.
                     _user_history_text = _history_user_messages[-1]
-            if re.search(r"\b(?:delete|remove)\b", _user_history_text, re.IGNORECASE):
+            if _rx(r"\b(?:delete|remove)\b", re.IGNORECASE).search(_user_history_text):
                 _qwen_note_delete_title = str(
                     _approved_payload.get("title")
                     or _approved_payload.get("query")
@@ -25372,7 +22950,7 @@ async def stream_agent_loop(
                 for item in messages
                 if isinstance(item, dict) and item.get("role") == "user"
             )
-            if re.search(r"\b(?:delete|remove)\b", _user_history_text, re.IGNORECASE):
+            if _rx(r"\b(?:delete|remove)\b", re.IGNORECASE).search(_user_history_text):
                 _qwen_note_delete_title = str(_approved_payload["title"]).strip()
 
         if (
@@ -25435,40 +23013,24 @@ async def stream_agent_loop(
 
         if tool_result_is_successful(approved_result):
             for doc_event in _document_stream_events(approved_block):
-                yield f"data: {json.dumps(doc_event)}\n\n"
+                yield _sse(doc_event)
         if approved_result.get("action") == "suggest":
-            yield (
-                "data: "
-                + json.dumps(
-                    {
-                        "type": "doc_suggestions",
-                        "doc_id": approved_result.get("doc_id"),
-                        "suggestions": approved_result.get("suggestions", []),
-                    }
-                )
-                + "\n\n"
-            )
+            yield _sse({
+                "type": "doc_suggestions",
+                "doc_id": approved_result.get("doc_id"),
+                "suggestions": approved_result.get("suggestions", []),
+            })
         elif approved_result.get("doc_id") and approved_result.get("content") is not None:
-            yield (
-                "data: "
-                + json.dumps(
-                    {
-                        "type": "doc_update",
-                        "doc_id": approved_result["doc_id"],
-                        "title": approved_result.get("title", ""),
-                        "language": approved_result.get("language", ""),
-                        "content": approved_result.get("content", ""),
-                        "version": approved_result.get("version", 1),
-                    }
-                )
-                + "\n\n"
-            )
+            yield _sse({
+                "type": "doc_update",
+                "doc_id": approved_result["doc_id"],
+                "title": approved_result.get("title", ""),
+                "language": approved_result.get("language", ""),
+                "content": approved_result.get("content", ""),
+                "version": approved_result.get("version", 1),
+            })
         if approved_result.get("ui_event"):
-            yield (
-                "data: "
-                + json.dumps({"type": "ui_control", "data": approved_result})
-                + "\n\n"
-            )
+            yield _sse({"type": "ui_control", "data": approved_result})
 
         approved_output = str(
             approved_result.get("output")
@@ -25527,7 +23089,7 @@ async def stream_agent_loop(
             approved_event["screenshot"] = (
                 f"data:{approved_image['mimeType']};base64,{approved_image['data']}"
             )
-        yield "data: " + json.dumps(approved_event) + "\n\n"
+        yield _sse(approved_event)
         if approved.tool_name == "host_shell" and _is_host_bridge_failure_result(approved_result):
             # Approval continuations are new HTTP requests, so the normal
             # per-turn bridge-failure flag does not survive from the original
@@ -25535,11 +23097,7 @@ async def stream_agent_loop(
             # router propose the same action and repeat the approval prompt.
             _bridge_response = _host_bridge_failure_response()
             full_response = _bridge_response
-            yield (
-                "data: "
-                + json.dumps({"type": "final_response", "content": _bridge_response})
-                + "\n\n"
-            )
+            yield _sse({"type": "final_response", "content": _bridge_response})
             _approved_read_completed = True
             _approved_result_injected = True
         elif not tool_result_is_successful(approved_result) and (
@@ -25563,36 +23121,26 @@ async def stream_agent_loop(
                 f"{_approval_error}"
             )
             full_response = _approval_response
-            yield (
-                "data: "
-                + json.dumps({"type": "final_response", "content": _approval_response})
-                + "\n\n"
-            )
+            yield _sse({"type": "final_response", "content": _approval_response})
             _approved_read_completed = True
             _approved_result_injected = True
         if approved_result.get("image_url"):
-            yield (
-                "data: "
-                + json.dumps(
-                    {
-                        "type": "generated_image",
-                        "url": approved_result["image_url"],
-                        **{
-                            key: approved_result[key]
-                            for key in (
-                                "image_url",
-                                "image_id",
-                                "image_prompt",
-                                "image_model",
-                                "image_size",
-                                "image_quality",
-                            )
-                            if key in approved_result
-                        },
-                    }
-                )
-                + "\n\n"
-            )
+            yield _sse({
+                "type": "generated_image",
+                "url": approved_result["image_url"],
+                **{
+                    key: approved_result[key]
+                    for key in (
+                        "image_url",
+                        "image_id",
+                        "image_prompt",
+                        "image_model",
+                        "image_size",
+                        "image_quality",
+                    )
+                    if key in approved_result
+                },
+            })
 
         approved_research_id = approved_result.get("research_session_id")
         if approved_research_id:
@@ -25600,7 +23148,7 @@ async def stream_agent_loop(
                 f"\n\n[Open in Deep Research](#research-{approved_research_id})\n"
             )
             full_response += approved_anchor
-            yield "data: " + json.dumps({"delta": approved_anchor}) + "\n\n"
+            yield _sse({"delta": approved_anchor})
         approved_note_id = approved_result.get("note_id")
         if approved_note_id and approved.tool_name == "manage_notes":
             approved_note_title = str(
@@ -25615,7 +23163,7 @@ async def stream_agent_loop(
                 f"\n\n[{approved_note_label}](#note-{approved_note_id})\n"
             )
             full_response += approved_anchor
-            yield "data: " + json.dumps({"delta": approved_anchor}) + "\n\n"
+            yield _sse({"delta": approved_anchor})
 
         approved_tool_event = {
             "round": 0,
@@ -25679,7 +23227,7 @@ async def stream_agent_loop(
             # is already rendered as its own approval card. On the approval
             # continuation replace that draft instead of appending
             # "Done." to it (which produced "Allow ...?Done.").
-            yield 'data: ' + json.dumps({"type": "final_response", "content": "Done."}) + "\n\n"
+            yield _sse({"type": "final_response", "content": "Done."})
             _approved_effectful_completed = True
             _approved_result_injected = True
         _approved_terminal_summary = ""
@@ -25720,11 +23268,7 @@ async def stream_agent_loop(
             full_response = _approved_terminal_summary
             # Replace the pending approval question with the authoritative
             # read result on the continuation stream.
-            yield (
-                'data: '
-                + json.dumps({"type": "final_response", "content": _approved_terminal_summary})
-                + "\n\n"
-            )
+            yield _sse({"type": "final_response", "content": _approved_terminal_summary})
             _approved_read_completed = True
         _approved_result_injected = True
 
@@ -25757,11 +23301,7 @@ async def stream_agent_loop(
             round_endpoint_labels.append(actual_endpoint_label)
             time_to_first_token = time.time() - total_start
             _awaiting_user = True
-            yield (
-                "data: "
-                + json.dumps({"type": "final_response", "content": full_response})
-                + "\n\n"
-            )
+            yield _sse({"type": "final_response", "content": full_response})
             logger.info("[agent] web-disabled request completed without model call")
             break
         round_response = ""
@@ -25851,14 +23391,8 @@ async def stream_agent_loop(
                     | _acquisition_mutation_floor
                 )
 
-        # A tool-heavy turn can grow past the context budget after the first
-        # round even when the original request fit comfortably.  The initial
-        # route is compacted during route construction, but subsequent rounds
-        # used to rely on trimming alone.  Prepare a deferred compaction for
-        # every later round so the active coding task survives large diffs,
-        # test logs, and host-shell output.  It is persisted only when the
-        # selected candidate emits a model event, just like initial fallback
-        # compaction.
+        # Later rounds can outgrow the context budget, so prepare a deferred compaction for each
+        # one; it persists only when the candidate emits a model event.
         _round_compaction_state: Dict = {}
         if round_num > 1:
             _round_compaction_options = (
@@ -25893,12 +23427,11 @@ async def stream_agent_loop(
             round_models.append(actual_model)
             round_endpoint_ids.append(actual_endpoint_id)
             round_endpoint_labels.append(actual_endpoint_label)
-            yield f'data: {json.dumps({"delta": _bridge_response})}\n\n'
+            yield _sse({"delta": _bridge_response})
             break
 
         if _web_fetch_needs_private_browser and "private_browser" not in disabled_tools:
             if _relevant_tools is None:
-                from src.tool_index import ALWAYS_AVAILABLE
                 _relevant_tools = set(ALWAYS_AVAILABLE)
             _relevant_tools.update({"web_search", "web_fetch", "private_browser"})
         if _private_browser_needs_static_fallback:
@@ -25918,7 +23451,6 @@ async def stream_agent_loop(
             and not _private_browser_needs_static_fallback
         ):
             if _relevant_tools is None:
-                from src.tool_index import ALWAYS_AVAILABLE
                 _relevant_tools = set(ALWAYS_AVAILABLE)
             _relevant_tools.update({"web_search", "web_fetch", "private_browser"})
         if normalized_external_tool_schemas and not guide_only:
@@ -25955,12 +23487,7 @@ async def stream_agent_loop(
                 if _artifact_mutation_only_mode
                 else ()
             )
-            # Direct source-media tasks may also declare a textual companion
-            # (for example answer.txt or timestamp.txt).  Preserve its
-            # provenance-safe writer at the schema boundary from the initial
-            # route onward; previously this was enabled only after entering
-            # recovery, causing valid write_file calls to be dropped before
-            # recovery could even begin.
+            # Keep the provenance-safe writer for a declared text companion (answer.txt) from the first route.
             _source_companion_tools = _source_media_text_companion_recovery_tools(
                 _workspace_artifacts,
                 recovery_active=True,
@@ -26082,7 +23609,7 @@ async def stream_agent_loop(
             tool_schema_chars=len(json.dumps(all_tool_schemas or [], sort_keys=True)),
         )
         logger.info("[agent-routing-audit] %s", json.dumps(_routing_audit, sort_keys=True))
-        yield f'data: {json.dumps(_routing_audit)}\n\n'
+        yield _sse(_routing_audit)
 
         # Once a fallback produces substantive output, keep that exact route
         # pinned for every later tool round instead of retrying the primary.
@@ -26182,14 +23709,8 @@ async def stream_agent_loop(
                 request_messages,
                 candidate_tools,
             )
-            # Once a verified artifact has triggered the one-shot finish
-            # nudge, a normal final response can be short.  The first response
-            # after that nudge is also the only permitted evidence-based
-            # correction, however, and may need to rewrite a complete HTML or
-            # SVG artifact.  Do not cap that response at 2048 tokens: a large
-            # native write call would be truncated into invalid JSON and the
-            # model would loop on rejected retries.  Once the correction has
-            # itself been verified, the convergence response remains bounded.
+            # The one correction after the finish nudge may rewrite a whole artifact, so
+            # only cap output once that correction has been seen.
             if _artifact_finish_nudge_sent and _artifact_finish_correction_seen:
                 candidate_max_tokens = min(candidate_max_tokens, 2048)
             state["max_tokens"] = candidate_max_tokens
@@ -26378,12 +23899,8 @@ async def stream_agent_loop(
                     if not _ask_question:
                         _ask_question = "What exact date should I use?"
                         _ask_payload["question"] = _ask_question
-                    yield (
-                        "data: "
-                        + json.dumps({"type": "final_response", "content": _ask_question})
-                        + "\n\n"
-                    )
-                    yield f"data: {json.dumps({'type': 'ask_user', 'data': _ask_payload})}\n\n"
+                    yield _sse({"type": "final_response", "content": _ask_question})
+                    yield _sse({'type': 'ask_user', 'data': _ask_payload})
                     tool_events.append({
                         "round": round_num,
                         "model": _round_actual_model,
@@ -26430,18 +23947,14 @@ async def stream_agent_loop(
                 and _preemptive_calendar_action in {"list", "list_events"}
             ):
                 _preemptive_block = ToolBlock("manage_calendar", _preemptive_calendar_content)
-                yield (
-                    "data: "
-                    + json.dumps({
-                        "type": "tool_start",
-                        "tool": "manage_calendar",
-                        "command": _preemptive_calendar_content,
-                        "full_command": _preemptive_calendar_content,
-                        "round": round_num,
-                        "fallback": "preemptive_calendar_lookup",
-                    })
-                    + "\n\n"
-                )
+                yield _sse({
+                    "type": "tool_start",
+                    "tool": "manage_calendar",
+                    "command": _preemptive_calendar_content,
+                    "full_command": _preemptive_calendar_content,
+                    "round": round_num,
+                    "fallback": "preemptive_calendar_lookup",
+                })
                 try:
                     _preemptive_desc, _preemptive_result = await execute_tool_block(
                         _preemptive_block,
@@ -26492,7 +24005,7 @@ async def stream_agent_loop(
                     _preemptive_tool_output["events"] = _preemptive_result.get("events")
                 if isinstance(_preemptive_result, dict) and _preemptive_result.get("error_category") == "tool_execution_error":
                     _preemptive_tool_output["error_category"] = "tool_execution_error"
-                yield f"data: {json.dumps(_preemptive_tool_output)}\n\n"
+                yield _sse(_preemptive_tool_output)
                 _preemptive_tool_event = {
                     "round": round_num,
                     "model": _round_actual_model,
@@ -26531,7 +24044,7 @@ async def stream_agent_loop(
                 round_models.append(_round_actual_model)
                 round_endpoint_ids.append(_round_actual_endpoint_id)
                 round_endpoint_labels.append(_round_actual_endpoint_label)
-                yield f'data: {json.dumps({"type": "final_response", "content": full_response})}\n\n'
+                yield _sse({"type": "final_response", "content": full_response})
                 _preemptive_calendar_final_emitted = True
                 _finalize_round_usage()
                 logger.info("[agent] completed preemptive calendar lookup")
@@ -26630,18 +24143,14 @@ async def stream_agent_loop(
             ):
                 _preemptive_tool, _preemptive_content = _preemptive_explicit_request
                 _preemptive_block = ToolBlock(_preemptive_tool, _preemptive_content)
-                yield (
-                    "data: "
-                    + json.dumps({
-                        "type": "tool_start",
-                        "tool": _preemptive_tool,
-                        "command": _preemptive_content,
-                        "full_command": _preemptive_content,
-                        "round": round_num,
-                        "fallback": "preemptive_explicit_admin_session",
-                    })
-                    + "\n\n"
-                )
+                yield _sse({
+                    "type": "tool_start",
+                    "tool": _preemptive_tool,
+                    "command": _preemptive_content,
+                    "full_command": _preemptive_content,
+                    "round": round_num,
+                    "fallback": "preemptive_explicit_admin_session",
+                })
                 try:
                     _preemptive_desc, _preemptive_result = await execute_tool_block(
                         _preemptive_block,
@@ -26690,7 +24199,7 @@ async def stream_agent_loop(
                 }
                 if isinstance(_preemptive_result, dict) and _preemptive_result.get("error_category") == "tool_execution_error":
                     _preemptive_tool_output["error_category"] = "tool_execution_error"
-                yield f"data: {json.dumps(_preemptive_tool_output)}\n\n"
+                yield _sse(_preemptive_tool_output)
                 _preemptive_tool_event = {
                     "round": round_num,
                     "model": _round_actual_model,
@@ -26726,12 +24235,7 @@ async def stream_agent_loop(
                     else None
                 )
                 if _topic_bulk_preemptive_request:
-                    try:
-                        _preemptive_search_args = json.loads(_preemptive_content or "{}")
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        _preemptive_search_args = {}
-                    if not isinstance(_preemptive_search_args, dict):
-                        _preemptive_search_args = {}
+                    _preemptive_search_args = _json_object(_preemptive_content)
                     _topic_bulk_blocks = _email_bulk_blocks_from_search_output(
                         _preemptive_output,
                         action=str(_topic_bulk_preemptive_request.get("action") or ""),
@@ -26752,18 +24256,14 @@ async def stream_agent_loop(
                         full_response = "Matching emails were found, but the bulk email tool is disabled."
                     else:
                         for _topic_bulk_block in _topic_bulk_blocks:
-                            yield (
-                                "data: "
-                                + json.dumps({
-                                    "type": "tool_start",
-                                    "tool": _topic_bulk_block.tool_type,
-                                    "command": _topic_bulk_block.content,
-                                    "full_command": _topic_bulk_block.content,
-                                    "round": round_num,
-                                    "fallback": "preemptive_topic_bulk_email",
-                                })
-                                + "\n\n"
-                            )
+                            yield _sse({
+                                "type": "tool_start",
+                                "tool": _topic_bulk_block.tool_type,
+                                "command": _topic_bulk_block.content,
+                                "full_command": _topic_bulk_block.content,
+                                "round": round_num,
+                                "fallback": "preemptive_topic_bulk_email",
+                            })
                             try:
                                 _topic_bulk_desc, _topic_bulk_result = await execute_tool_block(
                                     _topic_bulk_block,
@@ -26797,22 +24297,18 @@ async def stream_agent_loop(
                                     or _topic_bulk_result.get("error")
                                     or ""
                                 )
-                            yield (
-                                "data: "
-                                + json.dumps({
-                                    "type": "tool_output",
-                                    "tool": _topic_bulk_block.tool_type,
-                                    "command": _topic_bulk_block.content,
-                                    "output": _truncate(_topic_bulk_output),
-                                    "exit_code": (
-                                        _topic_bulk_result.get("exit_code")
-                                        if isinstance(_topic_bulk_result, dict)
-                                        else None
-                                    ),
-                                    "fallback": "preemptive_topic_bulk_email",
-                                })
-                                + "\n\n"
-                            )
+                            yield _sse({
+                                "type": "tool_output",
+                                "tool": _topic_bulk_block.tool_type,
+                                "command": _topic_bulk_block.content,
+                                "output": _truncate(_topic_bulk_output),
+                                "exit_code": (
+                                    _topic_bulk_result.get("exit_code")
+                                    if isinstance(_topic_bulk_result, dict)
+                                    else None
+                                ),
+                                "fallback": "preemptive_topic_bulk_email",
+                            })
                             _topic_bulk_event = {
                                 "round": round_num,
                                 "model": _round_actual_model,
@@ -26851,7 +24347,7 @@ async def stream_agent_loop(
                     round_endpoint_ids.append(_round_actual_endpoint_id)
                     round_endpoint_labels.append(_round_actual_endpoint_label)
                     if full_response.strip():
-                        yield f"data: {json.dumps({'type': 'final_response', 'content': full_response})}\n\n"
+                        yield _sse({'type': 'final_response', 'content': full_response})
                     _finalize_round_usage()
                     logger.info(
                         "[agent] completed preemptive topic bulk email action=%s",
@@ -26893,7 +24389,7 @@ async def stream_agent_loop(
                 )
                 _active_route_state["request_messages"] = _snapshot_messages
                 _last_route_request_messages = _snapshot_messages
-            yield "data: " + json.dumps({
+            yield _sse({
                 "type": "model_request_snapshot",
                 **_model_request_snapshot(
                     round_num=round_num,
@@ -26910,7 +24406,7 @@ async def stream_agent_loop(
                         else "agent"
                     ),
                 ),
-            }) + "\n\n"
+            })
         async for chunk in stream_llm_with_fallback(
             _candidates,
             messages,
@@ -27039,18 +24535,15 @@ async def stream_agent_loop(
                         "provider error: %s",
                         _artifact_labels,
                     )
-                    yield f'data: {json.dumps({"type": "final_response", "content": full_response})}\n\n'
+                    yield _sse({"type": "final_response", "content": full_response})
                     return
                 if _web_search_completed and _last_web_search_output:
                     _finalize_round_usage(include_empty=False)
-                    full_response = _web_search_safety_touch_hygiene_postprocess(
+                    full_response = _web_search_answer_from_evidence(
                         _web_search_user_text,
-                        _web_search_answer_from_evidence(
-                            _web_search_user_text,
-                            _last_web_search_output,
-                        ),
+                        _last_web_search_output,
                     )
-                    yield f'data: {json.dumps({"type": "final_response", "content": full_response})}\n\n'
+                    yield _sse({"type": "final_response", "content": full_response})
                     return
                 # A provider error is never authority for the harness to run a
                 # tool itself. The model owns query formulation and tool choice;
@@ -27064,18 +24557,14 @@ async def stream_agent_loop(
                         _web_search_user_text or _last_user,
                     )
                     _fallback_command = _web_search_query_from_block(_fallback_block)
-                    yield (
-                        "data: "
-                        + json.dumps({
-                            "type": "tool_start",
-                            "tool": "web_search",
-                            "command": _fallback_command,
-                            "full_command": _fallback_command,
-                            "round": round_num,
-                            "fallback": "provider_empty_public_web_lookup",
-                        })
-                        + "\n\n"
-                    )
+                    yield _sse({
+                        "type": "tool_start",
+                        "tool": "web_search",
+                        "command": _fallback_command,
+                        "full_command": _fallback_command,
+                        "round": round_num,
+                        "fallback": "provider_empty_public_web_lookup",
+                    })
                     try:
                         _fallback_desc, _fallback_result = await execute_tool_block(
                             _fallback_block,
@@ -27106,102 +24595,19 @@ async def stream_agent_loop(
                         or _fallback_result.get("error")
                         or ""
                     )
-                    yield (
-                        "data: "
-                        + json.dumps({
-                            "type": "tool_output",
-                            "tool": "web_search",
-                            "command": _fallback_command,
-                            "output": _truncate(_fallback_output),
-                            "exit_code": _fallback_result.get("exit_code"),
-                        })
-                        + "\n\n"
-                    )
+                    yield _sse({
+                        "type": "tool_output",
+                        "tool": "web_search",
+                        "command": _fallback_command,
+                        "output": _truncate(_fallback_output),
+                        "exit_code": _fallback_result.get("exit_code"),
+                    })
                     if not _fallback_result.get("error") and _fallback_output:
-                        _combined_fallback_output = _fallback_output
-                        if (
-                            not _web_search_fuel_euro_conversion_answer(
-                                _web_search_user_text or _last_user,
-                                _combined_fallback_output,
-                            )
-                            and re.search(r"\b(?:euro|euros|eur)\b|€", _web_search_user_text or _last_user, re.IGNORECASE)
-                            and re.search(r"\b(?:gas|gasoline|petrol|fuel|diesel)\b", _web_search_user_text or _last_user, re.IGNORECASE)
-                            and re.search(r"\b(?:\$|USD|NOK|kr)\b", _fallback_output, re.IGNORECASE)
-                        ):
-                            _fx_terms = ["EUR exchange rate"]
-                            if re.search(r"\b(?:\$|USD)\b", _fallback_output, re.IGNORECASE):
-                                _fx_terms.append("USD EUR")
-                            if re.search(r"\b(?:NOK|kr)\b", _fallback_output, re.IGNORECASE):
-                                _fx_terms.append("NOK EUR")
-                            _fx_query = " ".join(dict.fromkeys(_fx_terms))
-                            _fx_block = ToolBlock("web_search", _fx_query)
-                            yield (
-                                "data: "
-                                + json.dumps({
-                                    "type": "tool_start",
-                                    "tool": "web_search",
-                                    "command": _fx_query,
-                                    "full_command": _fx_query,
-                                    "round": round_num,
-                                    "fallback": "provider_empty_public_web_lookup_fx_recovery",
-                                })
-                                + "\n\n"
-                            )
-                            try:
-                                _fx_desc, _fx_result = await execute_tool_block(
-                                    _fx_block,
-                                    session_id=session_id,
-                                    disabled_tools=set(disabled_tools) | _caller_hard_denials,
-                                    tool_policy=tool_policy,
-                                    owner=owner,
-                                    workspace=workspace,
-                                    security_context=run_security,
-                                    active_document_id=(
-                                        getattr(active_document, "id", None)
-                                        if active_document is not None
-                                        else None
-                                    ),
-                                    client_runtime_context=client_runtime_context,
-                                )
-                            except Exception as _fx_exc:
-                                logger.warning("[agent] provider-error web FX fallback failed: %s", _fx_exc)
-                                _fx_result = {
-                                    "error": str(_fx_exc),
-                                    "exit_code": 1,
-                                    "output": "",
-                                }
-                            _fx_output = str(
-                                _fx_result.get("output")
-                                or _fx_result.get("results")
-                                or _fx_result.get("stdout")
-                                or _fx_result.get("error")
-                                or ""
-                            )
-                            yield (
-                                "data: "
-                                + json.dumps({
-                                    "type": "tool_output",
-                                    "tool": "web_search",
-                                    "command": _fx_query,
-                                    "output": _truncate(_fx_output),
-                                    "exit_code": _fx_result.get("exit_code"),
-                                })
-                                + "\n\n"
-                            )
-                            if not _fx_result.get("error") and _fx_output:
-                                _combined_fallback_output = _fallback_output + "\n\n" + _fx_output
-                        full_response = _web_search_safety_touch_hygiene_postprocess(
+                        full_response = _web_search_answer_from_evidence(
                             _web_search_user_text or _last_user,
-                            _web_search_answer_from_evidence(
-                                _web_search_user_text or _last_user,
-                                _combined_fallback_output,
-                            ),
+                            _fallback_output,
                         )
-                        full_response = _web_search_requested_unit_postprocess(
-                            _web_search_user_text or _last_user,
-                            full_response,
-                        )
-                        yield f'data: {json.dumps({"type": "final_response", "content": full_response})}\n\n'
+                        yield _sse({"type": "final_response", "content": full_response})
                         return
                 if full_response.strip() or round_reasoning.strip() or tool_events or round_texts:
                     _finalize_round_usage(include_empty=False)
@@ -27243,7 +24649,7 @@ async def stream_agent_loop(
                         terminal_metadata["endpoint_cost_tracked"] = (
                             actual_endpoint_cost_tracked
                         )
-                    yield f'data: {json.dumps({"type": "agent_terminal", "data": terminal_metadata})}\n\n'
+                    yield _sse({"type": "agent_terminal", "data": terminal_metadata})
                 if not full_response.strip():
                     # Some clients render terminal metadata as diagnostics only
                     # and otherwise leave the assistant bubble blank. Always
@@ -27259,12 +24665,9 @@ async def stream_agent_loop(
                     if _mutation_events:
                         _failure_text = _tui_coding_failure_summary(tool_events)
                     elif _web_search_completed and _last_web_search_output:
-                        _failure_text = _web_search_safety_touch_hygiene_postprocess(
+                        _failure_text = _web_search_answer_from_evidence(
                             _web_search_user_text,
-                            _web_search_answer_from_evidence(
-                                _web_search_user_text,
-                                _last_web_search_output,
-                            ),
+                            _last_web_search_output,
                         )
                     else:
                         _failure_text = (
@@ -27274,7 +24677,7 @@ async def stream_agent_loop(
                             if _workspace_read_requires_mutation
                             else "The model provider returned no usable output. No workspace change was made."
                         )
-                    yield f'data: {json.dumps({"type": "final_response", "content": _failure_text})}\n\n'
+                    yield _sse({"type": "final_response", "content": _failure_text})
                 # A terminal provider/request failure is not a completed Agent
                 # round.  Stop before empty-response synthesis, metrics,
                 # teacher escalation, post-processing, or a success [DONE].
@@ -27296,7 +24699,7 @@ async def stream_agent_loop(
                         continue
                     elif data.get("type") == "tool_calls":
                         if _apply_candidate_compaction(candidate_index):
-                            yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length})}\n\n'
+                            yield _sse({"type": "compacted", "context_length": _last_route_context_length})
                         native_tool_calls = data.get("calls", [])
                         logger.info(f"Agent round {round_num}: received {len(native_tool_calls)} native tool call(s)")
                     elif data.get("type") == "usage":
@@ -27417,19 +24820,19 @@ async def stream_agent_loop(
                                     )
                             data["pinned_for_run"] = True
                         if _apply_candidate_compaction(candidate_index):
-                            yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length})}\n\n'
+                            yield _sse({"type": "compacted", "context_length": _last_route_context_length})
                         _round_actual_model = data.get("answered_by") or model
                         _round_actual_endpoint_id = actual_endpoint_id
                         _round_actual_endpoint_label = actual_endpoint_label
                         data["round"] = round_num
                         logger.warning(f"[agent] round {round_num} fell back: "
                                        f"{data.get('selected_model')} -> {data.get('answered_by')}")
-                        yield f"data: {json.dumps(data)}\n\n"
+                        yield _sse(data)
                     elif data.get("type") == "model_actual":
                         if _apply_candidate_compaction(
                             candidate_index if isinstance(candidate_index, int) else 0
                         ):
-                            yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length})}\n\n'
+                            yield _sse({"type": "compacted", "context_length": _last_route_context_length})
                         actual_model = data.get("model") or actual_model
                         _round_actual_model = data.get("model") or _round_actual_model
                         data["requested_model"] = requested_model
@@ -27438,15 +24841,15 @@ async def stream_agent_loop(
                         data["endpoint_id"] = _round_actual_endpoint_id
                         data["endpoint_label"] = _round_actual_endpoint_label
                         data["round"] = round_num
-                        yield f"data: {json.dumps(data)}\n\n"
+                        yield _sse(data)
                     elif data.get("type") == "model_response_ref":
                         data["round"] = round_num
-                        yield f"data: {json.dumps(data)}\n\n"
+                        yield _sse(data)
                     elif "delta" in data:
                         if _apply_candidate_compaction(
                             candidate_index if isinstance(candidate_index, int) else 0
                         ):
-                            yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length})}\n\n'
+                            yield _sse({"type": "compacted", "context_length": _last_route_context_length})
                         _suppress_unavailable_web_delta = bool(
                             _web_search_unavailable_turn and not data.get("thinking")
                         )
@@ -27526,11 +24929,11 @@ async def stream_agent_loop(
                             )
                             if data.get("thinking") or not _qwen_buffered_route:
                                 data["round"] = round_num
-                                yield f"data: {json.dumps(data)}\n\n"
+                                yield _sse(data)
                             elif _force_answer and _private_browser_catalog_ready:
                                 _qwen_round_streamed_live = True
                                 data["round"] = round_num
-                                yield f"data: {json.dumps(data)}\n\n"
+                                yield _sse(data)
                             else:
                                 _next_qwen_visible = _incremental_qwen_visible_text(
                                     round_response
@@ -27550,11 +24953,11 @@ async def stream_agent_loop(
                                         _live_data = dict(data)
                                         _live_data["delta"] = _live_delta
                                         _live_data["round"] = round_num
-                                        yield f"data: {json.dumps(_live_data)}\n\n"
+                                        yield _sse(_live_data)
                     elif data.get("error"):
                         err_msg = data.get("error", "unknown")
                         logger.error(f"Agent round {round_num}: stream error: {err_msg}")
-                        yield f'data: {json.dumps({"delta": chr(10) + chr(10) + "*[Stream error: " + str(err_msg) + "]*"})}\n\n'
+                        yield _sse({"delta": chr(10) + chr(10) + "*[Stream error: " + str(err_msg) + "]*"})
                 except json.JSONDecodeError:
                     if round_num == 1:
                         yield chunk
@@ -27646,7 +25049,7 @@ async def stream_agent_loop(
         _malformed_native_tool_names = set(
             _resolution_audit["requested_not_accepted"]
         )
-        yield f'data: {json.dumps(_resolution_audit)}\n\n'
+        yield _sse(_resolution_audit)
         if _unoffered_web_search_should_synthesize(
             _resolution_audit["requested_not_accepted"],
             accepted_tools=_accepted_tool_names,
@@ -27663,7 +25066,7 @@ async def stream_agent_loop(
                     "URLs present in the retrieved evidence."
                 ),
             })
-            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+            yield _sse({"type": "agent_step", "round": round_num + 1})
             continue
         _malformed_write_missing = (
             tuple(
@@ -27757,16 +25160,12 @@ async def stream_agent_loop(
                     _malformed_target,
                     len(_malformed_body),
                 )
-                yield (
-                    "data: "
-                    + json.dumps({
-                        "type": "artifact_body_handoff",
-                        "reason": "malformed_write",
-                        "round": round_num,
-                        "path": _malformed_target,
-                    })
-                    + "\n\n"
-                )
+                yield _sse({
+                    "type": "artifact_body_handoff",
+                    "reason": "malformed_write",
+                    "round": round_num,
+                    "path": _malformed_target,
+                })
         _required_read = _required_safe_read_operation(turn_contract)
         if (
             _required_read is not None
@@ -27780,7 +25179,7 @@ async def stream_agent_loop(
             _required_block, _required_limit = _required_read
             _required_call_id = _required_read_native_id(_required_block, native_tool_calls)
             _required_call_id = _required_call_id or f"required-read-{round_num}"
-            yield f'data: {json.dumps({"type": "tool_start", "tool": _required_block.tool_type, "command": _required_block.content, "full_command": _required_block.content, "round": round_num, "call_id": _required_call_id})}\n\n'
+            yield _sse({"type": "tool_start", "tool": _required_block.tool_type, "command": _required_block.content, "full_command": _required_block.content, "round": round_num, "call_id": _required_call_id})
             _required_desc, _required_result, _required_answer = await _dispatch_required_safe_read(
                 _required_read,
                 session_id=session_id, disabled_tools=set(disabled_tools) | _caller_hard_denials,
@@ -27802,14 +25201,14 @@ async def stream_agent_loop(
                 "exit_code": _required_result.get("exit_code", 0 if _required_answer else 1),
                 "call_id": _required_call_id,
             })
-            yield f'data: {json.dumps({"type": "tool_output", **tool_events[-1]})}\n\n'
+            yield _sse({"type": "tool_output", **tool_events[-1]})
             # A rejected/failed read must not claim completion or fall back to
             # another family. Surface it once, without a mutation-capable retry.
             full_response = _required_answer or (
                 f"I couldn't complete the required read: {_required_result.get('error') or 'the tool failed'}."
             )
             round_texts.append(full_response)
-            yield f'data: {json.dumps({"type": "final_response", "content": full_response, "render_owner": "structured", "replacement_scope": "turn"})}\n\n'
+            yield _sse({"type": "final_response", "content": full_response, "render_owner": "structured", "replacement_scope": "turn"})
             _required_metrics = _compute_final_metrics(
                 _last_route_request_messages, full_response, time.time() - _t0,
                 time_to_first_token, _last_route_context_length,
@@ -27824,7 +25223,7 @@ async def stream_agent_loop(
                 "required_operation_succeeded": bool(_required_answer),
                 "render_owner": "structured", "replacement_scope": "turn",
             })
-            yield f'data: {json.dumps({"type": "metrics", "data": _required_metrics})}\n\n'
+            yield _sse({"type": "metrics", "data": _required_metrics})
             yield 'data: [DONE]\n\n'
             return
         if _terminal_completion_contract:
@@ -27876,10 +25275,7 @@ async def stream_agent_loop(
                 ).evaluate()
                 _prose_missing = tuple(_prose_evidence.missing_artifacts)
                 _prose_candidate = _strip_think_blocks(round_response).strip()
-                _prose_is_fenced_body = bool(re.fullmatch(
-                    r"```(?:[\w.+-]+)?\s*\n[\s\S]*?\n```",
-                    _prose_candidate,
-                ))
+                _prose_is_fenced_body = bool(_rx(r"```(?:[\w.+-]+)?\s*\n[\s\S]*?\n```").fullmatch(_prose_candidate))
                 _prose_artifact_body = _artifact_body_from_synthesis(
                     _prose_candidate
                 )
@@ -27958,17 +25354,13 @@ async def stream_agent_loop(
                         _artifact_followthrough_deferrals,
                         _missing,
                     )
-                    yield (
-                        "data: "
-                        + json.dumps({
-                            "type": "loop_breaker_triggered",
-                            "reason": "artifact_recovery_unoffered_tool",
-                            "round": round_num,
-                            "attempt": _artifact_followthrough_deferrals,
-                        })
-                        + "\n\n"
-                    )
-                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    yield _sse({
+                        "type": "loop_breaker_triggered",
+                        "reason": "artifact_recovery_unoffered_tool",
+                        "round": round_num,
+                        "attempt": _artifact_followthrough_deferrals,
+                    })
+                    yield _sse({"type": "agent_step", "round": round_num + 1})
                     continue
                 logger.warning(
                     "[agent] suppressed unoffered post-recovery native tool call; "
@@ -27976,18 +25368,14 @@ async def stream_agent_loop(
                     _artifact_followthrough_deferrals,
                     _missing,
                 )
-                yield (
-                    "data: "
-                    + json.dumps({
-                        "type": "completion_blocked",
-                        "reason": "artifact_mutation_required",
-                        "round": round_num,
-                        "attempt": _artifact_followthrough_deferrals,
-                        "decision": _dropped_followthrough_evidence.to_dict(),
-                    })
-                    + "\n\n"
-                )
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({
+                    "type": "completion_blocked",
+                    "reason": "artifact_mutation_required",
+                    "round": round_num,
+                    "attempt": _artifact_followthrough_deferrals,
+                    "decision": _dropped_followthrough_evidence.to_dict(),
+                })
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
         if _terminal_completion_contract and tool_blocks:
             _recovered_terminal_blocks = [
@@ -28215,13 +25603,13 @@ async def stream_agent_loop(
         elif (
             _explicit_recurring_task_request
             and "manage_tasks" not in disabled_tools
-            and not re.search(r"\b(?:calendar|events?|meeting|appointment|reservation)\b", _last_user, re.IGNORECASE)
+            and not _rx(r"\b(?:calendar|events?|meeting|appointment|reservation)\b", re.IGNORECASE).search(_last_user)
         ):
             _qwen_explicit_tool, _qwen_explicit_args = _explicit_recurring_task_request
         elif (
             _explicit_task_state_request
             and "manage_tasks" not in disabled_tools
-            and re.search(r"\b(?:tasks?|reminders?|scheduled\s+tasks?)\b", _last_user, re.IGNORECASE)
+            and _rx(r"\b(?:tasks?|reminders?|scheduled\s+tasks?)\b", re.IGNORECASE).search(_last_user)
         ):
             _qwen_explicit_tool = _explicit_task_state_request.tool_type
             _qwen_explicit_args = _explicit_task_state_request.content
@@ -28234,7 +25622,7 @@ async def stream_agent_loop(
         elif (
             _explicit_memory_add_text
             and "manage_memory" not in disabled_tools
-            and re.search(r"\b(?:remember\s+this|remember\s+that|save\s+this\s+as\s+(?:a\s+)?memory|add\s+to\s+memory)\b", _last_user, re.IGNORECASE)
+            and _rx(r"\b(?:remember\s+this|remember\s+that|save\s+this\s+as\s+(?:a\s+)?memory|add\s+to\s+memory)\b", re.IGNORECASE).search(_last_user)
         ):
             _qwen_explicit_tool = "manage_memory"
             _qwen_explicit_args = "add\n" + _explicit_memory_add_text
@@ -28247,7 +25635,7 @@ async def stream_agent_loop(
         elif (
             _explicit_skill_request
             and "manage_skills" not in disabled_tools
-            and re.search(r"\b(?:skills?)\b", _last_user, re.IGNORECASE)
+            and _rx(r"\b(?:skills?)\b", re.IGNORECASE).search(_last_user)
         ):
             _qwen_explicit_tool = "manage_skills"
             _qwen_explicit_args = json.dumps(_explicit_skill_request)
@@ -28280,7 +25668,7 @@ async def stream_agent_loop(
             (_explicit_spam_scan_pre := _parse_qwen_explicit_spam_scan_request(_last_user))
             and "mcp__email__scan_spam" not in disabled_tools
         ):
-            if re.search(r"\b(?:again|re-?scan|repeat)\b", _last_user, re.IGNORECASE):
+            if _rx(r"\b(?:again|re-?scan|repeat)\b", re.IGNORECASE).search(_last_user):
                 _prior_spam_candidates = _recent_spam_candidates_from_tool_context(messages)
                 if _prior_spam_candidates:
                     _explicit_spam_scan_pre["folder"] = str(
@@ -28360,11 +25748,7 @@ async def stream_agent_loop(
             _active_email_reply_text = (
                 _extract_followup_content_update(_last_user)
                 if _is_email_document_obj(active_document)
-                and re.search(
-                    r"\b(?:write|reply|respond|response|draft|compose|say|saying|tell them|tell her|tell him)\b",
-                    _last_user,
-                    re.IGNORECASE,
-                )
+                and _rx(r"\b(?:write|reply|respond|response|draft|compose|say|saying|tell them|tell her|tell him)\b", re.IGNORECASE).search(_last_user)
                 else ""
             )
             if _active_email_reply_text:
@@ -28396,7 +25780,7 @@ async def stream_agent_loop(
                 _qwen_explicit_tool, _qwen_explicit_args = _explicit_calendar_request
             elif (
                 _explicit_recurring_task_request
-                and not re.search(r"\b(?:calendar|events?|meeting|appointment|reservation)\b", _last_user, re.IGNORECASE)
+                and not _rx(r"\b(?:calendar|events?|meeting|appointment|reservation)\b", re.IGNORECASE).search(_last_user)
             ):
                 _qwen_explicit_tool, _qwen_explicit_args = _explicit_recurring_task_request
             elif _explicit_download_attachment_request:
@@ -28554,17 +25938,13 @@ async def stream_agent_loop(
                 _qwen_explicit_args = json.dumps(_explicit_skill_request)
             elif (
                 not _qwen_skills_tool_completed
-                and re.search(r"\b(?:skill|skills|tdd|procedures?)\b", _last_user, re.IGNORECASE)
-                and re.search(r"\b(?:available|list|show|view)\b", _last_user, re.IGNORECASE)
+                and _rx(r"\b(?:skill|skills|tdd|procedures?)\b", re.IGNORECASE).search(_last_user)
+                and _rx(r"\b(?:available|list|show|view)\b", re.IGNORECASE).search(_last_user)
             ):
                 _qwen_explicit_tool = "manage_skills"
                 _qwen_explicit_args = '{"action":"list"}'
-            elif re.search(
-                r"\b(?:search|find)\b.{0,40}\b(?:prior|past|previous)\s+"
-                r"(?:chat|conversation|session)s?\b",
-                _last_user,
-                re.IGNORECASE,
-            ):
+            elif _rx(r"\b(?:search|find)\b.{0,40}\b(?:prior|past|previous)\s+"
+                r"(?:chat|conversation|session)s?\b", re.IGNORECASE).search(_last_user):
                 _qwen_explicit_tool = "search_chats"
                 _qwen_explicit_args = _last_user
             elif (
@@ -28625,11 +26005,7 @@ async def stream_agent_loop(
             and all(block.tool_type in {"scan_spam", "mcp__email__scan_spam"} for block in tool_blocks)
             and any(
                 _resolved_tool_event_name(event) in {"scan_spam", "mcp__email__scan_spam"}
-                and not re.search(
-                    r"\b(?:failed|error|connection refused)\b",
-                    str(event.get("output") or ""),
-                    re.IGNORECASE,
-                )
+                and not _rx(r"\b(?:failed|error|connection refused)\b", re.IGNORECASE).search(str(event.get("output") or ""))
                 and any(
                     _tool_block_matches_event_args(block, event)
                     for block in tool_blocks
@@ -28732,7 +26108,7 @@ async def stream_agent_loop(
             if (
                 _qwen_explicit_tool == "ui_control"
                 and _tool_block_action(_qwen_explicit_args) == "open_panel"
-                and re.search(r"\bopen_panel\s+skills\b", _qwen_explicit_args, re.IGNORECASE)
+                and _rx(r"\bopen_panel\s+skills\b", re.IGNORECASE).search(_qwen_explicit_args)
                 and "manage_skills" not in disabled_tools
             ):
                 tool_blocks.append(ToolBlock("manage_skills", json.dumps({"action": "list"})))
@@ -29074,7 +26450,7 @@ async def stream_agent_loop(
                         ),
                     })
                     if _tui_invalid_tool_nudges <= 2:
-                        yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                        yield _sse({"type": "agent_step", "round": round_num + 1})
                         continue
                     _force_answer = True
         if (
@@ -29202,7 +26578,7 @@ async def stream_agent_loop(
                 ),
             })
             if _tui_invalid_tool_nudges <= 2:
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
             _force_answer = True
 
@@ -29264,23 +26640,11 @@ async def stream_agent_loop(
                 native_tool_calls = []
                 used_native = False
         _qwen_registry_list_tool = None
-        if _qwen38_tool_router and re.search(
-            r"\b(?:list|show|view)\b.{0,30}\b(?:chat\s+)?sessions?\b",
-            _last_user,
-            re.IGNORECASE,
-        ):
+        if _qwen38_tool_router and _rx(r"\b(?:list|show|view)\b.{0,30}\b(?:chat\s+)?sessions?\b", re.IGNORECASE).search(_last_user):
             _qwen_registry_list_tool = "list_sessions"
-        elif _qwen38_tool_router and re.search(
-            r"\b(?:list|show|view)\b.{0,30}\b(?:my\s+)?contacts?\b",
-            _last_user,
-            re.IGNORECASE,
-        ):
+        elif _qwen38_tool_router and _rx(r"\b(?:list|show|view)\b.{0,30}\b(?:my\s+)?contacts?\b", re.IGNORECASE).search(_last_user):
             _qwen_registry_list_tool = "manage_contact"
-        elif _qwen38_tool_router and re.search(
-            r"\b(?:list|show|view)\b.{0,30}\b(?:saved\s+)?(?:research|reports?)\b",
-            _last_user,
-            re.IGNORECASE,
-        ):
+        elif _qwen38_tool_router and _rx(r"\b(?:list|show|view)\b.{0,30}\b(?:saved\s+)?(?:research|reports?)\b", re.IGNORECASE).search(_last_user):
             _qwen_registry_list_tool = "manage_research"
         if _qwen_registry_list_tool and tool_blocks and not _qwen_explicit_tool:
             # The small router occasionally emits search_chats with an empty
@@ -29395,7 +26759,7 @@ async def stream_agent_loop(
                             "State clearly when the requested item was not found."
                         ),
                     })
-                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    yield _sse({"type": "agent_step", "round": round_num + 1})
                     continue
 
         if _compact_memory_list_turn and tool_blocks:
@@ -29412,13 +26776,7 @@ async def stream_agent_loop(
                     if _idx < len(converted_calls):
                         _compact_filtered_calls.append(converted_calls[_idx])
                     continue
-                _compact_action = ""
-                try:
-                    _compact_args = json.loads(_block.content or "{}")
-                    if isinstance(_compact_args, dict):
-                        _compact_action = str(_compact_args.get("action") or "").lower()
-                except Exception:
-                    _compact_action = str(_block.content or "").strip().splitlines()[0].lower()
+                _compact_action = _tool_block_action(_block.content)
                 if _compact_action in {"list", "index"}:
                     _compact_dropped = True
                     continue
@@ -29450,13 +26808,7 @@ async def stream_agent_loop(
                     if _idx < len(converted_calls):
                         _document_filtered_calls.append(converted_calls[_idx])
                     continue
-                _document_action = ""
-                try:
-                    _document_args = json.loads(_block.content or "{}")
-                    if isinstance(_document_args, dict):
-                        _document_action = str(_document_args.get("action") or "").lower()
-                except Exception:
-                    _document_action = str(_block.content or "").strip().splitlines()[0].lower()
+                _document_action = _tool_block_action(_block.content)
                 if _document_action in {"list", "search", "find"}:
                     _document_dropped = True
                     continue
@@ -29480,10 +26832,7 @@ async def stream_agent_loop(
 
         if _ody_qwen_finetune_model and tool_blocks:
             _allowed_memory_write_actions = {"add", "edit", "update", "delete", "delete_all"}
-            _explicit_memory_browse = bool(re.search(
-                r"\b(search|list|show|open|view)\b.{0,40}\b(memories|memory|brain)\b",
-                _last_user.lower(),
-            ))
+            _explicit_memory_browse = bool(_rx(r"\b(search|list|show|open|view)\b.{0,40}\b(memories|memory|brain)\b").search(_last_user.lower()))
             _filtered_tool_blocks = []
             _filtered_converted_calls = []
             _dropped_memory_lookup = False
@@ -29502,10 +26851,7 @@ async def stream_agent_loop(
                     _action = ""
                 if _action in {"list", "search", "view", "get", "read"} and not _explicit_memory_browse:
                     _dropped_memory_lookup = True
-                elif _action in _allowed_memory_write_actions and re.search(
-                    r"\b(remember|forget|preference|prefer|save this about me|update memory|delete memory)\b",
-                    _last_user.lower(),
-                ):
+                elif _action in _allowed_memory_write_actions and _rx(r"\b(remember|forget|preference|prefer|save this about me|update memory|delete memory)\b").search(_last_user.lower()):
                     _filtered_tool_blocks.append(_block)
                     if _idx < len(converted_calls):
                         _filtered_converted_calls.append(converted_calls[_idx])
@@ -29528,7 +26874,7 @@ async def stream_agent_loop(
                             "saved memory facts already provided. Do not call manage_memory or any tool."
                         ),
                     })
-                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    yield _sse({"type": "agent_step", "round": round_num + 1})
                     continue
 
         # Search is a one-query lookup tool. Weak models sometimes issue a
@@ -29590,7 +26936,7 @@ async def stream_agent_loop(
                                 "answer or write artifacts until the requested source detail is loaded."
                             ),
                         })
-                        yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\\n\\n'
+                        yield _sse({"type": "agent_step", "round": round_num + 1})
                         continue
                     else:
                         _force_answer = True
@@ -29601,7 +26947,7 @@ async def stream_agent_loop(
                                 "Answer from the returned search results and do not search again."
                             ),
                         })
-                        yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                        yield _sse({"type": "agent_step", "round": round_num + 1})
                         continue
 
         # Detached host jobs are a hard continuation invariant. Apply this
@@ -29650,12 +26996,8 @@ async def stream_agent_loop(
                 _read_before_mutation_path,
             )
 
-        # If the loop breaker fired while a required artifact is still
-        # missing, keep this round actionable. The prior implementation
-        # removed all schemas above and then discarded the model's valid
-        # follow-up call, producing the M005-M008 failures seen in benchmark
-        # traces. Only artifact recovery gets this exception; ordinary
-        # conversational/error turns retain tool-free finalization.
+        # When the loop breaker fires with a required artifact still missing, keep the round
+        # actionable; other turns keep tool-free finalization.
         if _force_answer:
             _force_answer_missing = (
                 EvidenceLedger.from_tool_events(
@@ -29718,7 +27060,7 @@ async def stream_agent_loop(
                     # enter the tool-free synthesis path. Give the model one
                     # actionable recovery round with the preserved schemas.
                     round_response = ""
-                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    yield _sse({"type": "agent_step", "round": round_num + 1})
                     continue
                 if native_tool_calls:
                     # A mutation is the correction itself, not the bounded
@@ -29871,14 +27213,14 @@ async def stream_agent_loop(
                     except Exception as _e:
                         logger.warning(f"[agent] grace synthesis failed: {_e}")
                 if _synth:
-                    yield f'data: {json.dumps({"delta": _synth})}\n\n'
+                    yield _sse({"delta": _synth})
                     round_response += _synth
                     full_response += _synth
                 else:
                     _fb = ("I gathered some search results but couldn't pull a clean "
                            "answer together. Want me to try a more specific question, "
                            "or summarize what I did find?")
-                    yield f'data: {json.dumps({"delta": _fb})}\n\n'
+                    yield _sse({"delta": _fb})
                     round_response += _fb
                     full_response += _fb
 
@@ -29913,14 +27255,10 @@ async def stream_agent_loop(
                 "create_document",
                 f"{_svg_title}\nsvg\n{_oversized_svg}",
             ))
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "final_response",
-                    "content": "Opening the visual as a document...",
-                })
-                + "\n\n"
-            )
+            yield _sse({
+                "type": "final_response",
+                "content": "Opening the visual as a document...",
+            })
             logger.info(
                 "[agent] promoted oversized SVG to document title=%r chars=%d lines=%d",
                 _svg_title,
@@ -29928,13 +27266,8 @@ async def stream_agent_loop(
                 _oversized_svg.count("\n") + 1,
             )
 
-        # Save cleaned round text for history persistence
-        # Keep <think> blocks so they render in the thinking section on reload
-        # Mirror the same fenced-pattern gate used to resolve tool_blocks above:
-        # an illustrative fence that wasn't executed (because this is a native
-        # model with no real native_tool_calls) must not be stripped from the
-        # persisted text either — otherwise it streams once and then disappears
-        # on reload (#3222 follow-up).
+        # Keep <think> blocks for the thinking section on reload. Use the same fenced-pattern
+        # gate as tool resolution, so an unexecuted example fence is not stripped from history.
         cleaned_round = strip_tool_blocks(
             round_response,
             skip_fenced=(_is_api_model and not used_native and not guide_only),
@@ -30007,42 +27340,16 @@ async def stream_agent_loop(
                 or (_force_answer and _private_browser_catalog_ready)
             ),
         ):
-            yield f'data: {json.dumps({"delta": cleaned_round})}\n\n'
+            yield _sse({"delta": cleaned_round})
 
         _forced_notes_request = _parse_simple_notes_tool_request(_last_user)
         _has_notes_block = any(block.tool_type == "manage_notes" for block in tool_blocks)
-        _notes_definition_answer = _notes_general_definition_answer(_last_user)
-        if _notes_definition_answer and _has_notes_block and not guide_only:
-            if round_texts:
-                round_texts.pop()
-            if round_models:
-                round_models.pop()
-            if round_endpoint_ids:
-                round_endpoint_ids.pop()
-            if round_endpoint_labels:
-                round_endpoint_labels.pop()
-            full_response = _drop_rejected_round_response(full_response, cleaned_round)
-            cleaned_round = _notes_definition_answer
-            round_response = _notes_definition_answer
-            full_response = "\n".join(
-                part for part in [full_response.strip(), _notes_definition_answer] if part
-            ).strip()
-            round_texts.append(cleaned_round)
-            round_models.append(_round_actual_model)
-            round_endpoint_ids.append(_round_actual_endpoint_id)
-            round_endpoint_labels.append(_round_actual_endpoint_label)
-            tool_blocks = []
-            native_tool_calls = []
-            converted_calls = []
-            used_native = False
-            logger.info("[agent] suppressed manage_notes for general definition question")
-            yield f"data: {json.dumps({'type': 'final_response', 'content': full_response})}\n\n"
         _only_notes_panel_open = (
             bool(tool_blocks)
             and not _has_notes_block
             and all(
                 block.tool_type == "ui_control"
-                and re.search(r"\bopen_panel\s+notes\b", str(block.content or ""), re.IGNORECASE)
+                and _rx(r"\bopen_panel\s+notes\b", re.IGNORECASE).search(str(block.content or ""))
                 for block in tool_blocks
             )
         )
@@ -30068,12 +27375,7 @@ async def stream_agent_loop(
                 for block in tool_blocks:
                     if block.tool_type != "manage_notes":
                         continue
-                    try:
-                        _current_notes_args = json.loads(str(block.content or "{}"))
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        _current_notes_args = {}
-                    if not isinstance(_current_notes_args, dict):
-                        _current_notes_args = {}
+                    _current_notes_args = _json_object(block.content)
                     _current_notes_arg_list.append(_current_notes_args)
                 _current_notes_actions = {
                     str(args.get("action") or "").strip().lower()
@@ -30102,7 +27404,7 @@ async def stream_agent_loop(
                 if _forced_action in {"search", "find"} and _notes_body_requested(_last_user):
                     _forced_query_terms = [
                         term
-                        for term in re.findall(r"[a-z0-9]+", str(_forced_notes_args.get("query") or "").lower())
+                        for term in _rx(r"[a-z0-9]+").findall(str(_forced_notes_args.get("query") or "").lower())
                         if term not in {"the", "a", "an", "note", "notes", "checklist", "list", "todo", "todos"}
                     ]
                     _has_specific_locator_search = False
@@ -30141,14 +27443,7 @@ async def stream_agent_loop(
             and not guide_only
         ):
             _tool_name, _tool_args = _forced_notes_request
-            if round_texts:
-                round_texts.pop()
-            if round_models:
-                round_models.pop()
-            if round_endpoint_ids:
-                round_endpoint_ids.pop()
-            if round_endpoint_labels:
-                round_endpoint_labels.pop()
+            _pop_last_round(round_texts, round_models, round_endpoint_ids, round_endpoint_labels)
             full_response = _drop_rejected_round_response(full_response, cleaned_round)
             cleaned_round = ""
             round_response = ""
@@ -30191,14 +27486,7 @@ async def stream_agent_loop(
             & _LOCAL_MEDIA_EVIDENCE_TOOLS
         ):
             _local_media_source_nudge_sent = True
-            if round_texts:
-                round_texts.pop()
-            if round_models:
-                round_models.pop()
-            if round_endpoint_ids:
-                round_endpoint_ids.pop()
-            if round_endpoint_labels:
-                round_endpoint_labels.pop()
+            _pop_last_round(round_texts, round_models, round_endpoint_ids, round_endpoint_labels)
             full_response = _drop_rejected_round_response(
                 full_response,
                 cleaned_round,
@@ -30217,16 +27505,12 @@ async def stream_agent_loop(
             logger.info(
                 "[agent] blocked local-media answer without source evidence"
             )
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "source_evidence_required",
-                    "reason": "local_media_not_observed",
-                    "round": round_num,
-                })
-                + "\n\n"
-            )
-            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+            yield _sse({
+                "type": "source_evidence_required",
+                "reason": "local_media_not_observed",
+                "round": round_num,
+            })
+            yield _sse({"type": "agent_step", "round": round_num + 1})
             continue
 
         if not tool_blocks:
@@ -30251,20 +27535,16 @@ async def stream_agent_loop(
                             _artifact_no_action_rounds,
                             ", ".join(_no_action_evidence.missing_artifacts),
                         )
-                        yield (
-                            "data: "
-                            + json.dumps({
-                                "type": "loop_breaker_triggered",
-                                "reason": "artifact_recovery_no_action",
-                                "message": (
-                                    "Artifact recovery did not produce the required "
-                                    "workspace mutation, so the agent is being asked "
-                                    "to finish briefly instead of looping."
-                                ),
-                                "round": round_num,
-                            })
-                            + "\n\n"
-                        )
+                        yield _sse({
+                            "type": "loop_breaker_triggered",
+                            "reason": "artifact_recovery_no_action",
+                            "message": (
+                                "Artifact recovery did not produce the required "
+                                "workspace mutation, so the agent is being asked "
+                                "to finish briefly instead of looping."
+                            ),
+                            "round": round_num,
+                        })
                         messages.append({
                             "role": "system",
                             "content": (
@@ -30274,7 +27554,7 @@ async def stream_agent_loop(
                                 "could not be completed if it is still missing."
                             ),
                         })
-                        yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                        yield _sse({"type": "agent_step", "round": round_num + 1})
                         continue
                 else:
                     _artifact_no_action_rounds = 0
@@ -30293,14 +27573,7 @@ async def stream_agent_loop(
                 )
                 if _successful_media_inspections < 2:
                     _local_media_detail_nudge_sent = True
-                    if round_texts:
-                        round_texts.pop()
-                    if round_models:
-                        round_models.pop()
-                    if round_endpoint_ids:
-                        round_endpoint_ids.pop()
-                    if round_endpoint_labels:
-                        round_endpoint_labels.pop()
+                    _pop_last_round(round_texts, round_models, round_endpoint_ids, round_endpoint_labels)
                     full_response = _drop_rejected_round_response(full_response, cleaned_round)
                     cleaned_round = ""
                     round_response = ""
@@ -30314,11 +27587,8 @@ async def stream_agent_loop(
                         ),
                     })
                     logger.info("[agent] required a second focused inspection for detailed local-video QA")
-                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    yield _sse({"type": "agent_step", "round": round_num + 1})
                     continue
-            if cleaned_round and _notes_definition_answer:
-                logger.info("[agent] completed notes definition answer without tool execution")
-                break
             if (
                 cleaned_round
                 and _has_successful_calendar_list_evidence(tool_events)
@@ -30387,7 +27657,7 @@ async def stream_agent_loop(
                     "role": "system",
                     "content": _empty_action_directive,
                 })
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
             # An explicit request such as "edit X, then run ..." is not
             # complete merely because the mutation succeeded.  This bounded
@@ -30414,15 +27684,9 @@ async def stream_agent_loop(
                         + "Do not stop after the edit."
                     ),
                 })
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
-            # ── Completion verifier (mechanism 3a) ────────────────────
-            # The model is finishing. If this was an effectful agentic turn,
-            # have a fresh-context verifier independently check the work
-            # before we accept "done". On FAIL, surface the issues and let
-            # the model fix them (capped, and it must do new effectful work
-            # to re-trigger). Skipped on force-answer rounds (no tools to
-            # fix with), pure Q&A, and when the toggle is off.
+            # Before accepting "done" on an effectful turn, a fresh-context verifier checks the work.
             _claimed_done_text = _strip_think_blocks(cleaned_round).strip()
             _unfinished_action_promise = _looks_like_unfinished_action_promise(
                 _claimed_done_text
@@ -30496,18 +27760,14 @@ async def stream_agent_loop(
                                 None if _relevant_tools is None else set(_relevant_tools)
                             )
                         _artifact_mutation_only_mode = True
-                    yield (
-                        "data: "
-                        + json.dumps({
-                            "type": "completion_blocked",
-                            "round": round_num,
-                            "attempt": _evidence_repair_rounds,
-                            "decision": _round_decision.to_dict(),
-                        })
-                        + "\n\n"
-                    )
+                    yield _sse({
+                        "type": "completion_blocked",
+                        "round": round_num,
+                        "attempt": _evidence_repair_rounds,
+                        "decision": _round_decision.to_dict(),
+                    })
                     messages.append({"role": "system", "content": _repair_instruction})
-                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    yield _sse({"type": "agent_step", "round": round_num + 1})
                     continue
             if (_effectful_used and not _force_answer
                     and _claimed_done
@@ -30518,7 +27778,7 @@ async def stream_agent_loop(
                     # effectful turn. Opt-in via setting for strong models.
                     and get_setting("agent_verifier_subagent", False)):
                 # Brief "working" indicator while the verifier runs.
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num})}\n\n'
+                yield _sse({"type": "agent_step", "round": round_num})
                 _vfail = await _run_verifier_subagent(
                     _verifier_instruction,
                     _build_actions_snapshot(tool_events),
@@ -30528,7 +27788,7 @@ async def stream_agent_loop(
                     _verifier_rounds += 1
                     logger.info(f"[agent] verifier flagged {len(_vfail)} issue(s) on round {round_num}: {_vfail}")
                     _note = "\n\nAnd also...\n\n"
-                    yield f'data: {json.dumps({"delta": _note})}\n\n'
+                    yield _sse({"delta": _note})
                     full_response += _note
                     messages.append({
                         "role": "system",
@@ -30547,15 +27807,7 @@ async def stream_agent_loop(
                     # never re-verify an unchanged state in a loop.
                     _effectful_used = False
                     continue
-            # ── Intent-without-action supervisor ─────────────────────
-            # Catch "Let me tail the output" / "I'll check the logs" /
-            # "Let me investigate" patterns where the model announces an
-            # action but emits no tool_call. The bug shows up most on
-            # smaller models trained to verbalize plans before acting.
-            # We inject one sharp nudge ("you said you would X — call the
-            # actual tool now") and loop again. Capped at
-            # _MAX_INTENT_NUDGES so a model that genuinely cannot use the
-            # tool doesn't pin us in a forever loop.
+            # Nudge a model that announces an action ("Let me check the logs") but calls no tool.
             _intent_text = _strip_think_blocks(cleaned_round).strip()
             if (
                 _unattended_native_runtime
@@ -30564,14 +27816,7 @@ async def stream_agent_loop(
             ):
                 _unattended_final_nudge_sent = True
                 _force_answer = True
-                if round_texts:
-                    round_texts.pop()
-                if round_models:
-                    round_models.pop()
-                if round_endpoint_ids:
-                    round_endpoint_ids.pop()
-                if round_endpoint_labels:
-                    round_endpoint_labels.pop()
+                _pop_last_round(round_texts, round_models, round_endpoint_ids, round_endpoint_labels)
                 full_response = _drop_rejected_round_response(
                     full_response,
                     cleaned_round,
@@ -30600,7 +27845,7 @@ async def stream_agent_loop(
                 logger.info(
                     "[agent] unattended clarification replaced with final synthesis"
                 )
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
             _false_missing_tool = _false_unavailable_tool_claim(_intent_text, _relevant_tools)
             _state_tool, _state_actions = _state_manager_expected_action(
@@ -30624,14 +27869,7 @@ async def stream_agent_loop(
                 and not guide_only
             ):
                 _intent_nudge_count += 1
-                if round_texts:
-                    round_texts.pop()
-                if round_models:
-                    round_models.pop()
-                if round_endpoint_ids:
-                    round_endpoint_ids.pop()
-                if round_endpoint_labels:
-                    round_endpoint_labels.pop()
+                _pop_last_round(round_texts, round_models, round_endpoint_ids, round_endpoint_labels)
                 full_response = _drop_rejected_round_response(full_response, cleaned_round)
                 logger.info(
                     "[agent] active document mutation answered without editor tool evidence; nudging round %s",
@@ -30647,7 +27885,7 @@ async def stream_agent_loop(
                         "call `ask_user` once instead."
                     ),
                 })
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
             if (
                 _false_missing_tool
@@ -30656,14 +27894,7 @@ async def stream_agent_loop(
                 and not guide_only
             ):
                 _intent_nudge_count += 1
-                if round_texts:
-                    round_texts.pop()
-                if round_models:
-                    round_models.pop()
-                if round_endpoint_ids:
-                    round_endpoint_ids.pop()
-                if round_endpoint_labels:
-                    round_endpoint_labels.pop()
+                _pop_last_round(round_texts, round_models, round_endpoint_ids, round_endpoint_labels)
                 full_response = _drop_rejected_round_response(full_response, cleaned_round)
                 logger.info(
                     "[agent] false-unavailable tool claim for selected tool %s; nudging round %s",
@@ -30680,7 +27911,7 @@ async def stream_agent_loop(
                         "target or date is genuinely ambiguous, call ask_user once."
                     ),
                 })
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
             _forced_state_block = None
             if _state_tool == "manage_tasks":
@@ -30716,14 +27947,7 @@ async def stream_agent_loop(
                 )
                 and not guide_only
             ):
-                if round_texts:
-                    round_texts.pop()
-                if round_models:
-                    round_models.pop()
-                if round_endpoint_ids:
-                    round_endpoint_ids.pop()
-                if round_endpoint_labels:
-                    round_endpoint_labels.pop()
+                _pop_last_round(round_texts, round_models, round_endpoint_ids, round_endpoint_labels)
                 full_response = _drop_rejected_round_response(full_response, cleaned_round)
                 cleaned_round = ""
                 round_response = ""
@@ -30747,14 +27971,7 @@ async def stream_agent_loop(
                 and not guide_only
             ):
                 _intent_nudge_count += 1
-                if round_texts:
-                    round_texts.pop()
-                if round_models:
-                    round_models.pop()
-                if round_endpoint_ids:
-                    round_endpoint_ids.pop()
-                if round_endpoint_labels:
-                    round_endpoint_labels.pop()
+                _pop_last_round(round_texts, round_models, round_endpoint_ids, round_endpoint_labels)
                 full_response = _drop_rejected_round_response(full_response, cleaned_round)
                 logger.info(
                     "[agent] explicit %s request answered without matching tool evidence; nudging round %s",
@@ -30771,7 +27988,7 @@ async def stream_agent_loop(
                         "result."
                     ),
                 })
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
             if (
                 _calendar_lookup_requires_fresh_tool(
@@ -30786,14 +28003,7 @@ async def stream_agent_loop(
                 and not guide_only
             ):
                 _intent_nudge_count += 1
-                if round_texts:
-                    round_texts.pop()
-                if round_models:
-                    round_models.pop()
-                if round_endpoint_ids:
-                    round_endpoint_ids.pop()
-                if round_endpoint_labels:
-                    round_endpoint_labels.pop()
+                _pop_last_round(round_texts, round_models, round_endpoint_ids, round_endpoint_labels)
                 full_response = _drop_rejected_round_response(full_response, cleaned_round)
                 logger.info(
                     "[agent] calendar lookup answered without fresh manage_calendar list; nudging round %s",
@@ -30808,7 +28018,7 @@ async def stream_agent_loop(
                         "answer from that fresh tool result."
                     ),
                 })
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
             if (
                 _notes_request_requires_fresh_tool(_last_user, _intent_domains, _relevant_tools)
@@ -30820,14 +28030,7 @@ async def stream_agent_loop(
                 and not guide_only
             ):
                 _intent_nudge_count += 1
-                if round_texts:
-                    round_texts.pop()
-                if round_models:
-                    round_models.pop()
-                if round_endpoint_ids:
-                    round_endpoint_ids.pop()
-                if round_endpoint_labels:
-                    round_endpoint_labels.pop()
+                _pop_last_round(round_texts, round_models, round_endpoint_ids, round_endpoint_labels)
                 full_response = _drop_rejected_round_response(full_response, cleaned_round)
                 logger.info(
                     "[agent] notes request answered without matching manage_notes action; nudging round %s",
@@ -30844,7 +28047,7 @@ async def stream_agent_loop(
                         "delete for removals. Then answer from the fresh tool result."
                     ),
                 })
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
             # A weak model may treat a concrete task as a new conversation and
             # answer with "what would you like me to do?". That is not a real
@@ -30869,7 +28072,7 @@ async def stream_agent_loop(
                         "reasonable assumption and state it briefly."
                     ),
                 })
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
             if (
                 _fabricated_calendar_event_anchor_without_tool(_intent_text, _relevant_tools)
@@ -30885,14 +28088,7 @@ async def stream_agent_loop(
                 and not guide_only
             ):
                 _intent_nudge_count += 1
-                if round_texts:
-                    round_texts.pop()
-                if round_models:
-                    round_models.pop()
-                if round_endpoint_ids:
-                    round_endpoint_ids.pop()
-                if round_endpoint_labels:
-                    round_endpoint_labels.pop()
+                _pop_last_round(round_texts, round_models, round_endpoint_ids, round_endpoint_labels)
                 full_response = _drop_rejected_round_response(full_response, cleaned_round)
                 logger.info(
                     "[agent] rejected fabricated calendar event anchor without matching manage_calendar action; nudging round %s",
@@ -30911,7 +28107,7 @@ async def stream_agent_loop(
                         "as `list_calendars` is not enough for add, move, or delete."
                     ),
                 })
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
             if (
                 _artifact_recovery_enabled
@@ -30944,14 +28140,7 @@ async def stream_agent_loop(
                             None if _relevant_tools is None else set(_relevant_tools)
                         )
                     _artifact_mutation_only_mode = True
-                    if round_texts:
-                        round_texts.pop()
-                    if round_models:
-                        round_models.pop()
-                    if round_endpoint_ids:
-                        round_endpoint_ids.pop()
-                    if round_endpoint_labels:
-                        round_endpoint_labels.pop()
+                    _pop_last_round(round_texts, round_models, round_endpoint_ids, round_endpoint_labels)
                     full_response = _drop_rejected_round_response(
                         full_response,
                         _final_candidate_text,
@@ -30968,18 +28157,14 @@ async def stream_agent_loop(
                         _artifact_final_response_recoveries,
                         _missing,
                     )
-                    yield (
-                        "data: "
-                        + json.dumps({
-                            "type": "completion_blocked",
-                            "reason": "final_response_missing_artifacts",
-                            "round": round_num,
-                            "attempt": _artifact_final_response_recoveries,
-                            "decision": _final_evidence.to_dict(),
-                        })
-                        + "\n\n"
-                    )
-                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    yield _sse({
+                        "type": "completion_blocked",
+                        "reason": "final_response_missing_artifacts",
+                        "round": round_num,
+                        "attempt": _artifact_final_response_recoveries,
+                        "decision": _final_evidence.to_dict(),
+                    })
+                    yield _sse({"type": "agent_step", "round": round_num + 1})
                     continue
             _artifact_outputs_complete = bool(
                 _completion_requirements.required_artifacts
@@ -31015,10 +28200,7 @@ async def stream_agent_loop(
                 )
                 logger.info(f"[agent] intent-without-action nudge #{_intent_nudge_count} on round {round_num}: {_matched_phrase!r}")
                 _lower_phrase = _matched_phrase.lower()
-                _answer_promise = bool(re.search(
-                    r"\b(?:provide|give|state|report|answer|respond|summarize|conclude)\b",
-                    _lower_phrase,
-                ))
+                _answer_promise = bool(_rx(r"\b(?:provide|give|state|report|answer|respond|summarize|conclude)\b").search(_lower_phrase))
                 _cookbook_log_hint = ""
                 if any(_word in _lower_phrase for _word in ("log", "logs", "output", "tail", "status")):
                     _cookbook_log_hint = (
@@ -31067,7 +28249,7 @@ async def stream_agent_loop(
                     ),
                 })
                 # Visible signal in the stream so the user knows we caught it.
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
             if _looks_like_promise:
                 _intent_match = _INTENT_RE.search(_intent_text[-600:])
@@ -31083,14 +28265,7 @@ async def stream_agent_loop(
                 if _unattended_native_runtime and not _unattended_final_nudge_sent:
                     _unattended_final_nudge_sent = True
                     _force_answer = True
-                    if round_texts:
-                        round_texts.pop()
-                    if round_models:
-                        round_models.pop()
-                    if round_endpoint_ids:
-                        round_endpoint_ids.pop()
-                    if round_endpoint_labels:
-                        round_endpoint_labels.pop()
+                    _pop_last_round(round_texts, round_models, round_endpoint_ids, round_endpoint_labels)
                     full_response = _drop_rejected_round_response(
                         full_response,
                         cleaned_round,
@@ -31108,7 +28283,7 @@ async def stream_agent_loop(
                     logger.info(
                         "[agent] unattended intent nudge cap forced final synthesis"
                     )
-                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    yield _sse({"type": "agent_step", "round": round_num + 1})
                     continue
                 logger.warning(
                     "[agent] intent-without-action guard exhausted on round %d after %d nudges: %r",
@@ -31116,18 +28291,14 @@ async def stream_agent_loop(
                     _intent_nudge_count,
                     _matched_phrase,
                 )
-                yield (
-                    "data: "
-                    + json.dumps({
-                        "type": "intent_nudge_exhausted",
-                        "reason": "intent_without_action_nudge_cap",
-                        "message": _guard_message,
-                        "round": round_num,
-                        "nudges": _intent_nudge_count,
-                        "matched": _matched_phrase,
-                    })
-                    + "\n\n"
-                )
+                yield _sse({
+                    "type": "intent_nudge_exhausted",
+                    "reason": "intent_without_action_nudge_cap",
+                    "message": _guard_message,
+                    "round": round_num,
+                    "nudges": _intent_nudge_count,
+                    "matched": _matched_phrase,
+                })
                 break
             if (
                 not tool_blocks
@@ -31138,30 +28309,19 @@ async def stream_agent_loop(
                 and _web_evidence_recovery_rounds < 2
             ):
                 _web_evidence_recovery_rounds += 1
-                if round_texts:
-                    round_texts.pop()
-                if round_models:
-                    round_models.pop()
-                if round_endpoint_ids:
-                    round_endpoint_ids.pop()
-                if round_endpoint_labels:
-                    round_endpoint_labels.pop()
+                _pop_last_round(round_texts, round_models, round_endpoint_ids, round_endpoint_labels)
                 full_response = _drop_rejected_round_response(full_response, cleaned_round)
                 cleaned_round = ""
                 round_response = ""
                 instruction = _web_execution_budget.instruction()
                 messages.append({"role": "system", "content": instruction})
                 logger.info("[agent] web evidence recovery stage=%d", _web_evidence_recovery_rounds)
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
             if not tool_blocks:
                 break  # no tools — done
 
-        # ── Loop-breaker (Terminus-style stall detector) ──────────────
-        # Detailed video questions benefit from a second focused look, but
-        # unlimited distinct ranges are still a loop.  For answer-only local
-        # media tasks, stop after eight completed native inspections and ask
-        # the model to synthesize the evidence it already has.
+        # Answer-only local media tasks stop after eight completed inspections and synthesize.
         _completed_media_inspections = sum(
             1
             for event in tool_events
@@ -31217,7 +28377,7 @@ async def stream_agent_loop(
                     "State uncertainty briefly if a detail remains ambiguous."
                 ),
             })
-            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+            yield _sse({"type": "agent_step", "round": round_num + 1})
             continue
 
         # Distinct searches/reads with short prose preambles can evade the
@@ -31250,27 +28410,15 @@ async def stream_agent_loop(
                     )
                     _source_lookup_requested = bool(
                         _native_acquisition_tools
-                        and re.search(
-                            r"https?://|\b(?:pdf|paper|report|study|source|online)\b",
-                            _last_user,
-                            re.IGNORECASE,
-                        )
+                        and _rx(r"https?://|\b(?:pdf|paper|report|study|source|online)\b", re.IGNORECASE).search(_last_user)
                     )
                     _source_evidence_ready = _artifact_source_evidence_ready(
                         tool_events,
                         _last_user,
                     )
                     if _source_lookup_requested and not _source_evidence_ready:
-                        # Keep the native acquisition path alive. The old
-                        # branch narrowed to write/edit/apply_patch here even
-                        # when all six observations were only failed or
-                        # irrelevant searches, so subsequent web/PDF calls
-                        # were silently dropped and the task could never
-                        # produce its artifacts.
-                        # Snapshot the full pre-recovery surface before
-                        # narrowing it. Otherwise a successful fetch restores
-                        # only the three acquisition tools and the model's
-                        # required write/read follow-through is dropped.
+                        # Keep acquisition alive while source evidence is missing. Snapshot the
+                        # full surface first so a later successful fetch can restore it.
                         if _relevant_tools is not None:
                             _artifact_recovery_relevant_tools = set(_relevant_tools)
                         _artifact_acquisition_recovery_active = True
@@ -31299,18 +28447,14 @@ async def stream_agent_loop(
                                 "handing off to mutation recovery missing=%s",
                                 list(_observation_missing),
                             )
-                            yield (
-                                "data: "
-                                + json.dumps({
-                                    "type": "completion_blocked",
-                                    "reason": "artifact_source_recovery_budget",
-                                    "round": round_num,
-                                    "attempt": _artifact_completion_nudges,
-                                    "decision": _observation_evidence.to_dict(),
-                                })
-                                + "\n\n"
-                            )
-                            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                            yield _sse({
+                                "type": "completion_blocked",
+                                "reason": "artifact_source_recovery_budget",
+                                "round": round_num,
+                                "attempt": _artifact_completion_nudges,
+                                "decision": _observation_evidence.to_dict(),
+                            })
+                            yield _sse({"type": "agent_step", "round": round_num + 1})
                             continue
                         _artifact_mutation_tools = (
                             {
@@ -31340,17 +28484,13 @@ async def stream_agent_loop(
                             "preserving native acquisition tools=%s",
                             sorted(_native_acquisition_tools),
                         )
-                        yield (
-                            "data: "
-                            + json.dumps({
-                                "type": "completion_blocked",
-                                "reason": "artifact_source_evidence_missing",
-                                "round": round_num,
-                                "decision": _observation_evidence.to_dict(),
-                            })
-                            + "\n\n"
-                        )
-                        yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                        yield _sse({
+                            "type": "completion_blocked",
+                            "reason": "artifact_source_evidence_missing",
+                            "round": round_num,
+                            "decision": _observation_evidence.to_dict(),
+                        })
+                        yield _sse({"type": "agent_step", "round": round_num + 1})
                         continue
                     _artifact_completion_nudges += 1
                     if not _artifact_mutation_only_mode:
@@ -31370,18 +28510,14 @@ async def stream_agent_loop(
                         "missing; entering mutation recovery missing=%s",
                         _missing,
                     )
-                    yield (
-                        "data: "
-                        + json.dumps({
-                            "type": "completion_blocked",
-                            "reason": "artifact_observation_budget",
-                            "round": round_num,
-                            "attempt": _artifact_completion_nudges,
-                            "decision": _observation_evidence.to_dict(),
-                        })
-                        + "\n\n"
-                    )
-                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    yield _sse({
+                        "type": "completion_blocked",
+                        "reason": "artifact_observation_budget",
+                        "round": round_num,
+                        "attempt": _artifact_completion_nudges,
+                        "decision": _observation_evidence.to_dict(),
+                    })
+                    yield _sse({"type": "agent_step", "round": round_num + 1})
                     continue
 
         # Artifact tasks need a separate observation budget.  A model can make
@@ -31422,18 +28558,14 @@ async def stream_agent_loop(
                         _artifact_observation_only_rounds,
                         _missing,
                     )
-                    yield (
-                        "data: "
-                        + json.dumps({
-                            "type": "completion_blocked",
-                            "reason": "artifact_observation_budget",
-                            "round": round_num,
-                            "attempt": _artifact_completion_nudges,
-                            "decision": _observation_evidence.to_dict(),
-                        })
-                        + "\n\n"
-                    )
-                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    yield _sse({
+                        "type": "completion_blocked",
+                        "reason": "artifact_observation_budget",
+                        "round": round_num,
+                        "attempt": _artifact_completion_nudges,
+                        "decision": _observation_evidence.to_dict(),
+                    })
+                    yield _sse({"type": "agent_step", "round": round_num + 1})
                     continue
             else:
                 _artifact_observation_only_rounds = 0
@@ -31460,14 +28592,7 @@ async def stream_agent_loop(
             _calendar_completion_nudge_sent = True
             _force_answer = True
             full_response = _drop_rejected_round_response(full_response, cleaned_round)
-            if round_texts:
-                round_texts.pop()
-            if round_models:
-                round_models.pop()
-            if round_endpoint_ids:
-                round_endpoint_ids.pop()
-            if round_endpoint_labels:
-                round_endpoint_labels.pop()
+            _pop_last_round(round_texts, round_models, round_endpoint_ids, round_endpoint_labels)
             messages.append({
                 "role": "system",
                 "content": (
@@ -31477,7 +28602,7 @@ async def stream_agent_loop(
                 ),
             })
             logger.info("[agent] stopped post-calendar-completion read-only expansion")
-            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+            yield _sse({"type": "agent_step", "round": round_num + 1})
             continue
 
         # Stall detector for repeated no-progress tool loops.
@@ -31548,18 +28673,14 @@ async def stream_agent_loop(
                     "[agent] stalled with required artifacts missing; entering mutation recovery missing=%s",
                     _missing,
                 )
-                yield (
-                    "data: "
-                    + json.dumps({
-                        "type": "completion_blocked",
-                        "reason": "artifact_mutation_required",
-                        "round": round_num,
-                        "attempt": _artifact_completion_nudges,
-                        "decision": _stall_evidence.to_dict(),
-                    })
-                    + "\n\n"
-                )
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({
+                    "type": "completion_blocked",
+                    "reason": "artifact_mutation_required",
+                    "round": round_num,
+                    "attempt": _artifact_completion_nudges,
+                    "decision": _stall_evidence.to_dict(),
+                })
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
             reason = (
                 "repeating blocked-task status commands without new progress"
@@ -31571,21 +28692,17 @@ async def stream_agent_loop(
                 else "repeating the same tool calls without new progress"
             )
             logger.warning(f"[agent] loop-breaker tripped on round {round_num} ({reason}); sig={_sig[:80]!r}")
-            yield (
-                "data: "
-                    + json.dumps({
-                    "type": "loop_breaker_triggered",
-                    "reason": "loop_breaker_stall",
-                    "message": (
-                        "The loop-breaker detected repeated tool calls without "
-                        "new progress, so the agent is being forced to stop "
-                        "using tools and give its best final answer."
-                    ),
-                    "round": round_num,
-                    "detail": reason,
-                })
-                + "\n\n"
-            )
+            yield _sse({
+                "type": "loop_breaker_triggered",
+                "reason": "loop_breaker_stall",
+                "message": (
+                    "The loop-breaker detected repeated tool calls without "
+                    "new progress, so the agent is being forced to stop "
+                    "using tools and give its best final answer."
+                ),
+                "round": round_num,
+                "detail": reason,
+            })
             if _loop_breaker_force_answer_used:
                 _exhausted_rounds = True
                 logger.warning(
@@ -31615,7 +28732,7 @@ async def stream_agent_loop(
                 ),
             })
             full_response += "\n\n"
-            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+            yield _sse({"type": "agent_step", "round": round_num + 1})
             continue
 
         # Existing-file edits must make progress before verification. Compact
@@ -31660,7 +28777,7 @@ async def stream_agent_loop(
                         "an edit or patch. No file was changed."
                     )
                     logger.warning("[agent] stopped repeated pre-mutation verification")
-                    yield f'data: {json.dumps({"type": "final_response", "content": _blocked})}\n\n'
+                    yield _sse({"type": "final_response", "content": _blocked})
                     break
                 messages.append({
                     "role": "system",
@@ -31672,7 +28789,7 @@ async def stream_agent_loop(
                     ),
                 })
                 logger.info("[agent] deferred verification until workspace mutation")
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
 
         # Once the evidence ledger has explicitly redirected a terminal run to
@@ -31863,34 +28980,26 @@ async def stream_agent_loop(
                             _artifact_followthrough_deferrals,
                             _missing,
                         )
-                        yield (
-                            "data: "
-                            + json.dumps({
-                                "type": "loop_breaker_triggered",
-                                "reason": "artifact_recovery_inspection_limit",
-                                "round": round_num,
-                                "attempt": _artifact_followthrough_deferrals,
-                            })
-                            + "\n\n"
-                        )
-                        yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                        yield _sse({
+                            "type": "loop_breaker_triggered",
+                            "reason": "artifact_recovery_inspection_limit",
+                            "round": round_num,
+                            "attempt": _artifact_followthrough_deferrals,
+                        })
+                        yield _sse({"type": "agent_step", "round": round_num + 1})
                         continue
                     logger.warning(
                         "[agent] suppressed post-redirect inspection batch attempt=%d missing=%s",
                         _artifact_followthrough_deferrals,
                         _missing,
                     )
-                    yield (
-                        "data: "
-                        + json.dumps({
-                            "type": "completion_blocked",
-                            "reason": "artifact_mutation_required",
-                            "round": round_num,
-                            "attempt": _artifact_followthrough_deferrals,
-                            "decision": _followthrough_evidence.to_dict(),
-                        })
-                        + "\n\n"
-                    )
+                    yield _sse({
+                        "type": "completion_blocked",
+                        "reason": "artifact_mutation_required",
+                        "round": round_num,
+                        "attempt": _artifact_followthrough_deferrals,
+                        "decision": _followthrough_evidence.to_dict(),
+                    })
                     _artifact_recovery_message_list = _artifact_recovery_messages(
                         messages,
                         tool_events,
@@ -31994,16 +29103,12 @@ async def stream_agent_loop(
                                 _target,
                                 len(_artifact_body),
                             )
-                            yield (
-                                "data: "
-                                + json.dumps({
-                                    "type": "artifact_body_handoff",
-                                    "round": round_num,
-                                    "attempt": _artifact_body_handoff_attempts,
-                                    "path": _target,
-                                })
-                                + "\n\n"
-                            )
+                            yield _sse({
+                                "type": "artifact_body_handoff",
+                                "round": round_num,
+                                "attempt": _artifact_body_handoff_attempts,
+                                "path": _target,
+                            })
                         else:
                             messages = _artifact_recovery_message_list
                     else:
@@ -32019,7 +29124,7 @@ async def stream_agent_loop(
                     _stuck_rounds = 0
                     _blocked_status_rounds = 0
                     if not _artifact_action_ready:
-                        yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                        yield _sse({"type": "agent_step", "round": round_num + 1})
                         continue
 
         # Request-scoped environments own the complete tool contract. Keep a
@@ -32063,7 +29168,7 @@ async def stream_agent_loop(
                             "settings, model registries, or personal tools."
                         ),
                     })
-                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    yield _sse({"type": "agent_step", "round": round_num + 1})
                     continue
 
         # Explicit read-only email requests are a hard user boundary. Models
@@ -32098,7 +29203,7 @@ async def stream_agent_loop(
                             "tools. Finish with only the requested evidence and summary."
                         ),
                     })
-                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    yield _sse({"type": "agent_step", "round": round_num + 1})
                     continue
 
         # Execute each tool block
@@ -32112,7 +29217,7 @@ async def stream_agent_loop(
             _seen_tool_blocks: set[tuple[str, str]] = set()
             _repeated_successful_mutations = []
             for _idx, _block in enumerate(tool_blocks):
-                _sig = (_block.tool_type, re.sub(r"\s+", " ", (_block.content or "").strip()))
+                _sig = (_block.tool_type, _rx(r"\s+").sub(" ", (_block.content or "").strip()))
                 if _sig in _seen_tool_blocks:
                     logger.info("[agent] dropped duplicate tool call %s", _block.tool_type)
                     continue
@@ -32152,7 +29257,7 @@ async def stream_agent_loop(
                         "[agent] verified artifact received an identical rewrite; "
                         "forcing bounded final response"
                     )
-                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    yield _sse({"type": "agent_step", "round": round_num + 1})
                     continue
                 messages.append({
                     "role": "system",
@@ -32163,7 +29268,7 @@ async def stream_agent_loop(
                         "or summarize the verified result."
                     ),
                 })
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
 
         budget_hit = False
@@ -32197,7 +29302,7 @@ async def stream_agent_loop(
             if max_tool_calls > 0 and total_tool_calls >= max_tool_calls:
                 if _runtime_action is not None:
                     _runtime_action.finish({'blocked': True, 'exit_code': 1, 'error': 'tool budget exceeded'})
-                yield f'data: {json.dumps({"type": "budget_exceeded", "limit": max_tool_calls, "used": total_tool_calls})}\n\n'
+                yield _sse({"type": "budget_exceeded", "limit": max_tool_calls, "used": total_tool_calls})
                 budget_hit = True
                 break
             if (
@@ -32464,7 +29569,7 @@ async def stream_agent_loop(
                             )
                     _note_recent_update_followup = (
                         _looks_like_recent_reference(_last_user, "note")
-                        and re.search(r"\b(?:update|change|edit|replace)\b", _last_user, re.IGNORECASE)
+                        and _rx(r"\b(?:update|change|edit|replace)\b", re.IGNORECASE).search(_last_user)
                         and not _user_named_explicit_title(_last_user)
                     )
                     if _note_action in {"list", "lis"} and _note_query and not _note_recent_update_followup:
@@ -32640,7 +29745,7 @@ async def stream_agent_loop(
                         _refs = _recent_odysseus_anchor_refs(messages, history_session)
                         _recent_task_id = _refs.get("task_id")
                         if _recent_task_id:
-                            if _task_action == "list" and re.search(r"\b(?:update|change|edit)\b", _last_user, re.IGNORECASE):
+                            if _task_action == "list" and _rx(r"\b(?:update|change|edit)\b", re.IGNORECASE).search(_last_user):
                                 _task_args["action"] = "edit"
                                 _task_action = "edit"
                             elif _task_action == "update":
@@ -32712,19 +29817,11 @@ async def stream_agent_loop(
                             or ""
                         ).strip()
                         if not _title:
-                            _title_match = re.search(
-                                r"\bdocument\s+(?:titled|called|named)\s+(.+?)(?:\s+with\b|[.!?]\s*$|$)",
-                                _last_user,
-                                re.IGNORECASE,
-                            )
+                            _title_match = _rx(r"\bdocument\s+(?:titled|called|named)\s+(.+?)(?:\s+with\b|[.!?]\s*$|$)", re.IGNORECASE).search(_last_user)
                             if _title_match:
                                 _title = _title_match.group(1).strip(" .\"'")
                         if not _content:
-                            _content_match = re.search(
-                                r"\b(?:markdown\s+content|content|body|text)\s+(.+?)(?:[.!?]\s*)?$",
-                                _last_user,
-                                re.IGNORECASE,
-                            )
+                            _content_match = _rx(r"\b(?:markdown\s+content|content|body|text)\s+(.+?)(?:[.!?]\s*)?$", re.IGNORECASE).search(_last_user)
                             if _content_match:
                                 _content = _content_match.group(1).strip(" .\"'")
                         if _title and _content:
@@ -32773,9 +29870,9 @@ async def stream_agent_loop(
             if block.tool_type == "host_shell" and _tui_bash_block_request:
                 command_text = _tui_host_command_text(full_command)
                 if not (
-                    re.search(r"\bpwd\b", command_text)
-                    and re.search(r"\bwhoami\b", command_text)
-                    and re.search(r"\buname\b", command_text)
+                    _rx(r"\bpwd\b").search(command_text)
+                    and _rx(r"\bwhoami\b").search(command_text)
+                    and _rx(r"\buname\b").search(command_text)
                 ):
                     bash_command = _tui_local_fallback_shell_command(_last_user)
                     if bash_command:
@@ -32800,12 +29897,8 @@ async def stream_agent_loop(
 
             if block.tool_type == "host_shell" and _tui_test_request:
                 command_text = _tui_host_command_text(full_command)
-                if not re.search(
-                    r"(?:python(?:3(?:\.\d+)?)?\s+-m\s+pytest|\bpytest\b|npm\s+(?:run\s+)?test\b|"
-                    r"make\s+test\b|\bgo\s+test\b|cargo\s+test\b|No supported test runner)",
-                    command_text,
-                    re.IGNORECASE,
-                ):
+                if not _rx(r"(?:python(?:3(?:\.\d+)?)?\s+-m\s+pytest|\bpytest\b|npm\s+(?:run\s+)?test\b|"
+                    r"make\s+test\b|\bgo\s+test\b|cargo\s+test\b|No supported test runner)", re.IGNORECASE).search(command_text):
                     test_command = _tui_local_fallback_shell_command(_last_user)
                     if test_command:
                         logger.info(
@@ -32978,7 +30071,7 @@ async def stream_agent_loop(
                     if (
                         _calendar_action in {"", "list_events"}
                         and _looks_like_recent_reference(_last_user, "event")
-                        and re.search(r"\b(?:update|change|edit)\b", _last_user, re.IGNORECASE)
+                        and _rx(r"\b(?:update|change|edit)\b", re.IGNORECASE).search(_last_user)
                         and not _user_named_explicit_title(_last_user)
                     ):
                         _refs = _recent_odysseus_anchor_refs(messages, history_session)
@@ -33208,7 +30301,7 @@ async def stream_agent_loop(
                         "claim the requested command ran if the first command differed."
                     ),
                 })
-                yield f'data: {json.dumps({"type": "tool_retry_blocked", "reason": "user_bounded_single_execution", "tool": block.tool_type, "command": cmd_display, "round": round_num, **({"call_id": tool_call_id, "tool_call_id": tool_call_id} if tool_call_id else {})})}\n\n'
+                yield _sse({"type": "tool_retry_blocked", "reason": "user_bounded_single_execution", "tool": block.tool_type, "command": cmd_display, "round": round_num, **({"call_id": tool_call_id, "tool_call_id": tool_call_id} if tool_call_id else {})})
                 logger.info(
                     "[agent] blocked retry forbidden by user for %s",
                     block.tool_type,
@@ -33232,7 +30325,7 @@ async def stream_agent_loop(
                         "tools; finish with a concise confirmation of the verified result."
                     ),
                 })
-                yield f'data: {json.dumps({"type": "tool_retry_blocked", "reason": "repeated_successful_mutation", "tool": block.tool_type, "command": cmd_display, "round": round_num, **({"call_id": tool_call_id, "tool_call_id": tool_call_id} if tool_call_id else {})})}\n\n'
+                yield _sse({"type": "tool_retry_blocked", "reason": "repeated_successful_mutation", "tool": block.tool_type, "command": cmd_display, "round": round_num, **({"call_id": tool_call_id, "tool_call_id": tool_call_id} if tool_call_id else {})})
                 logger.info(
                     "[agent] blocked post-normalization repeated successful mutation %s",
                     block.tool_type,
@@ -33299,7 +30392,7 @@ async def stream_agent_loop(
                     "blocked": True,
                     "policy": "repeated_read_only_call",
                 }
-                yield f'data: {json.dumps({"type": "tool_retry_blocked", "reason": "repeated_read_only_call", "tool": block.tool_type, "command": cmd_display, "round": round_num, "previous_round": _prior_round, **({"call_id": tool_call_id, "tool_call_id": tool_call_id} if tool_call_id else {})})}\n\n'
+                yield _sse({"type": "tool_retry_blocked", "reason": "repeated_read_only_call", "tool": block.tool_type, "command": cmd_display, "round": round_num, "previous_round": _prior_round, **({"call_id": tool_call_id, "tool_call_id": tool_call_id} if tool_call_id else {})})
                 logger.info(
                     "[agent] blocked redundant read-only call %s from round %s at mutation epoch %s",
                     block.tool_type,
@@ -33320,7 +30413,7 @@ async def stream_agent_loop(
                     "blocked": True,
                     "policy": "repeated_failed_call",
                 }
-                yield f'data: {json.dumps({"type": "tool_retry_blocked", "tool": block.tool_type, "command": cmd_display, "round": round_num, "previous_round": _prior_round, **({"call_id": tool_call_id, "tool_call_id": tool_call_id} if tool_call_id else {})})}\n\n'
+                yield _sse({"type": "tool_retry_blocked", "tool": block.tool_type, "command": cmd_display, "round": round_num, "previous_round": _prior_round, **({"call_id": tool_call_id, "tool_call_id": tool_call_id} if tool_call_id else {})})
                 logger.info(
                     "[agent] blocked repeated failed call %s from round %s at mutation epoch %s",
                     block.tool_type,
@@ -33437,18 +30530,10 @@ async def stream_agent_loop(
                     _execution_tool_attempts[block.tool_type] = (
                         _execution_tool_attempts.get(block.tool_type, 0) + 1
                     )
-                yield (
-                    f'data: {json.dumps({"type": "tool_start", "tool": block.tool_type, "command": cmd_display, "full_command": full_command, "round": round_num, **({"call_id": tool_call_id, "tool_call_id": tool_call_id} if tool_call_id else {})})}\n\n'
-                )
+                yield _sse({"type": "tool_start", "tool": block.tool_type, "command": cmd_display, "full_command": full_command, "round": round_num, **({"call_id": tool_call_id, "tool_call_id": tool_call_id} if tool_call_id else {})})
 
-                # Streaming progress for long-running tools (bash, python).
-                # The bash/python branches inside _direct_fallback emit
-                # periodic {elapsed_s, tail} payloads via this callback;
-                # we forward each one as a `tool_progress` SSE event so
-                # the UI can render live elapsed-time + tail-of-output.
+                # Long-running bash/python report {elapsed_s, tail} here; each becomes a tool_progress event.
                 _progress_q: asyncio.Queue = asyncio.Queue()
-                async def _push_progress(payload):
-                    await _progress_q.put(payload)
 
                 async def _run_tool():
                     try:
@@ -33483,7 +30568,7 @@ async def stream_agent_loop(
                             disabled_tools=set(disabled_tools) | _caller_hard_denials,
                             tool_policy=tool_policy,
                             owner=owner,
-                            progress_cb=_push_progress,
+                            progress_cb=_progress_q.put,
                             workspace=workspace,
                             security_context=run_security,
                             active_document_id=(
@@ -33505,9 +30590,7 @@ async def stream_agent_loop(
                         evt = await _progress_q.get()
                         if evt is None:
                             break
-                        yield (
-                            f'data: {json.dumps({"type": "tool_progress", "tool": block.tool_type, "round": round_num, **evt})}\n\n'
-                        )
+                        yield _sse({"type": "tool_progress", "tool": block.tool_type, "round": round_num, **evt})
                     desc, result = await _tool_task
                 finally:
                     # If the SSE client disconnects (or this generator is
@@ -33679,11 +30762,7 @@ async def stream_agent_loop(
                 local_inspection_budget_hit = True
             if (
                 block.tool_type == "host_shell"
-                and re.search(
-                    r"(?:python\s+-m\s+pytest|\bpytest\b|npm\s+(?:run\s+)?test\b|make\s+test\b|\bgo\s+test\b|cargo\s+test\b)",
-                    full_command,
-                    re.IGNORECASE,
-                )
+                and _rx(r"(?:python\s+-m\s+pytest|\bpytest\b|npm\s+(?:run\s+)?test\b|make\s+test\b|\bgo\s+test\b|cargo\s+test\b)", re.IGNORECASE).search(full_command)
                 ):
                 _tui_test_completed = True
                 _tui_test_summary_text = str(
@@ -33693,7 +30772,7 @@ async def stream_agent_loop(
                 _tui_bash_block_request
                 and block.tool_type == "host_shell"
                 and not result.get("error")
-                and re.search(r"\b(?:pwd|whoami|uname)\b", full_command)
+                and _rx(r"\b(?:pwd|whoami|uname)\b").search(full_command)
             ):
                 _tui_bash_block_completed = True
                 _tui_bash_block_output = str(
@@ -33704,7 +30783,7 @@ async def stream_agent_loop(
                         "```bash\n$ pwd; whoami; uname -srm\n"
                         f"{_tui_bash_block_output}\n```"
                     )
-                    yield f'data: {json.dumps({"type": "final_response", "content": full_response})}\n\n'
+                    yield _sse({"type": "final_response", "content": full_response})
             if block.tool_type == "manage_memory" and not result.get("error"):
                 _memory_action = str(block.content or "").strip().splitlines()[0].lower()
                 if _memory_action in {"list", "index"}:
@@ -33784,7 +30863,7 @@ async def stream_agent_loop(
                         "private_browser",
                         json.dumps({"action": "batch", "commands": [["open", _browser_url], ["snapshot"]]}),
                     )
-                    yield f'data: {json.dumps({"type": "tool_start", "tool": "private_browser", "command": _browser_url, "round": round_num, "fallback": "empty_web_search"})}\n\n'
+                    yield _sse({"type": "tool_start", "tool": "private_browser", "command": _browser_url, "round": round_num, "fallback": "empty_web_search"})
                     try:
                         _, _browser_result = await execute_tool_block(
                             _browser_block,
@@ -33799,7 +30878,7 @@ async def stream_agent_loop(
                     except Exception as _browser_exc:
                         _browser_result = {"error": str(_browser_exc), "exit_code": 1}
                     _browser_output = str(_browser_result.get("output") or _browser_result.get("error") or "")
-                    yield f'data: {json.dumps({"type": "tool_output", "tool": "private_browser", "command": _browser_url, "output": _truncate(_browser_output), "exit_code": _browser_result.get("exit_code")})}\n\n'
+                    yield _sse({"type": "tool_output", "tool": "private_browser", "command": _browser_url, "output": _truncate(_browser_output), "exit_code": _browser_result.get("exit_code")})
                     if (
                         _browser_result.get("exit_code") == 0
                         and _browser_output.strip()
@@ -33823,14 +30902,10 @@ async def stream_agent_loop(
                     if _official_site_answer:
                         full_response = _official_site_answer
                         _qwen_terminal_summary_completed = True
-                        yield (
-                            "data: "
-                            + json.dumps({
-                                "type": "final_response",
-                                "content": full_response,
-                            })
-                            + "\n\n"
-                        )
+                        yield _sse({
+                            "type": "final_response",
+                            "content": full_response,
+                        })
                 messages.append({
                     "role": "system",
                     "content": (
@@ -33911,7 +30986,7 @@ async def stream_agent_loop(
                     if _src_end >= 0:
                         try:
                             _extracted_sources = json.loads(_src_text[_src_idx + len(_src_marker):_src_end])
-                            yield f'data: {json.dumps({"type": "web_sources", "data": _extracted_sources})}\n\n'
+                            yield _sse({"type": "web_sources", "data": _extracted_sources})
                             # Strip the marker from the result so it doesn't show in chat
                             _clean = _src_text[:_src_idx].rstrip()
                             if "output" in result:
@@ -33930,25 +31005,19 @@ async def stream_agent_loop(
             # discard/save the stale pre-update document.
             if tool_result_is_successful(result):
                 for doc_event in _document_stream_events(block):
-                    yield f'data: {json.dumps(doc_event)}\n\n'
+                    yield _sse(doc_event)
 
             # Emit doc-specific event for document tools — the frontend
             # document panel handles this; no need to show content in chat.
             if is_doc_tool and "action" in result:
                 if result["action"] == "suggest":
-                    yield (
-                        f'data: {json.dumps({"type": "doc_suggestions", "doc_id": result["doc_id"], "suggestions": result["suggestions"]})}\n\n'
-                    )
+                    yield _sse({"type": "doc_suggestions", "doc_id": result["doc_id"], "suggestions": result["suggestions"]})
                 else:
-                    yield (
-                        f'data: {json.dumps({"type": "doc_update", "doc_id": result["doc_id"], "content": result["content"], "version": result["version"], "title": result.get("title", ""), "language": result.get("language")})}\n\n'
-                    )
+                    yield _sse({"type": "doc_update", "doc_id": result["doc_id"], "content": result["content"], "version": result["version"], "title": result.get("title", ""), "language": result.get("language")})
 
             # Emit ui_control event for frontend to apply UI changes
             if "ui_event" in result:
-                yield (
-                    f'data: {json.dumps({"type": "ui_control", "data": result})}\n\n'
-                )
+                yield _sse({"type": "ui_control", "data": result})
 
             # ask_user: remember the payload now, but emit the interactive event
             # only *after* tool_output below.  Emitting it before tool_output let
@@ -33969,7 +31038,7 @@ async def stream_agent_loop(
                 if _auq_q and _auq_q not in full_response:
                     _auq_delta = ("\n\n" if full_response.strip() else "") + _auq_q
                     full_response += _auq_delta
-                    yield 'data: ' + json.dumps({"delta": _auq_delta}) + '\n\n'
+                    yield _sse({"delta": _auq_delta})
                 _pending_ask_user_event = _auq
                 _awaiting_user = True
 
@@ -33977,9 +31046,7 @@ async def stream_agent_loop(
             # Push it to the frontend so the stored plan + docked window update
             # live. Does NOT end the turn — the agent keeps working.
             if "plan_update" in result:
-                yield (
-                    f'data: {json.dumps({"type": "plan_update", "data": result["plan_update"]})}\n\n'
-                )
+                yield _sse({"type": "plan_update", "data": result["plan_update"]})
 
             # Build output for frontend tool bubble.
             # Document tools get a short summary — content goes to the editor panel.
@@ -34035,9 +31102,9 @@ async def stream_agent_loop(
                 "ai_draft_email_reply",
                 "mcp__email__ai_draft_email_reply",
             } and not result.get("doc_id"):
-                _draft_doc_match = re.search(r"#document-([0-9a-fA-F-]{8,64})", output_text)
+                _draft_doc_match = _rx(r"#document-([0-9a-fA-F-]{8,64})").search(output_text)
                 if not _draft_doc_match:
-                    _draft_doc_match = re.search(r"document ID:\s*([0-9a-fA-F-]{8,64})", output_text, re.IGNORECASE)
+                    _draft_doc_match = _rx(r"document ID:\s*([0-9a-fA-F-]{8,64})", re.IGNORECASE).search(output_text)
                 if _draft_doc_match:
                     result["doc_id"] = _draft_doc_match.group(1)
                     result.setdefault("title", "Email draft")
@@ -34046,7 +31113,6 @@ async def stream_agent_loop(
             if block.tool_type == "ui_control":
                 _inherit_calendar_open_range_from_tool_events(result, tool_events)
 
-            # Emit tool_output (include ui_event data if present)
             tool_output_data = {"type": "tool_output", "tool": block.tool_type, "command": cmd_display, "output": output_text, "exit_code": result.get("exit_code"), "execution_attempted": _execution_attempted, "blocked": bool(result.get("blocked", False))}
             if _runtime_action is not None:
                 _runtime_action.normalize(block, 'agent_loop compatibility adapters')
@@ -34147,7 +31213,7 @@ async def stream_agent_loop(
             # Forward a file-write diff for inline before/after rendering
             if "diff" in result:
                 tool_output_data["diff"] = result["diff"]
-            yield f'data: {json.dumps(tool_output_data)}\n\n'
+            yield _sse(tool_output_data)
             if host_bridge_failed:
                 _force_answer = True
                 messages.append({
@@ -34164,17 +31230,12 @@ async def stream_agent_loop(
                 for k in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality"):
                     if k in result:
                         generated_image_data[k] = result[k]
-                yield f'data: {json.dumps(generated_image_data)}\n\n'
+                yield _sse(generated_image_data)
 
             if not result.get("error") and block.tool_type in {"search_emails", "mcp__email__search_emails"}:
                 _topic_bulk_request = _parse_qwen_explicit_email_topic_bulk_action_request(_last_user)
                 if _topic_bulk_request and "mcp__email__bulk_email" not in disabled_tools:
-                    try:
-                        _search_args = json.loads(block.content or "{}")
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        _search_args = {}
-                    if not isinstance(_search_args, dict):
-                        _search_args = {}
+                    _search_args = _json_object(block.content)
                     _bulk_blocks = _email_bulk_blocks_from_search_output(
                         result.get("output")
                         or result.get("response")
@@ -34302,11 +31363,7 @@ async def stream_agent_loop(
                     if _email_read_summary:
                         full_response = _email_read_summary
                         round_response = ""
-                        yield (
-                            "data: "
-                            + json.dumps({"type": "final_response", "content": _email_read_summary})
-                            + "\n\n"
-                        )
+                        yield _sse({"type": "final_response", "content": _email_read_summary})
                         _qwen_terminal_summary_completed = True
                         _ody_notes_tool_completed = True
                         logger.info("[agent] completed email read from deterministic terminal summary")
@@ -34373,11 +31430,7 @@ async def stream_agent_loop(
                 _email_error_summary = "I couldn't access your email because the email tool is unavailable."
                 full_response = _email_error_summary
                 round_response = ""
-                yield (
-                    "data: "
-                    + json.dumps({"type": "final_response", "content": _email_error_summary})
-                    + "\n\n"
-                )
+                yield _sse({"type": "final_response", "content": _email_error_summary})
                 _qwen_terminal_summary_completed = True
                 _ody_notes_tool_completed = True
 
@@ -34388,16 +31441,12 @@ async def stream_agent_loop(
                 and not result.get("error")
                 and (
                     result.get("doc_id")
-                    or re.search(
-                        r"\b(?:document updated|edit applied|updated)\b",
-                        str(
+                    or _rx(r"\b(?:document updated|edit applied|updated)\b", re.IGNORECASE).search(str(
                             result.get("output")
                             or result.get("response")
                             or result.get("results")
                             or "",
-                        ),
-                        re.IGNORECASE,
-                    )
+                        ))
                 )
             ):
                 _doc_done_summary = (
@@ -34407,11 +31456,7 @@ async def stream_agent_loop(
                 )
                 full_response = _doc_done_summary
                 round_response = ""
-                yield (
-                    "data: "
-                    + json.dumps({"type": "final_response", "content": _doc_done_summary})
-                    + "\n\n"
-                )
+                yield _sse({"type": "final_response", "content": _doc_done_summary})
                 _qwen_terminal_summary_completed = True
                 _ody_notes_tool_completed = True
 
@@ -34483,7 +31528,7 @@ async def stream_agent_loop(
                             _forced_body_query = str(_forced_body_args.get("query") or "").strip().lower()
                         _forced_body_terms = [
                             term
-                            for term in re.findall(r"[a-z0-9]+", _forced_body_query)
+                            for term in _rx(r"[a-z0-9]+").findall(_forced_body_query)
                             if term not in {"the", "a", "an", "note", "notes", "checklist", "list", "todo", "todos"}
                         ]
                         if len(_body_lookup_pairs) > 1 and _forced_body_terms:
@@ -34495,7 +31540,7 @@ async def stream_agent_loop(
                             if _matching_pairs:
                                 _body_lookup_pairs = _matching_pairs
                         _unique_note_titles = {
-                            re.sub(r"\s+", " ", title).strip().lower()
+                            _rx(r"\s+").sub(" ", title).strip().lower()
                             for title, _note_id in _body_lookup_pairs
                             if str(title or "").strip()
                         }
@@ -34542,7 +31587,7 @@ async def stream_agent_loop(
                         ).strip()
                         if _notes_text.startswith("AI: "):
                             _notes_text = _notes_text[4:].strip()
-                        if _notes_text and not re.match(r"^(done|note|item|deleted)\b", _notes_text, re.IGNORECASE):
+                        if _notes_text and not _rx(r"^(done|note|item|deleted)\b", re.IGNORECASE).match(_notes_text):
                             _notes_text = f"Done — {_notes_text}"
                 if _notes_text and _deterministic_terminal_eligible:
                     if _notes_action in {"list", "search", "find", "view", "lis"} and not (
@@ -34563,7 +31608,7 @@ async def stream_agent_loop(
                         if _notes_text not in _clean_current:
                             _prefix = "\n\n" if _clean_current else ""
                             full_response = (_clean_current + _prefix + _notes_text).strip()
-                            yield f'data: {json.dumps({"delta": _prefix + _notes_text})}\n\n'
+                            yield _sse({"delta": _prefix + _notes_text})
                         _ody_notes_tool_completed = True
 
             if block.tool_type == "manage_tasks":
@@ -34585,7 +31630,6 @@ async def stream_agent_loop(
                     if _tasks_text.startswith("AI: "):
                         _tasks_text = _tasks_text[4:].strip()
                     if _tasks_action == "list" and _tasks_text:
-                        _tasks_text = _tasks_text
                         _task_followup_action = _parse_qwen_task_mutation_request(_last_user)
                         _task_followup_id = _single_task_id_from_manage_tasks_list(_tasks_text)
                         if _task_followup_action and _task_followup_id:
@@ -34604,7 +31648,7 @@ async def stream_agent_loop(
                                 _task_followup_action,
                                 _task_followup_id,
                             )
-                    elif _tasks_text and not re.match(r"^(done|created|updated|deleted|task)\b", _tasks_text, re.IGNORECASE):
+                    elif _tasks_text and not _rx(r"^(done|created|updated|deleted|task)\b", re.IGNORECASE).match(_tasks_text):
                         _tasks_text = f"Done — {_tasks_text}"
                 if (
                     _tasks_text
@@ -34620,7 +31664,7 @@ async def stream_agent_loop(
                     if _tasks_text not in _clean_current:
                         _prefix = "\n\n" if _clean_current else ""
                         full_response = (_clean_current + _prefix + _tasks_text).strip()
-                        yield f'data: {json.dumps({"delta": _prefix + _tasks_text})}\n\n'
+                        yield _sse({"delta": _prefix + _tasks_text})
                     _ody_notes_tool_completed = True
 
             _notes_mutation_terminal = False
@@ -34754,11 +31798,7 @@ async def stream_agent_loop(
                         if _terminal_is_note_view:
                             # Replace the locator summary already streamed above;
                             # never append the note body to a title-only list.
-                            yield (
-                                "data: "
-                                + json.dumps({"type": "final_response", "content": _terminal_summary})
-                                + "\n\n"
-                            )
+                            yield _sse({"type": "final_response", "content": _terminal_summary})
                             _qwen_terminal_summary_completed = True
                         elif (
                             _terminal_tool_name in {
@@ -34800,14 +31840,10 @@ async def stream_agent_loop(
                             "bash",
                             "host_shell",
                         }:
-                            yield (
-                                "data: "
-                                + json.dumps({"type": "final_response", "content": _terminal_summary})
-                                + "\n\n"
-                            )
+                            yield _sse({"type": "final_response", "content": _terminal_summary})
                             _qwen_terminal_summary_completed = True
                         elif _terminal_summary not in _clean_current:
-                            yield f'data: {json.dumps({"delta": _terminal_summary})}\n\n'
+                            yield _sse({"delta": _terminal_summary})
                         _ody_notes_tool_completed = True
 
             # This must be the final UI event for ask_user: the frontend appends
@@ -34819,39 +31855,28 @@ async def stream_agent_loop(
                     full_response = _ask_question
                     if round_texts:
                         round_texts[-1] = _ask_question
-                    yield (
-                        "data: "
-                        + json.dumps({"type": "final_response", "content": _ask_question})
-                        + "\n\n"
-                    )
-                yield (
-                    f'data: {json.dumps({"type": "ask_user", "data": _pending_ask_user_event})}\n\n'
-                )
+                    yield _sse({"type": "final_response", "content": _ask_question})
+                yield _sse({"type": "ask_user", "data": _pending_ask_user_event})
 
             # Native document tools open in the editor + carry the REAL doc id.
             # Emit a doc_update so the frontend opens/activates it and sends it
             # back as active_doc_id next turn (otherwise the agent can't "see"
             # the document it just created on the follow-up message).
             if block.tool_type in ("create_document", "update_document", "edit_document") and result.get("doc_id"):
-                yield (
-                    'data: ' + json.dumps({
-                        "type": "doc_update",
-                        "doc_id": result["doc_id"],
-                        "title": result.get("title", ""),
-                        "language": result.get("language", ""),
-                        "content": result.get("content", ""),
-                        "version": result.get("version", 1),
-                    }) + '\n\n'
-                )
+                yield _sse({
+                    "type": "doc_update",
+                    "doc_id": result["doc_id"],
+                    "title": result.get("title", ""),
+                    "language": result.get("language", ""),
+                    "content": result.get("content", ""),
+                    "version": result.get("version", 1),
+                })
 
-            # Inline research: emit the open-link as part of the assistant's
-            # actual response text — a `#research-<id>` anchor that chatRenderer
-            # turns into a regular clickable link. Saved with the message, so it
-            # PERSISTS across refresh (unlike the old ephemeral injected chip).
+            # The research link goes in the response text so it persists with the message.
             _rsid = result.get("research_session_id")
             if _rsid:
                 _anchor = f"\n\n[Open in Deep Research](#research-{_rsid})\n"
-                yield 'data: ' + json.dumps({"delta": _anchor}) + '\n\n'
+                yield _sse({"delta": _anchor})
 
             # Same pattern for notes: when manage_notes creates a note
             # and returns note_id, drop a `[View note](#note-<id>)` link
@@ -34865,7 +31890,7 @@ async def stream_agent_loop(
                 _label = f"View note: {_title}" if _title else "View note"
                 _anchor = f"\n\n[{_label}](#note-{_nid})\n"
                 full_response = (full_response.rstrip() + _anchor).strip()
-                yield 'data: ' + json.dumps({"delta": _anchor}) + '\n\n'
+                yield _sse({"delta": _anchor})
 
             if block.tool_type == "manage_calendar" and tool_result_is_successful(result):
                 try:
@@ -34893,7 +31918,7 @@ async def stream_agent_loop(
                         ).strip()
                     if not _calendar_title:
                         _calendar_anchor_text = str(result.get("anchor") or "")
-                        _match = re.search(r"\[([^\]]+)\]\(#event-[^)]+\)", _calendar_anchor_text)
+                        _match = _rx(r"\[([^\]]+)\]\(#event-[^)]+\)").search(_calendar_anchor_text)
                         if _match:
                             _calendar_title = _match.group(1).strip()
                     _calendar_has_reminder = bool(
@@ -34936,7 +31961,6 @@ async def stream_agent_loop(
                                 _calendar_dt_text.replace("Z", "+00:00")
                             )
                             if _calendar_dt.tzinfo is not None:
-                                from src.user_time import user_timezone
                                 _calendar_dt = _calendar_dt.astimezone(user_timezone())
                             _calendar_hour = _calendar_dt.hour
                             _calendar_min = _calendar_dt.minute
@@ -34975,7 +31999,7 @@ async def stream_agent_loop(
                         full_response = (full_response.rstrip() + _calendar_effect_anchor).strip()
                         if round_texts:
                             round_texts[-1] = (str(round_texts[-1] or "").rstrip() + _calendar_effect_anchor).strip()
-                        yield 'data: ' + json.dumps({"delta": _calendar_effect_anchor}) + '\n\n'
+                        yield _sse({"delta": _calendar_effect_anchor})
 
             # Save for history persistence
             tool_event = {
@@ -35078,9 +32102,7 @@ async def stream_agent_loop(
                             ),
                         )
                     try:
-                        yield (
-                            f'data: {json.dumps({"type": "tool_start", "tool": "manage_calendar", "command": _calendar_snapshot_command, "full_command": _calendar_snapshot_command, "round": round_num, "context_only": True, "triggered_by": "ui_control open_panel calendar"})}\n\n'
-                        )
+                        yield _sse({"type": "tool_start", "tool": "manage_calendar", "command": _calendar_snapshot_command, "full_command": _calendar_snapshot_command, "round": round_num, "context_only": True, "triggered_by": "ui_control open_panel calendar"})
                         _calendar_snapshot_desc, _calendar_snapshot_result = await execute_tool_block(
                             _calendar_snapshot_block,
                             session_id=session_id,
@@ -35115,7 +32137,7 @@ async def stream_agent_loop(
                         }
                         if isinstance(_calendar_snapshot_result, dict) and isinstance(_calendar_snapshot_result.get("events"), list):
                             _calendar_snapshot_stream_event["events"] = _calendar_snapshot_result.get("events")
-                        yield f"data: {json.dumps(_calendar_snapshot_stream_event)}\n\n"
+                        yield _sse(_calendar_snapshot_stream_event)
                         _calendar_snapshot_event = {
                             "round": round_num,
                             "model": _round_actual_model,
@@ -35259,20 +32281,12 @@ async def stream_agent_loop(
                         )
                 if _private_browser_product_catalog_ready(_browser_output):
                     _private_browser_catalog_ready = True
-                _store_ref_match = re.search(
-                    r"Detected page type: global store-selector landing page\.\s*"
-                    r"Local shopping link:\s*@(?P<ref>e\d+)\b",
-                    _browser_output,
-                    re.IGNORECASE,
-                )
+                _store_ref_match = _rx(r"Detected page type: global store-selector landing page\.\s*"
+                    r"Local shopping link:\s*@(?P<ref>e\d+)\b", re.IGNORECASE).search(_browser_output)
                 if (
                     _store_ref_match
                     and not _private_browser_store_handoff_done
-                    and re.search(
-                        r"\b(?:shop|shopping|buy|product|products|best|chair|desk|table|sofa|bed)\b",
-                        _last_user,
-                        re.IGNORECASE,
-                    )
+                    and _rx(r"\b(?:shop|shopping|buy|product|products|best|chair|desk|table|sofa|bed)\b", re.IGNORECASE).search(_last_user)
                 ):
                     _store_ref = "@" + _store_ref_match.group("ref")
                     _auto_browser_commands = (
@@ -35294,12 +32308,8 @@ async def stream_agent_loop(
                         "[agent] queued deterministic global retail handoff ref=%s",
                         _store_ref,
                     )
-                _search_ref_match = re.search(
-                    r'combobox\s+"(?:Search(?:\s+by\s+product)?|What are you looking for)[^"\n]{0,180}"'
-                    r"[^\n]*\[ref=(?P<ref>e\d+)\]",
-                    _browser_output,
-                    re.IGNORECASE,
-                )
+                _search_ref_match = _rx(r'combobox\s+"(?:Search(?:\s+by\s+product)?|What are you looking for)[^"\n]{0,180}"'
+                    r"[^\n]*\[ref=(?P<ref>e\d+)\]", re.IGNORECASE).search(_browser_output)
                 _product_query = _private_browser_product_query(_last_user)
                 if (
                     _search_ref_match
@@ -35428,13 +32438,8 @@ async def stream_agent_loop(
                     _completion_requirements,
                 ).evaluate()
                 if not _post_mutation_evidence.missing_artifacts:
-                    # A successful mutation that satisfies the completion
-                    # contract is the end of artifact recovery. Restoring
-                    # web/PDF acquisition here used to send source-backed
-                    # tasks back into open-ended research after their output
-                    # already existed. Keep bounded verification/file tools,
-                    # but remove acquisition tools so the model can verify
-                    # and finish instead of timing out.
+                    # A mutation that satisfies the completion contract ends artifact recovery: drop
+                    # acquisition tools so the model verifies and finishes instead of researching again.
                     if _relevant_tools is not None:
                         _relevant_tools.difference_update(
                             _completed_artifact_acquisition_tools_to_remove(
@@ -35455,14 +32460,8 @@ async def stream_agent_loop(
                 and block.tool_type in {"pdf_extract", "web_fetch", "private_browser"}
                 and _artifact_source_evidence_ready(tool_events, _last_user)
             ):
-                # Source evidence is only the first half of a source-backed
-                # artifact workflow.  If the deliverable is still missing,
-                # keep acquisition and mutation available together: models
-                # commonly need one more targeted lookup before writing the
-                # CSV/report.  Restoring the unrestricted surface here used
-                # to immediately fall through to mutation-only recovery, so
-                # a later web_search was silently dropped and the task ended
-                # without its required artifact.
+                # With source evidence in but the deliverable missing, keep acquisition and
+                # mutation together: models often need one more lookup before writing.
                 _acquisition_evidence = EvidenceLedger.from_tool_events(
                     tool_events,
                     _completion_requirements,
@@ -35785,7 +32784,7 @@ async def stream_agent_loop(
                 and tool_result_is_successful(result)
                 and str(block.content or "").splitlines()[0].strip().lower()
                 in {"add", "delete", "edit"}
-                and re.search(r"\b(?:memory|memories)\b", _last_user, re.IGNORECASE)
+                and _rx(r"\b(?:memory|memories)\b", re.IGNORECASE).search(_last_user)
             ):
                 _qwen_explicit_effectful_completed = True
             if (
@@ -35817,11 +32816,7 @@ async def stream_agent_loop(
                     )
                     if round_texts:
                         round_texts[-1] = full_response
-                    yield (
-                        "data: "
-                        + json.dumps({"type": "final_response", "content": full_response})
-                        + "\n\n"
-                    )
+                    yield _sse({"type": "final_response", "content": full_response})
             if (
                 _qwen_explicit_memory_search
             ):
@@ -35855,7 +32850,7 @@ async def stream_agent_loop(
                 elif (
                     block.tool_type == "read_file"
                     and not tool_result_is_successful(result)
-                    and re.search(r"(?:not found|file not found|no such file)", str(result), re.IGNORECASE)
+                    and _rx(r"(?:not found|file not found|no such file)", re.IGNORECASE).search(str(result))
                 ):
                     _file_creation_pending = True
             if (
@@ -35937,12 +32932,12 @@ async def stream_agent_loop(
         if local_network_budget_hit or local_inspection_budget_hit:
             if _tui_project_discovery_summary_text:
                 full_response = _tui_project_discovery_summary_text
-                yield f'data: {json.dumps({"type": "final_response", "content": full_response})}\n\n'
+                yield _sse({"type": "final_response", "content": full_response})
                 logger.info("[agent] completed TUI project discovery from deterministic host inventory")
                 break
             if _tui_local_network_summary_text:
                 full_response = _tui_local_network_summary_text
-                yield f'data: {json.dumps({"type": "final_response", "content": full_response})}\n\n'
+                yield _sse({"type": "final_response", "content": full_response})
                 logger.info("[agent] completed TUI local network inspection from deterministic host inventory")
                 break
             _local_cap = (
@@ -35965,21 +32960,17 @@ async def stream_agent_loop(
                 _local_subject,
                 _local_cap,
             )
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "loop_breaker_triggered",
-                    "reason": _local_reason,
-                    "message": (
-                        f"{_local_subject.capitalize()} reached its tool-call budget; "
-                        "the agent is now synthesizing from the evidence collected."
-                    ),
-                    "round": round_num,
-                    "used": total_tool_calls,
-                    "limit": _local_cap,
-                })
-                + "\n\n"
-            )
+            yield _sse({
+                "type": "loop_breaker_triggered",
+                "reason": _local_reason,
+                "message": (
+                    f"{_local_subject.capitalize()} reached its tool-call budget; "
+                    "the agent is now synthesizing from the evidence collected."
+                ),
+                "round": round_num,
+                "used": total_tool_calls,
+                "limit": _local_cap,
+            })
             _force_answer = True
             messages.append({
                 "role": "system",
@@ -35989,7 +32980,7 @@ async def stream_agent_loop(
                     "evidence already collected; state what remains uncertain."
                 ),
             })
-            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+            yield _sse({"type": "agent_step", "round": round_num + 1})
             continue
 
         # If the configured budget was hit, stop the loop.
@@ -36032,18 +33023,14 @@ async def stream_agent_loop(
                         _artifact_completion_nudges,
                         _missing,
                     )
-                    yield (
-                        "data: "
-                        + json.dumps({
-                            "type": "completion_blocked",
-                            "reason": "failed_trailing_tool_missing_artifacts",
-                            "round": round_num,
-                            "attempt": _artifact_completion_nudges,
-                            "decision": _failed_tail_evidence.to_dict(),
-                        })
-                        + "\n\n"
-                    )
-                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    yield _sse({
+                        "type": "completion_blocked",
+                        "reason": "failed_trailing_tool_missing_artifacts",
+                        "round": round_num,
+                        "attempt": _artifact_completion_nudges,
+                        "decision": _failed_tail_evidence.to_dict(),
+                    })
+                    yield _sse({"type": "agent_step", "round": round_num + 1})
                     continue
                 if not _failed_tail_evidence.can_complete:
                     _failed_tool_completion_decision = _failed_tail_evidence
@@ -36073,7 +33060,7 @@ async def stream_agent_loop(
                     + "Do not stop after the edit."
                 ),
             })
-            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+            yield _sse({"type": "agent_step", "round": round_num + 1})
             continue
 
         if (
@@ -36085,7 +33072,7 @@ async def stream_agent_loop(
             if _tui_local_execution_turn or _qwen38_tool_router:
                 full_response = _tui_verified_coding_summary(tool_events)
                 _verified_coding_summary_emitted = True
-                yield f'data: {json.dumps({"type": "final_response", "content": full_response})}\n\n'
+                yield _sse({"type": "final_response", "content": full_response})
             elif not full_response.strip() or full_response.strip().startswith("```"):
                 _verification_output = ""
                 for _event in reversed(tool_events):
@@ -36099,7 +33086,7 @@ async def stream_agent_loop(
                     if _verification_output
                     else "Done."
                 )
-                yield 'data: ' + json.dumps({"delta": full_response}) + '\n\n'
+                yield _sse({"delta": full_response})
             logger.info("[agent] completed verified workspace mutation")
             break
 
@@ -36117,26 +33104,26 @@ async def stream_agent_loop(
                     full_response = "Done. Verification output:\n" + _verification_output
                 else:
                     full_response = "Done."
-                yield 'data: ' + json.dumps({"delta": full_response}) + '\n\n'
+                yield _sse({"delta": full_response})
             logger.info("[agent] completed explicit inspection-then-edit request")
             break
 
         if _qwen_skills_tool_completed and not _qwen_skills_unlocked_tools and _deterministic_terminal_eligible:
             if not full_response.strip():
                 full_response = _qwen_skills_terminal_summary or "Done."
-                yield 'data: ' + json.dumps({"delta": full_response}) + '\n\n'
+                yield _sse({"delta": full_response})
             logger.info("[agent] completed explicit skills listing")
             break
 
         if _qwen_model_list_completed and _deterministic_terminal_eligible:
             full_response = _qwen_model_list_terminal_summary
-            yield 'data: ' + json.dumps({"type": "final_response", "content": full_response}) + '\n\n'
+            yield _sse({"type": "final_response", "content": full_response})
             logger.info("[agent] completed explicit model listing from deterministic tool output")
             break
 
         if _qwen_endpoint_list_completed and _deterministic_terminal_eligible:
             full_response = _qwen_endpoint_list_terminal_summary
-            yield 'data: ' + json.dumps({"type": "final_response", "content": full_response}) + '\n\n'
+            yield _sse({"type": "final_response", "content": full_response})
             logger.info("[agent] completed explicit endpoint listing from deterministic tool output")
             break
 
@@ -36161,9 +33148,9 @@ async def stream_agent_loop(
                 if _calendar_effect_anchor and round_texts:
                     round_texts[-1] = full_response
                 if _had_effectful_response or _dropped_tool_preamble_from_stream:
-                    yield 'data: ' + json.dumps({"type": "final_response", "content": full_response}) + '\n\n'
+                    yield _sse({"type": "final_response", "content": full_response})
                 else:
-                    yield 'data: ' + json.dumps({"delta": full_response}) + '\n\n'
+                    yield _sse({"delta": full_response})
             logger.info("[agent] completed explicit compact-router create/add")
             break
 
@@ -36175,7 +33162,7 @@ async def stream_agent_loop(
             # The memory tool already produced the bounded user-facing answer.
             # Do not spend a second model round asking for prose around it.
             full_response = _memory_listing_summary
-            yield 'data: ' + json.dumps({"delta": full_response}) + '\n\n'
+            yield _sse({"delta": full_response})
             logger.info("[agent] completed compact memory listing from deterministic tool output")
             break
 
@@ -36186,7 +33173,7 @@ async def stream_agent_loop(
         ):
             if not full_response.strip():
                 full_response = "Done."
-                yield 'data: ' + json.dumps({"delta": "Done."}) + '\n\n'
+                yield _sse({"delta": "Done."})
             logger.info("[agent] odysseus doc stream-create completed after one create_document")
             break
 
@@ -36197,7 +33184,7 @@ async def stream_agent_loop(
         ):
             if not full_response.strip() or full_response.strip().startswith("```"):
                 full_response = "Done."
-                yield 'data: ' + json.dumps({"delta": "Done."}) + '\n\n'
+                yield _sse({"delta": "Done."})
             logger.info("[agent] document tool completed after successful document mutation")
             break
 
@@ -36208,7 +33195,7 @@ async def stream_agent_loop(
         ):
             if not full_response.strip() or full_response.strip().startswith("```"):
                 full_response = "Done."
-                yield 'data: ' + json.dumps({"delta": "Done."}) + '\n\n'
+                yield _sse({"delta": "Done."})
             logger.info("[agent] odysseus doc tool completed after one textual tool block")
             break
 
@@ -36283,7 +33270,7 @@ async def stream_agent_loop(
                         break
                 if _completed_summary and full_response.strip() != _completed_summary:
                     full_response = _completed_summary
-                    yield f'data: {json.dumps({"type": "final_response", "content": full_response})}\n\n'
+                    yield _sse({"type": "final_response", "content": full_response})
                 if _completed_summary:
                     logger.info("[agent] odysseus completed from deterministic tool output")
                     break
@@ -36319,11 +33306,7 @@ async def stream_agent_loop(
                              include_reasoning_content=(
                                  not bool(normalized_external_tool_schemas)
                                  or _is_odysseus_qwen_model(_round_actual_model)
-                                 or bool(re.search(
-                                     r"(?:qwen3\.5|qwen35)",
-                                     str(_round_actual_model or ""),
-                                     re.IGNORECASE,
-                                 ))
+                                 or bool(_rx(r"(?:qwen3\.5|qwen35)", re.IGNORECASE).search(str(_round_actual_model or "")))
                                  or "deepseek" in str(_round_actual_model or "").lower()
                                  or "deepseek" in str(requested_model or "").lower()
                                  or str(_round_actual_endpoint_id or "").lower() == "flashteach"
@@ -36354,16 +33337,12 @@ async def stream_agent_loop(
             _missing = ", ".join(
                 _failed_tool_completion_decision.missing_artifacts
             )
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "completion_blocked",
-                    "round": round_num,
-                    "attempt": _evidence_repair_rounds,
-                    "decision": _failed_tool_completion_decision.to_dict(),
-                })
-                + "\n\n"
-            )
+            yield _sse({
+                "type": "completion_blocked",
+                "round": round_num,
+                "attempt": _evidence_repair_rounds,
+                "decision": _failed_tool_completion_decision.to_dict(),
+            })
             messages.append({
                 "role": "system",
                 "content": (
@@ -36408,15 +33387,11 @@ async def stream_agent_loop(
             logger.info(
                 "[agent] post-finish inspection made no correction; forcing final synthesis"
             )
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "artifact_finish_after_reinspection",
-                    "round": round_num,
-                })
-                + "\n\n"
-            )
-            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+            yield _sse({
+                "type": "artifact_finish_after_reinspection",
+                "round": round_num,
+            })
+            yield _sse({"type": "agent_step", "round": round_num + 1})
             continue
 
         if (
@@ -36445,15 +33420,11 @@ async def stream_agent_loop(
             logger.info(
                 "[agent] corrected artifact re-previewed; forcing final synthesis"
             )
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "artifact_finish_after_verified_correction",
-                    "round": round_num,
-                })
-                + "\n\n"
-            )
-            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+            yield _sse({
+                "type": "artifact_finish_after_verified_correction",
+                "round": round_num,
+            })
+            yield _sse({"type": "agent_step", "round": round_num + 1})
             continue
 
         # A successful post-edit inspection is a natural convergence point.
@@ -36487,16 +33458,12 @@ async def stream_agent_loop(
             logger.info(
                 "[agent] current artifact inspection triggered one-shot finish nudge"
             )
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "artifact_finish_nudge",
-                    "round": round_num,
-                    "reason": "artifact_complete_and_currently_inspected",
-                })
-                + "\n\n"
-            )
-            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+            yield _sse({
+                "type": "artifact_finish_nudge",
+                "round": round_num,
+                "reason": "artifact_complete_and_currently_inspected",
+            })
+            yield _sse({"type": "agent_step", "round": round_num + 1})
             continue
 
         if (
@@ -36531,11 +33498,7 @@ async def stream_agent_loop(
                 _needs_native_acquisition = bool(
                     not _source_locks
                     and _native_source_tools
-                    and re.search(
-                        r"https?://|\b(?:pdf|paper|report|source|web|online)\b",
-                        _last_user,
-                        re.IGNORECASE,
-                    )
+                    and _rx(r"https?://|\b(?:pdf|paper|report|source|web|online)\b", re.IGNORECASE).search(_last_user)
                 )
                 if _needs_native_acquisition:
                     _artifact_acquisition_recovery_active = True
@@ -36565,18 +33528,14 @@ async def stream_agent_loop(
                     _artifact_completion_nudges,
                     _missing,
                 )
-                yield (
-                    "data: "
-                    + json.dumps({
-                        "type": "completion_blocked",
-                        "reason": _reason,
-                        "round": round_num,
-                        "attempt": _artifact_completion_nudges,
-                        "decision": _wrong_tool_evidence.to_dict(),
-                    })
-                    + "\n\n"
-                )
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({
+                    "type": "completion_blocked",
+                    "reason": _reason,
+                    "round": round_num,
+                    "attempt": _artifact_completion_nudges,
+                    "decision": _wrong_tool_evidence.to_dict(),
+                })
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
 
         if (
@@ -36619,18 +33578,14 @@ async def stream_agent_loop(
                     _artifact_completion_nudges,
                     _missing,
                 )
-                yield (
-                    "data: "
-                    + json.dumps({
-                        "type": "completion_blocked",
-                        "reason": "partial_artifact_mutation",
-                        "round": round_num,
-                        "attempt": _artifact_completion_nudges,
-                        "decision": _post_mutation_evidence.to_dict(),
-                    })
-                    + "\n\n"
-                )
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({
+                    "type": "completion_blocked",
+                    "reason": "partial_artifact_mutation",
+                    "round": round_num,
+                    "attempt": _artifact_completion_nudges,
+                    "decision": _post_mutation_evidence.to_dict(),
+                })
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
 
         # Acquisition must not consume the final round of a terminal artifact
@@ -36676,18 +33631,14 @@ async def stream_agent_loop(
                     "missing=%s",
                     _missing,
                 )
-                yield (
-                    "data: "
-                    + json.dumps({
-                        "type": "completion_blocked",
-                        "reason": "artifact_round_budget_reserved",
-                        "round": round_num,
-                        "attempt": _artifact_completion_nudges,
-                        "decision": _round_budget_evidence.to_dict(),
-                    })
-                    + "\n\n"
-                )
-                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                yield _sse({
+                    "type": "completion_blocked",
+                    "reason": "artifact_round_budget_reserved",
+                    "round": round_num,
+                    "attempt": _artifact_completion_nudges,
+                    "decision": _round_budget_evidence.to_dict(),
+                })
+                yield _sse({"type": "agent_step", "round": round_num + 1})
                 continue
 
         if any(
@@ -36920,21 +33871,17 @@ async def stream_agent_loop(
                 "[agent] mixed artifact mutation failures reached %d; forcing final answer",
                 _artifact_failed_mutation_attempts,
             )
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "loop_breaker_triggered",
-                    "reason": "mixed_artifact_mutation_failures",
-                    "message": (
-                        "Several artifact mutations failed despite other tool calls "
-                        "returning results, so the agent is being asked to finish "
-                        "instead of continuing a mixed recovery loop."
-                    ),
-                    "round": round_num,
-                    "failed_attempts": _artifact_failed_mutation_attempts,
-                })
-                + "\n\n"
-            )
+            yield _sse({
+                "type": "loop_breaker_triggered",
+                "reason": "mixed_artifact_mutation_failures",
+                "message": (
+                    "Several artifact mutations failed despite other tool calls "
+                    "returning results, so the agent is being asked to finish "
+                    "instead of continuing a mixed recovery loop."
+                ),
+                "round": round_num,
+                "failed_attempts": _artifact_failed_mutation_attempts,
+            })
             messages.append({
                 "role": "system",
                 "content": (
@@ -36954,21 +33901,17 @@ async def stream_agent_loop(
                 "[agent] cumulative artifact mutation failures reached %d; forcing final answer",
                 _artifact_failed_mutation_batches,
             )
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "loop_breaker_triggered",
-                    "reason": "cumulative_artifact_mutation_failures",
-                    "message": (
-                        "Repeated materially different artifact mutations failed, "
-                        "so the agent is being asked to finish instead of consuming "
-                        "more retries."
-                    ),
-                    "round": round_num,
-                    "failed_batches": _artifact_failed_mutation_batches,
-                })
-                + "\n\n"
-            )
+            yield _sse({
+                "type": "loop_breaker_triggered",
+                "reason": "cumulative_artifact_mutation_failures",
+                "message": (
+                    "Repeated materially different artifact mutations failed, "
+                    "so the agent is being asked to finish instead of consuming "
+                    "more retries."
+                ),
+                "round": round_num,
+                "failed_batches": _artifact_failed_mutation_batches,
+            })
             messages.append({
                 "role": "system",
                 "content": (
@@ -37008,29 +33951,21 @@ async def stream_agent_loop(
                     _artifact_failed_batch_repairs,
                     _missing,
                 )
-                yield (
-                    "data: "
-                    + json.dumps({
-                        "type": "artifact_repair_required",
-                        "reason": "artifact_recovery_after_tool_failures",
-                        "round": round_num,
-                        "attempt": _artifact_failed_batch_repairs,
-                        "decision": _failed_evidence.to_dict(),
-                        "last_failure": _last_failure_detail,
-                    })
-                    + "\n\n"
-                )
-                yield (
-                    "data: "
-                    + json.dumps({
-                        "type": "completion_blocked",
-                        "reason": "artifact_recovery_after_tool_failures",
-                        "round": round_num,
-                        "attempt": _artifact_failed_batch_repairs,
-                        "decision": _failed_evidence.to_dict(),
-                    })
-                    + "\n\n"
-                )
+                yield _sse({
+                    "type": "artifact_repair_required",
+                    "reason": "artifact_recovery_after_tool_failures",
+                    "round": round_num,
+                    "attempt": _artifact_failed_batch_repairs,
+                    "decision": _failed_evidence.to_dict(),
+                    "last_failure": _last_failure_detail,
+                })
+                yield _sse({
+                    "type": "completion_blocked",
+                    "reason": "artifact_recovery_after_tool_failures",
+                    "round": round_num,
+                    "attempt": _artifact_failed_batch_repairs,
+                    "decision": _failed_evidence.to_dict(),
+                })
                 _artifact_recovery_relevant_tools = (
                     None if _relevant_tools is None else set(_relevant_tools)
                 )
@@ -37054,19 +33989,15 @@ async def stream_agent_loop(
                     "[agent] failed tool batches on %d consecutive rounds; forcing final answer",
                     _failed_tool_rounds,
                 )
-                yield (
-                    "data: "
-                    + json.dumps({
-                        "type": "loop_breaker_triggered",
-                        "reason": "consecutive_tool_failures",
-                        "message": (
-                            "The last tool calls failed repeatedly, so the agent is "
-                            "being asked to finish instead of retrying blindly."
-                        ),
-                        "round": round_num,
-                    })
-                    + "\n\n"
-                )
+                yield _sse({
+                    "type": "loop_breaker_triggered",
+                    "reason": "consecutive_tool_failures",
+                    "message": (
+                        "The last tool calls failed repeatedly, so the agent is "
+                        "being asked to finish instead of retrying blindly."
+                    ),
+                    "round": round_num,
+                })
                 _force_answer = True
                 messages.append({
                     "role": "system",
@@ -37082,20 +34013,16 @@ async def stream_agent_loop(
                 _web_fetch_pagination_counts[_runaway_pagination_sig],
                 _runaway_pagination_sig,
             )
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "loop_breaker_triggered",
-                    "reason": "repeated_web_pagination",
-                    "message": (
-                        "The agent kept paging through the same web source, "
-                        "so it is being asked to answer from the evidence "
-                        "already collected instead of continuing indefinitely."
-                    ),
-                    "round": round_num,
-                })
-                + "\n\n"
-            )
+            yield _sse({
+                "type": "loop_breaker_triggered",
+                "reason": "repeated_web_pagination",
+                "message": (
+                    "The agent kept paging through the same web source, "
+                    "so it is being asked to answer from the evidence "
+                    "already collected instead of continuing indefinitely."
+                ),
+                "round": round_num,
+            })
             _force_answer = True
             messages.append({
                 "role": "system",
@@ -37127,16 +34054,12 @@ async def stream_agent_loop(
                     _artifact_completion_nudges,
                     _missing,
                 )
-                yield (
-                    "data: "
-                    + json.dumps({
-                        "type": "completion_blocked",
-                        "round": round_num,
-                        "attempt": _artifact_completion_nudges,
-                        "decision": _loop_evidence.to_dict(),
-                    })
-                    + "\n\n"
-                )
+                yield _sse({
+                    "type": "completion_blocked",
+                    "round": round_num,
+                    "attempt": _artifact_completion_nudges,
+                    "decision": _loop_evidence.to_dict(),
+                })
                 messages.append({
                     "role": "system",
                     "content": (
@@ -37151,19 +34074,15 @@ async def stream_agent_loop(
                     "[agent] unchanged tool results on %d consecutive rounds; forcing final answer",
                     _unchanged_tool_result_rounds + 1,
                 )
-                yield (
-                    "data: "
-                    + json.dumps({
-                        "type": "loop_breaker_triggered",
-                        "reason": "unchanged_tool_results",
-                        "message": (
-                            "The agent received the same tool result repeatedly, "
-                            "so it is being asked to finish instead of probing again."
-                        ),
-                        "round": round_num,
-                    })
-                    + "\n\n"
-                )
+                yield _sse({
+                    "type": "loop_breaker_triggered",
+                    "reason": "unchanged_tool_results",
+                    "message": (
+                        "The agent received the same tool result repeatedly, "
+                        "so it is being asked to finish instead of probing again."
+                    ),
+                    "round": round_num,
+                })
                 _force_answer = True
                 messages.append({
                     "role": "system",
@@ -37175,20 +34094,10 @@ async def stream_agent_loop(
                     ),
                 })
 
-        # Emit agent_step event
-        yield (
-            f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
-        )
-
-        # Separator in accumulated response
+        yield _sse({"type": "agent_step", "round": round_num + 1})
         full_response += "\n\n"
     else:
-        # The for-loop completed every allowed round WITHOUT an early `break`
-        # (a `break` fires on "done", budget, or error). Reaching this `else`
-        # means the agent kept working until it ran out of rounds — so offer
-        # Continue instead of stopping silently. This catches ALL exhaustion
-        # paths, including a verifier `continue` on the final round (the old
-        # bottom-of-loop flag missed those).
+        # No break: the agent used every round while still working.
         _exhausted_rounds = True
 
     # If the loop hit the round cap while still working, tell the client so it
@@ -37198,7 +34107,7 @@ async def stream_agent_loop(
             "[agent] round cap (%d) reached mid-task — emitting rounds_exhausted",
             _round_limit,
         )
-        yield f'data: {json.dumps({"type": "rounds_exhausted", "rounds": _round_limit})}\n\n'
+        yield _sse({"type": "rounds_exhausted", "rounds": _round_limit})
 
     # Interactive clients can expose the rounds_exhausted continuation affordance,
     # but unattended native (/cook and eval) callers have nobody to press it.
@@ -37298,27 +34207,23 @@ async def stream_agent_loop(
         if _exhaustion_final:
             full_response = _exhaustion_final
             round_texts.append(_exhaustion_final)
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "final_response",
-                    "content": full_response,
-                    "fallback": _unattended_final_recovery,
-                })
-                + "\n\n"
-            )
+            yield _sse({
+                "type": "final_response",
+                "content": full_response,
+                "fallback": _unattended_final_recovery,
+            })
 
     if _tui_project_discovery_summary_text:
         # Project inventory is already authoritative. Replace blank or
         # hallucinated router prose with the bounded structured result.
         if full_response.strip() != _tui_project_discovery_summary_text.strip():
             full_response = _tui_project_discovery_summary_text
-            yield f'data: {json.dumps({"type": "final_response", "content": full_response})}\n\n'
+            yield _sse({"type": "final_response", "content": full_response})
 
     if _tui_local_network_summary_text:
         if full_response.strip() != _tui_local_network_summary_text.strip():
             full_response = _tui_local_network_summary_text
-            yield f'data: {json.dumps({"type": "final_response", "content": full_response})}\n\n'
+            yield _sse({"type": "final_response", "content": full_response})
 
     if _tui_bash_block_request and not _tui_bash_block_output:
         for _event in reversed(tool_events):
@@ -37328,22 +34233,18 @@ async def stream_agent_loop(
                     break
     if _tui_test_summary_text and not full_response.strip():
         full_response = _tui_test_summary_text
-        yield f'data: {json.dumps({"type": "final_response", "content": full_response})}\n\n'
+        yield _sse({"type": "final_response", "content": full_response})
     if not full_response.strip():
         for _event in reversed(tool_events):
             if _resolved_tool_event_name(_event) != "host_shell":
                 continue
             _event_command = str(_event.get("command") or "")
-            if not re.search(
-                r"(?:pytest|npm\s+(?:run\s+)?test|make\s+test|go\s+test|cargo\s+test)",
-                _event_command,
-                re.IGNORECASE,
-            ):
+            if not _rx(r"(?:pytest|npm\s+(?:run\s+)?test|make\s+test|go\s+test|cargo\s+test)", re.IGNORECASE).search(_event_command):
                 continue
             _event_output = str(_event.get("output") or "").strip()
             if _event_output:
                 full_response = _event_output
-                yield f'data: {json.dumps({"type": "final_response", "content": full_response})}\n\n'
+                yield _sse({"type": "final_response", "content": full_response})
             break
     if (
         _tui_bash_block_request
@@ -37351,7 +34252,7 @@ async def stream_agent_loop(
         and _tui_bash_block_output
     ):
         full_response = f"```bash\n$ pwd; whoami; uname -srm\n{_tui_bash_block_output}\n```"
-        yield f'data: {json.dumps({"type": "final_response", "content": full_response})}\n\n'
+        yield _sse({"type": "final_response", "content": full_response})
 
     # If the response is completely empty and no tools were executed,
     # yield a fallback message so the user is not left hanging.
@@ -37365,7 +34266,7 @@ async def stream_agent_loop(
     # prose. Local finetunes may emit those before the parser catches and
     # executes them; saved history should contain only the user-facing answer.
     full_response = _visible_response_text(full_response)
-    if re.match(r"^Done\b", full_response, re.IGNORECASE):
+    if _rx(r"^Done\b", re.IGNORECASE).match(full_response):
         without_trailing_done = _strip_trailing_done(full_response)
         if without_trailing_done:
             full_response = without_trailing_done
@@ -37374,7 +34275,7 @@ async def stream_agent_loop(
         if _normalized_full_response != full_response:
             full_response = _normalized_full_response
             if not tool_events:
-                yield f'data: {json.dumps({"type": "final_response", "content": full_response})}\n\n'
+                yield _sse({"type": "final_response", "content": full_response})
         else:
             full_response = _normalized_full_response
         if (
@@ -37417,10 +34318,10 @@ async def stream_agent_loop(
         ):
             _context_query = _web_search_query_from_user_text(_retry_context)
             if _context_query:
-                _retry_query = re.sub(r"\s+", " ", f"{_context_query} {_retry_query}").strip()
+                _retry_query = _rx(r"\s+").sub(" ", f"{_context_query} {_retry_query}").strip()
                 _retry_block = ToolBlock("web_search", json.dumps({"query": _retry_query}, ensure_ascii=False))
         if _retry_query and any(_web_search_queries_overlap(_retry_query, q) for q in _web_search_queries):
-            _retry_query = re.sub(r"\s+", " ", f"{_retry_query} official source").strip()
+            _retry_query = _rx(r"\s+").sub(" ", f"{_retry_query} official source").strip()
             _retry_block = ToolBlock("web_search", json.dumps({"query": _retry_query}, ensure_ascii=False))
         # This path is itself the single bounded recovery attempt. Once the
         # model has explicitly reported bad/off-topic evidence, semantic
@@ -37429,18 +34330,14 @@ async def stream_agent_loop(
         # official-source qualifier, and this fallback cannot loop.
         if _retry_query:
             logger.info("[agent] running one-shot web retry after retry preamble: %r", _retry_query[:180])
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "tool_start",
-                    "tool": "web_search",
-                    "command": _retry_query,
-                    "full_command": _retry_query,
-                    "round": _last_round_num + 1,
-                    "fallback": "web_retry_preamble",
-                })
-                + "\n\n"
-            )
+            yield _sse({
+                "type": "tool_start",
+                "tool": "web_search",
+                "command": _retry_query,
+                "full_command": _retry_query,
+                "round": _last_round_num + 1,
+                "fallback": "web_retry_preamble",
+            })
             try:
                 _retry_desc, _retry_result = await execute_tool_block(
                     _retry_block,
@@ -37472,18 +34369,14 @@ async def stream_agent_loop(
                 or _retry_result.get("error")
                 or ""
             )
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "tool_output",
-                    "tool": "web_search",
-                    "command": _retry_query,
-                    "output": _truncate(_retry_output),
-                    "exit_code": _retry_result.get("exit_code"),
-                    "fallback": "web_retry_preamble",
-                })
-                + "\n\n"
-            )
+            yield _sse({
+                "type": "tool_output",
+                "tool": "web_search",
+                "command": _retry_query,
+                "output": _truncate(_retry_output),
+                "exit_code": _retry_result.get("exit_code"),
+                "fallback": "web_retry_preamble",
+            })
             if not _retry_result.get("error") and _retry_output:
                 _web_search_queries.append(_retry_query)
                 _last_web_search_output = _retry_output
@@ -37530,14 +34423,10 @@ async def stream_agent_loop(
             or _web_retry_preamble
             or _is_tool_preamble(full_response)
             or _looks_like_web_preamble_only_response(full_response)
-            or re.search(r"(?m)^\s*Source:\s*https?://", full_response)
-            or re.search(
-                r"\bmodel provider returned no usable output\b|\bno usable output\b|"
+            or _rx(r"(?m)^\s*Source:\s*https?://").search(full_response)
+            or _rx(r"\bmodel provider returned no usable output\b|\bno usable output\b|"
                 r"\bmodel provider stopped before writing a final answer\b|"
-                r"\bcouldn'?t pull a clean answer together\b",
-                full_response,
-                re.IGNORECASE,
-            )
+                r"\bcouldn'?t pull a clean answer together\b", re.IGNORECASE).search(full_response)
         )
     ):
         try:
@@ -37576,12 +34465,8 @@ async def stream_agent_loop(
         except Exception as _e:
             logger.warning(f"[agent] web final synthesis retry failed: {_e}")
             _web_model_summary = ""
-        if _web_model_summary and re.search(
-            r"\bcouldn'?t pull a clean answer together\b|\bplease retry the request\b|"
-            r"\bnot enough clear evidence\b",
-            _web_model_summary,
-            re.IGNORECASE,
-        ):
+        if _web_model_summary and _rx(r"\bcouldn'?t pull a clean answer together\b|\bplease retry the request\b|"
+            r"\bnot enough clear evidence\b", re.IGNORECASE).search(_web_model_summary):
             _web_model_summary = ""
         if not _web_model_summary:
             _web_model_summary = _web_search_answer_from_evidence(
@@ -37590,7 +34475,7 @@ async def stream_agent_loop(
             )
         if _web_model_summary:
             full_response = _web_model_summary
-            yield f"data: {json.dumps({'type': 'final_response', 'content': full_response})}\n\n"
+            yield _sse({'type': 'final_response', 'content': full_response})
     # Native tool models sometimes stop immediately after one or more
     # read_email calls. For "find the address/amount/date in my mail" this is
     # not a completed answer: replaying the last message body only makes the
@@ -37662,7 +34547,7 @@ async def stream_agent_loop(
             if _email_synth:
                 full_response = _email_synth
                 _email_lookup_synthesized = True
-                yield f"data: {json.dumps({'type': 'final_response', 'content': full_response})}\n\n"
+                yield _sse({'type': 'final_response', 'content': full_response})
 
     _response_before_tool_summary = full_response
     _action_summary_selected = False
@@ -37775,7 +34660,7 @@ async def stream_agent_loop(
                 _action_summary_selected = True
                 break
         if len(_multi_read_email_summaries) > 1 and not _email_lookup_synthesized:
-            if re.search(r"\b(?:urgent|important|priority|pressing|action\s+needed)\b", _last_user, re.IGNORECASE):
+            if _rx(r"\b(?:urgent|important|priority|pressing|action\s+needed)\b", re.IGNORECASE).search(_last_user):
                 full_response = _email_urgent_summary_from_read_summaries(
                     _multi_read_email_summaries
                 )
@@ -37898,16 +34783,6 @@ async def stream_agent_loop(
                     full_response = _attachment_summary
                 break
 
-    if _web_search_completed and full_response.strip():
-        full_response = _web_search_safety_touch_hygiene_postprocess(
-            _web_search_user_text,
-            full_response,
-        )
-        full_response = _web_search_requested_unit_postprocess(
-            _web_search_user_text,
-            full_response,
-        )
-
     if tool_events and full_response.strip():
         full_response = _linkify_note_titles_from_tool_events(full_response, tool_events)
         full_response = _linkify_email_titles_from_tool_events(full_response, tool_events)
@@ -37927,20 +34802,20 @@ async def stream_agent_loop(
         and full_response.strip() not in (_response_before_tool_summary or "")
     ):
         _final_delta = full_response.strip()
-        yield f"data: {json.dumps({'type': 'final_response', 'content': _final_delta})}\n\n"
+        yield _sse({'type': 'final_response', 'content': _final_delta})
     elif (
         (_ody_qwen_finetune_model or _qwen38_tool_router)
         and _web_search_completed
         and full_response.strip()
     ):
-        yield f"data: {json.dumps({'type': 'final_response', 'content': full_response.strip()})}\n\n"
+        yield _sse({'type': 'final_response', 'content': full_response.strip()})
 
     if (_compact_memory_list_turn or _compact_document_list_turn) and full_response.strip():
         # Let clients replace any accumulated partial response with the
         # deterministic compact memory summary. The TUI renders this as the
         # only assistant text after the tool card; the API route persists it
         # instead of concatenating it with the suppressed model dump.
-        yield f"data: {json.dumps({'type': 'final_response', 'content': full_response})}\n\n"
+        yield _sse({'type': 'final_response', 'content': full_response})
 
     # --- Final metrics ---
     total_duration = time.time() - total_start
@@ -38003,15 +34878,11 @@ async def stream_agent_loop(
     # diagnosable without logging the unsanitized client payload.
     metrics["completion_requirements"] = _completion_requirements.to_dict()
     metrics["completion_decision"] = _completion_decision.to_dict()
-    yield (
-        "data: "
-        + json.dumps({
-            "type": "completion_decision",
-            "data": _completion_decision.to_dict(),
-        })
-        + "\n\n"
-    )
-    yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
+    yield _sse({
+        "type": "completion_decision",
+        "data": _completion_decision.to_dict(),
+    })
+    yield _sse({'type': 'metrics', 'data': metrics})
 
     # Queue the existing teacher hook. The outer adapter executes it only
     # after this invocation's completion gate and action context have closed.

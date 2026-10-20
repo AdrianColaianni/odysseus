@@ -49,8 +49,8 @@ export function createPanel({
     document.body.classList.remove('notes-view', 'notes-mobile-mode', 'notes-drag-mode');
     document.getElementById('tool-notes-btn')?.classList.remove('active');
     try { Modals.unregister('notes-panel'); } catch {}
-    try { document.getElementById('notes-pane')?.remove(); } catch {}
-    try { document.getElementById('notes-pane-backdrop')?.remove(); } catch {}
+    document.getElementById('notes-pane')?.remove();
+    document.getElementById('notes-pane-backdrop')?.remove();
     try { window._restoreSidebarIfRouteCollapsed?.(); } catch {}
   }
 
@@ -363,8 +363,8 @@ export function createPanel({
       // like the same gesture played backwards.
       pane.classList.add('notes-pane-leaving');
       const _cleanup = () => {
-        try { pane.remove(); } catch {}
-        try { backdrop?.remove(); } catch {}
+        pane.remove();
+        backdrop?.remove();
       };
       pane.addEventListener('animationend', _cleanup, { once: true });
       // Belt-and-braces: if animation is skipped (reduced motion / detached
@@ -489,7 +489,7 @@ export function createPanel({
     if (!card) return;
     const scroller = card.closest('.notes-pane-body');
     if (!scroller) {
-      try { card.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (_) {}
+      card.scrollIntoView({ block: 'center', behavior: 'smooth' });
       return;
     }
     const scrollerRect = scroller.getBoundingClientRect();

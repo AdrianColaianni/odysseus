@@ -4,15 +4,19 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
-import time
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple, cast
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote, urljoin, urlparse
 
-import httpcore
 import httpx
 
-from src.url_safety import _default_resolver, check_outbound_url
+from src.url_safety import (
+    OutboundAddressBlocked,
+    PinnedBackend as _PinnedBackend,  # noqa: F401
+    PinnedTransport as _PinnedTransport,
+    _default_resolver,
+    resolve_outbound_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,158 +79,16 @@ def _is_text_file(name: str) -> bool:
 _MAX_FETCH_REDIRECTS = 5
 
 
-def _validated_ips(raw_ips: List[str]) -> List[ipaddress._BaseAddress]:
-    """Parse and de-duplicate one resolver snapshot in resolver order."""
-    ips: List[ipaddress._BaseAddress] = []
-    seen = set()
-    for raw in raw_ips:
-        if not isinstance(raw, str):
-            continue
-        try:
-            ip = ipaddress.ip_address(raw.split("%", 1)[0])
-        except ValueError:
-            continue
-        if ip in seen:
-            continue
-        seen.add(ip)
-        ips.append(ip)
-    return ips
-
-
 def _resolve_and_check_url(url: str) -> List[ipaddress._BaseAddress]:
     """Return the exact address snapshot approved for one fetch hop."""
-    resolved_ips: List[str] = []
-
-    def _recording_resolver(host: str) -> List[str]:
-        answers = list(_default_resolver(host))
-        resolved_ips[:] = answers
-        return answers
-
-    ok, reason = check_outbound_url(
-        url,
-        block_private=True,
-        resolver=_recording_resolver,
-    )
-    if not ok:
-        raise SkillImportError(f"outbound URL blocked: {reason}")
-
-    pinned_ips = _validated_ips(resolved_ips)
-    if not pinned_ips:
-        raise SkillImportError("outbound URL blocked: host did not resolve to a usable address")
-    return pinned_ips
+    try:
+        return resolve_outbound_url(url, block_private=True, resolver=_default_resolver)
+    except OutboundAddressBlocked as e:
+        raise SkillImportError(f"outbound URL blocked: {e}") from e
 
 
 # Backward compatibility alias for tests importing _check_fetch_url directly
 _check_fetch_url = _resolve_and_check_url
-
-
-class _PinnedBackend(httpcore.NetworkBackend):
-    """Connect only to addresses from one validated DNS snapshot."""
-
-    def __init__(self, ips: List[ipaddress._BaseAddress]):
-        self._ips = [str(ip) for ip in ips]
-        self._real = httpcore.SyncBackend()
-
-    def connect_tcp(
-        self,
-        host: str,
-        port: int,
-        timeout: float | None = None,
-        local_address: str | None = None,
-        socket_options=None,
-    ):
-        deadline = None if timeout is None else time.monotonic() + timeout
-        last_exc: Optional[Exception] = None
-        for ip in self._ips:
-            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            try:
-                return self._real.connect_tcp(
-                    ip,
-                    port,
-                    remaining,
-                    local_address,
-                    socket_options,
-                )
-            except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
-                last_exc = exc
-                if deadline is not None and time.monotonic() >= deadline:
-                    break
-        if last_exc is not None:
-            raise last_exc
-        raise httpcore.ConnectError("no validated address available")
-
-    def connect_unix_socket(self, path, timeout=None, socket_options=None):
-        return self._real.connect_unix_socket(path, timeout, socket_options)
-
-    def sleep(self, seconds: float) -> None:
-        return self._real.sleep(seconds)
-
-
-_HTTPCORE_TO_HTTPX_EXC = {
-    httpcore.ConnectError: httpx.ConnectError,
-    httpcore.ConnectTimeout: httpx.ConnectTimeout,
-    httpcore.LocalProtocolError: httpx.LocalProtocolError,
-    httpcore.NetworkError: httpx.NetworkError,
-    httpcore.PoolTimeout: httpx.PoolTimeout,
-    httpcore.ProtocolError: httpx.ProtocolError,
-    httpcore.ProxyError: httpx.ProxyError,
-    httpcore.ReadError: httpx.ReadError,
-    httpcore.ReadTimeout: httpx.ReadTimeout,
-    httpcore.RemoteProtocolError: httpx.RemoteProtocolError,
-    httpcore.TimeoutException: httpx.TimeoutException,
-    httpcore.UnsupportedProtocol: httpx.UnsupportedProtocol,
-    httpcore.WriteError: httpx.WriteError,
-    httpcore.WriteTimeout: httpx.WriteTimeout,
-}
-
-
-class _PinnedTransport(httpx.BaseTransport):
-    """Pin socket connects while preserving URL authority, Host, and TLS SNI."""
-
-    def __init__(self, ips: List[ipaddress._BaseAddress]):
-        self._pinned_ips = list(ips)
-        self._pool = httpcore.ConnectionPool(
-            ssl_context=httpx.create_ssl_context(),
-            http1=True,
-            http2=False,
-            network_backend=_PinnedBackend(ips),
-        )
-
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
-        core_request = httpcore.Request(
-            method=request.method,
-            url=httpcore.URL(
-                scheme=request.url.raw_scheme,
-                host=request.url.raw_host,
-                port=request.url.port,
-                target=request.url.raw_path,
-            ),
-            headers=request.headers.raw,
-            content=request.stream,
-            extensions=request.extensions,
-        )
-        core_response = None
-        try:
-            core_response = self._pool.handle_request(core_request)
-            content = b"".join(cast(Iterable[bytes], core_response.stream))
-        except Exception as exc:
-            mapped = _HTTPCORE_TO_HTTPX_EXC.get(type(exc))
-            if mapped is not None:
-                raise mapped(str(exc)) from exc
-            raise
-        finally:
-            if core_response is not None:
-                core_response.close()
-
-        return httpx.Response(
-            status_code=core_response.status,
-            headers=core_response.headers,
-            content=content,
-            extensions=core_response.extensions,
-        )
-
-    def close(self) -> None:
-        self._pool.close()
 
 
 def _get_checked(

@@ -14,7 +14,8 @@ from core.models import ChatMessage
 from core.database import SessionLocal
 from core.database import Session as DBSession, ModelEndpoint
 from src.llm_core import normalize_model_id
-from src.endpoint_resolver import normalize_base
+from src.constants import SFT_TRACE_DIR
+from src.endpoint_resolver import normalize_base, session_url_matches_endpoint
 from src.context_compactor import maybe_compact, trim_for_context
 from src.model_context import estimate_tokens, get_context_length
 from src.auth_helpers import effective_user
@@ -179,6 +180,10 @@ def _last_user_message_for_trace(sess) -> str:
     return ""
 
 
+def _sft_trace_path(owner: str | None) -> str:
+    return os.path.join(os.getenv(_SFT_TRACE_DIR_ENV) or SFT_TRACE_DIR, f"{owner}.jsonl")
+
+
 def _append_sft_trace_record(
     *,
     owner: str | None,
@@ -192,11 +197,8 @@ def _append_sft_trace_record(
     if not _sft_trace_capture_enabled(owner):
         return
     try:
-        from src.constants import DATA_DIR
-
-        trace_dir = os.getenv(_SFT_TRACE_DIR_ENV) or os.path.join(DATA_DIR, "sft_traces")
-        os.makedirs(trace_dir, exist_ok=True)
-        path = os.path.join(trace_dir, f"{owner}.jsonl")
+        path = _sft_trace_path(owner)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         runtime_revision = os.getenv(_RUNTIME_REVISION_ENV, "").strip()
         record = {
             "format": "odysseus_sft_trace_turn_v1",
@@ -235,10 +237,7 @@ def remove_session_sft_trace_rows(owner: str | None, session_id: str) -> int:
     if not _sft_trace_capture_enabled(owner) or not str(session_id or "").strip():
         return 0
     try:
-        from src.constants import DATA_DIR
-
-        trace_dir = os.getenv(_SFT_TRACE_DIR_ENV) or os.path.join(DATA_DIR, "sft_traces")
-        path = os.path.join(trace_dir, f"{owner}.jsonl")
+        path = _sft_trace_path(owner)
         if not os.path.exists(path):
             return 0
         kept: list[str] = []
@@ -781,23 +780,6 @@ def fire_message_event(request, webhook_manager, session_id: str, sess, message:
     fire_event("message_sent", user)
 
 
-def _session_url_matches_endpoint(session_url: str, endpoint_base: str) -> bool:
-    if not session_url or not endpoint_base:
-        return False
-    try:
-        from src.endpoint_resolver import build_chat_url, normalize_base
-
-        sess_url = session_url.rstrip("/")
-        base = normalize_base(endpoint_base).rstrip("/")
-        return sess_url in {
-            base,
-            base + "/chat/completions",
-            build_chat_url(base).rstrip("/"),
-        }
-    except Exception:
-        return False
-
-
 def _endpoint_created_sort_key(ep) -> tuple:
     created = getattr(ep, "created_at", None)
     try:
@@ -818,7 +800,7 @@ def _select_session_endpoint(sess, target_url: str, endpoints) -> tuple:
     Returns ``(endpoint, bound_by_fallback)``; ``bound_by_fallback`` is True
     when the choice came from URL matching and may be persisted as a binding.
     """
-    matching = [ep for ep in endpoints if _session_url_matches_endpoint(target_url, getattr(ep, "base_url", "") or "")]
+    matching = [ep for ep in endpoints if session_url_matches_endpoint(target_url, getattr(ep, "base_url", "") or "")]
     if not matching:
         return None, False
     bound_id = getattr(sess, "endpoint_id", None) or None

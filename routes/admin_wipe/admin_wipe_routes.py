@@ -13,11 +13,12 @@ import json
 import logging
 import os
 import shutil
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Depends
+from sqlalchemy.orm import Session
 
 from core.middleware import require_admin
 from core.database import (
-    SessionLocal,
+    get_db,
     Session as DbSession,
     ChatMessage as DbChatMessage,
     Memory,
@@ -69,11 +70,10 @@ def setup_admin_wipe_routes(session_manager):
     router = APIRouter(prefix="/api/admin")
 
     @router.delete("/wipe/{kind}")
-    def wipe(kind: str, request: Request):
+    def wipe(kind: str, request: Request, db: Session = Depends(get_db)):
         require_admin(request)
         kind = (kind or "").strip().lower()
 
-        db = SessionLocal()
         try:
             if kind == "chats":
                 count = db.query(DbSession).count()
@@ -170,7 +170,5 @@ def setup_admin_wipe_routes(session_manager):
             db.rollback()
             logger.exception(f"Wipe {kind} failed")
             raise HTTPException(500, f"Wipe {kind} failed: {e}")
-        finally:
-            db.close()
 
     return router

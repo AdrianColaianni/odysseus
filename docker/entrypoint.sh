@@ -1,14 +1,6 @@
 #!/bin/sh
-# Entrypoint that fixes the #1 self-host footgun: a Docker container
-# that runs as root writes root-owned files into bind-mounted host
-# volumes, and the host user (or a non-root service user) then can't
-# update them — silently breaking skill extraction, prefs saves, mail
-# attachments, etc.
-#
-# Standard PUID/PGID pattern: pick the UID/GID we should drop to,
-# chown the writable bind-mounts so existing root-owned content gets
-# repaired on every start (idempotent), then exec the real command
-# as that user via gosu.
+# PUID/PGID drop: chown the writable bind mounts so root-owned files from
+# earlier runs stay writable by the host user, then exec the command via gosu.
 set -e
 
 PUID="${PUID:-1000}"

@@ -1,31 +1,10 @@
-/* Cookbook (including What Fits?), deep research, memory, settings and admin.
- *
- * This is an eagerly loaded tail segment of the app stylesheet cascade. The
- * former static/style.css now lives in the numbered 00-17 fragments; these
- * three pre-existing panel files follow those fragments without changing
- * their relative order. Nothing here is lazy-loaded.
- *
- * LOAD ORDER IS PART OF THE CONTRACT. static/index.html and the PRECACHE list
- * in static/sw.js must agree:
- *   1. static/css/00-tokens.css through static/css/17-research.css,
- *      in numeric order
- *   2. static/css/documents-gallery-editor.css
- *   3. static/css/email-calendar-notes-tasks.css
- *   4. static/css/cookbook-research-memory-settings.css
- *
- * Rules in this file retain their existing cascade position. Shared rules
- * formerly kept in static/style.css now live in the numbered fragments.
- */
+/* Cookbook (including What Fits?), deep research, memory, settings and admin. */
 
 /* Cookbook already shows its own running/served-status dot
        (#cookbook-notif-dot, toggled with .cookbook-notif-active on the
        button). Don't stack the tabbed-down pulse on top of it — the two
        dots overlap. Suppress the minimized dot while the status dot is up. */
 .list-item.rail-minimized.cookbook-notif-active::after { display: none; }
-@keyframes research-done-pulse {
-      0%, 100% { transform: scale(1); opacity: 1; }
-      50% { transform: scale(1.5); opacity: 0.7; }
-    }
 #cookbook-gguf-delete-overlay {
       background:rgba(0,0,0,0.5);
       backdrop-filter:blur(4px);
@@ -42,16 +21,8 @@
   0%, 100% { opacity: 0.3; transform: scale(0.8); }
   50% { opacity: 1; transform: scale(1.2); }
 }
-@keyframes memory-synapse-pulse {
-  0%, 100% { opacity: 0.35; transform: scale(1); }
-  50%      { opacity: 0.65; transform: scale(1.02); }
-}
 .memory-add-input::placeholder {
   color: color-mix(in srgb, var(--fg) 40%, transparent);
-}
-.memory-toolbar-toggle:has(input:not(:checked)) > span {
-  text-decoration: line-through;
-  text-decoration-color: color-mix(in srgb, var(--fg) 30%, transparent);
 }
 .memory-sort-label { white-space: nowrap; }
 .memory-sort-btn[aria-expanded="true"] .memory-sort-caret { transform: rotate(180deg); }
@@ -100,14 +71,12 @@
 /* Most recently added endpoint — brief accent glow so the user can
    spot the new row immediately after Adding / Find. Fades out cleanly. */
 @keyframes adm-ep-just-added-glow {
-  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, var(--red)) 55%, transparent); background: color-mix(in srgb, var(--accent, var(--red)) 18%, transparent); }
-  60%  { box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent, var(--red)) 0%, transparent); background: color-mix(in srgb, var(--accent, var(--red)) 8%, transparent); }
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--red) 55%, transparent); background: color-mix(in srgb, var(--red) 18%, transparent); }
+  60%  { box-shadow: 0 0 0 6px color-mix(in srgb, var(--red) 0%, transparent); background: color-mix(in srgb, var(--red) 8%, transparent); }
   100% { box-shadow: 0 0 0 0 transparent; background: transparent; }
 }
-.adm-section-toggle:focus-visible { outline: 1px solid var(--red); outline-offset: 1px; }
 /* Collapsed: hide the form body and point the caret right. */
 .adm-add-section.collapsed .admin-model-form { display: none; }
-.adm-add-section.collapsed .adm-section-caret { transform: rotate(-90deg); }
 .adm-quickstart-section {
   margin-top: 7px;
 }
@@ -115,13 +84,7 @@
   border-bottom-left-radius: 0;
   border-bottom-right-radius: 0;
 }
-.adm-quickstart-section.collapsed .adm-quickstart-body { display: none; }
-.adm-quickstart-section.collapsed .adm-section-caret { transform: rotate(-90deg); }
 .adm-provider-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-@keyframes admin-spin {
-  to { transform: rotate(360deg); }
-}
-.admin-rag-item .admin-btn-delete { font-size: 10px; padding: 2px 6px; }
 /* Cookbook's cached-model list: NO inner-scroll cap. Two nested scroll
    surfaces (this + the outer .admin-card) trapped the wheel so an expanded
    serve panel couldn't be reached on tall content. Let the outer
@@ -130,8 +93,8 @@
   max-height: none !important;
   overflow-y: visible !important;
 }
-/* The Servers list reuses .memory-toolbar for layout but must grow with every
-   added server — the 120px cap above was clipping manually-added servers. */
+/* The Servers list reuses .memory-toolbar for layout but must grow with
+   every added server, past the 120px cap above. */
 .memory-toolbar.cookbook-servers-toolbar {
   max-height: none;
   overflow: visible;
@@ -182,7 +145,7 @@
   animation: cookbook-task-flash-anim 1.6s ease-out;
 }
 @keyframes cookbook-task-flash-anim {
-  0%   { box-shadow: 0 0 0 2px var(--accent, var(--red)); }
+  0%   { box-shadow: 0 0 0 2px var(--red); }
   100% { box-shadow: 0 0 0 2px transparent; }
 }
 /* Cookbook header "downloading" status label sits 2px too far left
@@ -208,7 +171,6 @@
   flex: 1;
 }
 .cookbook-section-header:hover .cookbook-section-chevron { opacity: 1; }
-.cookbook-slot-wrap:hover .cookbook-slot-del { opacity: 1; }
 /* Keep dependency pills visually centered against the package description.
    The row itself stays stable; only the controls move down slightly. */
 .cookbook-dep-row > .cookbook-dep-tag {
@@ -284,22 +246,15 @@
 .hwfit-serve-panel[data-backend-active="vllm"] .hwfit-extra-env-label {
   grid-column: 2 / -1;
 }
-.hwfit-sf.hwfit-sf-full { grid-column: 1 / -1; }
 .hwfit-spec-tokens-bare::-webkit-outer-spin-button,
 .hwfit-spec-tokens-bare::-webkit-inner-spin-button {
   -webkit-appearance: none;
   margin: 0;
   display: none;
 }
-.hwfit-numstep .hwfit-spec-tokens::-webkit-outer-spin-button,
-.hwfit-numstep .hwfit-spec-tokens::-webkit-inner-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
-}
 .hwfit-numstep-btn:focus { outline: none; }
 .hwfit-spec-group:has(input[type="checkbox"]:not(:checked)) .hwfit-spec-method,
-.hwfit-spec-group:has(input[type="checkbox"]:not(:checked)) .hwfit-spec-tokens,
-.hwfit-spec-group:has(input[type="checkbox"]:not(:checked)) .hwfit-numstep {
+.hwfit-spec-group:has(input[type="checkbox"]:not(:checked)) .hwfit-spec-tokens {
   opacity: 0.45;
   pointer-events: none;
 }
@@ -347,20 +302,9 @@
   padding-right: 32px;
 }
 .hwfit-serve-cmd-details[open] .hwfit-serve-cmd {
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 48%, var(--border));
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent, var(--red)) 16%, transparent),
-              0 0 12px color-mix(in srgb, var(--accent, var(--red)) 13%, transparent);
-}
-.cookbook-gpu-split .cookbook-gpu-split-main {
-  border-top-right-radius: 0 !important;
-  border-bottom-right-radius: 0 !important;
-}
-.cookbook-gpu-split .cookbook-gpu-split-arrow {
-  border-top-left-radius: 0 !important;
-  border-bottom-left-radius: 0 !important;
-  border-left-width: 0 !important;
-  padding: 0 6px !important;
-  min-width: 24px;
+  border-color: color-mix(in srgb, var(--red) 48%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 16%, transparent),
+              0 0 12px color-mix(in srgb, var(--red) 13%, transparent);
 }
 .cookbook-task[data-type="download"][data-status="running"] .cookbook-task-type[data-type="download"] {
   background: color-mix(in srgb, var(--color-accent, #00aaff) 18%, transparent);
@@ -375,68 +319,6 @@
 .cookbook-task-header {
   cursor: pointer;
 }
-.cookbook-env-row > .cookbook-field-label {
-  flex: 1 1 140px;
-  min-width: 120px;
-}
-.cookbook-extra-label { grid-column: 1 / -1; }
-.cookbook-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: var(--fg);
-  border: 2px solid var(--panel);
-  box-shadow: 0 1px 4px rgba(0,0,0,0.3);
-  cursor: pointer;
-  transition: transform 0.1s, box-shadow 0.1s;
-}
-.cookbook-slider:hover::-webkit-slider-thumb {
-  transform: scale(1.15);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, var(--red)) 20%, transparent);
-}
-.cookbook-slider:active::-webkit-slider-thumb {
-  transform: scale(1.25);
-  box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent, var(--red)) 25%, transparent);
-}
-.cookbook-slider::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--fg);
-  border: 2px solid var(--panel);
-  box-shadow: 0 1px 4px rgba(0,0,0,0.3);
-  cursor: pointer;
-}
-.cookbook-slider::-moz-range-progress {
-  background: var(--accent, var(--red));
-  height: 6px;
-  border-radius: 4px;
-}
-.cookbook-slider::-webkit-slider-runnable-track {
-  height: 6px;
-  border-radius: 4px;
-}
-.cookbook-slider::-moz-range-track {
-  height: 6px;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--fg) 12%, transparent);
-}
-.cookbook-checkbox:checked::after {
-  transform: translateX(14px);
-}
-/* Sliders span full row for alignment */
-.cookbook-field-slider {
-  grid-column: 1 / -1;
-}
-.cookbook-diag-body {
-  margin-top: 7px;
-}
-/* Add Server collapsible */
-.cookbook-server-details {
-  margin: 4px 0 6px;
-}
-.cookbook-server-toggle::-webkit-details-marker { display: none; }
 .cookbook-srv-status:hover { transform: scale(1.3); }
 @keyframes cookbook-srv-pulse {
   0%, 100% { opacity: 0.45; }
@@ -483,7 +365,7 @@
   display: none !important;
 }
 .cookbook-server-row .cookbook-srv-color-btn:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--cookbook-server-color, var(--accent, var(--red))) 70%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--cookbook-server-color, var(--red)) 70%, transparent);
   outline-offset: 2px;
 }
 .cookbook-server-row .cookbook-srv-host { flex: 1; min-width: 100px; }
@@ -517,11 +399,6 @@
   /* Make room for the ? on the right edge, in addition to the native chevron. */
   padding-right: 32px;
 }
-.hwfit-toolbar .hwfit-host { width: 110px; flex-shrink: 0; }
-.hwfit-env-row .hwfit-envtype { width: auto; min-width: 70px; flex-shrink: 0; }
-.hwfit-env-row .hwfit-envpath { flex: 1; min-width: 100px; }
-.hwfit-env-row .hwfit-gpus { width: 90px; flex-shrink: 0; }
-.hwfit-hw-chip-dismiss { cursor: pointer; }
 .hwfit-hw-chip-row[data-hw-chip="gpu"] .hwfit-hw-chip-x {
   transform: translateY(-3px);
 }
@@ -556,7 +433,6 @@
   from { opacity: 0; transform: translateY(-4px); }
   to { opacity: 1; transform: translateY(0); }
 }
-.hwfit-cb { cursor: pointer; }
 .settings-appearance-panel {
   flex-direction: column;
 }
@@ -695,22 +571,11 @@ details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_kv_cache_dtype
 .cookbook-output-wrap .cookbook-output-copy:hover {
   opacity: 1;
 }
-#cookbook-dl-btn-search {
-  position: relative;
-  top: -4px;
-  padding-top: 0;
-  padding-bottom: 0;
-  height: 28px;
-}
 #cookbook-dl-btn {
   position: relative;
   top: -4px;
 }
 .research-synapse-compact .rs-stage { height: 288px; }
-@keyframes rs-live {
-  0%, 100% { opacity: 0.45; }
-  50% { opacity: 1; }
-}
 .research-synapse .rs-guide ellipse {
   fill: none;
   stroke: color-mix(in srgb, var(--fg) 7%, transparent);
@@ -720,10 +585,10 @@ details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_kv_cache_dtype
 .research-synapse .rs-edge-tone-1 { stroke: color-mix(in srgb, var(--gold, #d4a72c) 45%, var(--border)); }
 .research-synapse .rs-edge-tone-2 { stroke: color-mix(in srgb, #5aa7c7 42%, var(--border)); }
 .research-synapse .rs-edge.rs-edge-firing {
-  stroke: var(--accent, var(--red));
+  stroke: var(--red);
   stroke-width: 2;
   opacity: 1;
-  filter: drop-shadow(0 0 4px var(--accent, var(--red)));
+  filter: drop-shadow(0 0 4px var(--red));
   animation: rs-fire 1.1s ease-out;
 }
 @keyframes rs-fire {
@@ -732,21 +597,21 @@ details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_kv_cache_dtype
   100% { stroke-dasharray: 200 4; stroke-dashoffset: -200; opacity: 0.55; }
 }
 .research-synapse .rs-node-root {
-  fill: var(--accent, var(--red));
-  stroke: var(--accent, var(--red));
-  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent, var(--red)) 65%, transparent));
+  fill: var(--red);
+  stroke: var(--red);
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--red) 65%, transparent));
 }
 .research-synapse .rs-root-halo {
   fill: none;
-  stroke: color-mix(in srgb, var(--accent, var(--red)) 28%, transparent);
+  stroke: color-mix(in srgb, var(--red) 28%, transparent);
   stroke-width: 1;
 }
 /* Sub & leaf nodes stay inside the accent palette so the whole graph
    reads as one organism. Leaves are softer/lower-contrast dots that
    float around their sub — not green-on-stem (which read as palm fronds). */
 .research-synapse .rs-node-sub {
-  fill: color-mix(in srgb, var(--accent, var(--red)) 10%, var(--bg));
-  stroke: color-mix(in srgb, var(--accent, var(--red)) 70%, var(--fg));
+  fill: color-mix(in srgb, var(--red) 10%, var(--bg));
+  stroke: color-mix(in srgb, var(--red) 70%, var(--fg));
 }
 .research-synapse .rs-node-sub.rs-node-tone-1 {
   fill: color-mix(in srgb, var(--gold, #d4a72c) 11%, var(--bg));
@@ -757,15 +622,15 @@ details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_kv_cache_dtype
   stroke: color-mix(in srgb, #5aa7c7 72%, var(--fg));
 }
 .research-synapse .rs-node-leaf {
-  stroke: color-mix(in srgb, var(--accent, var(--red)) 55%, transparent);
-  fill: color-mix(in srgb, var(--accent, var(--red)) 42%, var(--bg));
+  stroke: color-mix(in srgb, var(--red) 55%, transparent);
+  fill: color-mix(in srgb, var(--red) 42%, var(--bg));
 }
 .research-synapse .rs-node-leaf.rs-node-tone-1 { fill: color-mix(in srgb, var(--gold, #d4a72c) 48%, var(--bg)); }
 .research-synapse .rs-node-leaf.rs-node-tone-2 { fill: color-mix(in srgb, #5aa7c7 48%, var(--bg)); }
 .research-synapse .rs-source-node { cursor: help; }
 @keyframes rs-hub-expand {
   0% { filter: drop-shadow(0 0 0 transparent); }
-  35% { filter: drop-shadow(0 0 7px var(--accent, var(--red))); }
+  35% { filter: drop-shadow(0 0 7px var(--red)); }
   100% { filter: drop-shadow(0 0 0 transparent); }
 }
 @keyframes rs-pop {
@@ -852,8 +717,8 @@ details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_kv_cache_dtype
   flex-wrap: wrap;
 }
 @media (max-width: 600px) {
-  /* Keep the "Research" title visible on mobile (matches the Cookbook tab
-     titles, which show on mobile). It used to be hidden here. */
+  /* Keep the "Research" title visible on mobile, like the Cookbook tab
+     titles. */
   .research-new-job h2 {
     font-size: 14px;
   }
@@ -880,7 +745,7 @@ details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_kv_cache_dtype
 }
 .research-picker-btn:focus-visible,
 .research-picker-option:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent, var(--red)) 65%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--red) 65%, transparent);
   outline-offset: 1px;
 }
 .research-picker-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -896,17 +761,16 @@ details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_kv_cache_dtype
   background: color-mix(in srgb, var(--accent-primary, var(--red)) 14%, transparent);
 }
 .research-job-card.done { cursor:pointer; }
-/* Past (library) research used to be dimmed to 0.65 which read as "greyed out".
-   They now look the same as the rest — folding them under "Past research"
-   handles the de-clutter instead. */
+/* Past (library) research is not dimmed; folding it under "Past
+   research" handles the de-clutter. */
 .research-job-card.done.from-library { opacity:1; }
 .research-job-thumb-frame[role="button"] { cursor: pointer; }
 .research-job-thumb-frame[role="button"]:hover {
-  outline: 1px solid color-mix(in srgb, var(--accent, var(--red)) 65%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--red) 65%, transparent);
   outline-offset: 1px;
 }
 .research-job-report-body h1, .research-job-report-body h2, .research-job-report-body h3 {
-  color: var(--cat-color, var(--accent, var(--fg)));
+  color: var(--cat-color, var(--fg));
 }
 .research-hero::after {
   content: ''; position: absolute; right: -40px; top: -40px;
@@ -988,7 +852,6 @@ details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_kv_cache_dtype
 .research-job-report-link:hover { opacity:1; }
 .research-synapse-toggle:hover,
 .research-synapse-toggle.active { opacity:1; }
-.research-job-synapse-host.synapse-collapsed { display:none; }
 .research-job-summary .research-job-thumb-frame {
   transform: translateY(-4px);
 }
@@ -1002,7 +865,7 @@ details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_kv_cache_dtype
   pointer-events: none;
   background: radial-gradient(ellipse at center,
     transparent 42%,
-    color-mix(in srgb, var(--accent, var(--red)) 28%, transparent) 100%);
+    color-mix(in srgb, var(--red) 28%, transparent) 100%);
   opacity: 0.75;
 }
 /* Push the first dim (dismiss/delete) button — and everything after it — to
@@ -1032,8 +895,8 @@ details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_kv_cache_dtype
 /* Active section dot: pulsing accent glow (work in progress). */
 .research-section-dot.pulsing { animation: research-dot-pulse 1.5s ease-in-out infinite; }
 @keyframes research-dot-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, var(--red)) 55%, transparent); }
-  70%      { box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent, var(--red)) 0%, transparent); }
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--red) 55%, transparent); }
+  70%      { box-shadow: 0 0 0 6px color-mix(in srgb, var(--red) 0%, transparent); }
 }
 .research-source-link:hover { text-decoration:underline; }
 .research-navigation-trace-live {
@@ -1096,9 +959,9 @@ details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_kv_cache_dtype
 }
 .research-section-clear svg { width: 11px; height: 11px; }
 .research-job-action.research-job-action-report:hover {
-  color: var(--cat-color, var(--accent, var(--red)));
-  border-color: var(--cat-color, var(--accent, var(--red)));
-  background: color-mix(in srgb, var(--cat-color, var(--accent, var(--red))) 10%, transparent);
+  color: var(--cat-color, var(--red));
+  border-color: var(--cat-color, var(--red));
+  background: color-mix(in srgb, var(--cat-color, var(--red)) 10%, transparent);
 }
 .research-start-btn svg { color: inherit; }
 .research-library-link:hover { opacity: 0.8; }
@@ -1121,7 +984,6 @@ details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_kv_cache_dtype
 .research-hero.research-hero-v3 { --research-accent: #72a5cf; }
 .research-job-card.research-standard-v4,
 .research-hero.research-hero-v4 { --research-accent: #aa86c7; }
-.adm-copilot-copy { margin-left: auto; }
 .adm-chatgpt-usage-host {
   margin: 4px 0 6px 0;
 }
@@ -1220,7 +1082,7 @@ details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_kv_cache_dtype
   font-size: 11px;
 }
 .settings-nav-search:focus {
-  border-color: var(--accent, var(--red));
+  border-color: var(--red);
 }
 .settings-nav-search::placeholder {
   color: var(--fg);
@@ -1305,7 +1167,7 @@ details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_kv_cache_dtype
 }
 .settings-sidebar-resize-handle:hover,
 .settings-sidebar-resizing .settings-sidebar-resize-handle {
-  background: var(--accent, var(--red));
+  background: var(--red);
   opacity: 0.45;
 }
 .settings-sidebar-resizing {
@@ -1342,8 +1204,8 @@ body.settings-sidebar-resize-active {
 }
 .settings-sidebar-toggle:hover,
 .settings-sidebar-toggle:focus-visible {
-  border-color: var(--accent, var(--red));
-  color: var(--accent, var(--red));
+  border-color: var(--red);
+  color: var(--red);
 }
 .settings-sidebar-toggle-expand {
   display: none;
@@ -1427,7 +1289,7 @@ body.settings-sidebar-resize-active {
   animation: cookbook-chat-target-pulse 1.8s ease-out;
 }
 @keyframes cookbook-chat-target-pulse {
-  0%, 35% { outline: 2px solid var(--accent, #d46a6a); outline-offset: 2px; }
+  0%, 35% { outline: 2px solid #d46a6a; outline-offset: 2px; }
   100% { outline: 2px solid transparent; outline-offset: 5px; }
 }
 #research-pane .research-history-clear-btn {

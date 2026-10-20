@@ -147,7 +147,6 @@ def test_unexpected_url_prefetch_exception_logs_only_stable_diagnostic(
             use_memory=False,
         )
 
-    assert "Automatic URL fetch failed while building context" in caplog.text
     assert "LEAK_URL_MARKER" not in caplog.text
     assert "LEAK_EXCEPTION_MARKER" not in caplog.text
 

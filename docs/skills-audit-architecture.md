@@ -286,9 +286,7 @@ well as Python 3.11. Record interpreter/dependency versions with results.
   tests/test_skills_audit_characterization.py tests/test_skills_audit_services.py
 .venv/bin/python -m compileall -q app.py core routes src services scripts tests
 .venv/bin/python -c 'import routes.skills_routes; import services.skills.agent_runner; import services.skills.audit_workflow'
-.venv/bin/python scripts/build_frontend.py --check
-node scripts/check_frontend.mjs
-node --test tests/skillsApproval.test.mjs tests/frontendArchitecture.test.mjs
+node --test tests/skillsApproval.test.mjs
 git diff --check
 ```
 

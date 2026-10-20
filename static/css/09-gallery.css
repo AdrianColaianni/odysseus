@@ -1,106 +1,5 @@
-/* 09-gallery - part of the former static/style.css.
- *
- * The stylesheet is split by area, but the split is mechanical: rules were
- * moved verbatim and NOT regrouped. The numeric prefix is the load order, and
- * that order is what preserves the cascade. A rule sits in the file its
- * original position fell into, so an area's rules are not all in its file and
- * a file is not only that area's rules.
- *
- * Do not reorder the <link> tags in static/index.html, and do not move a rule
- * between files: with 1,151 redeclarations and 1,886 !important in this
- * cascade, either can change which declaration wins.
- *
- * static/index.html and the PRECACHE list in static/sw.js must agree on this
- * order. tests/test_static_stylesheet_manifest.py and
- * tests/test_css_computed_style_snapshot.py fail if that drifts.
- */
 .email-reader-actions-inline.email-reader-actions-compact > .reader-action-overflowed {
   display: none !important;
-}
-
-/* ── Archive browser ── */
-.archive-list {
-  grid-template-columns: 1fr !important;
-  gap: 4px !important;
-}
-.archive-row {
-  flex-direction: row !important;
-}
-.archive-row .doclib-card-header {
-  flex: 1;
-  padding: 8px 10px;
-}
-.archive-row .doclib-card-title {
-  flex: 1;
-  min-width: 0;
-}
-/* Archive column layout */
-.archive-header {
-  display: flex;
-  align-items: center;
-  padding: 4px 10px;
-  gap: 6px;
-  font-size: 9px;
-  font-weight: 600;
-  opacity: 0.35;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.archive-col-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  margin-left: -4px;
-}
-.archive-col-msgs {
-  width: 40px;
-  flex-shrink: 0;
-  text-align: left;
-  margin-left: -8px;
-}
-.archive-col-model {
-  width: 90px;
-  flex-shrink: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.archive-col-time {
-  width: 55px;
-  flex-shrink: 0;
-  text-align: right;
-}
-.archive-col-menu {
-  width: 24px;
-  flex-shrink: 0;
-}
-.archive-menu-btn {
-  background: transparent;
-  border: none;
-  color: var(--fg);
-  opacity: 0.3;
-  cursor: pointer;
-  padding: 4px;
-  line-height: 0;
-  border-radius: 4px;
-  transition: background .15s, opacity .15s;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  margin-left: 4px;
-  vertical-align: middle;
-  height: 100%;
-}
-.archive-menu-btn svg {
-  display: block;
-  margin-top: -6px;
-}
-.archive-menu-btn:hover {
-  background: color-mix(in srgb, var(--fg) 10%, transparent);
-  opacity: 1;
 }
 
 /* ── Gallery (image library) ── */
@@ -226,7 +125,7 @@
   gap: 4px;
   font-size: 10px;
   font-weight: 600;
-  color: var(--accent, var(--red));
+  color: var(--red);
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.12s;
@@ -293,9 +192,6 @@
 }
 .gallery-chip-fav { color: var(--red); }
 .gallery-chip-fav.active { background: color-mix(in srgb, var(--red) 15%, transparent); border-color: var(--red); }
-.gallery-chip-add { opacity: 0.5; font-size: 14px; padding: 2px 10px; }
-/* Active-album indicator — appears when the Photos grid is filtered to one album. */
-.gallery-chip-active-album,
 .gallery-active-filter-pill {
   display: inline-flex; align-items: center; gap: 4px;
   background: color-mix(in srgb, var(--red) 14%, transparent);
@@ -399,9 +295,9 @@ body.gallery-selecting .gallery-dl-btn,
 /* AI tag chips in detail view */
 .gallery-ai-tags { display: flex; gap: 4px; flex-wrap: wrap; }
 .gallery-ai-chip {
-  background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 25%, transparent);
-  border-radius: 10px; padding: 3px 8px; font-size: 10px;
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 25%, transparent);
+  border-radius: 10px; padding: 3px 8px;
   color: var(--fg); opacity: 0.8;
   font: inherit; font-size: 10px;
   cursor: pointer;
@@ -409,8 +305,8 @@ body.gallery-selecting .gallery-dl-btn,
 }
 .gallery-ai-chip:hover {
   opacity: 1;
-  background: color-mix(in srgb, var(--accent, var(--red)) 22%, transparent);
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 50%, transparent);
+  background: color-mix(in srgb, var(--red) 22%, transparent);
+  border-color: color-mix(in srgb, var(--red) 50%, transparent);
 }
 /* AI-generated tags: muted neutral with a tiny sparkle marker so the
    user can tell at a glance these came from the model, not them. */
@@ -428,7 +324,7 @@ body.gallery-selecting .gallery-dl-btn,
 .gallery-aitag-mark {
   font-size: 8px;
   opacity: 0.55;
-  color: var(--accent, var(--red));
+  color: var(--red);
 }
 /* User-applied tags keep the accent-colored chip — they're the personal/
    curated tags, so they get the strongest visual weight. */
@@ -535,7 +431,7 @@ body.gallery-selecting .gallery-dl-btn,
 }
 .attach-vision-model {
   font-size: 10px;
-  color: var(--accent, var(--red));
+  color: var(--red);
   opacity: 0.85;
   margin-top: 3px;
 }
@@ -599,7 +495,6 @@ body.gallery-selecting .gallery-dl-btn,
   resize: vertical; outline: none;
 }
 .vision-editor-text:focus { border-color: var(--accent-primary, var(--red)); }
-.vision-editor-hint { font-size: 10.5px; opacity: 0.55; line-height: 1.4; }
 .vision-editor-actions {
   display: flex; gap: 8px; justify-content: flex-end;
   margin-top: 4px;
@@ -724,9 +619,8 @@ body.gallery-selecting .gallery-dl-btn,
   margin-top: -4px !important;
 }
 .gallery-select-btn:hover { opacity: 1; }
-/* Match the library Select toggle's red tint (.memory-toolbar-btn.active).
-   Bumped contrast so the toggled state actually reads on mobile — the prior
-   15% red on transparent was nearly invisible against the page background. */
+/* Match the library Select toggle's red tint (.memory-toolbar-btn.active),
+   with enough contrast to read on mobile. */
 .gallery-select-btn.active {
   background: color-mix(in srgb, var(--red) 28%, transparent);
   color: var(--red);
@@ -748,11 +642,6 @@ body.gallery-selecting .gallery-dl-btn,
   justify-content: flex-end;
 }
 .gallery-bulk-bar.hidden { display: none; }
-.gallery-bulk-all {
-  display: inline-flex; align-items: center; gap: 4px;
-  font-size: 11px; opacity: 0.75; cursor: pointer; margin-right: auto;
-}
-.gallery-bulk-all input { accent-color: var(--accent, var(--red)); cursor: pointer; }
 .gallery-bulk-delete {
   padding: 3px 10px; background: transparent; color: var(--red);
   border: 1px solid var(--red); border-radius: 4px; cursor: pointer;
@@ -1018,45 +907,6 @@ body.gallery-selecting .gallery-dl-btn,
 .gallery-detail-rotate:hover { opacity: 1 !important; background: rgba(0, 0, 0, 0.7); }
 .gallery-detail-rotate-ccw { left: 8px; }
 .gallery-detail-rotate-cw  { right: 8px; }
-/* Inline heart that lives next to the "Date" label in the sidebar.
-   Tiny outline icon by default; fills red when favorited. */
-.gallery-detail-date-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-}
-.gallery-detail-fav-inline {
-  background: none;
-  border: none;
-  padding: 0;
-  /* Nudge up 8px so the heart sits visually above the Date label
-     baseline rather than centred on it. */
-  margin-top: -8px;
-  border-radius: 4px;
-  color: var(--fg-muted);
-  opacity: 0.6;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 1;
-  transition: opacity 0.15s, color 0.15s;
-}
-/* Shrink the SVG so the heart matches the height of the small uppercase
-   Date label sitting next to it. */
-.gallery-detail-fav-inline svg {
-  width: 12px;
-  height: 12px;
-  display: block;
-}
-.gallery-detail-fav-inline:hover {
-  opacity: 1;
-}
-.gallery-detail-fav-inline.active {
-  opacity: 1;
-  color: var(--red);
-}
 .gallery-detail-sidebar {
   width: 290px;
   flex-shrink: 0;
@@ -1075,7 +925,7 @@ body.gallery-selecting .gallery-dl-btn,
 .gallery-detail-eyebrow {
   font-size: 9px;
   font-weight: 700;
-  color: var(--accent, var(--red));
+  color: var(--red);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   margin-bottom: 3px;
@@ -1120,7 +970,7 @@ body.gallery-selecting .gallery-dl-btn,
   appearance: none;
   background: none;
   border: none;
-  color: var(--accent, var(--red));
+  color: var(--red);
   padding: 0;
   font: inherit;
   font-weight: inherit;
@@ -1206,7 +1056,7 @@ body.gallery-selecting .gallery-dl-btn,
   top: 50%;
   transform: translateY(-50%);
   margin-top: -2px;  /* the input has 4px bottom margin; center on the box */
-  color: var(--accent, var(--red));
+  color: var(--red);
   font-size: 13px;
   line-height: 1;
   pointer-events: none;
@@ -1222,25 +1072,10 @@ body.gallery-selecting .gallery-dl-btn,
   top: 50%;
   transform: translateY(-50%);
   margin-top: -2px;
-  color: var(--accent, var(--red));
+  color: var(--red);
   opacity: 0.85;
   pointer-events: none;
   display: none;
-}
-.gallery-tag-save {
-  background: none;
-  border: 1px solid var(--border);
-  color: var(--fg);
-  cursor: pointer;
-  font: inherit;
-  font-size: 10px;
-  padding: 3px 10px;
-  border-radius: 4px;
-  transition: border-color 0.15s, color 0.15s;
-}
-.gallery-tag-save:hover {
-  border-color: var(--red);
-  color: var(--red);
 }
 
 @media (max-width: 600px) {

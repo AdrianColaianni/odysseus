@@ -1,9 +1,4 @@
-"""Calendar-domain tool implementations.
-
-Extracted from tool_implementations.py as part of slice 1 (#4082/#4071).
-Holds the manage_calendar tool (CalDAV-backed event CRUD).
-``src.tool_implementations`` re-exports these for backward compatibility.
-"""
+"""The manage_calendar agent tool (CalDAV-backed event CRUD)."""
 import json
 import logging
 import re
@@ -11,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Dict, Optional
 
-from src.tools._common import _parse_tool_args
+from src.tools._common import parsed_tool_args
 from src.tool_utils import get_upload_handler
 from src.upload_handler import reserve_upload_references
 
@@ -92,12 +87,12 @@ def _explicit_calendar_time(raw: str, zone_name: str) -> tuple[datetime, bool]:
     return candidates.pop().replace(tzinfo=None), True
 
 
-async def do_manage_calendar(content: str, owner: Optional[str] = None, *, import_event_uid: Optional[str] = None) -> Dict:
+@parsed_tool_args
+async def do_manage_calendar(args: dict, owner: Optional[str] = None, *, import_event_uid: Optional[str] = None) -> Dict:
     """Handle manage_calendar tool calls: list/create/update/delete calendar events (local SQLite)."""
     from core.database import SessionLocal, CalendarCal, CalendarEvent, Note
     from routes.calendar_routes import (
         _ensure_default_calendar,
-        _parse_dt,
         _parse_dt_pair,
         parse_due_for_user,
         _resolve_base_uid,
@@ -109,10 +104,6 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None, *, impor
     )
     import uuid as _uuid
 
-    try:
-        args = _parse_tool_args(content)
-    except ValueError:
-        return {"error": "Invalid JSON arguments", "exit_code": 1}
     try:
         args = _normalize_local_event_times(args)
     except (ValueError, TypeError) as exc:
@@ -425,7 +416,7 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None, *, impor
                         line += f" repeats({ev['rrule']})"
                     if ev.get("has_reminder"):
                         minutes = ev.get("reminder_minutes")
-                        line += f" 🔔 reminder"
+                        line += " 🔔 reminder"
                         if minutes is not None:
                             line += f" {minutes} min before"
                     if ev.get("location"):

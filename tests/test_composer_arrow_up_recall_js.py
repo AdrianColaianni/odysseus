@@ -12,16 +12,13 @@ trigger recall; messages are read from #chat-history (dataset.raw), not session
 sidebar metadata.
 """
 import json
-import shutil
-import subprocess
 from pathlib import Path
 
-import pytest
+from tests.helpers.node import run_node_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _HELPER = _REPO / "static" / "js" / "composerArrowUpRecall.js"
 _HELPER_URL = _HELPER.as_uri()
-_HAS_NODE = shutil.which("node") is not None
 
 _HARNESS = r"""
 import { wireArrowUpRecall } from 'HELPER_PATH';
@@ -32,6 +29,7 @@ function makeComposer(initial = '') {
     value: initial,
     selectionStart: initial.length,
     selectionEnd: initial.length,
+    dataset: {},
     _arrowUpRecallWired: false,
     addEventListener(type, fn) {
       if (type === 'keydown') listeners.push(fn);
@@ -90,20 +88,9 @@ console.log(JSON.stringify(results));
 
 def _run(cases: list) -> list:
     js = _HARNESS.replace("CASES_JSON", json.dumps(cases))
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        cwd=str(_REPO),
-        timeout=30,
-    )
-    assert proc.returncode == 0, proc.stderr
-    return json.loads(proc.stdout.strip())
+    return run_node_module(js)
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_empty_composer_recalls_last_user_message():
     out = _run([{"initial": "", "last": "hello again"}])[0]
     assert out["value"] == "hello again"
@@ -115,7 +102,6 @@ def test_empty_composer_recalls_last_user_message():
     assert out["resized"] is True
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_repeated_arrow_up_cycles_current_chat_prompts_newest_first():
     out = _run([{
         "initial": "",
@@ -130,7 +116,6 @@ def test_repeated_arrow_up_cycles_current_chat_prompts_newest_first():
     assert out["resized"] is True
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_non_empty_composer_does_not_recall():
     out = _run([{"initial": "draft in progress", "last": "ignored"}])[0]
     assert out["value"] == "draft in progress"
@@ -138,14 +123,12 @@ def test_non_empty_composer_does_not_recall():
     assert out["resized"] is False
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_whitespace_only_composer_is_not_empty():
     out = _run([{"initial": "   ", "last": "ignored"}])[0]
     assert out["value"] == "   "
     assert out["prevented"] == [False]
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_multiline_caret_navigation_preserved():
     # Caret on line 2 — ArrowUp must not recall or preventDefault.
     text = "line one\nline two"
@@ -155,7 +138,6 @@ def test_multiline_caret_navigation_preserved():
     assert out["prevented"] == [False]
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_modified_arrow_up_ignored():
     cases = [
         {"initial": "", "event": {"shiftKey": True}},
@@ -168,14 +150,12 @@ def test_modified_arrow_up_ignored():
         assert out["prevented"] == [False]
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_ime_composition_does_not_trigger_recall():
     out = _run([{"initial": "", "event": {"isComposing": True}, "last": "ignored"}])[0]
     assert out["value"] == ""
     assert out["prevented"] == [False]
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_no_recall_when_last_message_missing():
     out = _run([{"initial": "", "last": ""}])[0]
     assert out["value"] == ""
@@ -183,7 +163,6 @@ def test_no_recall_when_last_message_missing():
     assert out["resized"] is False
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_wire_is_idempotent():
     js = f"""
     import {{ wireArrowUpRecall }} from '{_HELPER_URL}';
@@ -192,20 +171,9 @@ def test_wire_is_idempotent():
     const ok2 = wireArrowUpRecall(composer, () => 'y');
     console.log(JSON.stringify({{ ok1, ok2, wired: composer._arrowUpRecallWired }}));
     """
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        cwd=str(_REPO),
-        timeout=30,
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert json.loads(proc.stdout.strip()) == {"ok1": True, "ok2": True, "wired": True}
+    assert run_node_module(js) == {"ok1": True, "ok2": True, "wired": True}
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_get_last_user_message_from_chat_history():
     js = f"""
     import {{
@@ -238,17 +206,7 @@ def test_get_last_user_message_from_chat_history():
       }}),
     }}));
     """
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        cwd=str(_REPO),
-        timeout=30,
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert json.loads(proc.stdout.strip()) == {
+    assert run_node_module(js) == {
         "fromChat": "last raw",
         "fromBox": "last raw",
         "allFromChat": ["last raw", "first"],
@@ -257,7 +215,6 @@ def test_get_last_user_message_from_chat_history():
     }
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_integration_recalls_from_chat_history_dom():
     js = f"""
     import {{
@@ -279,6 +236,7 @@ def test_integration_recalls_from_chat_history_dom():
       value: '',
       selectionStart: 0,
       selectionEnd: 0,
+      dataset: {{}},
       _arrowUpRecallWired: false,
       addEventListener(type, fn) {{ if (type === 'keydown') listeners.push(fn); }},
     }};
@@ -295,17 +253,7 @@ def test_integration_recalls_from_chat_history_dom():
     }});
     console.log(JSON.stringify({{ value: composer.value, prevented }}));
     """
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        cwd=str(_REPO),
-        timeout=30,
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert json.loads(proc.stdout.strip()) == {"value": "stored prompt", "prevented": True}
+    assert run_node_module(js) == {"value": "stored prompt", "prevented": True}
 
 
 def test_prompt_recall_is_not_duplicated_in_app_js():

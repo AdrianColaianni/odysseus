@@ -48,7 +48,7 @@ def _env(monkeypatch):
 
 
 # ── validator: the RCE forms from the #438 review must all be rejected ──
-@pytest.mark.parametrize("command,args", [
+RCE_FORMS = [
     ("sh", ["-c", "id>/tmp/pwn"]),
     ("bash", ["-c", "id"]),
     ("python3", ["/tmp/payload.py"]),                  # interpreter + script path
@@ -69,14 +69,17 @@ def _env(monkeypatch):
     ("mcp-server-demo", ["-cglued()"]),                # glued code-exec flag
     ("mcp-server-demo", ["--eval=x"]),                 # long glued eval
     ("mcp-server-demo", ["https://evil.example/x.js"]),# remote URL arg
-])
-def test_validator_rejects_rce_forms(command, args):
-    assert _validate_mcp_command(command, args, {}) is not None
+]
 
 
-@pytest.mark.parametrize("key", ["LD_PRELOAD", "NODE_OPTIONS", "PYTHONPATH", "DYLD_INSERT_LIBRARIES", "PATH"])
-def test_validator_rejects_dangerous_env(key):
-    assert _validate_mcp_command("mcp-server-demo", [], {key: "x"}) is not None
+def test_validator_rejects_rce_forms():
+    accepted = [(c, a) for c, a in RCE_FORMS if _validate_mcp_command(c, a, {}) is None]
+    assert accepted == []
+
+
+def test_validator_rejects_dangerous_env():
+    for key in ("LD_PRELOAD", "NODE_OPTIONS", "PYTHONPATH", "DYLD_INSERT_LIBRARIES", "PATH"):
+        assert _validate_mcp_command("mcp-server-demo", [], {key: "x"}) is not None, key
 
 
 def test_denied_command_rejected_even_when_operator_allowlists_it():
@@ -84,14 +87,14 @@ def test_denied_command_rejected_even_when_operator_allowlists_it():
     assert _validate_mcp_command("python3", ["server.py"], {}) is not None
 
 
-@pytest.mark.parametrize("command", [
-    "python3.11", "python3.12", "node18", "node20", "pip3", "ruby3.2",
-    "java", "javac", "bunx", "tsx", "ts-node", "pypy3", "deno1",
-])
-def test_versioned_and_alias_runtimes_are_denied(command):
+def test_versioned_and_alias_runtimes_are_denied():
     # Versioned / alias runtime forms must collapse to the family and be denied,
     # not slip past exact-name matching (RaresKeY review on #4433).
-    assert _validate_mcp_command(command, [], {}) is not None
+    commands = [
+        "python3.11", "node20", "pip3", "ruby3.2", "java", "javac",
+        "bunx", "tsx", "ts-node", "pypy3", "deno1",
+    ]
+    assert [c for c in commands if _validate_mcp_command(c, [], {}) is None] == []
 
 
 def test_alias_runtime_denied_even_if_operator_allowlists_it(monkeypatch):

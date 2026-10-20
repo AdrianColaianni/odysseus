@@ -12,6 +12,7 @@ import spinnerModule from './spinner.js';
 import { modelColor } from './chatRenderer.js?v=20260914metricssummary1';
 import { providerLogo } from './providers.js';
 import { sortModelIds } from './modelSort.js';
+import { loadFavorites, toggleFavorite } from './model/favorites.js';
 
 let API_BASE = '';
 let _cachedItems = []; // cached /api/models items for model-switch dropdown
@@ -20,7 +21,6 @@ let _fetchInflight = null;
 let _fetchSeq = 0;
 const _FETCH_CACHE_TTL = 30000; // 30s client-side cache for /api/models
 const COLLAPSE_KEY = 'odysseus-models-collapsed';
-const FAVORITES_KEY = 'odysseus-model-favorites';
 const USAGE_KEY = 'odysseus-model-usage';
 const SORT_KEY = 'odysseus-model-sort';
 
@@ -28,7 +28,7 @@ export function init(apiBase) {
   API_BASE = apiBase;
 }
 
-// ── Collapse state persistence ──
+// Collapse state persistence
 function _loadCollapsed() {
   return Storage.getJSON(COLLAPSE_KEY, {});
 }
@@ -36,26 +36,11 @@ function _saveCollapsed(state) {
   Storage.setJSON(COLLAPSE_KEY, state);
 }
 
-// ── Favorites persistence ──
-function _loadFavorites() {
-  return Storage.getJSON(FAVORITES_KEY, []);
-}
-function _saveFavorites(list) {
-  Storage.setJSON(FAVORITES_KEY, list);
-}
 function _isFavorite(mid) {
-  return _loadFavorites().includes(mid);
-}
-function _toggleFavorite(mid) {
-  const favs = _loadFavorites();
-  const idx = favs.indexOf(mid);
-  if (idx >= 0) favs.splice(idx, 1);
-  else favs.push(mid);
-  _saveFavorites(favs);
-  return idx < 0; // returns true if now favorited
+  return loadFavorites().includes(mid);
 }
 
-// ── Usage tracking ──
+// Usage tracking
 function _loadUsage() {
   return Storage.getJSON(USAGE_KEY, {});
 }
@@ -113,7 +98,7 @@ function _buildModelRow(mid, url, displayName, endpointId, offline, modelType) {
   fav.title = 'Toggle favorite';
   fav.addEventListener('click', (e) => {
     e.stopPropagation();
-    const nowFav = _toggleFavorite(mid);
+    const nowFav = toggleFavorite(mid);
     fav.classList.toggle('active', nowFav);
     uiModule.showToast(nowFav ? 'Favorited' : 'Unfavorited');
     refreshModels();
@@ -266,8 +251,8 @@ export async function refreshModels(force = false, opts = {}) {
       });
     }
 
-    // ── Render Favorites section on top ──
-    const favs = _loadFavorites();
+    // Render Favorites section on top
+    const favs = loadFavorites();
     if (favs.length > 0) {
       const favModels = [];
       // Collect favorited models from all groups (keep them in originals too)
@@ -519,7 +504,7 @@ export async function refreshModels(force = false, opts = {}) {
       }
     }
 
-    // ── Search box (shown when >= 5 total models, including hidden overflow) ──
+    // Search box (shown when >= 5 total models, including hidden overflow)
     const totalModelCount = (_cachedItems || []).reduce((n, item) => {
       if (item.offline) return n;
       return n + (item.models || []).length + (item.models_extra || []).length;
@@ -596,47 +581,11 @@ export async function refreshModels(force = false, opts = {}) {
   }
 }
 
-/**
- * Refresh and display OpenAI providers
- */
-export async function refreshProviders() {
-  const sel = document.getElementById('openai-model');
-  if (!sel) return; // Exit if element doesn't exist
-
-  sel.innerHTML = '<option disabled>Loading providers…</option>';
-
-  try {
-    const res = await fetch(`${API_BASE}/api/providers`);
-    const data = await res.json();
-    const openai = (data.providers || []).find(p => p.provider === 'openai');
-
-    sel.innerHTML = '';
-
-    if (openai) {
-      const models = (openai.items?.[0]?.models) || [];
-      sortModelIds(models).forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m;
-        opt.textContent = m;
-        sel.appendChild(opt);
-      });
-    } else {
-      const opt = document.createElement('option');
-      opt.value = '';
-      opt.textContent = '(OPENAI_API_KEY not set on server)';
-      sel.appendChild(opt);
-    }
-  } catch (e) {
-    console.error(e);
-  }
-}
-
 export function getCachedItems() { return _cachedItems; }
 
 const modelsModule = {
   init,
   refreshModels,
-  refreshProviders,
   getCachedItems,
 };
 

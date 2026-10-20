@@ -1,194 +1,23 @@
 import asyncio
-import base64
 import contextlib
-import contextvars
 import inspect
 import io
 import json
 import os
 import re
-import signal
 import shutil
 import sys
-import tempfile
-import time
 import html
-import hashlib
 import urllib.parse
 import urllib.request
-import uuid
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any
 
 from core import platform_compat
-from src import browser_lifecycle, process_lifecycle
+from src import browser_lifecycle
 from src.constants import MAX_OUTPUT_CHARS
 
 PDF_EXTRACT_MAX_BYTES = 80_000_000
-_ACTIVE_BROWSER_SESSIONS: set[str] = set()
-
-
-def _service_home() -> Path:
-    """Return the account home even when a task overrides ``HOME``."""
-
-    return platform_compat.service_home()
-
-
-def _host_npm_roots() -> list[Path]:
-    """Return user npm roots visible to a runtime using an isolated HOME."""
-
-    roots = [_service_home() / ".npm"]
-    roots.extend(Path("/home").glob("*/.npm"))
-    roots.append(Path("/root/.npm"))
-    return list(dict.fromkeys(roots))
-
-
-def _accessible_glob(roots: list[Path], pattern: str):
-    """Yield matches while ignoring roots unreadable by the service account."""
-
-    for root in dict.fromkeys(roots):
-        try:
-            yield from root.glob(pattern)
-        except (OSError, PermissionError):
-            continue
-
-
-def _browser_executable_candidates() -> list[Path]:
-    """Return executable Chromium builds from standard host cache layouts."""
-
-    homes = [_service_home()]
-    homes.extend(path for path in _accessible_glob([Path("/home")], "*") if path.is_dir())
-    homes.append(Path("/root"))
-    patterns = (
-        ".cache/ms-playwright/chromium-*/chrome-linux64/chrome",
-        ".cache/ms-playwright/chromium_headless_shell-*/"
-        "chrome-headless-shell-linux64/chrome-headless-shell",
-        ".chromium-browser-snapshots/chromium/linux-*/chrome-linux/chrome",
-    )
-    candidates = [
-        path
-        for pattern in patterns
-        for path in _accessible_glob(list(dict.fromkeys(homes)), pattern)
-        if path.is_file() and os.access(path, os.X_OK)
-    ]
-    return sorted(dict.fromkeys(candidates), reverse=True)
-
-
-def _bounded_browser_identity(value: str, *, max_length: int = 20) -> str:
-    """Return an agent-browser identity safe for Unix socket paths."""
-
-    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "")).strip("-._")
-    if safe == value and 0 < len(safe) <= max_length:
-        return safe
-    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:max_length]
-
-
-def _scoped_browser_session(namespace: str, session_id: str) -> str:
-    """Build one upstream-compatible session key for runtime isolation."""
-
-    scope = f"{str(namespace or 'odysseus-ui')}\0{str(session_id or '')}"
-    return f"ody-{_bounded_browser_identity(scope)}"
-
-
-def _browser_namespace(env: dict[str, str] | None) -> str:
-    return str(
-        (env or {}).get("ODYSSEUS_BROWSER_NAMESPACE")
-        or os.getenv("ODYSSEUS_BROWSER_NAMESPACE", "odysseus-ui")
-    ).strip() or "odysseus-ui"
-
-
-# Browser CLI processes started by the current private_browser call, so a
-# cancellation can stop every client it spawned, not only the main command.
-_BROWSER_CALL_PROCS: contextvars.ContextVar[list | None] = contextvars.ContextVar(
-    "_BROWSER_CALL_PROCS", default=None
-)
-
-
-async def _spawn_browser_cli(*command, **kwargs):
-    proc = await asyncio.create_subprocess_exec(*command, **kwargs)
-    # Identity taken while we hold the unreaped child: teardown later signals
-    # its group only while this identity still verifies, never on the pid
-    # alone (the event loop may reap it before returncode is observed).
-    pid = getattr(proc, "pid", None)
-    if isinstance(pid, int) and pid > 0:
-        with contextlib.suppress(Exception):
-            proc._ody_identity = process_lifecycle.ProcessIdentity.capture(pid, pgid=pid)
-    tracked = _BROWSER_CALL_PROCS.get()
-    if tracked is not None:
-        tracked.append(proc)
-    return proc
-
-
-def _browser_pid_file_candidates(
-    runtime_dir: Path, namespace: str, session_id: str | None
-) -> list[Path]:
-    """Return only the daemon pid files owned by one browser runtime.
-
-    Current agent-browser stores ``--session`` state directly below its
-    runtime directory.  Older builds used a namespace/run subdirectory, so
-    retain that layout as a compatibility fallback.  When no session is
-    supplied, only the legacy namespace directory is eligible; never sweep
-    all upstream sessions from the shared root.
-    """
-
-    browser_root = runtime_dir / "agent-browser"
-    legacy_run = (
-        browser_root / "namespaces" / _bounded_browser_identity(namespace) / "run"
-    )
-    if not session_id:
-        return list(legacy_run.glob("ody-*.pid")) if legacy_run.is_dir() else []
-
-    scoped = _scoped_browser_session(namespace, session_id)
-    candidates = [browser_root / f"{scoped}.pid"]
-    if legacy_run.is_dir():
-        candidates.extend(
-            [
-                legacy_run / f"ody-{_bounded_browser_identity(session_id)}.pid",
-                legacy_run / f"{scoped}.pid",
-            ]
-        )
-    return list(dict.fromkeys(candidates))
-
-
-# Linux exposes one command line per pid under /proc; macOS and Windows do not.
-# Kept as a module attribute so the procfs-dependent paths stay testable on a
-# host that has no procfs, and on one that does.
-
-
-def _process_command_line(pid: int) -> str | None:
-    """Command line of a running process, or ``None`` when it cannot be read.
-
-    ``None`` means "this host cannot tell", not "the process is gone". Off
-    Linux there is no procfs to read a command line from, so callers must not
-    treat it as proof that the process exited.
-    """
-
-    try:
-        return (platform_compat.PROC_ROOT / str(pid) / "cmdline").read_bytes().replace(
-            b"\0", b" "
-        ).decode("utf-8", errors="replace")
-    except (OSError, UnicodeError):
-        return None
-
-
-def _process_is_alive(pid: int) -> bool:
-    """Whether a pid currently exists.
-
-    Delegates to ``core.platform_compat.pid_alive`` rather than probing with
-    ``os.kill(pid, 0)`` directly. That probe is POSIX-only: CPython's Windows
-    ``os.kill`` calls ``TerminateProcess(handle, sig)`` for any signal other
-    than CTRL_C / CTRL_BREAK, so it would *kill* the daemon it is asked about.
-    Windows is also where there is no procfs, which is precisely when this
-    function gets called at all.
-
-    ``pid_alive`` reads False for a pid that ``os.kill`` reports with
-    ``PermissionError`` — a live process owned by another user. Neither caller
-    here wants a different answer: the sweep only unlinks a pid file it wrote
-    itself, and treating somebody else's pid as "not our daemon" is the safe
-    reading in both.
-    """
-
-    return platform_compat.pid_alive(pid)
 
 _SCHOLARLY_METADATA_CUE_RE = re.compile(
     r"\b(?:accept(?:ed|ance)?|publish(?:ed|ing|cation)?|venue|conference|"
@@ -274,10 +103,6 @@ def _format_search_metadata(query: str, results: list[dict]) -> tuple[str, list[
     return "\n".join(parts), sources
 
 
-def _looks_like_youtube_video_id(value: str) -> bool:
-    return bool(re.fullmatch(r"[A-Za-z0-9_-]{10,16}", str(value or "").strip()))
-
-
 def _arxiv_listing_api_hint(url: str, error: str) -> str:
     """Return an explicit recovery path for a blocked arXiv date listing."""
     if "406" not in str(error or ""):
@@ -303,7 +128,7 @@ def _arxiv_listing_api_hint(url: str, error: str) -> str:
 
 class WebSearchTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.search import comprehensive_web_search, searxng_search_results
+        from services.search import comprehensive_web_search, searxng_search_results
         progress_cb = ctx.get("progress_cb") if isinstance(ctx, dict) else None
         raw = content.strip()
         query = raw
@@ -663,7 +488,7 @@ class WebFetchTool:
         }
 
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.search.content import fetch_webpage_content
+        from services.search.content import fetch_webpage_content
         from src.constants import WEB_FETCH_HARD_MAX_BYTES
         raw = content.strip()
         if raw.startswith("{"):
@@ -682,9 +507,8 @@ class WebFetchTool:
                 if isinstance(parsed, dict):
                     url = str(parsed.get("url") or "").strip()
                     query = str(parsed.get("query") or "").strip()
-                    # Download-budget override (#3812): "full": true raises the
-                    # budget to the hard cap; an explicit max_bytes is clamped
-                    # to the hard cap downstream. Default stays the soft cap.
+                    # "full": true raises the download budget to the hard cap; an
+                    # explicit max_bytes is clamped to it downstream.
                     if parsed.get("full") is True:
                         max_bytes = WEB_FETCH_HARD_MAX_BYTES
                     mb = parsed.get("max_bytes")
@@ -1237,7 +1061,7 @@ class PdfExtractTool:
             import pdfplumber
             import httpx
             from services.search.content import _PinnedTransport, _resolve_public_ips
-            from src.constants import WEB_FETCH_HARD_MAX_BYTES, WEB_FETCH_USER_AGENT
+            from src.constants import WEB_FETCH_USER_AGENT
         except ImportError:
             return ""
         local_path = PdfExtractTool._local_pdf_path(url)
@@ -1256,7 +1080,7 @@ class PdfExtractTool:
                 headers=headers,
                 timeout=30,
                 follow_redirects=True,
-                transport=_PinnedTransport(ips[0]),
+                transport=_PinnedTransport(ips),
             ) as client:
                 response = client.get(url)
             response.raise_for_status()
@@ -2336,376 +2160,17 @@ class YouTubeTool:
 
 class PrivateBrowserTool:
     """Resource-bound session metadata; page/document execution is unavailable."""
-    _ACTIONS = {"session_info"}
-    _AUTO_SCREENSHOT_ACTIONS = set()
-
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.browser_identity import execute_browser
         return await execute_browser(content, dict(ctx or {}))
 
-    async def _execute_unlocked(self, content, ctx, **kwargs):
-        # Legacy internal callers must pass through the same capability gate.
-        return await self.execute(content, ctx)
-
-    async def _capture_post_click_state(self, *args, **kwargs):
-        from src.agent_runtime.resources import ResourceIdentityError
-        raise ResourceIdentityError("browser_page_authority_unavailable")
-
-    @staticmethod
-    def _local_agent_browser_binary():
-        # Retired cache discovery seam. Trusted selection is browser_identity.
-        return None
-
-    def _parse_args(self, content):
-        from src.browser_identity import parse_operation
-        try:
-            _, args = parse_operation(content)
-            return args, None
-        except (ValueError, TypeError) as error:
-            return {}, str(error)
-
-    def _command_for_action(self, prefix, action, args):
-        from src.browser_identity import parse_operation, SESSION_ACTIONS, PAGE_FAILURE
-        try:
-            parse_operation(json.dumps({**args, "action": action}))
-        except (ValueError, TypeError) as error:
-            return [], None, str(error)
-        if action not in SESSION_ACTIONS:
-            return [], None, PAGE_FAILURE
-        return [*prefix, *( ["session", "info"] if action == "session_info" else ["tab", "list"] )], None, None
-
-    def _normalize_batch_screenshots(self, *args):
-        raise ValueError("Model-authored browser batch is forbidden")
-
-    def _timeout_seconds(self, args, *, action=""):
-        return 20
-
-    @staticmethod
-    def _shopping_landing_hint(output: str) -> str:
-        """Expose the actionable store link on global retail landing pages."""
-        text = str(output or "")
-        if not re.search(r"\b(?:global|choose another store|store selector)\b", text, re.IGNORECASE):
-            return ""
-        match = re.search(
-            r'link\s+"(?P<label>Go shopping[^"\n]{0,220})"\s+\[ref=(?P<ref>e\d+)\]',
-            text,
-            re.IGNORECASE,
-        )
-        if not match:
-            return ""
-        label = re.sub(r"\s+", " ", match.group("label")).strip()
-        return (
-            "Detected page type: global store-selector landing page. "
-            f"Local shopping link: @{match.group('ref')} ({label})."
-        )
-
-    @staticmethod
-    def _terminate_subprocess(proc) -> None:
-        """Terminate a browser CLI and descendants spawned for its session.
-
-        Every browser CLI is spawned with ``start_new_session``, so it leads a
-        group of its own. That group is signalled only while the identity
-        captured at spawn still verifies and still leads it; otherwise only
-        the held handle is killed. A pid alone — or a group derived from a pid
-        that may since have been reaped and reissued — is never signalled,
-        and neither is the server's own group.
-        """
-
-        identity = getattr(proc, "_ody_identity", None)
-        if identity is not None and getattr(proc, "returncode", None) is None:
-            verdict = process_lifecycle.group_ownership_verdict(
-                identity.pid, identity.pid, identity.start_token)
-            if verdict == process_lifecycle.OWNED:
-                process_lifecycle.signal_group(identity.pid, identity.pid, signal.SIGKILL)
-        with contextlib.suppress(Exception):
-            proc.kill()
-
-    @staticmethod
-    def _terminate_owned_chrome(env: dict[str, str]) -> None:
-        """Kill Chrome trees created in this runtime's temporary directory.
-
-        agent-browser deliberately keeps its daemon alive after the CLI
-        client exits.  If the client is killed while waiting for a response,
-        the daemon and its Chrome children are reparented to init and are no
-        longer in the client's process group.  Leaving those trees behind
-        makes later benchmark tasks contend for resources and can make a
-        healthy page look like a browser timeout.  Restrict matching to the
-        runtime-owned ``TMPDIR`` and the browser profile prefix; never scan
-        or kill a user's normal Chrome profile.
-        """
-
-        raw_tmpdir = str(env.get("TMPDIR") or "").strip()
-        if not raw_tmpdir:
-            return
-        try:
-            tmpdir = Path(raw_tmpdir).resolve()
-        except OSError:
-            return
-        profile_prefix = str(tmpdir / "agent-browser-chrome-")
-        if not platform_compat.has_procfs():
-            # Without procfs there is no way to match a reparented Chrome by
-            # its command line, and the sweep is an optimisation rather than a
-            # correctness requirement.  Leave those trees to the daemon's own
-            # lifecycle instead of failing the whole shutdown path.
-            return
-        owned: list[process_lifecycle.ProcessIdentity] = []
-        for entry in platform_compat.PROC_ROOT.iterdir():
-            if not entry.name.isdigit():
-                continue
-            # The command line that matches the profile and the identity that
-            # will be signalled are read from the same process.
-            seen = process_lifecycle.observe(int(entry.name), _process_command_line)
-            if seen is not None and "--user-data-dir=" + profile_prefix in seen.facts:
-                owned.append(seen.identity)
-        if owned:
-            process_lifecycle.terminate_identities(
-                sorted(owned, key=lambda identity: identity.pid, reverse=True),
-                steps=((signal.SIGKILL, 1.0),), poll_s=0.02,
-            )
-
-    @staticmethod
-    def _terminate_owned_daemon(
-        env: dict[str, str], session_id: str | None = None
-    ) -> dict[str, Any] | None:
-        """Terminate the detached agent-browser tree owned by one session.
-
-        Killing only the daemon reparents its Chrome children, so the whole
-        POSIX session the daemon leads is cleaned together with the session's
-        runtime files and browser profile. Returns the cleanup receipt.
-        """
-
-        namespace = _browser_namespace(env)
-        receipt = None
-        pid_files = []
-        if session_id:
-            key = _scoped_browser_session(namespace, session_id)
-            root = browser_lifecycle.runtime_root(env)
-            receipt = browser_lifecycle.force_cleanup(
-                root, key, pid_alive=lambda pid: _process_is_alive(pid)
-            ).as_dict()
-            pid_files.append(root / f"{key}.pid")
-        runtime_dir = Path(os.getenv("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
-        pid_files = [
-            path
-            for path in _browser_pid_file_candidates(runtime_dir, namespace, session_id)
-            if path not in pid_files
-        ]
-        for pid_file in pid_files:
-            try:
-                pid = int(pid_file.read_text().strip())
-            except (OSError, ValueError):
-                continue
-            # A pid file names a slot, not a process: the command-line match
-            # and the identity that authorises the signal come from one read.
-            seen = process_lifecycle.observe(pid, _process_command_line) if pid > 0 else None
-            command_line = seen.facts if seen is not None else None
-            if command_line is None:
-                # Either the daemon exited between writing its pid file and
-                # this pass, or this host has no procfs to ask. Only the first
-                # justifies forgetting the pid file. Without procfs we cannot
-                # confirm the process is ours, so we neither kill it nor drop
-                # the record that would let a later pass find it.
-                if not _process_is_alive(pid):
-                    with contextlib.suppress(FileNotFoundError, PermissionError, OSError):
-                        pid_file.unlink()
-                continue
-            if "agent-browser" in command_line:
-                sweep = process_lifecycle.terminate_identities(
-                    [seen.identity], steps=((signal.SIGKILL, 1.0),), poll_s=0.02,
-                )
-                if not sweep.survivors and not sweep.unverified:
-                    with contextlib.suppress(FileNotFoundError, PermissionError, OSError):
-                        pid_file.unlink()
-        return receipt
-
-    @staticmethod
-    def _owned_daemon_exists(env: dict[str, str], session_id: str | None) -> bool:
-        """Return whether this runtime has a live agent-browser daemon.
-
-        A ``close`` command against a session that has never been started can
-        bootstrap a fresh daemon and wait for its browser indefinitely.  Only
-        reset sessions that have an exact, verified pid-file match.
-        """
-
-        if not session_id:
-            return False
-        namespace = _browser_namespace(env)
-        key = _scoped_browser_session(namespace, session_id)
-        root = browser_lifecycle.runtime_root(env)
-        if browser_lifecycle.has_live_daemon(
-            root, key, pid_alive=lambda pid: _process_is_alive(pid)
-        ):
-            return True
-        runtime_dir = Path(os.getenv("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
-        for pid_file in _browser_pid_file_candidates(runtime_dir, namespace, session_id):
-            if pid_file == root / f"{key}.pid":
-                continue
-            try:
-                pid = int(pid_file.read_text().strip())
-            except (OSError, ValueError):
-                continue
-            command_line = _process_command_line(pid)
-            if command_line is None:
-                # Without procfs we can only tell that something with this pid
-                # is alive, not that it is agent-browser. The pid file is our
-                # own namespaced one, so treat a live pid as a match: answering
-                # "no daemon" here is what lets `close` bootstrap a fresh one
-                # and wait on its browser forever.
-                if _process_is_alive(pid):
-                    return True
-                continue
-            if "agent-browser" in command_line:
-                return True
-        return False
-
-    @staticmethod
-    def _resolve_workspace_path(raw_path: str) -> Path:
-        """Resolve a logical agent path inside the active task workspace."""
-
-        # Reuse the central path policy so browser screenshots obey the same
-        # /workspace alias, traversal checks, and sensitive-file restrictions
-        # as the native filesystem/media tools.
-        from src.tool_execution import _resolve_tool_path
-
-        return Path(_resolve_tool_path(raw_path))
-
-    @classmethod
-    def _resolve_local_file_url(cls, url: str) -> str:
-        """Map a local logical workspace reference into its real file URL."""
-
-        raw_url = str(url or "").strip()
-        if raw_url == "/workspace" or raw_url.startswith("/workspace/"):
-            resolved = cls._resolve_workspace_path(
-                urllib.parse.unquote(raw_url)
-            )
-            return resolved.as_uri()
-        parsed = urllib.parse.urlsplit(raw_url)
-        if parsed.scheme.lower() != "file":
-            return raw_url
-        if parsed.netloc not in {"", "localhost"}:
-            raise ValueError("private_browser file URL must use the local workspace")
-        raw_path = urllib.parse.unquote(parsed.path)
-        resolved = cls._resolve_workspace_path(raw_path)
-        return resolved.as_uri()
-
-    @staticmethod
-    def _empty_dom_observation(text: str) -> bool:
-        """Recognize empty accessibility scaffolding, not an actual no-results message."""
-        try:
-            payload = json.loads(text)
-        except (ValueError, TypeError):
-            payload = None
-        if isinstance(payload, list):
-            snapshots = [row['result']['snapshot'] for row in payload
-                if isinstance(row, dict) and row.get('success') is True
-                and isinstance(row.get('result'), dict)
-                and isinstance(row['result'].get('snapshot'), str)]
-        else:
-            snapshots = [text] if isinstance(text, str) and text.strip() else []
-        scaffolding = {'- generic', '- main', '- none', '- presentation', '(empty page)'}
-        return bool(snapshots) and all(
-            all(line.strip() in scaffolding for line in snapshot.splitlines() if line.strip())
-            for snapshot in snapshots
-        )
-
-    @staticmethod
-    def _dialog_first_snapshot(snapshot: str) -> str:
-        """Keep modal controls ahead of long page content without inventing refs."""
-        lines = snapshot.splitlines(keepends=True)
-        dialogs = []
-        remainder = []
-        index = 0
-        while index < len(lines):
-            match = re.match(r'^(\s*)- (?:dialog|alertdialog)(?:\s|$)', lines[index])
-            if not match:
-                remainder.append(lines[index])
-                index += 1
-                continue
-            indent = len(match[1])
-            end = index + 1
-            while end < len(lines):
-                line = lines[end]
-                if line.strip() and len(line) - len(line.lstrip()) <= indent:
-                    break
-                end += 1
-            # A nested dialog stays with its parent; no duplicated handles.
-            dialogs.append(''.join(line[indent:] if line.strip() else line
-                                   for line in lines[index:end]))
-            index = end
-        if not dialogs or not ''.join(remainder).strip():
-            return snapshot
-        return '\n'.join(dialogs) + '\n[Remaining page snapshot]\n' + ''.join(remainder)
-
-    @staticmethod
-    def _snapshot_observation(text: str) -> str:
-        """Put the actual DOM before redundant CLI lifecycle/ref metadata."""
-        try:
-            rows = json.loads(text)
-        except (ValueError, TypeError):
-            return text
-        if not isinstance(rows, list):
-            return text
-        snapshots = []
-        errors = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            if row.get('error'):
-                errors.append(str(row['error']))
-            result = row.get('result')
-            if isinstance(result, dict) and isinstance(result.get('snapshot'), str):
-                snapshot = PrivateBrowserTool._dialog_first_snapshot(result['snapshot'])
-                snapshots.append((str(result.get('origin') or '') + '\n' + snapshot).strip())
-        return '\n\n'.join(snapshots + errors) if snapshots else text
-
-    def _new_screenshot_path(self) -> Path:
-        configured = os.getenv("ODYSSEUS_BROWSER_SCREENSHOT_DIR")
-        candidates = [
-            Path(configured) if configured else Path("/app/data/tmp/private-browser"),
-            Path(tempfile.gettempdir()) / "odysseus-private-browser",
-        ]
-        screenshot_dir = candidates[-1]
-        for candidate in candidates:
-            try:
-                candidate.mkdir(parents=True, exist_ok=True)
-                screenshot_dir = candidate
-                break
-            except OSError:
-                continue
-        with tempfile.NamedTemporaryFile(
-            prefix="browser-",
-            suffix=".png",
-            dir=screenshot_dir,
-            delete=False,
-        ) as tmp:
-            return Path(tmp.name)
-
-    def _image_payload_from_path(self, path: Path) -> dict[str, str] | None:
-        try:
-            if not path.exists() or path.stat().st_size <= 0:
-                return None
-            return {
-                "data": base64.b64encode(path.read_bytes()).decode("ascii"),
-                "mimeType": "image/png",
-            }
-        except Exception:
-            return None
-
-
 
 async def shutdown_private_browser_sessions() -> None:
     """Service-owned cleanup only; never discover/download a producer binary."""
-    for session in tuple(_ACTIVE_BROWSER_SESSIONS):
-        record = browser_lifecycle.registered(session)
-        if record is not None and record.env is not None:
-            browser_lifecycle.force_cleanup(browser_lifecycle.runtime_root(record.env), session,
-                method="shutdown", pid_alive=lambda pid: _process_is_alive(pid))
-        browser_lifecycle.forget(session)
-        _ACTIVE_BROWSER_SESSIONS.discard(session)
     from src.browser_identity import _REGISTRY
     for record in tuple(_REGISTRY.values()):
         if record.env and "AGENT_BROWSER_SOCKET_DIR" in record.env:
             browser_lifecycle.force_cleanup(Path(record.env["AGENT_BROWSER_SOCKET_DIR"]), record.key,
-                method="shutdown", pid_alive=lambda pid: _process_is_alive(pid))
+                method="shutdown", pid_alive=platform_compat.pid_alive)
         record.invalidate()
     _REGISTRY.clear()

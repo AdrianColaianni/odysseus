@@ -41,7 +41,7 @@ _SEED = [
 
 
 def _seeded(tmp_path):
-    m = MemoryManager(str(tmp_path))
+    m = MemoryManager(str(tmp_path / "memory.json"))
     m.save([dict(e) for e in _SEED])
     return m
 

@@ -5,6 +5,7 @@
 // events so existing listeners keep working.
 
 import { topPortalZ } from './toolWindowZOrder.js';
+import { hexToRgb } from './color/hex.js';
 
 const LS_RECENT = 'odysseus-recent-colors';
 const MAX_RECENT = 12;
@@ -15,16 +16,7 @@ let _h = 0, _s = 100, _v = 100;   // HSV
 let _drag = null;                  // 'sl' | 'hue' | null
 let _onOutside = null;
 
-// ── Color math ────────────────────────────────────────────────────────
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
-
-function hexToRgb(hex) {
-  hex = String(hex || '').replace('#', '');
-  if (hex.length === 3) hex = hex.split('').map(c => c + c).join('');
-  if (!/^[0-9a-f]{6}$/i.test(hex)) return { r: 0, g: 0, b: 0 };
-  const n = parseInt(hex, 16);
-  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
-}
 
 function rgbToHex(r, g, b) {
   return '#' + [r, g, b].map(v =>
@@ -68,9 +60,8 @@ function hsvToRgb(h, s, v) {
 
 function hsvToHex(h, s, v) { const { r, g, b } = hsvToRgb(h, s, v); return rgbToHex(r, g, b); }
 
-function hexToHsv(hex) { const { r, g, b } = hexToRgb(hex); return rgbToHsv(r, g, b); }
+function hexToHsv(hex) { const { r, g, b } = hexToRgb(hex) || { r: 0, g: 0, b: 0 }; return rgbToHsv(r, g, b); }
 
-// ── Storage ───────────────────────────────────────────────────────────
 function getRecents() {
   try { return JSON.parse(localStorage.getItem(LS_RECENT) || '[]'); }
   catch { return []; }
@@ -84,7 +75,6 @@ function addRecent(hex) {
   try { localStorage.setItem(LS_RECENT, JSON.stringify(recents)); } catch {}
 }
 
-// ── Suggestions based on current color (5 harmony swatches) ──────────
 function computeSuggestions() {
   // Complement, analogous ±30°, split-complement (+150), tone shift
   return [
@@ -96,7 +86,6 @@ function computeSuggestions() {
   ];
 }
 
-// ── Popover build ─────────────────────────────────────────────────────
 function buildPopover() {
   const p = document.createElement('div');
   p.className = 'cp-popover';
@@ -132,7 +121,6 @@ function buildPopover() {
   return p;
 }
 
-// ── UI sync ───────────────────────────────────────────────────────────
 function syncUI() {
   if (!_popover) return;
   const sl = _popover.querySelector('.cp-sl');
@@ -232,7 +220,6 @@ function openFallbackEyedropper() {
   });
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────
 // Window-level pointer listeners — installed ONCE, not per-popover, so they
 // don't leak when the popover is rebuilt on every open.
 let _windowPointerInstalled = false;
@@ -367,7 +354,6 @@ function commitCurrent() {
   syncUI();
 }
 
-// ── Open / close ──────────────────────────────────────────────────────
 function position(p, anchor) {
   p.style.zIndex = String(topPortalZ());
   if (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
@@ -474,7 +460,6 @@ function close() {
   _destroyPopover();
 }
 
-// ── Attach to inputs ──────────────────────────────────────────────────
 // Standard setter we need to call after wrapping .value with a custom setter.
 const _NATIVE_VALUE_DESC = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
 

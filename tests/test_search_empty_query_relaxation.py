@@ -43,20 +43,20 @@ def test_empty_results_advance_provider_but_transport_errors_get_one_retry(monke
     assert calls == (['primary', 'primary', 'fallback'] if transient_error else ['primary', 'fallback'])
 
 
-@pytest.mark.parametrize('url,accepted', [
-    ('https://python.org/downloads/', True),
-    ('https://docs.python.org/3/', True),
-    ('https://python.org.evil.example/downloads/', False),
-    ('https://evil.example/python.org', False),
-    ('https://evil.example/?site=python.org', False),
-    ('https://python.org@evil.example/', False),
-    ('https://en.wikipedia.org/wiki/Microsoft_campus', False),
-])
-def test_provider_results_must_obey_site_scope(url, accepted):
-    result = {'url': url, 'title': 'Python official release source python.org'}
-    assert bool(core._filter_low_relevance_results(
-        'latest Python release site:python.org', [result],
-    )) is accepted
+def test_provider_results_must_obey_site_scope():
+    for url, accepted in (
+        ('https://python.org/downloads/', True),
+        ('https://docs.python.org/3/', True),
+        ('https://python.org.evil.example/downloads/', False),
+        ('https://evil.example/python.org', False),
+        ('https://evil.example/?site=python.org', False),
+        ('https://python.org@evil.example/', False),
+        ('https://en.wikipedia.org/wiki/Microsoft_campus', False),
+    ):
+        result = {'url': url, 'title': 'Python official release source python.org'}
+        assert bool(core._filter_low_relevance_results(
+            'latest Python release site:python.org', [result],
+        )) is accepted
 
 
 def test_site_scope_exclusions_and_unrestricted_queries():
@@ -67,14 +67,14 @@ def test_site_scope_exclusions_and_unrestricted_queries():
     assert not core._result_matches_site_scope('site:python.org/downloads/', result)
 
 
-@pytest.mark.parametrize('query', [
-    'latest Python official site:python.org',
-    'Python manual -site:example.org',
-    'official manual filetype:pdf',
-    'official "exact phrase" manual',
-])
-def test_relaxation_never_drops_explicit_query_constraints(query):
-    assert core._empty_result_query_relaxations(query) == []
+def test_relaxation_never_drops_explicit_query_constraints():
+    for query in (
+        'latest Python official site:python.org',
+        'Python manual -site:example.org',
+        'official manual filetype:pdf',
+        'official "exact phrase" manual',
+    ):
+        assert core._empty_result_query_relaxations(query) == []
 
 
 @pytest.mark.parametrize('comprehensive', [False, True])

@@ -217,10 +217,6 @@ def combine_observations(observations) -> ContextResolution:
     )
 
 
-# ---------------------------------------------------------------------------
-# Provider metadata probe
-# ---------------------------------------------------------------------------
-
 @dataclass(frozen=True)
 class _ProbeResult:
     observations: tuple[ContextObservation, ...] = ()

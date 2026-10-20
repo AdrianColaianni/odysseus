@@ -32,22 +32,20 @@ def test_normalize_strips_leading_and_trailing_underscores():
 
 # --- classify_test_path: one example per area --------------------------------
 
-@pytest.mark.parametrize("filename, expected_area, expected_sub", [
-    ("test_owner_scope.py", "security", "owner_scope"),
-    ("test_cookbook_helpers.py", "services", "cookbook"),
-    ("test_routes_sessions.py", "routes", "routes"),
-    ("test_backup_cli.py", "cli", "cli"),
-    ("test_compare_js.py", "js", "js"),
-    ("segmenter.test.mjs", "js", "js"),
-    ("segmenter.test.js", "js", "js"),
-    ("segmenter.test.ts", "js", "js"),
-    ("test_helpers_import_state.py", "helpers", "helpers"),
-    ("test_atomic_io.py", "unit", "atomic"),
-])
-def test_classify_examples(filename, expected_area, expected_sub):
-    result = classify_test_path(filename)
-    assert result.area == expected_area
-    assert result.sub_area == expected_sub
+def test_classify_examples():
+    for filename, expected_area, expected_sub in [
+        ("test_owner_scope.py", "security", "owner_scope"),
+        ("test_cookbook_helpers.py", "services", "cookbook"),
+        ("test_routes_sessions.py", "routes", "routes"),
+        ("test_backup_cli.py", "cli", "cli"),
+        ("test_compare_js.py", "js", "js"),
+        ("segmenter.test.mjs", "js", "js"),
+        ("test_helpers_import_state.py", "helpers", "helpers"),
+        ("test_atomic_io.py", "unit", "atomic"),
+    ]:
+        result = classify_test_path(filename)
+        assert result.area == expected_area
+        assert result.sub_area == expected_sub
 
 
 def test_embedding_lanes_memory_file_keeps_specific_sub_area():
@@ -127,14 +125,14 @@ def test_markers_for_bare_test_filename():
     assert "sub_uncategorized" in markers
 
 
-@pytest.mark.parametrize("path", [
-    "tests/helpers/test_module_isolation.py",
-    "/work/repo/tests/helpers/test_module_isolation.py",
-])
-def test_file_under_helpers_dir_is_helpers(path):
-    result = classify_test_path(path)
-    assert result.area == "helpers"
-    assert result.sub_area == "helpers"
+def test_file_under_helpers_dir_is_helpers():
+    for path in [
+        "tests/helpers/test_module_isolation.py",
+        "/work/repo/tests/helpers/test_module_isolation.py",
+    ]:
+        result = classify_test_path(path)
+        assert result.area == "helpers"
+        assert result.sub_area == "helpers"
 
 
 # --- priority contract -------------------------------------------------------

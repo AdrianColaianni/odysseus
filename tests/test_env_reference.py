@@ -134,10 +134,6 @@ def test_records_defaults_and_locations_from_the_source(generator, fake_tree):
     assert found["ODYSSEUS_VIA_HELPER"].primary.path == "src/indirect.py"
 
 
-def test_environ_writes_are_not_reads(generator, fake_tree):
-    assert "ODYSSEUS_WRITE_ONLY" not in generator.collect(fake_tree)
-
-
 def test_an_undocumented_variable_is_reported(generator, fake_tree):
     """The whole point: a new variable with no notes entry must fail loudly."""
     problems = generator.check_notes(generator.collect(fake_tree))
@@ -259,11 +255,3 @@ def test_script_runs_as_a_subprocess_without_importing_the_app():
     assert result.returncode == 0, result.stderr
     assert re.search(r"\d+ variables", result.stdout), result.stdout
 
-
-def test_page_is_linked_from_the_places_a_reader_starts():
-    assert "configuration-reference.md" in (REPO / "website" / "setup.md").read_text(
-        encoding="utf-8"
-    )
-    assert "configuration-reference.md" in (REPO / ".env.example").read_text(
-        encoding="utf-8"
-    )

@@ -5,6 +5,7 @@ new account, or reconnect one exact existing account — with owner validation,
 and must never carry access/refresh tokens.
 """
 
+import sys
 import types
 
 import pytest
@@ -15,6 +16,7 @@ from sqlalchemy.orm import sessionmaker
 from core.database import Base, ModelEndpoint, ProviderAuthSession
 import routes.chatgpt_subscription_routes as csr
 from routes.device_flow import PendingDeviceFlowStore
+from tests.helpers.route_call import with_db
 
 _BASE = "https://chatgpt.com/backend-api/codex"
 
@@ -23,7 +25,8 @@ def _mem_db(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
     TestSessionLocal = sessionmaker(bind=engine, autoflush=False)
-    monkeypatch.setattr(csr, "SessionLocal", TestSessionLocal)
+    monkeypatch.setattr(csr, "SessionLocal", TestSessionLocal, raising=False)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", TestSessionLocal)
     return TestSessionLocal
 
 
@@ -194,11 +197,10 @@ def test_pending_payload_ignores_actual_secrets_and_allows_harmless_label(monkey
 
 def test_account_listing_and_usage_route_are_owner_scoped(monkeypatch):
     TestSessionLocal = _mem_db(monkeypatch)
-    monkeypatch.setattr(csr, "require_admin", lambda request: None)
     _seed_account(TestSessionLocal, "alice", "auth-a", "ep-a", label="ChatGPT · codex00")
     _seed_account(TestSessionLocal, "bob", "auth-b", "ep-b", label="ChatGPT · work")
     router = csr.setup_chatgpt_subscription_routes()
-    handlers = {(r.path, tuple(sorted(r.methods))): r.endpoint for r in router.routes}
+    handlers = {(r.path, tuple(sorted(r.methods))): with_db(r.endpoint) for r in router.routes}
     list_accounts = handlers[("/api/chatgpt-subscription/accounts", ("GET",))]
     usage = handlers[("/api/chatgpt-subscription/accounts/{auth_id}/usage", ("GET",))]
 

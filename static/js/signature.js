@@ -12,16 +12,10 @@
 // derived from pointer velocity (slower → thicker), which gives signatures
 // their characteristic ink-bleed feel.
 
-const API_BASE = window.location.origin;
+import { esc } from './ui.js?v=20260916largetoolscroll1';
+import { jsonRequest } from './shared/http.js';
 
-function _esc(s) {
-  return String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
+const API_BASE = window.location.origin;
 
 function _safeSignatureDataUrl(raw) {
   const value = String(raw || '').trim();
@@ -333,11 +327,7 @@ async function _listSignatures() {
 }
 
 async function _saveSignature({ dataUrl, width, height, name }) {
-  const r = await fetch(`${API_BASE}/api/signatures`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ data: dataUrl, width, height, name }),
-  });
+  const r = await fetch(`${API_BASE}/api/signatures`, jsonRequest('POST', { data: dataUrl, width, height, name }));
   if (!r.ok) {
     const t = await r.text();
     throw new Error(t || r.statusText);
@@ -464,10 +454,10 @@ export function pick(opts = {}) {
       const dataUrl = _safeSignatureDataUrl(s.data_url);
       if (!dataUrl) return '';
       return `
-      <div class="sig-tile" data-id="${_esc(s.id)}">
-        <img src="${_esc(dataUrl)}"/>
-        <div style="margin-top:4px;font-size:0.72rem;color:var(--fg);opacity:0.85;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(s.name || '')}</div>
-        <button class="sig-tile-del" data-id="${_esc(s.id)}" title="Delete">×</button>
+      <div class="sig-tile" data-id="${esc(s.id)}">
+        <img src="${esc(dataUrl)}"/>
+        <div style="margin-top:4px;font-size:0.72rem;color:var(--fg);opacity:0.85;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(s.name || '')}</div>
+        <button class="sig-tile-del" data-id="${esc(s.id)}" title="Delete">×</button>
       </div>
     `;
     }).join('');

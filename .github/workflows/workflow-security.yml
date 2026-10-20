@@ -1,17 +1,4 @@
-# Workflow security (CI that audits the CI)
-#
-# Purpose: the GitHub Actions workflows themselves are an attack surface. A
-# poorly written workflow can leak the repository token, run attacker-supplied
-# code from a pull request, or pull in a tampered third-party action. These two
-# tools check every workflow file in this repo for those mistakes:
-#
-#   - actionlint: catches workflow syntax errors and shell-script bugs inside
-#     `run:` steps before they reach main.
-#   - zizmor: a security linter for Actions. Flags template-injection holes,
-#     unpinned actions, credential persistence, and over-broad token
-#     permissions -- exactly the patterns the rest of this CI is built to avoid.
-#
-# Add this early: it then audits every workflow added after it.
+# actionlint and zizmor audit the workflow files themselves.
 
 name: Workflow security
 

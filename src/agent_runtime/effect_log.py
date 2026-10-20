@@ -161,7 +161,6 @@ class EffectLog:
         self.degraded = False
         self._lock = threading.RLock()
 
-    # -- merged view ---------------------------------------------------------
 
     def _rebuild_view(self) -> None:
         self._view, self._view_index = _records(), _Index()
@@ -192,7 +191,6 @@ class EffectLog:
         return EffectHistory(tuple(self._view["claim"]), tuple(self._view["outcome"]),
                              tuple(self._view["observation"]))
 
-    # -- persistence -------------------------------------------------------
 
     def _read_tail(self, descriptor: int, *, repair: bool) -> None:
         """Merge complete records other writers appended after our offset.
@@ -336,7 +334,6 @@ class EffectLog:
         self._add_volatile(kind, record)
         return record
 
-    # -- records -----------------------------------------------------------
 
     def claim(self, **fields: Any) -> EffectClaim:
         """Persist a claim before invocation; raises if it is not durable."""
@@ -381,7 +378,6 @@ class EffectLog:
     def assessments(self) -> tuple[EffectAssessment, ...]:
         return assess_all(self.history())
 
-    # -- replay ------------------------------------------------------------
 
     @classmethod
     def load(cls, run_id: str, *, directory: str | os.PathLike | None = None) -> "EffectLog":
@@ -448,7 +444,6 @@ class EffectLog:
             log.recover_interrupted()
             return log
 
-    # -- background launch lineage ------------------------------------------
 
     def index_launch(self, generation: str, effect_id: str) -> None:
         """Durably map an exact Wave 3 launch generation to its claim."""

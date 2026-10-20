@@ -98,9 +98,8 @@ export async function loadSkills(cascade = false) {
   // Play the domino-in entrance on this load (set when the tab is opened,
   // not for the silent re-loads after an edit/delete).
   if (cascade) _cascadeNext = true;
-  // Always re-fetch when the tab is explicitly opened — the cascade
-  // animation is handled inside renderSkillsList() via _cascadeNext.
-  // Skipping the fetch here caused stale data on panel close/reopen (#5870).
+  // Always re-fetch when the tab is opened, or a close and reopen shows stale
+  // data. The cascade animation is handled in renderSkillsList() via _cascadeNext.
   if (_loadPromise) return _loadPromise;
   _loadPromise = (async () => {
   try {
@@ -338,7 +337,7 @@ function _sourcePill(sk) {
   }
   if (sk.source !== 'teacher-escalation') return '';
   const teacher = sk.teacher_model || 'teacher';
-  return `<span class="memory-cat-badge" title="Created by teacher escalation: ${esc(teacher)}" style="background:color-mix(in srgb, var(--color-warning, #f0ad4e) 22%, transparent);">teacher-created</span>`;
+  return `<span class="memory-cat-badge" title="Created by teacher escalation: ${esc(teacher)}" style="background:color-mix(in srgb, var(--color-warning) 22%, transparent);">teacher-created</span>`;
 }
 
 function _modelShortName(model) {
@@ -585,7 +584,7 @@ function _openSkillMenu(btn, card, sk, name, isPublished) {
   document.body.appendChild(menu);
   // Override the CSS z-index (100002) with a value derived from the live
   // tool-window stack so the kebab menu stays above its modal even after the
-  // bring-to-front counter climbs past the static value (#4720).
+  // bring-to-front counter climbs past the static value.
   menu.style.zIndex = String(topPortalZ());
   const r = btn.getBoundingClientRect();
   menu.style.top = (r.bottom + 4) + 'px';
@@ -625,7 +624,7 @@ function _buildBuiltinCards() {
         <div class="doclib-card-title" style="display:flex;align-items:center;gap:6px;min-width:0;">
           <code style="font-weight:600;font-size:0.9em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:1;min-width:0;">${esc(b.name)}</code>
           <span class="memory-cat-badge" style="background:color-mix(in srgb, var(--fg) 14%, transparent)">built-in</span>
-          ${b.is_overridden ? '<span class="memory-cat-badge" title="You have edited this built-in capability" style="background:color-mix(in srgb, var(--color-warning, #f0ad4e) 30%, transparent);">edited</span>' : ''}
+          ${b.is_overridden ? '<span class="memory-cat-badge" title="You have edited this built-in capability" style="background:color-mix(in srgb, var(--color-warning) 30%, transparent);">edited</span>' : ''}
         </div>
         ${b.description ? `<div class="doclib-card-session" title="${esc(b.description)}" style="font-size:10px;opacity:0.55;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(b.description)}</div>` : ''}
       </div>
@@ -991,7 +990,7 @@ function renderSkillsList() {
     } else {
       pubBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>Publish';
       pubBtn.title = 'Publish — appears in the skills index';
-      pubBtn.style.color = 'var(--color-success, #4caf50)';
+      pubBtn.style.color = 'var(--color-success)';
       pubBtn.addEventListener('click', (e) => { e.stopPropagation(); _setSkillStatus(name, 'published'); });
     }
 
@@ -1528,10 +1527,10 @@ function _setCardRunning(card, on) {
 function _applyVerdictToHeader(card, verdict) {
   if (!card || !verdict) return;
   const dotColor = {
-    pass: 'var(--color-success, #4ade80)',
-    needs_work: 'var(--color-warning, #f0ad4e)',
-    inconclusive: 'var(--color-warning, #f0ad4e)',
-    fail: 'var(--color-danger, #e06c75)',
+    pass: 'var(--color-success)',
+    needs_work: 'var(--color-warning)',
+    inconclusive: 'var(--color-warning)',
+    fail: 'var(--color-danger)',
   }[verdict];
   // Audit dot removed at user request — strip any pre-existing one so the
   // post-audit live update doesn't leave a stale dot from an old render.
@@ -1561,10 +1560,10 @@ function _applyVerdictToHeader(card, verdict) {
     // Wash the pill's bg + tint the text so a glance at the badge tells you
     // pass/needs-work/fail without expanding the card.
     const tint = {
-      pass:       { bg: 'color-mix(in srgb, var(--color-success, #4ade80) 30%, transparent)', fg: 'var(--color-success, #4ade80)' },
-      needs_work: { bg: 'color-mix(in srgb, var(--color-warning, #f0ad4e) 30%, transparent)', fg: 'var(--color-warning, #f0ad4e)' },
-      inconclusive: { bg: 'color-mix(in srgb, var(--color-warning, #f0ad4e) 30%, transparent)', fg: 'var(--color-warning, #f0ad4e)' },
-      fail:       { bg: 'color-mix(in srgb, var(--color-danger, #e06c75) 30%, transparent)',  fg: 'var(--color-danger, #e06c75)' },
+      pass:       { bg: 'color-mix(in srgb, var(--color-success) 30%, transparent)', fg: 'var(--color-success)' },
+      needs_work: { bg: 'color-mix(in srgb, var(--color-warning) 30%, transparent)', fg: 'var(--color-warning)' },
+      inconclusive: { bg: 'color-mix(in srgb, var(--color-warning) 30%, transparent)', fg: 'var(--color-warning)' },
+      fail:       { bg: 'color-mix(in srgb, var(--color-danger) 30%, transparent)',  fg: 'var(--color-danger)' },
     }[verdict];
     // The status pill (draft / published) keeps its own colours now — the
     // verdict lives in a separate "checked" pill that's inserted next to it.
@@ -2009,20 +2008,23 @@ async function _bulkDelete() {
     { confirmText: 'Move to bin', danger: true }
   );
   if (!ok) return;
-  let binned = 0;
+  await _binSkills([..._selectedNames]);
+}
+
+async function _binSkills(names) {
   const binnedNames = [];
-  for (const name of _selectedNames) {
+  for (const name of names) {
     try {
       const res = await fetch(`${API}/api/skills/${encodeURIComponent(name)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'binned' }),
       });
-      if (res.ok) {
-        binned++;
-        binnedNames.push(name);
-      }
-    } catch {}
+      if (res.ok) binnedNames.push(name);
+      else console.warn(`Failed to bin skill ${name}: HTTP ${res.status}`);
+    } catch (e) {
+      console.warn(`Failed to bin skill ${name}:`, e);
+    }
   }
   for (const name of binnedNames) {
     const card = document.querySelector(`.skill-card[data-skill-name="${CSS.escape(name)}"]`);
@@ -2031,7 +2033,8 @@ async function _bulkDelete() {
   if (binnedNames.length) await new Promise(resolve => setTimeout(resolve, 320));
   _exitSelectMode();
   await loadSkills();
-  uiModule.showToast(`Moved ${binned} to bin`);
+  const failed = names.length - binnedNames.length;
+  uiModule.showToast(`Moved ${binnedNames.length} to bin` + (failed ? `, ${failed} failed` : ''));
 }
 
 async function _loadSkillApprovalThreshold() {
@@ -2042,7 +2045,9 @@ async function _loadSkillApprovalThreshold() {
     const raw = prefs.skill_min_confidence ?? prefs.skill_autosave_min_confidence;
     const val = Number(raw);
     if (Number.isFinite(val)) _skillApprovalThreshold = Math.max(0, Math.min(1, val));
-  } catch {}
+  } catch (e) {
+    console.warn('Failed to load skill approval threshold:', e);
+  }
 }
 
 function _selectedNonPassingSkills() {
@@ -2071,59 +2076,7 @@ async function _bulkDeleteNonPassing() {
     { confirmText: 'Move to bin', danger: true }
   );
   if (!ok) return;
-  let binned = 0;
-  const binnedNames = [];
-  for (const name of names) {
-    try {
-      const res = await fetch(`${API}/api/skills/${encodeURIComponent(name)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'binned' }),
-      });
-      if (res.ok) {
-        binned++;
-        binnedNames.push(name);
-      }
-    } catch {}
-  }
-  for (const name of binnedNames) {
-    const card = document.querySelector(`.skill-card[data-skill-name="${CSS.escape(name)}"]`);
-    if (card) card.classList.add('doclib-card-deleting');
-  }
-  if (binnedNames.length) await new Promise(resolve => setTimeout(resolve, 320));
-  _exitSelectMode();
-  await loadSkills();
-  uiModule.showToast(`Moved ${binned} to bin`);
-}
-
-async function _bulkApprove() {
-  if (!_selectedNames.size) return;
-  let published = 0;
-  for (const name of _selectedNames) {
-    const sk = skills.find(s => (s.name || s.id) === name);
-    if (sk && sk.status === 'published') continue;
-    try {
-      const res = await fetch(`${API}/api/skills/${encodeURIComponent(name)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'published' }),
-      });
-      if (res.ok) published++;
-    } catch {}
-  }
-  _exitSelectMode();
-  await loadSkills();
-  uiModule.showToast(`Published ${published}`);
-}
-
-async function _bulkAudit() {
-  if (!_selectedNames.size) return;
-  const selected = new Set(_selectedNames);
-  const ordered = _getFilteredSkills()
-    .map(sk => sk.name || sk.id)
-    .filter(n => selected.has(n));
-  _exitSelectMode();
-  await _auditAllSkills({ names: ordered });
+  await _binSkills(names);
 }
 
 async function _showSkillSource(name) {
@@ -2213,18 +2166,12 @@ async function importSkillFromUrl() {
 }
 
 async function addSkill() {
-  const name = document.getElementById('new-skill-name')?.value.trim()
-    || document.getElementById('new-skill-title')?.value.trim();
-  const description = document.getElementById('new-skill-description')?.value.trim()
-    || document.getElementById('new-skill-title')?.value.trim();
-  const whenToUse = document.getElementById('new-skill-when')?.value.trim()
-    || document.getElementById('new-skill-problem')?.value.trim() || '';
-  const procedureRaw = document.getElementById('new-skill-procedure')?.value.trim()
-    || document.getElementById('new-skill-solution')?.value.trim() || '';
+  const name = document.getElementById('new-skill-title')?.value.trim();
+  const whenToUse = document.getElementById('new-skill-problem')?.value.trim() || '';
+  const procedureRaw = document.getElementById('new-skill-solution')?.value.trim() || '';
   const tagsRaw = document.getElementById('new-skill-tags')?.value.trim();
-  const category = document.getElementById('new-skill-category')?.value.trim() || 'general';
 
-  if (!description && !name) {
+  if (!name) {
     uiModule.showError('Description (or name) is required');
     return;
   }
@@ -2238,9 +2185,9 @@ async function addSkill() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        name: name || undefined,
-        description,
-        category,
+        name,
+        description: name,
+        category: 'general',
         when_to_use: whenToUse,
         procedure,
         tags,
@@ -2248,9 +2195,7 @@ async function addSkill() {
       }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    ['new-skill-name', 'new-skill-title', 'new-skill-description', 'new-skill-when',
-     'new-skill-problem', 'new-skill-procedure', 'new-skill-solution', 'new-skill-tags',
-     'new-skill-category']
+    ['new-skill-title', 'new-skill-problem', 'new-skill-solution', 'new-skill-tags']
       .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
     await loadSkills();
     uiModule.showToast('Skill added (draft)');
@@ -2302,17 +2247,11 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('skills-select-btn')?.addEventListener('click', () => {
     if (_selectMode) _exitSelectMode(); else _enterSelectMode();
   });
-  document.getElementById('skills-audit-btn')?.addEventListener('click', _auditAllSkills);
   document.getElementById('skills-select-all')?.addEventListener('change', _toggleSelectAll);
   document.getElementById('skills-bulk-cancel')?.addEventListener('click', _exitSelectMode);
-  document.getElementById('skills-bulk-audit')?.addEventListener('click', _bulkAudit);
   document.getElementById('skills-bulk-delete')?.addEventListener('click', _bulkDelete);
   document.getElementById('skills-bulk-delete-nonpassing')?.addEventListener('click', _bulkDeleteNonPassing);
-  document.getElementById('skills-bulk-publish')?.addEventListener('click', _bulkApprove);
   document.getElementById('new-skill-title')?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') addSkill();
-  });
-  document.getElementById('new-skill-name')?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') addSkill();
   });
 });

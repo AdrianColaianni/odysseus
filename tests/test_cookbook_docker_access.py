@@ -10,6 +10,7 @@ import routes.cookbook_routes as cookbook_routes
 from routes.cookbook_helpers import ServeRequest, _validate_serve_cmd
 from src.host_docker_access import HOST_DOCKER_ACCESS_HINT
 from tests.helpers.unix_sockets import bound_unix_socket
+from tests.helpers.routes import route_endpoint
 
 
 @pytest.fixture(autouse=True)
@@ -18,11 +19,7 @@ def authenticated_admin_mode(monkeypatch):
 
 
 def _model_serve_endpoint():
-    router = cookbook_routes.setup_cookbook_routes()
-    for route in router.routes:
-        if route.path == "/api/model/serve" and "POST" in route.methods:
-            return route.endpoint
-    raise AssertionError("POST /api/model/serve route not found")
+    return route_endpoint(cookbook_routes.setup_cookbook_routes(), "/api/model/serve", "POST")
 
 
 def _admin_request() -> Request:

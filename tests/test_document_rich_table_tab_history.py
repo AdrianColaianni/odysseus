@@ -1,28 +1,7 @@
 """Regression coverage for undoable keyboard navigation in rich-text tables."""
 
-import json
-import subprocess
-from pathlib import Path
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source, function_body
-
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-
-
-def test_last_cell_tab_uses_the_undoable_table_replacement_path():
-    helper = function_body("_appendRichTableRow")
-    key_handler = DOC_JS.split("if (e.key === 'Tab')", 1)[1].split(
-        "let inList = false", 1
-    )[0]
-
-    assert "const clone = original.cloneNode(true)" in helper
-    assert "clone.insertRow(-1)" in helper
-    assert "_replaceRichTable(rich, original, clone, clone.rows.length - 1, 0)" in helper
-    assert "_appendRichTableRow(rich, table)" in key_handler
-    assert "table.insertRow(-1)" not in key_handler
-    assert "_scheduleDocumentHistoryControls()" in key_handler
+from tests.helpers.node import run_node_module
 
 
 def test_mobile_table_tab_navigation_row_creation_and_history():
@@ -99,15 +78,7 @@ def test_mobile_table_tab_navigation_row_creation_and_history():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
     assert (data["forward"]["rows"], data["forward"]["row"], data["forward"]["column"]) == (2, 1, 1)
     assert (data["backward"]["rows"], data["backward"]["row"], data["backward"]["column"]) == (2, 1, 0)
     assert (data["appended"]["rows"], data["appended"]["row"], data["appended"]["column"]) == (3, 2, 0)

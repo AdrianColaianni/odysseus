@@ -1,6 +1,4 @@
 # tests/test_launcher.py
-import sys
-import os
 from pathlib import Path
 from unittest import mock
 import pytest

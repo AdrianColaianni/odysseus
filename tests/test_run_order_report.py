@@ -95,13 +95,13 @@ def test_pytest_exit_code_is_propagated():
     assert run(["--seed", "123", "--", "-q"], pytest_main=fake) == 3
 
 
-@pytest.mark.parametrize("value", ["abc", "-1", str(SEED_MAX + 1)])
-def test_invalid_seed_is_rejected_before_pytest(value):
-    fake = _FakePytestMain()
-    with pytest.raises(SystemExit) as excinfo:
-        run(["--seed", value, "--", "-q"], pytest_main=fake)
-    assert excinfo.value.code == 2
-    assert fake.calls == []
+def test_invalid_seed_is_rejected_before_pytest():
+    for value in ["abc", "-1", str(SEED_MAX + 1)]:
+        fake = _FakePytestMain()
+        with pytest.raises(SystemExit) as excinfo:
+            run(["--seed", value, "--", "-q"], pytest_main=fake)
+        assert excinfo.value.code == 2
+        assert fake.calls == []
 
 
 # --- seed reporting -----------------------------------------------------------

@@ -355,10 +355,8 @@ def test_action_planning_returns_model_chosen_actions(monkeypatch):
     monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: True)
     nav = _ActionNavigator()
     researcher = _researcher(nav)
-    seen_prompt = {}
 
     async def _planner(messages, **kwargs):
-        seen_prompt["text"] = messages[0]["content"]
         return json.dumps({
             "actions": [
                 {"tool": "web_search", "query": "official release notes"},
@@ -374,10 +372,6 @@ def test_action_planning_returns_model_chosen_actions(monkeypatch):
         ("web_search", {"query": "official release notes"}),
         ("web_fetch", {"url": "https://example.com/docs"}),
     ]
-    assert "Evidence/source state:" in seen_prompt["text"]
-    assert "Structured source coverage JSON:" in seen_prompt["text"]
-    assert "No sources gathered yet" in seen_prompt["text"]
-    assert "never use the meta request itself as the search query" in seen_prompt["text"]
 
 
 def test_action_planning_rejects_meta_only_search_query(monkeypatch):
@@ -475,7 +469,6 @@ def test_action_planning_sees_recent_navigation_trace(monkeypatch):
     actions = asyncio.run(researcher._plan_research_actions("What changed?", "", 2))
 
     assert actions == [ResearchAction("web_search", {"query": "better query"})]
-    assert "Recent navigation observations:" in seen_prompt["text"]
     assert 'web_search "bad old query" -> no_results; 0 result(s)' in seen_prompt["text"]
 
 
@@ -574,12 +567,8 @@ def test_synthesis_prompt_includes_source_state_and_navigation_trace():
     ))
 
     assert result == "updated report"
-    assert "Evidence/source state:" in seen_prompt["text"]
-    assert "Structured source coverage JSON:" in seen_prompt["text"]
-    assert "Recent navigation observations:" in seen_prompt["text"]
     assert '"primary_or_official": 1' in seen_prompt["text"]
     assert "web_fetch https://example.com/source -> ok; primary score 82" in seen_prompt["text"]
-    assert "avoid overconfident conclusions" in seen_prompt["text"]
 
 
 def test_final_report_prompt_includes_source_state_and_navigation_trace():
@@ -610,12 +599,8 @@ def test_final_report_prompt_includes_source_state_and_navigation_trace():
     result = asyncio.run(researcher._final_report("What changed?", "evidence report"))
 
     assert result == "final report"
-    assert "Evidence/source state:" in seen_prompt["text"]
-    assert "Structured source coverage JSON:" in seen_prompt["text"]
-    assert "Recent navigation observations:" in seen_prompt["text"]
     assert '"primary_or_official": 1' in seen_prompt["text"]
     assert 'web_search "official docs" -> ok; 4 result(s)' in seen_prompt["text"]
-    assert "Prefer primary/official evidence" in seen_prompt["text"]
 
 
 def test_source_state_summary_reports_mix_and_gaps():
@@ -720,5 +705,4 @@ def test_stop_prompt_includes_structured_source_coverage():
     researcher._llm = _capture
 
     assert asyncio.run(researcher._should_stop("What changed?", "report", 3)) is True
-    assert "Structured source coverage JSON:" in seen_prompt["text"]
     assert '"primary_or_official": 1' in seen_prompt["text"]

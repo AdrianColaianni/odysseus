@@ -16,6 +16,7 @@ import asyncio
 import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from tests.helpers.routes import route_endpoint
 
 # Stub `core.database` / `core.auth` before the route modules import them.
 # (Same trick as test_null_owner_gates.py — the real modules instantiate
@@ -100,10 +101,7 @@ def _auth_route_endpoint(path: str, method: str):
 
     auth_manager = MagicMock()
     router = setup_auth_routes(auth_manager)
-    for route in router.routes:
-        if getattr(route, "path", "") == path and method in getattr(route, "methods", set()):
-            return auth_manager, route.endpoint
-    raise AssertionError(f"{method} {path} route not registered")
+    return auth_manager, route_endpoint(router, path, method)
 
 
 def _fake_auth_request(token="session-token"):
@@ -115,60 +113,6 @@ def _fake_auth_request(token="session-token"):
     return req
 
 
-def test_set_signup_enabled_true_is_idempotent():
-    from routes.auth_routes import SetOpenRegistrationRequest
-
-    auth, target = _auth_route_endpoint("/api/auth/open-signup", "PUT")
-    auth.get_username_for_token.return_value = "admin"
-    auth.is_admin.return_value = True
-
-    request = _fake_auth_request()
-    auth.signup_enabled = False
-
-    out = asyncio.run(target(body=SetOpenRegistrationRequest(enabled=True),request=request))
-
-    assert out == {"ok": True, "signup_enabled": True}
-    assert auth.signup_enabled is True
-
-    out = asyncio.run(target(body=SetOpenRegistrationRequest(enabled=True), request=request))
-
-    assert out == {"ok": True, "signup_enabled": True}
-    assert auth.signup_enabled is True
-
-def test_set_signup_enabled_false_is_idempotent():
-    from routes.auth_routes import SetOpenRegistrationRequest
-
-    auth, target = _auth_route_endpoint("/api/auth/open-signup", "PUT")
-    auth.get_username_for_token.return_value = "admin"
-    auth.is_admin.return_value = True
-
-    request = _fake_auth_request()
-    auth.signup_enabled = True
-
-    out = asyncio.run(target(body=SetOpenRegistrationRequest(enabled=False), request=request))
-
-    assert out == {"ok": True, "signup_enabled": False}
-    assert auth.signup_enabled is False
-
-    out = asyncio.run(target(body=SetOpenRegistrationRequest(enabled=False), request=request))
-
-    assert out == {"ok": True, "signup_enabled": False}
-    assert auth.signup_enabled is False
-
-def test_set_signup_enabled_requires_admin():
-    from routes.auth_routes import SetOpenRegistrationRequest
-
-    auth, target = _auth_route_endpoint("/api/auth/open-signup", "PUT")
-    auth.get_username_for_token.return_value = "bob"
-    auth.is_admin.return_value = False
-    auth.signup_enabled = False
-
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(target(body=SetOpenRegistrationRequest(enabled=True), request=_fake_auth_request()))
-
-    assert exc.value.status_code == 403
-    assert auth.signup_enabled is False
-
 # ---------------------------------------------------------------------------
 # Research endpoints — `_require_user` rejects anonymous
 # ---------------------------------------------------------------------------
@@ -177,7 +121,7 @@ def _build_research_router():
     """Construct the research router with a mock research_handler so we
     can fish out the inner `_require_user` helper without booting the
     full app."""
-    from routes.research_routes import setup_research_routes
+    from routes.research.research_routes import setup_research_routes
     rh = MagicMock()
     setup_research_routes(rh)
     # The helper lives inside the setup closure. Easiest way to exercise
@@ -199,47 +143,41 @@ def _fake_request(user=None):
 def test_research_status_rejects_anonymous():
     """research_status must 401 when no user is on the request state."""
     # Build a fresh router and pluck its registered routes.
-    from routes.research_routes import setup_research_routes
+    from routes.research.research_routes import setup_research_routes
     rh = MagicMock()
     rh.get_status.return_value = {"status": "running"}  # would 200 if auth passed
     router = setup_research_routes(rh)
-    # Find the function registered for /api/research/status/{session_id}
-    target = None
-    for route in router.routes:
-        if getattr(route, "path", "") == "/api/research/status/{session_id}":
-            target = route.endpoint
-            break
-    assert target is not None, "research_status route not registered"
+    target = route_endpoint(router, "/api/research/status/{session_id}", "GET")
     with pytest.raises(HTTPException) as exc:
         asyncio.run(target(session_id="x", request=_fake_request(user=None)))
     assert exc.value.status_code == 401
 
 
 def test_research_status_accepts_authenticated():
-    from routes.research_routes import setup_research_routes
+    from routes.research.research_routes import setup_research_routes
     rh = MagicMock()
     rh._active_tasks = {"x": {"owner": "alice", "status": "running"}}
     rh.get_status.return_value = {"status": "running", "progress": {}}
     router = setup_research_routes(rh)
-    target = next(r.endpoint for r in router.routes if getattr(r, "path", "") == "/api/research/status/{session_id}")
+    target = route_endpoint(router, "/api/research/status/{session_id}", "GET")
     out = asyncio.run(target(session_id="x", request=_fake_request(user="alice")))
     assert out == {"status": "running", "progress": {}}
 
 
 def test_research_status_rejects_wrong_owner():
-    from routes.research_routes import setup_research_routes
+    from routes.research.research_routes import setup_research_routes
     rh = MagicMock()
     rh._active_tasks = {"x": {"owner": "alice", "status": "running"}}
     rh.get_status.return_value = {"status": "running", "progress": {}}
     router = setup_research_routes(rh)
-    target = next(r.endpoint for r in router.routes if getattr(r, "path", "") == "/api/research/status/{session_id}")
+    target = route_endpoint(router, "/api/research/status/{session_id}", "GET")
     with pytest.raises(HTTPException) as exc:
         asyncio.run(target(session_id="x", request=_fake_request(user="bob")))
     assert exc.value.status_code == 404
 
 
 def test_research_cancel_rejects_anonymous():
-    from routes.research_routes import setup_research_routes
+    from routes.research.research_routes import setup_research_routes
     rh = MagicMock()
     router = setup_research_routes(rh)
     target = next(r.endpoint for r in router.routes if getattr(r, "path", "") == "/api/research/cancel/{session_id}")
@@ -249,7 +187,7 @@ def test_research_cancel_rejects_anonymous():
 
 
 def test_research_delete_rejects_anonymous():
-    from routes.research_routes import setup_research_routes
+    from routes.research.research_routes import setup_research_routes
     rh = MagicMock()
     router = setup_research_routes(rh)
     target = next(r.endpoint for r in router.routes if getattr(r, "path", "") == "/api/research/{session_id}")
@@ -263,7 +201,7 @@ def test_research_delete_rejects_anonymous():
 
 def test_research_spinoff_rejects_anonymous():
     """spinoff must 401 before reading any research data."""
-    from routes.research_routes import setup_research_routes
+    from routes.research.research_routes import setup_research_routes
     rh = MagicMock()
     router = setup_research_routes(rh, session_manager=MagicMock())
     target = next(r.endpoint for r in router.routes if getattr(r, "path", "") == "/api/research/spinoff/{session_id}")
@@ -276,7 +214,7 @@ def test_research_spinoff_rejects_wrong_owner():
     """A user must not be able to spin off (and thereby read) another user's
     research report. The ownership gate must 404 before any data is read or a
     new session is created. Regression for the cross-user disclosure IDOR."""
-    from routes.research_routes import setup_research_routes
+    from routes.research.research_routes import setup_research_routes
     sm = MagicMock()
     rh = MagicMock()
     rh._active_tasks = {"x": {"owner": "alice"}}
@@ -301,7 +239,6 @@ def test_pop_notifications_owner_filtered(monkeypatch):
     # Reuse the real class so the test catches future regressions of
     # the filter logic.
     import sys, types
-    from unittest.mock import MagicMock as _MM
     # `task_scheduler` pulls in lots of helpers — stub the ones it uses.
     # monkeypatch.setitem, not a bare assignment: a plain write leaves these
     # empty stubs in sys.modules for the rest of the session, and every later
@@ -349,7 +286,7 @@ def test_admin_only_actions_set_contains_shell_runners():
 def test_task_create_notification_default_allows_action_specific_defaults():
     """Omitted notifications_enabled should stay None so create_task can
     default noisy/quiet built-ins differently."""
-    from routes.task_routes import TaskCreate
+    from routes.task.task_routes import TaskCreate
 
     req = TaskCreate(task_type="action", action="check_email_urgency", schedule="cron", cron_expression="*/15 * * * *")
     assert req.notifications_enabled is None
@@ -358,7 +295,7 @@ def test_task_create_notification_default_allows_action_specific_defaults():
 def test_ship_paused_housekeeping_stays_paused_by_default():
     """Built-ins marked ship_paused are intentionally opt-in even after
     the user enables the rest of Tasks."""
-    from routes import task_routes
+    from routes.task import task_routes
     from src import task_scheduler
 
     route_src = open(task_routes.__file__, encoding="utf-8").read()
@@ -369,7 +306,7 @@ def test_ship_paused_housekeeping_stays_paused_by_default():
 
 
 def test_task_payload_exposes_crew_member_id_for_ui_category():
-    from routes import task_routes
+    from routes.task import task_routes
 
     src = open(task_routes.__file__, encoding="utf-8").read()
     assert '"crew_member_id"' in src

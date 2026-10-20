@@ -44,25 +44,24 @@ import { spawnConfetti } from '/static/js/shared/ui/confetti.js';
 import * as Modals from '/static/js/modalManager.js';
 import { attachColorPicker } from '/static/js/colorPicker.js?v=20260910eyedropper1';
 import { makeWindowDraggable } from '/static/js/windowDrag.js';
-import { snapModalToZone } from '/static/js/tileManager.js?v=20260910responsivebounds1';
 import { applyEdgeDock, clearDockSide } from '/static/js/modalSnap.js';
 import { topToolWindowZ, topPortalZ } from '/static/js/toolWindowZOrder.js';
 import { bindMenuDismiss, dismissOrRemove } from '/static/js/escMenuStack.js';
 import { bindTourHintDismiss } from '/static/js/tourHintDismiss.js';
 
 const api = createNotesApi({ origin: window.location.origin, request: (...args) => fetch(...args) });
-const persistence = createNotesPersistence({ storage: typeof localStorage === 'undefined' ? undefined : localStorage });
+const persistence = createNotesPersistence({ storage: localStorage });
 const { _loadPendingHighlights, _loadGlowedReminders, _saveGlowedReminders, _loadActiveHighlights, _saveActiveHighlights, _savePendingHighlights, _loadFiredReminders, _saveFiredReminders, _draftKey, _loadDraft, _clearDraft } = persistence;
 const clock = { now: () => Date.now() };
 const app = createNotesState({
- viewMode: (typeof localStorage !== 'undefined' && localStorage.getItem('odysseus-notes-view')) || 'list',
- labelsCollapsed: typeof localStorage !== 'undefined' && localStorage.getItem(NOTES_LABELS_COLLAPSED_KEY) === '1',
+ viewMode: localStorage.getItem('odysseus-notes-view') || 'list',
+ labelsCollapsed: localStorage.getItem(NOTES_LABELS_COLLAPSED_KEY) === '1',
  firedDotDismissedAt: (() => { try { const v = parseInt(persistence.getItem(REMINDER_DISMISSED_AT_KEY) || '0', 10); return Number.isFinite(v) && v > 0 ? v : 0; } catch { return 0; } })(),
 });
 const state = app.state;
 const lifecycle = createNotesLifecycle();
 const scheduler = { setTimeout: (...args) => setTimeout(...args), clearTimeout: id => clearTimeout(id), setInterval: (...args) => setInterval(...args), clearInterval: id => clearInterval(id) };
-const notifications = createNotesNotifications({ browser: window, notify: window.Notification, openPanel: () => openPanel(), toast: title => uiModule?.showToast?.(title) });
+const notifications = createNotesNotifications({ browser: window, notify: window.Notification, openPanel: () => openPanel(), toast: title => uiModule.showToast(title) });
 const reminders = createNotesReminders({
   app,
   api,
@@ -119,7 +118,7 @@ function _hasActiveReminder(...args) { return noteRules._hasActiveReminder(...ar
 const _isNoteFullyDone = noteRules._isNoteFullyDone;
 const _hasItems = noteRules._hasItems;
 function _isPastReminder(...args) { return noteRules._isPastReminder(...args, clock); }
-function _esc(...args) { return text._esc(...args); }
+const _esc = uiModule.esc;
 
 function _safeImgSrc(...args) { return text._safeImgSrc(...args); }
 function _linkify(...args) { return text._linkify(...args); }
@@ -195,7 +194,6 @@ const colors = createColors({
 const { COLORS, COLOR_HEX } = colors;
 const windowLayout = createWindowLayout({
   makeWindowDraggable,
-  snapModalToZone,
   clearDockSide,
   applyEdgeDock,
   topToolWindowZ
@@ -477,7 +475,7 @@ const deletion = createDeletion({
   _fetchNotes,
   _isPastReminder,
   _renderNotes,
-  effects: { styledConfirm: uiModule.styledConfirm, confirm: message => confirm(message), showToast: (...args) => uiModule.showToast(...args), showError: (...args) => uiModule.showError(...args) },
+  effects: { styledConfirm: uiModule.styledConfirm, showToast: (...args) => uiModule.showToast(...args), showError: (...args) => uiModule.showError(...args) },
   state
 });
 const notesModule = { openPanel: panel.openPanel, closePanel: panel.closePanel, togglePanel: panel.togglePanel, isPanelOpen: panel.isPanelOpen, openNote: panel.openNote, newNote: quickAdd.newNote, openNotes: panel.openPanel, closeNotes: panel.closePanel, isNotesOpen: panel.isPanelOpen, refreshDueBadge: reminders.refreshDueBadge };

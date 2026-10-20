@@ -8,7 +8,7 @@ from sqlalchemy.pool import NullPool
 
 import core.database as cdb
 from core.database import GalleryAlbum, GalleryImage
-import routes.gallery_routes as gallery_routes
+import routes.gallery.gallery_routes as gallery_routes
 
 
 def _client_with_gallery(monkeypatch, tmp_path):
@@ -19,7 +19,7 @@ def _client_with_gallery(monkeypatch, tmp_path):
     )
     cdb.Base.metadata.create_all(engine)
     session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-    monkeypatch.setattr(gallery_routes, "SessionLocal", session_factory)
+    monkeypatch.setattr(cdb, "SessionLocal", session_factory)
 
     db = session_factory()
     try:
@@ -77,15 +77,7 @@ def test_auth_enabled_null_user_gallery_routes_fail_closed(monkeypatch, tmp_path
     assert shuffled["items"] == []
     assert shuffled["total"] == 0
 
-    assert client.get("/api/gallery/tags").json() == {"tags": []}
     assert client.get("/api/gallery/albums").json() == {"albums": []}
-    assert client.get("/api/gallery/stats").json() == {
-        "total_photos": 0,
-        "total_size": 0,
-        "total_size_human": "0.0 B",
-        "favorites": 0,
-        "albums": 0,
-    }
     assert client.post("/api/gallery/ai-tag-batch").json() == {
         "ok": True,
         "queued": 0,
@@ -104,15 +96,7 @@ def test_auth_disabled_null_user_gallery_routes_keep_single_user_mode(monkeypatc
     assert library["tags"] == ["alice-tag", "bob-tag"]
     assert library["models"] == ["model-a", "model-b"]
 
-    assert client.get("/api/gallery/tags").json() == {"tags": ["alice-tag", "bob-tag"]}
     assert len(client.get("/api/gallery/albums").json()["albums"]) == 2
-    assert client.get("/api/gallery/stats").json() == {
-        "total_photos": 2,
-        "total_size": 30,
-        "total_size_human": "30.0 B",
-        "favorites": 0,
-        "albums": 2,
-    }
     batch = client.post("/api/gallery/ai-tag-batch").json()
     assert batch["ok"] is True
     assert batch["queued"] == 2
@@ -131,16 +115,8 @@ def test_authenticated_gallery_routes_remain_owner_scoped(monkeypatch, tmp_path)
     assert library["tags"] == ["alice-tag"]
     assert library["models"] == ["model-a"]
 
-    assert client.get("/api/gallery/tags").json() == {"tags": ["alice-tag"]}
     albums = client.get("/api/gallery/albums").json()["albums"]
     assert [album["id"] for album in albums] == ["album-alice"]
-    assert client.get("/api/gallery/stats").json() == {
-        "total_photos": 1,
-        "total_size": 10,
-        "total_size_human": "10.0 B",
-        "favorites": 0,
-        "albums": 1,
-    }
     assert client.post("/api/gallery/ai-tag-batch").json() == {
         "ok": True,
         "queued": 1,

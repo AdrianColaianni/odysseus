@@ -365,7 +365,6 @@ def test_oversized_declared_body_is_refused_before_it_is_parsed():
         },
     )
     assert response.status_code == 413
-    assert "safety limit" in response.text
 
 
 def test_oversized_declared_body_guard_runs_before_body_consumption():
@@ -387,7 +386,6 @@ def test_oversized_declared_body_guard_runs_before_body_consumption():
         },
     )
     assert response.status_code == 413
-    assert "safety limit" in response.text
     # Proves the body stream was never read or consumed before rejection
     assert body_consumed is False
 

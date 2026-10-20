@@ -1075,7 +1075,6 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
     API_BASE = apiBase;
     initLibrary({
       apiBase,
-      esc: _esc,
       getDocs: () => docs,
       isOpen: () => isOpen,
       createDocument,
@@ -1231,8 +1230,8 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
         ? langIcon(doc.language, 12, { style: 'opacity:0.65;flex-shrink:0;color:currentColor;margin-right:4px;' })
         : '';
       const langChip = `<span class="doc-tab-lang">${lic}</span>`;
-      html += `<div class="doc-tab${isActive ? ' active' : ''}" draggable="true" data-doc-id="${id}" title="${_esc(title)}">
-        ${verChip}${langChip}<span class="doc-tab-title">${_esc(shortTitle)}</span>
+      html += `<div class="doc-tab${isActive ? ' active' : ''}" draggable="true" data-doc-id="${id}" title="${uiModule.esc(title)}">
+        ${verChip}${langChip}<span class="doc-tab-title">${uiModule.esc(shortTitle)}</span>
         <button class="doc-tab-close" data-doc-id="${id}" title="Unlink from chat (kept in the Library)">&times;</button>
       </div>`;
     }
@@ -2109,7 +2108,7 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
       if (!res.ok) throw new Error(await _pdfResponseErrorMessage(res));
       data = await res.json();
     } catch (e) {
-      pane.innerHTML = `<div style="color:#fbb;padding:40px;text-align:center;">Failed to load PDF view: ${_escHtml(e.message || String(e))}</div>`;
+      pane.innerHTML = `<div style="color:#fbb;padding:40px;text-align:center;">Failed to load PDF view: ${uiModule.esc(e.message || String(e))}</div>`;
       if (savedPill) pane.appendChild(savedPill);
       return;
     }
@@ -4956,7 +4955,7 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
         for (const att of fields.attachments) {
           const isPdf = (att.filename || '').toLowerCase().endsWith('.pdf');
           const sizeKb = att.size > 0 ? `${Math.round(att.size / 1024)} KB` : '';
-          const chipHtml = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg><span>${_escHtml(att.filename)}</span><span class="att-size">${sizeKb}</span>`;
+          const chipHtml = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg><span>${uiModule.esc(att.filename)}</span><span class="att-size">${sizeKb}</span>`;
           // Helper: swap chip content for a whirlpool spinner while busy.
           const _withSpinner = async (chip, fn) => {
             if (chip.dataset.loading === '1') return;
@@ -5397,8 +5396,8 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
             <span class="email-odysseus-attach-dot" aria-hidden="true"></span>
             <span class="email-odysseus-attach-thumb"></span>
             <span class="email-odysseus-attach-main">
-              <span class="email-odysseus-attach-title">${_escHtml(label)}</span>
-              <span class="email-odysseus-attach-meta">${_escHtml(item.filename || 'image')}</span>
+              <span class="email-odysseus-attach-title">${uiModule.esc(label)}</span>
+              <span class="email-odysseus-attach-meta">${uiModule.esc(item.filename || 'image')}</span>
             </span>
           `;
           if (item.url) {
@@ -5412,8 +5411,8 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
             <span class="email-odysseus-attach-dot" aria-hidden="true"></span>
             <span class="email-odysseus-attach-icon">${langIcon(item.language || 'text', 14, { style: 'opacity:0.8;' })}</span>
             <span class="email-odysseus-attach-main">
-              <span class="email-odysseus-attach-title">${_escHtml(label)}</span>
-              <span class="email-odysseus-attach-meta">${_escHtml(item.language || 'text')}</span>
+              <span class="email-odysseus-attach-title">${uiModule.esc(label)}</span>
+              <span class="email-odysseus-attach-meta">${uiModule.esc(item.language || 'text')}</span>
             </span>
           `;
         }
@@ -5553,7 +5552,7 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
           const button = document.createElement('button');
           button.type = 'button';
           button.className = 'doc-rich-gallery-item';
-          button.innerHTML = `<span class="doc-rich-gallery-thumb"></span><span>${_escHtml(item.caption || item.filename || item.name || 'Gallery image')}</span>`;
+          button.innerHTML = `<span class="doc-rich-gallery-thumb"></span><span>${uiModule.esc(item.caption || item.filename || item.name || 'Gallery image')}</span>`;
           const thumb = button.querySelector('.doc-rich-gallery-thumb');
           const src = item.url || item.src || '';
           if (src) thumb.style.backgroundImage = `url("${src.startsWith('http') ? src : `${API_BASE}${src}`}" )`;
@@ -5951,7 +5950,7 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
       const sizeKb = att.size > 0 ? `${Math.round(att.size / 1024)} KB` : '';
       chip.innerHTML = `
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-        <span class="compose-chip-name">${_escHtml(att.filename)}</span>
+        <span class="compose-chip-name">${uiModule.esc(att.filename)}</span>
         <span class="att-size">${sizeKb}</span>
         <button class="compose-chip-remove" title="Remove">×</button>
       `;
@@ -6048,7 +6047,7 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
           item.className = 'contact-suggestion';
           item.setAttribute('role', 'option');
           item.setAttribute('aria-selected', 'false');
-          item.innerHTML = `<span class="contact-name">${_escHtml(c.name)}</span><span class="contact-email">${_escHtml(em)}</span>`;
+          item.innerHTML = `<span class="contact-name">${uiModule.esc(c.name)}</span><span class="contact-email">${uiModule.esc(em)}</span>`;
           item.addEventListener('mouseenter', () => {
             sugg.dataset.navStarted = '1';
             sugg.querySelectorAll('.contact-suggestion').forEach(it => {
@@ -7707,8 +7706,6 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
       const _pdfView = pane.querySelector('#doc-pdf-view-btn');
       if (_footer && _split) {
         // Footer order (left → right): Undo, Run/Preview, Lang, …, Copy/Export.
-        // The X close was here too but is now redundant with the per-tab close
-        // button in the title strip — removed.
         if (_undo) _footer.insertBefore(_undo, _footer.firstChild);
         const _anchor = _undo;
         if (_redo && _anchor) _anchor.after(_redo);
@@ -13732,7 +13729,7 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
         </div>
         <button class="doc-suggestion-close close-btn" title="Close all suggestions" aria-label="Close all suggestions"></button>
       </div>
-      <div class="doc-suggestion-reason">${_esc(sugg.reason)}</div>
+      <div class="doc-suggestion-reason">${uiModule.esc(sugg.reason)}</div>
       <div class="doc-suggestion-actions">
         <button class="doc-suggestion-accept">Accept</button>
         <button class="doc-suggestion-accept-all" title="Apply all ${remaining} pending suggestions" aria-label="Accept all ${remaining} pending suggestions">Accept All</button>
@@ -14350,10 +14347,6 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
     } else {
       _showCurrentSuggestion();
     }
-  }
-
-  function _esc(s) {
-    return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
   /** Accept a suggestion — apply the edit */
@@ -15372,7 +15365,7 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
     }
     const title = docs.get(activeDocId)?.title || 'document';
     const richStyles = _isRichTextLang(lang) ? `<style>${_richTextExportCss()}</style>` : '';
-    const html = `<!DOCTYPE html>\n<html><head><meta charset="utf-8"><title>${_esc(title)}</title>${richStyles}</head><body style="max-width:800px;margin:40px auto;font-family:sans-serif;line-height:1.6;padding:0 20px;background:#fff;color:#000;">\n${body}\n</body></html>`;
+    const html = `<!DOCTYPE html>\n<html><head><meta charset="utf-8"><title>${uiModule.esc(title)}</title>${richStyles}</head><body style="max-width:800px;margin:40px auto;font-family:sans-serif;line-height:1.6;padding:0 20px;background:#fff;color:#000;">\n${body}\n</body></html>`;
     const blob = new Blob([html], { type: 'text/html' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -16221,12 +16214,12 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
       const raw = String(payload.html || '');
       const safe = markdownModule.sanitizeAllowedHtml
         ? markdownModule.sanitizeAllowedHtml(raw)
-        : _escHtml(raw);
+        : uiModule.esc(raw);
       preview.innerHTML = `<article class="doc-docx-paper">${safe || '<p>No preview content.</p>'}</article>`;
       if (remember && activeDocId && docs.has(activeDocId)) docs.get(activeDocId)._docxPreviewActive = true;
     } catch (error) {
       if (!isCurrent()) return;
-      preview.innerHTML = `<div class="doc-docx-preview-error">Could not render Word preview: ${_escHtml(error.message || error)}</div>`;
+      preview.innerHTML = `<div class="doc-docx-preview-error">Could not render Word preview: ${uiModule.esc(error.message || error)}</div>`;
     }
     _syncHeaderActions();
   }
@@ -16342,7 +16335,7 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
         outputPanel.innerHTML = '<pre class="doc-run-error">No data — CSV is empty or unparseable.</pre>';
         return;
       } else {
-        const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        const esc = uiModule.esc;
         const colCount = Math.max(...rows.map(r => r.length));
         let html = '<div class="csv-table-wrap"><table class="csv-table"><thead><tr>';
         for (let j = 0; j < colCount; j++) {
@@ -16677,13 +16670,8 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
 
   /** Open the document panel immediately for a doc being streamed in */
   export function streamDocOpen(title, language) {
-    // Discard any pending AI-edit diff before this stream changes the active
-    // document. When the AI streams a NEW document while an unapproved diff is
-    // open on the current one, streamDocOpen reassigns activeDocId below; if the
-    // stale diff isn't cleared first, a later exitDiffMode applies the old doc's
-    // content to the new one and overwrites it (issue #2467). activeDocId still
-    // points at the previously-active doc here, so exitDiffMode(true) restores
-    // and saves THAT doc — same guard handleDocUpdate/switchToDoc use.
+    // The diff state belongs to the still-active doc; clear it before
+    // activeDocId moves, or it gets written into the new doc.
     if (_diffModeActive) exitDiffMode(true);
     // If already streaming a doc, reuse it (don't create a second temp doc)
     if (_streamDocId && docs.has(_streamDocId)) {
@@ -16953,15 +16941,8 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
   /** Handle SSE doc_update event from AI */
   export function handleDocUpdate(data) {
     const streamingId = streamDocFinalize();
-    // Discard any pending AI-edit diff before this update changes the active
-    // document. The diff state (_diffModeActive/_diffOldContent/...) is a
-    // module-global singleton bound to whatever doc was active when the diff
-    // opened; if we switch documents without clearing it, a later tab switch or
-    // Accept/Reject-All flushes the stale diff's content into the now-active
-    // doc and silently overwrites it (issue #2467). activeDocId still points at
-    // the previously-active doc here, so exitDiffMode(true) restores and saves
-    // THAT doc before we reassign activeDocId below — mirroring switchToDoc()
-    // and enterDiffMode().
+    // The diff state belongs to the still-active doc; clear it before
+    // activeDocId moves, or it gets written into the new doc.
     if (_diffModeActive) exitDiffMode(true, { persist: data.doc_id !== activeDocId });
     let docId = data.doc_id;
     let newContent = data.content || '';
@@ -17305,17 +17286,14 @@ import { attachColorPicker } from './colorPicker.js?v=20260910eyedropper1';
     // Show up to 3 changes
     const parts = [];
     for (const line of removed.slice(0, 2)) {
-      if (line) parts.push(`<span class="diff-del">${_escHtml(line.slice(0, 60))}</span>`);
+      if (line) parts.push(`<span class="diff-del">${uiModule.esc(line.slice(0, 60))}</span>`);
     }
     for (const line of added.slice(0, 2)) {
-      if (line) parts.push(`<span class="diff-add">${_escHtml(line.slice(0, 60))}</span>`);
+      if (line) parts.push(`<span class="diff-add">${uiModule.esc(line.slice(0, 60))}</span>`);
     }
     const extra = (added.length + removed.length) - 4;
     if (extra > 0) parts.push(`<span>+${extra} more changes</span>`);
     return parts.join('<br>');
-  }
-  function _escHtml(s) {
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
   /** Load version history list */

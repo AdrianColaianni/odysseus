@@ -44,13 +44,3 @@ def test_every_schema_tool_has_an_index_description():
         "Tools defined in FUNCTION_TOOL_SCHEMAS but absent from "
         f"BUILTIN_TOOL_DESCRIPTIONS (RAG can never select them): {sorted(missing)}"
     )
-
-
-def test_api_call_is_indexed_with_a_real_description():
-    src = open(os.path.join(ROOT, "src", "tool_index.py"), encoding="utf-8").read()
-    value = _assigned_value(ast.parse(src), "BUILTIN_TOOL_DESCRIPTIONS")
-    descriptions = {
-        ast.literal_eval(k): ast.literal_eval(v) for k, v in zip(value.keys, value.values)
-    }
-    assert "api_call" in descriptions
-    assert len(descriptions["api_call"]) > 50

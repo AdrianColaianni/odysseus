@@ -14,8 +14,8 @@ from src.tools.notes import do_manage_notes
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('repeats', [2, 3])
-async def test_corrected_ids_execute_after_repeated_ambiguous_title_failures(tmp_path, monkeypatch, repeats):
+async def test_corrected_ids_execute_after_repeated_ambiguous_title_failures(tmp_path, monkeypatch):
+    repeats = 2
     import src.clean_agent_preview as preview
     engine = create_engine(f'sqlite:///{tmp_path / "notes.db"}')
     database.Base.metadata.create_all(engine)

@@ -2,6 +2,7 @@ import asyncio
 from contextlib import contextmanager
 
 import pytest
+from tests.helpers.routes import route_endpoint
 
 
 RAW_EMAIL = (
@@ -14,14 +15,6 @@ RAW_EMAIL = (
     b"\r\n"
     b"Body"
 )
-
-
-def _route_endpoint(router, path: str, method: str):
-    method = method.upper()
-    for route in router.routes:
-        if route.path == path and method in getattr(route, "methods", set()):
-            return route.endpoint
-    raise AssertionError(f"route not found: {method} {path}")
 
 
 class FakeImap:
@@ -57,12 +50,11 @@ class FakeImap:
 
 
 def _install_fakes(monkeypatch, tmp_path, *, store_status="OK", readonly_mailbox=False):
-    import routes.email_helpers as email_helpers
-    import routes.email_routes as email_routes
+    import routes.email.email_helpers as email_helpers
+    import routes.email.email_routes as email_routes
 
     db_path = tmp_path / "email.db"
     monkeypatch.setattr(email_helpers, "SCHEDULED_DB", db_path)
-    monkeypatch.setattr(email_routes, "SCHEDULED_DB", db_path)
     email_helpers._init_scheduled_db()
 
     connections = []
@@ -93,7 +85,7 @@ def _install_fakes(monkeypatch, tmp_path, *, store_status="OK", readonly_mailbox
 async def test_read_email_seen_contract_uses_one_imap_connection(monkeypatch, tmp_path, mark_seen):
     email_routes, connections, indexed_updates = _install_fakes(monkeypatch, tmp_path)
     router = email_routes.setup_email_routes()
-    read_email = _route_endpoint(router, "/api/email/read/{uid}", "GET")
+    read_email = route_endpoint(router, "/api/email/read/{uid}", "GET")
 
     result = await read_email(
         "42",
@@ -123,7 +115,7 @@ async def test_read_email_seen_contract_uses_one_imap_connection(monkeypatch, tm
 async def test_cached_read_awaits_one_seen_store_without_refetch(monkeypatch, tmp_path):
     email_routes, connections, indexed_updates = _install_fakes(monkeypatch, tmp_path)
     router = email_routes.setup_email_routes()
-    read_email = _route_endpoint(router, "/api/email/read/{uid}", "GET")
+    read_email = route_endpoint(router, "/api/email/read/{uid}", "GET")
 
     first = await read_email(
         "42", folder="INBOX", account_id="acct-a", mark_seen=False, full=False, owner="alice"
@@ -160,7 +152,7 @@ async def test_seen_store_failure_returns_the_body_and_reports_the_failure(monke
         monkeypatch, tmp_path, store_status="NO"
     )
     router = email_routes.setup_email_routes()
-    read_email = _route_endpoint(router, "/api/email/read/{uid}", "GET")
+    read_email = route_endpoint(router, "/api/email/read/{uid}", "GET")
 
     result = await read_email(
         "42", folder="INBOX", account_id="acct-a", mark_seen=True, full=False, owner="alice"
@@ -187,7 +179,7 @@ async def test_read_only_mailbox_serves_the_message_without_marking_seen(monkeyp
         monkeypatch, tmp_path, readonly_mailbox=True
     )
     router = email_routes.setup_email_routes()
-    read_email = _route_endpoint(router, "/api/email/read/{uid}", "GET")
+    read_email = route_endpoint(router, "/api/email/read/{uid}", "GET")
 
     result = await read_email(
         "42", folder="Archive", account_id="acct-a", mark_seen=True, full=False, owner="alice"
@@ -212,7 +204,7 @@ async def test_failed_seen_state_is_not_replayed_from_cache(monkeypatch, tmp_pat
     """
     email_routes, connections, _ = _install_fakes(monkeypatch, tmp_path, store_status="NO")
     router = email_routes.setup_email_routes()
-    read_email = _route_endpoint(router, "/api/email/read/{uid}", "GET")
+    read_email = route_endpoint(router, "/api/email/read/{uid}", "GET")
 
     failed = await read_email(
         "42", folder="INBOX", account_id="acct-a", mark_seen=True, full=False, owner="alice"
@@ -235,7 +227,7 @@ async def test_unparseable_read_does_not_mark_seen(monkeypatch, tmp_path):
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("malformed message")),
     )
     router = email_routes.setup_email_routes()
-    read_email = _route_endpoint(router, "/api/email/read/{uid}", "GET")
+    read_email = route_endpoint(router, "/api/email/read/{uid}", "GET")
 
     result = await read_email(
         "42", folder="INBOX", account_id="acct-a", mark_seen=True, full=False, owner="alice"
@@ -258,7 +250,7 @@ async def test_cached_seen_store_failure_returns_the_cached_body(monkeypatch, tm
         monkeypatch, tmp_path, store_status="NO"
     )
     router = email_routes.setup_email_routes()
-    read_email = _route_endpoint(router, "/api/email/read/{uid}", "GET")
+    read_email = route_endpoint(router, "/api/email/read/{uid}", "GET")
 
     first = await read_email(
         "42", folder="INBOX", account_id="acct-a", mark_seen=False, full=False, owner="alice"

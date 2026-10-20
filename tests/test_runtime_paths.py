@@ -1,7 +1,6 @@
 import os
 import sys
 from unittest import mock
-import pytest
 from src.runtime_paths import get_app_root, get_default_data_dir
 
 

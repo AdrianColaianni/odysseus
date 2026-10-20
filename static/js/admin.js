@@ -1,7 +1,7 @@
 // static/js/admin.js — Admin panel module (ES6)
-// Admin-only: users, endpoints, MCP, RAG, embeddings, tokens, webhooks, features
+// Admin-only: users, endpoints, built-in tools, backup, logs
 
-import uiModule from './ui.js?v=20260916largetoolscroll1';
+import uiModule, { esc } from './ui.js?v=20260916largetoolscroll1';
 import settingsModule from './settings.js?v=20260912writingstyle3';
 import { providerLogo, providerLogoFromUrl } from './providers.js';
 import { sortModelObjects } from './modelSort.js';
@@ -16,45 +16,15 @@ import { getSettings, getTools, invalidateSettings, invalidateTools } from './ap
 
 let initialized = false;
 let modalEl = null;
-// When the user adds an endpoint, store its id so the next render of
-// the endpoints list can flash a glow on that row. Cleared once the
-// animation fires.
+// Id of the endpoint just added, so the next render flashes a glow on its row.
 let _recentlyAddedEpId = null;
 let _authPolicy = { password_min_length: 8, reserved_usernames: [] };
 let _endpointSelectMode = false;
 const _selectedEndpointIds = new Set();
 
 function el(id) { return document.getElementById(id); }
-function esc(s) { return uiModule.esc(s); }
+function _setMsg(node, text, ok) { node.textContent = text; node.className = ok ? 'admin-success' : 'admin-error'; }
 
-// Clipboard API is unavailable on the HTTP LAN URL; keep copy actions usable
-// there with the browser's synchronous fallback.
-async function copyNotificationText(value) {
-  const text = String(value ?? '');
-  try {
-    if (navigator.clipboard?.writeText && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch (_) {}
-
-  const textarea = document.createElement('textarea');
-  textarea.value = text;
-  textarea.setAttribute('readonly', '');
-  textarea.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0;font-size:16px;';
-  document.body.appendChild(textarea);
-  textarea.focus();
-  textarea.select();
-  try { textarea.setSelectionRange(0, text.length); } catch (_) {}
-  let copied = false;
-  try { copied = document.execCommand('copy'); } catch (_) {}
-  textarea.remove();
-  return copied;
-}
-
-/* ═══════════════════════════════════════════
-   USERS TAB
-   ═══════════════════════════════════════════ */
 const PRIV_LABELS = {
   can_use_agent: 'Agent mode',
   can_use_browser: 'Browser automation',
@@ -304,11 +274,7 @@ async function _loadModelsForUser(username, allowedSet, modelsRestricted, blockA
   const listEl = privPanel.querySelector(`.priv-models-list[data-user="${username}"]`);
   if (!listEl) return;
   try {
-    // Use /api/model-endpoints rather than /api/models — the latter is
-    // backed by `cached_models`, so endpoints that haven't been probed yet
-    // (e.g. a freshly-added cloud API like DeepSeek) simply don't show up
-    // until some other endpoint happens to trigger a cache refresh. The
-    // endpoints listing always reflects every configured endpoint.
+    // /api/models comes from `cached_models`, which misses endpoints not yet probed.
     const res = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
     const data = await res.json();
     const allModels = [];
@@ -366,7 +332,7 @@ async function _loadModelsForUser(username, allowedSet, modelsRestricted, blockA
         method: 'PUT', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ allowed_models: value, allowed_models_restricted: restricted, block_all_models: blockAll }),
-      }).catch(() => {});
+      }).catch(e => console.warn('Failed to save model privileges for', username, e));
     }
     listEl.querySelectorAll('.priv-model-cb').forEach(cb => cb.addEventListener('change', _saveModels));
 
@@ -441,23 +407,20 @@ function initAddUser() {
     const username = el('adm-newUsername').value.trim();
     const password = el('adm-newPassword').value;
     const is_admin = el('adm-newIsAdmin').checked;
-    if (!username) { msg.textContent = 'Username required'; msg.className = 'admin-error'; return; }
-    if (password.length < _authPolicy.password_min_length) { msg.textContent = `Password must be at least ${_authPolicy.password_min_length} characters`; msg.className = 'admin-error'; return; }
-    if (_authPolicy.reserved_usernames.includes(username.toLowerCase())) { msg.textContent = 'This username is reserved'; msg.className = 'admin-error'; return; }
+    if (!username) { _setMsg(msg, 'Username required', false); return; }
+    if (password.length < _authPolicy.password_min_length) { _setMsg(msg, `Password must be at least ${_authPolicy.password_min_length} characters`, false); return; }
+    if (_authPolicy.reserved_usernames.includes(username.toLowerCase())) { _setMsg(msg, 'This username is reserved', false); return; }
     el('adm-addBtn').disabled = true;
     try {
       const res = await fetch('/api/auth/users', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password, is_admin }) });
       const data = await res.json();
-      if (res.ok) { msg.textContent = 'User created'; msg.className = 'admin-success'; el('adm-newUsername').value = ''; el('adm-newPassword').value = ''; el('adm-newIsAdmin').checked = false; loadUsers(); }
-      else { msg.textContent = data.detail || 'Failed'; msg.className = 'admin-error'; }
-    } catch (e) { msg.textContent = 'Request failed'; msg.className = 'admin-error'; }
+      if (res.ok) { _setMsg(msg, 'User created', true); el('adm-newUsername').value = ''; el('adm-newPassword').value = ''; el('adm-newIsAdmin').checked = false; loadUsers(); }
+      else { _setMsg(msg, data.detail || 'Failed', false); }
+    } catch (e) { _setMsg(msg, 'Request failed', false); }
     el('adm-addBtn').disabled = false;
   });
 }
 
-/* ═══════════════════════════════════════════
-   SERVICES TAB — Endpoints
-   ═══════════════════════════════════════════ */
 function _isLocalEndpoint(url) {
   if (!url) return false;
   try {
@@ -491,16 +454,12 @@ async function _refreshAfterEndpointChange(deletedEndpointId) {
       await window.modelsModule.refreshModels(true);
     }
   } catch (_) {}
-  try {
-    window.dispatchEvent(new CustomEvent('ge:model-endpoints-updated', {
-      detail: { deletedEndpointId: deletedEndpointId || null }
-    }));
-  } catch (_) {}
-  try {
-    if (window.sessionModule && window.sessionModule.updateModelPicker) {
-      window.sessionModule.updateModelPicker();
-    }
-  } catch (_) {}
+  window.dispatchEvent(new CustomEvent('ge:model-endpoints-updated', {
+    detail: { deletedEndpointId: deletedEndpointId || null }
+  }));
+  if (window.sessionModule && window.sessionModule.updateModelPicker) {
+    window.sessionModule.updateModelPicker();
+  }
 }
 
 async function _selectAddedModelInChat(endpoint) {
@@ -511,16 +470,14 @@ async function _selectAddedModelInChat(endpoint) {
       await window.modelsModule.refreshModels(true);
     }
   } catch (_) {}
-  try {
-    document.dispatchEvent(new CustomEvent('odysseus:auto-select-model', {
-      detail: {
-        endpointId: endpoint.id || '',
-        endpointName: endpoint.name || '',
-        modelId,
-        url: endpoint.base_url || '',
-      }
-    }));
-  } catch (_) {}
+  document.dispatchEvent(new CustomEvent('odysseus:auto-select-model', {
+    detail: {
+      endpointId: endpoint.id || '',
+      endpointName: endpoint.name || '',
+      modelId,
+      url: endpoint.base_url || '',
+    }
+  }));
 }
 
 function _updateEndpointBulkControls() {
@@ -1021,10 +978,7 @@ async function loadEndpoints() {
   };
   try {
     const res = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
-    // Treat a non-OK response (e.g. 401/403 for non-admins, or backend
-    // returning an error envelope) the same as "no endpoints yet": show the
-    // empty state, not "Failed to load". The user just installed the app —
-    // there's literally nothing to load, so the error read as broken UI.
+    // A non-OK response (401/403 for non-admins) shows the empty state, not "Failed to load".
     let data = [];
     if (res.ok) {
       try { data = await res.json(); } catch { data = []; }
@@ -1209,13 +1163,11 @@ async function loadEndpoints() {
         const url = btn.dataset.admCopyUrl || '';
         if (!url) return;
         uiModule.copyToClipboard(url).then(() => {
-          // Brief icon swap to a checkmark so the user gets feedback that
-          // the copy actually happened. Reverts after ~1.4s.
           const prev = btn.innerHTML;
           btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
           btn.style.opacity = '1';
           setTimeout(() => { btn.innerHTML = prev; btn.style.opacity = ''; }, 1400);
-        }).catch(() => {});
+        });
       });
     });
     queryAll('[data-adm-del-ep]').forEach(btn => {
@@ -1223,9 +1175,7 @@ async function loadEndpoints() {
         e.stopPropagation();
         var epId = btn.dataset.admDelEp;
         var isOffline = btn.dataset.admEpOnline === '0';
-        // Offline endpoints are already broken — skip the confirm dialog
-        // entirely and delete immediately. The optimistic UI removal makes
-        // the action feel instant.
+        // Offline endpoints are already broken, so they skip the confirm dialog.
         if (!isOffline) {
           var deps = [];
           try {
@@ -1257,9 +1207,7 @@ async function loadEndpoints() {
         _updateEndpointBulkControls();
       });
     });
-    // Clear the just-added marker now that the row has been rendered
-    // with the animation class — keeps the glow from re-firing on every
-    // subsequent loadEndpoints() call (e.g. when toggling a model).
+    // Clear the marker so the glow does not re-fire on the next loadEndpoints().
     if (_recentlyAddedEpId) _recentlyAddedEpId = null;
     // Models expand/collapse (click anywhere on card)
     queryAll('[data-adm-ep-id]').forEach(row => {
@@ -1276,9 +1224,7 @@ async function loadEndpoints() {
           }
           return;
         }
-        // Don't let interactions inside the expanded panel re-fire the
-        // expand/collapse handler — the search box was getting closed
-        // because clicking it bubbled up to here.
+        // Clicks inside the expanded panel must not toggle it.
         if (e.target.closest('.admin-btn-sm, .admin-btn-delete, .mcp-tools-list, .mcp-tools-header, .mcp-tools-search, input, select, label, button, .featherless-panel, .featherless-search-bar, [data-ep-model-row]')) return;
         const epId = header.dataset.admEpHeader;
         const panel = row.querySelector(`[data-adm-ep-models-panel="${epId}"]`);
@@ -1467,7 +1413,7 @@ async function _saveEpModelState(epId, panel) {
       settingsModule.refreshAiModelEndpoints();
     }
     _refreshAfterEndpointChange();
-  } catch (e) { /* silent */ }
+  } catch (e) { console.warn('Failed to save endpoint model state', epId, e); }
 }
 
 // Render the shared "waiting for authorization" panel (code + manual link).
@@ -1491,27 +1437,7 @@ function _renderDeviceAuthWaitPanel(status, providerKey, start, authUrl) {
     '</div>';
   const copyBtn = status.querySelector('.adm-device-auth-copy');
   if (copyBtn) copyBtn.addEventListener('click', async () => {
-    const code = start.user_code || '';
-    let ok = false;
-    try {
-      if (navigator.clipboard && window.isSecureContext) {
-        await navigator.clipboard.writeText(code);
-        ok = true;
-      }
-    } catch (e) {}
-    if (!ok) {
-      // navigator.clipboard is unavailable in non-secure contexts (HTTP
-      // self-host over a LAN IP), so fall back to execCommand('copy').
-      const ta = document.createElement('textarea');
-      ta.value = code;
-      ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0;font-size:16px;';
-      document.body.appendChild(ta);
-      ta.focus();
-      ta.select();
-      try { ta.setSelectionRange(0, code.length); } catch (e) {}
-      try { ok = document.execCommand('copy'); } catch (e) {}
-      ta.remove();
-    }
+    const ok = await uiModule.copyToClipboard(start.user_code || '', { toast: false });
     copyBtn.textContent = ok ? 'Copied' : 'Failed';
     setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
   });
@@ -1604,9 +1530,7 @@ function initEndpointForm() {
   const urlInput = el('adm-epUrl');
   const kindSel = el('adm-epKind');
 
-  // Custom provider picker — mirrors the (now hidden) <select id="adm-epProvider">
-  // so the rest of this function (which reads provider.value and dispatches
-  // change events) keeps working unchanged.
+  // Custom provider picker; mirrors the hidden <select id="adm-epProvider">, which the rest of this function reads.
   const picker = el('adm-provider-picker');
   const pickerBtn = el('adm-provider-btn');
   const pickerMenu = el('adm-provider-menu');
@@ -1834,13 +1758,11 @@ function initEndpointForm() {
   function _renderEndpointTestResult(msg, res, d) {
     const isFeatherless = d && d.base_url && /featherless\.ai/i.test(d.base_url);
     if (res.ok && isFeatherless && d.online) {
-      msg.textContent = 'Online — Featherless.ai catalog ready (search to enable models)';
-      msg.className = 'admin-success';
+      _setMsg(msg, 'Online — Featherless.ai catalog ready (search to enable models)', true);
       return;
     }
     if (res.ok && d.status === 'empty') {
-      msg.textContent = 'Online — no models found';
-      msg.className = 'admin-success';
+      _setMsg(msg, 'Online — no models found', true);
       return;
     }
     if (res.ok && d.online) {
@@ -1850,8 +1772,7 @@ function initEndpointForm() {
       msg.className = 'admin-success';
       return;
     }
-    msg.textContent = (d && d.detail) || (d && d.ping_error ? `Offline — ${d.ping_error}` : 'Offline');
-    msg.className = 'admin-error';
+    _setMsg(msg, (d && d.detail) || (d && d.ping_error ? `Offline — ${d.ping_error}` : 'Offline'), false);
   }
 
   function _endpointMsg(kind) {
@@ -1873,8 +1794,8 @@ function initEndpointForm() {
       msg.textContent = ''; msg.className = '';
       const rawUrl = (urlInput.value || provider.value).trim();
       const apiKey = el('adm-epApiKey').value.trim();
-      if (!rawUrl) { msg.textContent = 'Select a provider or enter a base URL'; msg.className = 'admin-error'; return; }
-      if (provider.value && !apiKey) { msg.textContent = 'API key is required for cloud providers'; msg.className = 'admin-error'; return; }
+      if (!rawUrl) { _setMsg(msg, 'Select a provider or enter a base URL', false); return; }
+      if (provider.value && !apiKey) { _setMsg(msg, 'API key is required for cloud providers', false); return; }
       const url = provider.value && rawUrl === provider.value ? rawUrl : _normalizeBaseUrl(rawUrl);
       apiTestController = new AbortController();
       apiTestBtn.disabled = true;
@@ -1899,8 +1820,7 @@ function initEndpointForm() {
           msg.textContent = 'Test canceled';
           msg.className = '';
         } else {
-          msg.textContent = 'Test failed: ' + (e && e.message ? e.message : 'request failed');
-          msg.className = 'admin-error';
+          _setMsg(msg, 'Test failed: ' + (e && e.message ? e.message : 'request failed'), false);
         }
       }
       apiTestController = null;
@@ -1925,8 +1845,8 @@ function initEndpointForm() {
     msg.textContent = ''; msg.className = '';
     const rawUrl = (urlInput.value || provider.value).trim();
     const apiKey = el('adm-epApiKey').value.trim();
-    if (!rawUrl) { msg.textContent = 'Select a provider or enter a base URL'; msg.className = 'admin-error'; return; }
-    if (provider.value && !apiKey) { msg.textContent = 'API key is required for cloud providers'; msg.className = 'admin-error'; return; }
+    if (!rawUrl) { _setMsg(msg, 'Select a provider or enter a base URL', false); return; }
+    if (provider.value && !apiKey) { _setMsg(msg, 'API key is required for cloud providers', false); return; }
     // Normalize URL (fix typos, add /v1, strip wrong paths)
     const url = provider.value && rawUrl === provider.value ? rawUrl : _normalizeBaseUrl(rawUrl);
     const btn = el('adm-epAddBtn');
@@ -1973,8 +1893,8 @@ function initEndpointForm() {
           msg.innerHTML = `Added — found ${count} model${count !== 1 ? 's' : ''}` + goLink;
           msg.className = 'admin-success';
         }
-      } else { msg.textContent = d.detail || 'Failed'; msg.className = 'admin-error'; }
-    } catch (e) { msg.textContent = 'Request failed'; msg.className = 'admin-error'; }
+      } else { _setMsg(msg, d.detail || 'Failed', false); }
+    } catch (e) { _setMsg(msg, 'Request failed', false); }
     btn.disabled = false; btn.textContent = 'Add';
   });
 
@@ -2111,12 +2031,7 @@ function initEndpointForm() {
     if (btn) btn.click();
   });
 
-  // Generic open/close helper for the kebab dropdowns in this card.
-  // Both the Local and API cards use the same shape: an h2-anchored button
-  // with id "<prefix>MoreBtn" toggles a sibling menu with id "<prefix>MoreMenu".
-  // Global Esc handler: close any currently-open kebab menu in the admin
-  // panel regardless of which _wireKebab instance owns it. Belt-and-braces
-  // backup for the per-instance handler below — registered once.
+  // Esc closes any open kebab menu in the admin panel, whichever _wireKebab owns it.
   if (!document._admKebabEscWired) {
     document._admKebabEscWired = true;
     document.addEventListener('keydown', (e) => {
@@ -2201,11 +2116,7 @@ function initEndpointForm() {
   // open/close + outside-click + Esc.
   _wireKebab('adm-epLocalMoreBtn', 'adm-epLocalMoreMenu');
 
-  // ── Added Models toolbar: Probe + Clear offline ────────────────────
-  // Both buttons act over the currently-rendered endpoint list. The
-  // online/offline marker is stamped on each row's [data-adm-ep-online]
-  // attribute by loadEndpoints(), so both buttons just iterate the DOM
-  // without re-fetching anything they don't already have.
+  // Probe and Clear offline act on the rendered rows; loadEndpoints() stamps [data-adm-ep-online].
   const _refreshOfflineCount = () => {
     const lbl = el('adm-epOfflineCount');
     if (!lbl) return;
@@ -2339,13 +2250,13 @@ function initEndpointForm() {
         return;
       }
       clearOfflineBtn.disabled = true;
-      // Optimistic UI: pull rows immediately, then fire the DELETEs.
       offlineBtns.forEach(b => {
         const row = b.closest('[data-adm-ep-id]');
         if (row) row.remove();
       });
       await Promise.all(ids.map(id =>
-        fetch('/api/model-endpoints/' + id, { method: 'DELETE', credentials: 'same-origin' }).catch(() => {})
+        fetch('/api/model-endpoints/' + id, { method: 'DELETE', credentials: 'same-origin' })
+          .catch(e => console.warn('Failed to delete offline endpoint', id, e))
       ));
       await _refreshAfterEndpointChange();
       try { await loadEndpoints(); } catch (_) {}
@@ -2354,10 +2265,7 @@ function initEndpointForm() {
     });
   }
 
-  // Clear-on-focus for the API key inputs. The fields are type=password so the
-  // value is masked; users can't see what's there to edit it in place, so the
-  // expected gesture is "click in, type new key". Wiping on focus removes the
-  // select-all-and-delete dance.
+  // The key inputs are masked, so focus clears them for a fresh key.
   const _wireClearOnFocus = (id) => {
     const inp = el(id);
     if (!inp) return;
@@ -2387,7 +2295,7 @@ function initEndpointForm() {
       const msg = _endpointMsg('local');
       msg.textContent = ''; msg.className = 'adm-ep-inline-msg';
       const raw = (el('adm-epLocalUrl').value || '').trim();
-      if (!raw) { msg.textContent = 'Enter a base URL to test'; msg.className = 'admin-error'; return; }
+      if (!raw) { _setMsg(msg, 'Enter a base URL to test', false); return; }
       const url = _normalizeBaseUrl(raw);
       const keyEl = el('adm-epLocalApiKey');
       const apiKey = keyEl ? keyEl.value.trim() : '';
@@ -2401,8 +2309,7 @@ function initEndpointForm() {
         const d = await res.json();
         _renderEndpointTestResult(msg, res, d);
       } catch (e) {
-        msg.textContent = 'Test failed: ' + (e && e.message ? e.message : 'request failed');
-        msg.className = 'admin-error';
+        _setMsg(msg, 'Test failed: ' + (e && e.message ? e.message : 'request failed'), false);
       }
       localTestBtn.disabled = false;
       localTestBtn.innerHTML = testOriginalHtml;
@@ -2414,7 +2321,7 @@ function initEndpointForm() {
       const msg = _endpointMsg('local');
       msg.textContent = ''; msg.className = 'adm-ep-inline-msg';
       const raw = (el('adm-epLocalUrl').value || '').trim();
-      if (!raw) { msg.textContent = 'Enter a base URL (e.g. http://localhost:8002/v1)'; msg.className = 'admin-error'; return; }
+      if (!raw) { _setMsg(msg, 'Enter a base URL (e.g. http://localhost:8002/v1)', false); return; }
       const url = _normalizeBaseUrl(raw);
       const keyEl = el('adm-epLocalApiKey');
       const apiKey = keyEl ? keyEl.value.trim() : '';
@@ -2446,8 +2353,8 @@ function initEndpointForm() {
             : 'Added (offline — will retry on next load)';
           msg.innerHTML = `${baseText} <a href="#" data-go-added-models style="margin-left:6px;text-decoration:underline;color:inherit;font-weight:600;">Added Models →</a>`;
           msg.className = d.online ? 'admin-success' : 'admin-error';
-        } else { msg.textContent = d.detail || 'Failed'; msg.className = 'admin-error'; }
-      } catch (e) { msg.textContent = 'Request failed'; msg.className = 'admin-error'; }
+        } else { _setMsg(msg, d.detail || 'Failed', false); }
+      } catch (e) { _setMsg(msg, 'Request failed', false); }
       localAddBtn.disabled = false;
       localAddBtn.innerHTML = addOriginalHtml;
     });
@@ -2496,8 +2403,7 @@ function initEndpointForm() {
         const data = await res.json();
         const items = data.items || [];
         if (!items.length) {
-          msg.textContent = 'No model servers found. Make sure vLLM, llama.cpp, SGLang, or Ollama is running. Docker users may need Ollama bound to a trusted reachable interface.';
-          msg.className = 'admin-error';
+          _setMsg(msg, 'No model servers found. Make sure vLLM, llama.cpp, SGLang, or Ollama is running. Docker users may need Ollama bound to a trusted reachable interface.', false);
         } else {
           // Auto-add each discovered endpoint. Server dedupes on base_url
           // and returns `existing: true` for already-registered ones.
@@ -2545,8 +2451,7 @@ function initEndpointForm() {
           loadEndpoints();
         }
       } catch (e) {
-        msg.textContent = 'Scan failed: ' + e.message;
-        msg.className = 'admin-error';
+        _setMsg(msg, 'Scan failed: ' + e.message, false);
       }
       if (discoverBtn._wp) { discoverBtn._wp.destroy(); discoverBtn._wp = null; }
       discoverBtn.disabled = false;
@@ -2577,89 +2482,6 @@ function initEndpointForm() {
   });
 }
 
-/* ═══════════════════════════════════════════
-   TOOLS TAB — MCP
-   ═══════════════════════════════════════════ */
-
-const _GOOGLE_OAUTH_HELP = `To get Google OAuth credentials:
-1. Go to console.cloud.google.com
-2. Click the project dropdown (top left) > New Project > name it > Create
-3. APIs & Services > Library > enable the API you need (Gmail, Calendar, Drive, etc.)
-4. APIs & Services > OAuth consent screen > configure (External, app name + email)
-5. Under Audience, click Add Users > add your Google email as a test user
-6. APIs & Services > Credentials > + Create Credentials > OAuth Client ID > Desktop App
-7. Copy the Client ID and Client Secret into the fields above
-8. After adding the server, click Authorize to sign in with Google
-9. If accessing remotely: sign in, then copy the URL from the error page and paste it back`;
-
-const MCP_PRESETS = [
-  { name: "Gmail",           command: "npx", args: ["-y", "@gongrzhe/server-gmail-autoauth-mcp"],      env: { GOOGLE_CLIENT_ID: "", GOOGLE_CLIENT_SECRET: "" },
-    oauthFile: { dir: "gmail", filename: "gcp-oauth.keys.json" },
-    oauth: {
-      provider: "google",
-      keys_file: "gmail/gcp-oauth.keys.json",
-      token_file: "gmail/credentials.json",
-      scopes: ["https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/gmail.settings.basic"],
-    },
-    help: `Setup:
-1. Go to console.cloud.google.com > create or select a project
-2. APIs & Services > Library > search "Gmail API" > Enable
-3. APIs & Services > OAuth consent screen > set up (External is fine)
-4. Under Audience, add your Gmail address as a test user
-5. APIs & Services > Credentials > + Create Credentials > OAuth Client ID
-6. Application type: Desktop App > Create
-7. Copy the Client ID and Client Secret into the fields above
-8. Click Add Server, then click the Authorize button
-9. Sign in with Google, copy the URL from the error page, paste it back` },
-  { name: "Email (IMAP/SMTP)", command: "npx", args: ["-y", "@codefuturist/email-mcp", "stdio"],        env: { MCP_EMAIL_ADDRESS: "", MCP_EMAIL_PASSWORD: "", MCP_EMAIL_IMAP_HOST: "", MCP_EMAIL_SMTP_HOST: "" },
-    providerDropdown: {
-      label: "Provider",
-      targets: { MCP_EMAIL_IMAP_HOST: "imap", MCP_EMAIL_SMTP_HOST: "smtp" },
-      options: [
-        { name: "Migadu",        imap: "imap.migadu.com",     smtp: "smtp.migadu.com" },
-        { name: "Fastmail",      imap: "imap.fastmail.com",   smtp: "smtp.fastmail.com" },
-        { name: "Proton Bridge", imap: "127.0.0.1",           smtp: "127.0.0.1" },
-        { name: "Outlook/Hotmail", imap: "outlook.office365.com", smtp: "smtp.office365.com" },
-        { name: "Yahoo",         imap: "imap.mail.yahoo.com", smtp: "smtp.mail.yahoo.com" },
-        { name: "iCloud",        imap: "imap.mail.me.com",    smtp: "smtp.mail.me.com" },
-        { name: "Zoho",          imap: "imap.zoho.com",       smtp: "smtp.zoho.com" },
-        { name: "Custom",        imap: "",                    smtp: "" },
-      ],
-    },
-    help: "Works with any IMAP/SMTP email provider.\n1. Pick your provider from the dropdown (or choose Custom)\n2. Enter your email address and password (or app password)\n3. Click Add Server" },
-  { name: "CalDAV (Radicale/Nextcloud)", command: "npx", args: ["-y", "caldav-mcp"],                     env: { CALDAV_BASE_URL: "http://localhost:5232", CALDAV_USERNAME: "", CALDAV_PASSWORD: "" },
-    help: "Works with any CalDAV server (Radicale, Nextcloud, etc.).\n1. Enter your CalDAV server URL (e.g. http://localhost:5232)\n2. Enter your username and password\n3. Click Add Server" },
-  { name: "Google Calendar", command: "npx", args: ["-y", "@cocal/google-calendar-mcp"],                 env: { GOOGLE_OAUTH_CREDENTIALS: "" },
-    help: `Setup:
-1. Go to console.cloud.google.com > create/select a project
-2. APIs & Services > Library > enable Google Calendar API
-3. APIs & Services > Credentials > + Create Credentials > OAuth Client ID
-4. Application type: Desktop App > Create
-5. Click "Download JSON" on the credential you just created
-6. Set Google Oauth Credentials to the full path of the downloaded JSON file` },
-  { name: "Google Drive",    command: "npx", args: ["-y", "@modelcontextprotocol/server-gdrive"],        env: {},
-    help: "Google Drive uses browser-based OAuth on first run. No env vars needed — just click Add and authorize when prompted." },
-  { name: "GitHub",          command: "npx", args: ["-y", "@modelcontextprotocol/server-github"],        env: { GITHUB_PERSONAL_ACCESS_TOKEN: "" },
-    help: "1. Go to github.com > Settings > Developer Settings > Personal Access Tokens > Fine-grained tokens\n2. Generate a new token with the repo permissions you need\n3. Paste it as Github Personal Access Token" },
-  { name: "Slack",           command: "npx", args: ["-y", "@modelcontextprotocol/server-slack"],         env: { SLACK_BOT_TOKEN: "", SLACK_TEAM_ID: "" },
-    help: "1. Go to api.slack.com/apps > Create New App > From Scratch\n2. Add Bot Token Scopes (channels:read, chat:write, etc.)\n3. Install to workspace, copy the Bot User OAuth Token (xoxb-...)\n4. Team ID is in your workspace URL or Slack admin settings" },
-  { name: "Notion",          command: "npx", args: ["-y", "@notionhq/notion-mcp-server"],               env: { OPENAPI_MCP_HEADERS: "" },
-    help: "1. Go to notion.so/my-integrations\n2. Create a new integration\n3. Copy the Internal Integration Secret\n4. Share the Notion pages/databases you want accessible with the integration\n5. For Openapi Mcp Headers enter:\n   {\"Authorization\": \"Bearer YOUR_SECRET\", \"Notion-Version\": \"2022-06-28\"}" },
-  { name: "Linear",          command: "npx", args: ["-y", "mcp-linear"],                                env: { LINEAR_API_KEY: "" },
-    help: "1. Go to linear.app > Settings > API\n2. Create a Personal API Key\n3. Paste it as Linear Api Key" },
-  { name: "Brave Search",    command: "npx", args: ["-y", "@modelcontextprotocol/server-brave-search"], env: { BRAVE_API_KEY: "" },
-    help: "1. Go to brave.com/search/api\n2. Sign up for a free plan (2000 queries/month)\n3. Copy your API key" },
-  { name: "Browser (Playwright)", command: "npx", args: ["-y", "@playwright/mcp@latest", "--headless"],  env: {},
-    help: "Browser automation via Playwright. The AI can navigate pages, click, fill forms, and read content.\nRuns headless by default. Remove --headless from Args to see the browser window.\nFirst run installs Chromium automatically." },
-  { name: "Filesystem",      command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/home"], env: {},
-    help: "Edit the Args field to change which directory the server has access to." },
-  { name: "Memory",          command: "npx", args: ["-y", "@modelcontextprotocol/server-memory"],        env: {} },
-  { name: "Postgres",        command: "npx", args: ["-y", "@modelcontextprotocol/server-postgres", "postgresql://user:pass@localhost/db"], env: {},
-    help: "Replace the connection string in the Args field with your actual Postgres connection URL." },
-  { name: "Todoist",         command: "npx", args: ["-y", "todoist-mcp-server"],                         env: { TODOIST_API_TOKEN: "" },
-    help: "1. Go to todoist.com > Settings > Integrations > Developer\n2. Copy your API token" },
-];
-// ── Built-in tools management ──
 const TOOL_META = {
   bash:              { name: 'Shell',            desc: 'Execute bash commands',           cat: 'Code',       ctx: '~200' },
   python:            { name: 'Python',           desc: 'Run Python scripts',              cat: 'Code',       ctx: '~200' },
@@ -2698,14 +2520,8 @@ async function loadBuiltinTools() {
   const list = el('adm-builtin-tools-list');
   if (!list) return;
   try {
-    // This panel is an editor, and its save posts the whole disabled list
-    // rebuilt from the checkboxes below. So it has to render authoritative
-    // state: a snapshot that went stale out of band (the manage_settings tool,
-    // another tab) would be re-posted wholesale on the next unrelated toggle
-    // and would silently undo the newer state. refreshAll() calls this on every
-    // panel open, so drop the shared entry and refill it. The startup read that
-    // chatRenderer.js shares is unaffected; this panel just never edits a cache,
-    // which is the same rule the settings panel follows by reading directly.
+    // Saves merge onto this state, so it must be fresh: a stale snapshot (another
+    // tab, the manage_settings tool) would undo newer changes on the next toggle.
     invalidateTools();
     const data = await getTools();
     const tools = data.tools || [];
@@ -2865,779 +2681,6 @@ async function loadBuiltinTools() {
   }
 }
 
-async function loadMcpServers() {
-  const list = el('adm-mcpList');
-  if (!list) return;  // MCP section not visible / not yet rendered
-  try {
-    const res = await fetch('/api/mcp/servers', { credentials: 'same-origin' });
-    const servers = await res.json();
-    if (!servers.length) { list.innerHTML = '<div class="admin-empty">No MCP servers configured</div>'; return; }
-    list.innerHTML = servers.map(s => {
-      const statusColor = s.needs_oauth ? '#e5a33a' : s.status === 'connected' ? 'var(--fg)' : s.status === 'error' ? 'var(--red)' : 'color-mix(in srgb, var(--fg) 50%, transparent)';
-      const toolInfo = s.status === 'connected' ? `${s.enabled_tool_count}/${s.tool_count} tools enabled` : '';
-      const statusText = s.needs_oauth ? 'Needs authorization' : s.status === 'connected' ? `Connected (${toolInfo})` : s.status === 'error' ? `Error: ${s.error || 'unknown'}` : 'Disconnected';
-      const hasTools = s.status === 'connected' && s.tool_count > 0;
-      return `<div class="admin-user-row" data-adm-mcp-id="${s.id}">
-        <div style="display:flex;align-items:center;justify-content:space-between;${hasTools ? 'cursor:pointer;' : ''}padding:4px 0;" data-adm-mcp-header="${s.id}">
-          <div class="admin-user-info" style="flex:1;flex-wrap:wrap;gap:0.3rem;">
-            <span class="admin-user-name">${esc(s.name)}</span>
-            <span class="admin-badge" style="background:${statusColor}33;color:${statusColor}">${statusText}</span>
-            ${hasTools ? `<span style="font-size:10px;opacity:0.4;">Click to manage tools</span>` : ''}
-          </div>
-          <div style="display:flex;gap:4px;align-items:center;">
-            ${s.needs_oauth ? `<a href="/api/mcp/oauth/authorize/${s.id}" target="_blank" class="admin-btn-sm" style="background:var(--red);color:#fff;text-decoration:none;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:600;">Authorize</a>` : ''}
-            <button class="admin-btn-sm" data-adm-mcp-reconnect="${s.id}">Reconnect</button>
-            <button class="admin-btn-delete" style="border-color:${s.is_enabled ? 'color-mix(in srgb, var(--red) 30%, transparent)' : 'color-mix(in srgb, var(--fg) 30%, transparent)'};color:${s.is_enabled ? 'var(--red)' : 'var(--fg)'};" data-adm-mcp-toggle="${s.id}" data-adm-mcp-enable="${!s.is_enabled}">${s.is_enabled ? 'Disable' : 'Enable'}</button>
-            <button class="admin-btn-delete" data-adm-mcp-delete="${s.id}">Delete</button>
-            ${hasTools ? '<svg class="admin-user-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;transition:transform 0.2s,opacity 0.2s;"><polyline points="6 9 12 15 18 9"/></svg>' : ''}
-          </div>
-        </div>
-        ${hasTools ? `<div class="mcp-tools-panel hidden" data-adm-mcp-tools-panel="${s.id}"></div>` : ''}
-      </div>`;
-    }).join('');
-    list.querySelectorAll('[data-adm-mcp-reconnect]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const msg = el('adm-mcpMsg'); msg.textContent = 'Reconnecting...'; msg.className = '';
-        try {
-          const res = await fetch(`/api/mcp/servers/${btn.dataset.admMcpReconnect}/reconnect`, { method: 'POST', credentials: 'same-origin' });
-          const data = await res.json();
-          msg.textContent = data.connected ? `Reconnected (${data.tool_count} tools)` : `Failed: ${data.error || 'unknown'}`;
-          msg.className = data.connected ? 'admin-success' : 'admin-error';
-          loadMcpServers();
-        } catch (e) { msg.textContent = 'Failed: ' + e.message; msg.className = 'admin-error'; }
-      });
-    });
-    list.querySelectorAll('[data-adm-mcp-toggle]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const fd = new FormData(); fd.append('is_enabled', btn.dataset.admMcpEnable);
-        await fetch(`/api/mcp/servers/${btn.dataset.admMcpToggle}`, { method: 'PATCH', body: fd, credentials: 'same-origin' });
-        loadMcpServers();
-      });
-    });
-    list.querySelectorAll('[data-adm-mcp-delete]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        if (!await uiModule.styledConfirm('Delete this MCP server?', { confirmText: 'Delete', danger: true })) return;
-        await fetch(`/api/mcp/servers/${btn.dataset.admMcpDelete}`, { method: 'DELETE', credentials: 'same-origin' });
-        loadMcpServers();
-      });
-    });
-    // Tools expand/collapse (click anywhere on card)
-    list.querySelectorAll('[data-adm-mcp-id]').forEach(row => {
-      const header = row.querySelector('[data-adm-mcp-header]');
-      if (!header) return;
-      let _toolsLoaded = false;
-      row.style.cursor = 'pointer';
-      row.addEventListener('click', async (e) => {
-        if (e.target.closest('.admin-btn-sm, .admin-btn-delete, a, .mcp-tools-list, .mcp-tools-header')) return;
-        const sid = header.dataset.admMcpHeader;
-        const panel = row.querySelector(`[data-adm-mcp-tools-panel="${sid}"]`);
-        if (!panel) return;
-        panel.classList.toggle('hidden');
-        const chevron = row.querySelector('.admin-user-chevron');
-        const isOpen = !panel.classList.contains('hidden');
-        if (chevron) {
-          chevron.style.transform = isOpen ? 'rotate(180deg)' : '';
-          chevron.style.opacity = isOpen ? '0.7' : '0.3';
-        }
-        if (!_toolsLoaded && isOpen) {
-          _toolsLoaded = true;
-          panel.innerHTML = '<span style="opacity:0.5;font-size:11px;">Loading tools...</span>';
-          try {
-            const res = await fetch(`/api/mcp/servers/${sid}/tools`, { credentials: 'same-origin' });
-            const tools = await res.json();
-            if (!tools.length) { panel.innerHTML = '<span style="opacity:0.5;font-size:11px;">No tools</span>'; return; }
-            const disabled = new Set(tools.filter(t => t.is_disabled).map(t => t.name));
-            panel.innerHTML = `<div class="mcp-tools-header">
-              <span>Tools</span>
-              <span style="display:flex;gap:8px;align-items:center;">
-                <span class="mcp-tools-count">${tools.length - disabled.size}/${tools.length} enabled</span>
-                <a href="#" data-mcp-select-all="${sid}">All</a>
-                <a href="#" data-mcp-select-none="${sid}">None</a>
-              </span>
-            </div><div class="mcp-tools-list">` + tools.map(t =>
-              `<label title="${esc(t.description)}">
-                <input type="checkbox" data-mcp-tool-name="${esc(t.name)}" ${!t.is_disabled ? 'checked' : ''}>
-                <span><strong>${esc(t.name)}</strong> <span style="opacity:0.5;">— ${esc((t.description || '').slice(0, 80))}</span></span>
-              </label>`
-            ).join('') + '</div>';
-            panel.querySelector(`[data-mcp-select-all="${sid}"]`)?.addEventListener('click', (e) => {
-              e.preventDefault();
-              panel.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = true);
-              _saveMcpToolState(sid, panel);
-            });
-            panel.querySelector(`[data-mcp-select-none="${sid}"]`)?.addEventListener('click', (e) => {
-              e.preventDefault();
-              panel.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = false);
-              _saveMcpToolState(sid, panel);
-            });
-            panel.querySelectorAll('input[type=checkbox]').forEach(cb => {
-              cb.addEventListener('change', () => _saveMcpToolState(sid, panel));
-            });
-          } catch (e) { panel.innerHTML = '<span class="admin-error" style="font-size:11px;">Failed to load tools</span>'; }
-        }
-      });
-    });
-  } catch (e) { if (list) list.innerHTML = '<div class="admin-error">Failed to load MCP servers</div>'; }
-}
-
-async function _saveMcpToolState(serverId, panel) {
-  const disabled = [];
-  panel.querySelectorAll('input[type=checkbox]').forEach(cb => {
-    if (!cb.checked) disabled.push(cb.dataset.mcpToolName);
-  });
-  const total = panel.querySelectorAll('input[type=checkbox]').length;
-  try {
-    await fetch(`/api/mcp/servers/${serverId}/tools`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify({ disabled }),
-    });
-    // Update the count label in the panel
-    const countLabel = panel.querySelector('.mcp-tools-count');
-    if (countLabel) countLabel.textContent = `${total - disabled.length}/${total} enabled`;
-    // Update badge in the server row
-    const row = panel.closest('[data-adm-mcp-id]');
-    if (row) {
-      const badge = row.querySelector('.admin-badge');
-      if (badge) badge.textContent = `Connected (${total - disabled.length}/${total} tools enabled)`;
-    }
-  } catch (e) { /* silent */ }
-}
-
-function initMcpForm() {
-  const cmdEl = el('adm-mcpCommand');
-  if (!cmdEl) return;  // MCP form not present in this build — nothing to wire
-  const transportSel = el('adm-mcpTransport');
-  const sseRow = el('adm-mcpSseRow');
-  const envRow = el('adm-mcpEnvRow');
-  const envFieldsWrap = el('adm-mcpEnvFields');
-  const helpBox = el('adm-mcpHelp');
-  const cmdRow = cmdEl.parentElement;
-  let _activeHelp = null;
-  let _envKeys = []; // track which env keys have dedicated fields
-  let _activeOauthFile = null; // preset oauthFile config (for Google servers)
-  let _activeOauth = null;     // preset OAuth flow config (provider, scopes, etc.)
-
-  function _clearEnvFields() {
-    envFieldsWrap.innerHTML = '';
-    _envKeys = [];
-    envRow.style.display = 'none';
-    el('adm-mcpEnv').value = '';
-    _activeOauth = null;
-  }
-
-  function _buildEnvFields(envObj, help, preset) {
-    _clearEnvFields();
-    const keys = Object.keys(envObj);
-    if (!keys.length) return;
-    _envKeys = keys;
-
-    // Provider dropdown (e.g. for Email IMAP/SMTP)
-    if (preset?.providerDropdown) {
-      const pd = preset.providerDropdown;
-      const row = document.createElement('div');
-      row.className = 'admin-model-form-row';
-      row.style.cssText = 'gap:6px;align-items:center;';
-      const label = document.createElement('span');
-      label.style.cssText = 'font-size:11px;opacity:0.55;min-width:0;white-space:nowrap;';
-      label.textContent = pd.label || 'Provider';
-      const select = document.createElement('select');
-      select.style.cssText = 'flex:1;padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);font-size:12px;';
-      pd.options.forEach((opt, i) => {
-        const o = document.createElement('option');
-        o.value = i;
-        o.textContent = opt.name;
-        select.appendChild(o);
-      });
-      select.addEventListener('change', () => {
-        const opt = pd.options[parseInt(select.value)];
-        for (const [envKey, field] of Object.entries(pd.targets)) {
-          const inp = envFieldsWrap.querySelector(`.mcp-env-input[data-env-key="${envKey}"]`);
-          if (inp) inp.value = opt[field] || '';
-        }
-      });
-      row.appendChild(label);
-      row.appendChild(select);
-      envFieldsWrap.appendChild(row);
-      // Auto-fill with first provider after inputs are created
-      setTimeout(() => {
-        const first = pd.options[0];
-        for (const [envKey, field] of Object.entries(pd.targets)) {
-          const inp = envFieldsWrap.querySelector(`.mcp-env-input[data-env-key="${envKey}"]`);
-          if (inp && !inp.value) inp.value = first[field] || '';
-        }
-      }, 0);
-    }
-
-    for (const key of keys) {
-      const row = document.createElement('div');
-      row.className = 'admin-model-form-row';
-      row.style.cssText = 'gap:6px;align-items:center;';
-      const label = document.createElement('span');
-      label.style.cssText = 'font-size:11px;opacity:0.55;min-width:0;white-space:nowrap;';
-      label.textContent = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-      const input = document.createElement('input');
-      input.type = key.toLowerCase().includes('secret') || key.toLowerCase().includes('token') || key.toLowerCase().includes('key') || key.toLowerCase().includes('password') ? 'password' : 'text';
-      input.placeholder = key;
-      input.dataset.envKey = key;
-      input.className = 'mcp-env-input';
-      input.style.cssText = 'flex:1;';
-      if (envObj[key]) input.value = envObj[key];
-      row.appendChild(label);
-      row.appendChild(input);
-      envFieldsWrap.appendChild(row);
-    }
-    // Help toggle link
-    if (help) {
-      _activeHelp = help;
-      const helpLink = document.createElement('a');
-      helpLink.textContent = 'How do I get these?';
-      helpLink.href = '#';
-      helpLink.style.cssText = 'font-size:10.5px;opacity:0.5;margin-top:2px;display:inline-block;';
-      helpLink.addEventListener('click', (e) => {
-        e.preventDefault();
-        helpBox.style.display = helpBox.style.display === 'none' ? '' : 'none';
-      });
-      envFieldsWrap.appendChild(helpLink);
-      helpBox.textContent = help;
-      helpBox.style.display = 'none';
-    } else {
-      _activeHelp = null;
-      helpBox.style.display = 'none';
-    }
-  }
-
-  // Collect env from either dedicated fields or raw JSON fallback
-  function _collectEnv() {
-    if (_envKeys.length) {
-      const obj = {};
-      envFieldsWrap.querySelectorAll('.mcp-env-input').forEach(inp => {
-        if (inp.value.trim()) obj[inp.dataset.envKey] = inp.value.trim();
-      });
-      return JSON.stringify(obj);
-    }
-    return el('adm-mcpEnv').value.trim() || '{}';
-  }
-
-  transportSel.addEventListener('change', () => {
-    const isSse = transportSel.value === 'sse';
-    sseRow.style.display = isSse ? '' : 'none';
-    cmdRow.style.display = isSse ? 'none' : '';
-    if (isSse) { _clearEnvFields(); helpBox.style.display = 'none'; }
-  });
-
-  // Preset catalog
-  const presetSel = el('adm-mcpPreset');
-  if (presetSel) {
-    MCP_PRESETS.forEach((p, i) => {
-      const opt = document.createElement('option');
-      opt.value = i;
-      opt.textContent = p.name + (Object.keys(p.env).length ? '  (requires keys)' : '');
-      presetSel.appendChild(opt);
-    });
-    presetSel.addEventListener('change', () => {
-      if (presetSel.value === '') return;
-      const p = MCP_PRESETS[parseInt(presetSel.value)];
-      el('adm-mcpName').value = p.name.toLowerCase().replace(/\s+/g, '-');
-      transportSel.value = 'stdio';
-      el('adm-mcpCommand').value = p.command;
-      el('adm-mcpArgs').value = JSON.stringify(p.args);
-      sseRow.style.display = 'none';
-      cmdRow.style.display = '';
-      _buildEnvFields(p.env, p.help || null, p);
-      _activeOauthFile = p.oauthFile || null;
-      _activeOauth = p.oauth || null;
-      presetSel.value = '';
-      // Focus first env field if keys are needed
-      const firstInput = envFieldsWrap.querySelector('.mcp-env-input');
-      if (firstInput) firstInput.focus();
-      else el('adm-mcpAddBtn').focus();
-    });
-  }
-
-  el('adm-mcpAddBtn').addEventListener('click', async () => {
-    const name = el('adm-mcpName').value.trim();
-    const transport = transportSel.value;
-    const command = el('adm-mcpCommand').value.trim();
-    const args = el('adm-mcpArgs').value.trim() || '[]';
-    const env = _collectEnv();
-    const url = el('adm-mcpUrl').value.trim();
-    const msg = el('adm-mcpMsg');
-    if (!name) { msg.textContent = 'Name is required'; msg.className = 'admin-error'; return; }
-    if (transport === 'stdio' && !command) { msg.textContent = 'Command is required for stdio'; msg.className = 'admin-error'; return; }
-    if (transport === 'sse' && !url) { msg.textContent = 'URL is required for SSE'; msg.className = 'admin-error'; return; }
-    try { JSON.parse(env); } catch { msg.textContent = 'Env must be valid JSON'; msg.className = 'admin-error'; return; }
-    try { JSON.parse(args); } catch { msg.textContent = 'Args must be valid JSON, e.g. ["-y", "pkg"]'; msg.className = 'admin-error'; return; }
-    const fd = new FormData();
-    fd.append('name', name); fd.append('transport', transport); fd.append('command', command); fd.append('args', args); fd.append('env', env); fd.append('url', url);
-    // If preset has oauthFile config, send credentials for file generation
-    if (_activeOauthFile) {
-      const envObj = JSON.parse(env);
-      fd.append('oauth_file', JSON.stringify({
-        dir: _activeOauthFile.dir,
-        filename: _activeOauthFile.filename,
-        client_id: envObj.GOOGLE_CLIENT_ID || '',
-        client_secret: envObj.GOOGLE_CLIENT_SECRET || '',
-      }));
-    }
-    // If preset has OAuth flow config, send it so the server can handle authorization
-    if (_activeOauth) {
-      fd.append('oauth_config', JSON.stringify(_activeOauth));
-    }
-    msg.textContent = 'Adding...'; msg.className = '';
-    try {
-      const res = await fetch('/api/mcp/servers', { method: 'POST', body: fd, credentials: 'same-origin' });
-      const data = await res.json();
-      if (!res.ok) {
-        msg.textContent = data.detail || `Failed (${res.status})`; msg.className = 'admin-error';
-        return;
-      }
-      if (data.needs_oauth) {
-        msg.innerHTML = `Added ${esc(name)} — <a href="/api/mcp/oauth/authorize/${data.id}" target="_blank" style="color:var(--red);font-weight:600;">Authorize with Google</a> to connect`;
-        msg.className = 'admin-success';
-      } else if (data.connected) {
-        msg.textContent = `Added ${name} (${data.tool_count} tools discovered)`; msg.className = 'admin-success';
-      } else { msg.textContent = `Added but connection failed: ${data.error || 'unknown'}`; msg.className = 'admin-error'; }
-      el('adm-mcpName').value = ''; el('adm-mcpCommand').value = ''; el('adm-mcpArgs').value = ''; el('adm-mcpUrl').value = '';
-      _clearEnvFields(); helpBox.style.display = 'none'; _activeHelp = null; _activeOauthFile = null; _activeOauth = null;
-      loadMcpServers();
-    } catch (e) { msg.textContent = 'Failed: ' + e.message; msg.className = 'admin-error'; }
-  });
-}
-
-/* ── Embedding model ──
-   No settings UI: the embedding model (RAG, semantic memory, tool selection)
-   is fixed infrastructure that ships with the app, and swapping it would
-   invalidate every existing vector. Configure via the FASTEMBED_MODEL /
-   EMBEDDING_URL env vars if you really need to override it. */
-
-/* ── RAG ── */
-async function loadRag() {
-  try {
-    const res = await fetch('/api/personal');
-    const data = await res.json();
-    const dirList = el('adm-ragDirList');
-    const dirs = data.directories || [];
-    if (dirs.length === 0) { dirList.innerHTML = '<div class="admin-empty">No directories indexed</div>'; }
-    else {
-      dirList.innerHTML = dirs.map(d => `<div class="admin-rag-item"><span class="admin-rag-item-name" title="${esc(d)}">${esc(d)}</span><button class="admin-btn-delete" data-adm-rag-dir="${esc(d)}">Remove</button></div>`).join('');
-      dirList.querySelectorAll('[data-adm-rag-dir]').forEach(btn => {
-        btn.addEventListener('click', async () => {
-          if (!await uiModule.styledConfirm(`Remove directory "${btn.dataset.admRagDir}" from RAG?`, { confirmText: 'Remove', danger: true })) return;
-          btn.disabled = true; btn.textContent = '...';
-          try {
-            const res = await fetch('/api/personal/remove_directory?directory=' + encodeURIComponent(btn.dataset.admRagDir), { method: 'DELETE' });
-            if (res.ok) { ragMsg('Directory removed'); loadRag(); }
-            else { const e = await res.json(); ragMsg(e.detail || 'Failed', true); }
-          } catch (e) { ragMsg('Error: ' + e.message, true); }
-        });
-      });
-    }
-    const fileList = el('adm-ragFileList');
-    const files = data.files || [];
-    if (files.length === 0) { fileList.innerHTML = '<div class="admin-empty">No files indexed</div>'; }
-    else {
-      fileList.innerHTML = files.map(f => {
-        const size = f.size ? (f.size > 1024 ? (f.size / 1024).toFixed(1) + ' KB' : f.size + ' B') : '';
-        return `<div class="admin-rag-item"><span class="admin-rag-item-name" title="${esc(f.path || f.name)}">${esc(f.name)}</span><span class="admin-rag-item-meta">${size}</span><button class="admin-btn-delete" data-adm-rag-file="${esc(f.path || f.name)}">Delete</button></div>`;
-      }).join('');
-      fileList.querySelectorAll('[data-adm-rag-file]').forEach(btn => {
-        btn.addEventListener('click', async () => {
-          if (!await uiModule.styledConfirm(`Delete "${btn.dataset.admRagFile}" from RAG?`, { confirmText: 'Delete', danger: true })) return;
-          btn.disabled = true; btn.textContent = '...';
-          try {
-            const res = await fetch('/api/personal/file?filepath=' + encodeURIComponent(btn.dataset.admRagFile), { method: 'DELETE' });
-            if (res.ok) { ragMsg('File removed'); loadRag(); }
-            else { const e = await res.json(); ragMsg(e.detail || 'Failed', true); }
-          } catch (e) { ragMsg('Error: ' + e.message, true); }
-        });
-      });
-    }
-  } catch (e) {
-    el('adm-ragDirList').innerHTML = '<div class="admin-error">Failed to load</div>';
-    el('adm-ragFileList').innerHTML = '';
-  }
-}
-
-let _ragMsgTimer = null;
-function ragMsg(text, isError, persist) {
-  const s = el('adm-ragStatus');
-  s.textContent = text; s.style.color = isError ? 'var(--red)' : 'var(--fg)';
-  if (_ragMsgTimer) { clearTimeout(_ragMsgTimer); _ragMsgTimer = null; }
-  if (text && !persist) _ragMsgTimer = setTimeout(() => { s.textContent = ''; }, 5000);
-}
-
-async function ragUpload(files) {
-  if (!files || files.length === 0) return;
-  ragMsg('Uploading ' + files.length + ' file(s)...', false, true);
-  const fd = new FormData();
-  for (const f of files) fd.append('files', f);
-  try {
-    const res = await fetch('/api/personal/upload', { method: 'POST', body: fd });
-    const data = await res.json();
-    if (data.success) { ragMsg(`Uploaded ${data.uploaded.length} file(s), ${data.indexed_count} chunks indexed`); loadRag(); }
-    else ragMsg(data.detail || 'Upload failed', true);
-  } catch (e) { ragMsg('Upload error: ' + e.message, true); }
-}
-
-function initRag() {
-  const dropZone = el('adm-ragDropZone');
-  const fileInput = el('adm-ragFileInput');
-  dropZone.addEventListener('click', () => fileInput.click());
-  fileInput.addEventListener('change', () => ragUpload(fileInput.files));
-  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
-  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-  dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('dragover'); ragUpload(e.dataTransfer.files); });
-  el('adm-ragAddDirBtn').addEventListener('click', async () => {
-    const dir = el('adm-ragDirInput').value.trim();
-    if (!dir) return;
-    const btn = el('adm-ragAddDirBtn');
-    btn.disabled = true; btn.textContent = 'Indexing...';
-    try {
-      const res = await fetch('/api/personal/add_directory', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ directory: dir }) });
-      const data = await res.json();
-      if (data.success) { ragMsg(`Indexed ${data.indexed_count} chunks from directory`); el('adm-ragDirInput').value = ''; loadRag(); }
-      else ragMsg(data.detail || data.message || 'Failed', true);
-    } catch (e) { ragMsg('Error: ' + e.message, true); }
-    btn.disabled = false; btn.textContent = 'Add Directory';
-  });
-  el('adm-ragReloadBtn').addEventListener('click', async () => {
-    const btn = el('adm-ragReloadBtn');
-    btn.disabled = true; btn.textContent = 'Reloading...';
-    try {
-      const res = await fetch('/api/personal/reload', { method: 'POST' });
-      const data = await res.json();
-      ragMsg(`Index reloaded: ${data.count} documents`);
-      loadRag();
-    } catch (e) { ragMsg('Reload failed: ' + e.message, true); }
-    btn.disabled = false; btn.textContent = 'Reload Index';
-  });
-}
-
-/* ═══════════════════════════════════════════
-   SYSTEM TAB — Tokens
-   ═══════════════════════════════════════════ */
-// Catalog mirrors the one in settings.js integration form. Keep keys in
-// sync with the backend scope allowlist.
-const _TOKEN_SCOPES = [
-  { key: 'todos:read',        label: 'Todos read',        detail: 'Read notes and checklists' },
-  { key: 'todos:write',       label: 'Todos write',       detail: 'Create, update, delete, and toggle todo items' },
-  { key: 'documents:read',    label: 'Documents read',    detail: 'Read documents when a document API is enabled' },
-  { key: 'documents:write',   label: 'Documents write',   detail: 'Create and update draft documents' },
-  { key: 'email:read',        label: 'Email read',        detail: 'Read email when an email API is enabled' },
-  { key: 'email:draft',       label: 'Email draft',       detail: 'Create email reply drafts without sending' },
-  { key: 'email:send',        label: 'Email send',        detail: 'Send email directly' },
-  { key: 'calendar:read',     label: 'Calendar read',     detail: 'Read calendar events when enabled' },
-  { key: 'calendar:write',    label: 'Calendar write',    detail: 'Create and update calendar events' },
-  { key: 'memory:read',       label: 'Memory read',       detail: 'Read memory when enabled' },
-  { key: 'memory:write',      label: 'Memory write',      detail: 'Write memory when enabled' },
-  { key: 'cookbook:read',     label: 'Cookbook read',     detail: 'List cookbook tasks + tail their tmux output' },
-  { key: 'cookbook:launch',   label: 'Cookbook launch',   detail: 'Launch and stop cookbook serve tasks' },
-];
-
-function _renderTokenScopeRows(t) {
-  const have = new Set(t.scopes || []);
-  return _TOKEN_SCOPES.map(s => {
-    const action = (s.key.split(':')[1] || '').toLowerCase();
-    const pill = action === 'read'
-      ? 'background:rgba(150,150,150,0.18);color:var(--fg-muted,#888);'
-      : 'background:color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);color:var(--accent, var(--red));';
-    const tool = s.label.replace(/\s+(read|write|draft|send|launch)$/i, '');
-    return `
-      <label style="display:flex;align-items:center;gap:8px;min-height:28px;padding:1px 0;">
-        <span class="settings-label" style="width:90px;flex-shrink:0;padding:0;font-size:12px;">${esc(tool)}</span>
-        <span style="font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;padding:1px 7px;border-radius:999px;flex-shrink:0;min-width:44px;text-align:center;box-sizing:border-box;${pill}">${esc(action)}</span>
-        <span style="font-size:11px;line-height:1.35;opacity:0.62;flex:1;min-width:0;">${esc(s.detail)}</span>
-        <label class="admin-switch" style="margin-left:auto;flex-shrink:0;"><input type="checkbox" class="adm-tok-scope" data-token-id="${esc(t.id)}" data-scope="${esc(s.key)}" ${have.has(s.key) ? 'checked' : ''}><span class="admin-slider"></span></label>
-      </label>`;
-  }).join('');
-}
-
-async function loadTokens() {
-  const list = el('adm-tokenList');
-  if (!list) return;
-  try {
-    const res = await fetch('/api/tokens', { credentials: 'same-origin' });
-    const tokens = await res.json();
-    if (!tokens.length) { list.innerHTML = '<div class="admin-empty" style="color:var(--accent, var(--red));opacity:0.7;font-size:10px;">No API tokens</div>'; return; }
-    list.innerHTML = tokens.map(t => `
-      <div class="admin-user-row" data-adm-tok-row="${esc(t.id)}" style="display:block;">
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-          <div class="admin-user-info" style="flex:1;min-width:0;flex-wrap:wrap;gap:0.3rem;">
-            <input type="text" class="adm-tok-rename" data-token-id="${esc(t.id)}" value="${esc(t.name || '')}" placeholder="Token name" style="font-size:13px;font-weight:600;padding:3px 6px;background:transparent;border:1px solid transparent;border-radius:4px;min-width:160px;" title="Click to rename">
-            <span class="admin-badge">${esc(t.token_prefix)}...</span>
-            ${t.owner ? `<span style="font-size:0.75rem;opacity:0.5;">Owner: ${esc(t.owner)}</span>` : ''}
-            ${t.last_used_at ? `<span style="font-size:0.75rem;opacity:0.5;">Last used: ${new Date(t.last_used_at).toLocaleDateString()}</span>` : '<span style="font-size:0.75rem;opacity:0.4;">Never used</span>'}
-          </div>
-          <button class="admin-btn-sm" data-adm-tok-toggle="${esc(t.id)}" style="opacity:0.75;">Permissions</button>
-          <button class="admin-btn-delete" data-adm-del-token="${esc(t.id)}">Revoke</button>
-        </div>
-        <div data-adm-tok-perm="${esc(t.id)}" style="display:none;margin-top:8px;padding:8px 4px 0;border-top:1px solid var(--border);">
-          ${_renderTokenScopeRows(t)}
-          <div class="adm-tok-scope-msg" data-token-id="${esc(t.id)}" style="font-size:11px;min-height:14px;margin-top:4px;"></div>
-        </div>
-      </div>`).join('');
-
-    // Revoke
-    list.querySelectorAll('[data-adm-del-token]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        if (!await uiModule.styledConfirm('Revoke this API token? External integrations using it will stop working.', { confirmText: 'Revoke', danger: true })) return;
-        await fetch(`/api/tokens/${btn.dataset.admDelToken}`, { method: 'DELETE', credentials: 'same-origin' });
-        loadTokens();
-        // Codex / Claude integration cards on the Integrations panel are
-        // backed by these tokens — let them re-render so the deleted token
-        // disappears there too.
-        try { window.dispatchEvent(new CustomEvent('odysseus-integrations-changed')); } catch (_) {}
-      });
-    });
-    // Toggle permissions panel
-    list.querySelectorAll('[data-adm-tok-toggle]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const panel = list.querySelector(`[data-adm-tok-perm="${btn.dataset.admTokToggle}"]`);
-        if (!panel) return;
-        panel.style.display = panel.style.display === 'none' ? '' : 'none';
-      });
-    });
-    // Rename
-    list.querySelectorAll('.adm-tok-rename').forEach(input => {
-      const original = input.value;
-      const commit = async () => {
-        const name = (input.value || '').trim();
-        if (!name || name === original) return;
-        try {
-          const r = await fetch(`/api/tokens/${input.dataset.tokenId}`, {
-            method: 'PATCH', credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name }),
-          });
-          if (!r.ok) throw new Error('Save failed');
-          loadTokens();
-        } catch (_) { input.value = original; }
-      };
-      input.addEventListener('blur', commit);
-      input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); input.blur(); } });
-    });
-    // Scope toggle change → PATCH the whole scopes array for this token.
-    list.querySelectorAll('.adm-tok-scope').forEach(cb => {
-      cb.addEventListener('change', async () => {
-        const tokenId = cb.dataset.tokenId;
-        const panel = list.querySelector(`[data-adm-tok-perm="${tokenId}"]`);
-        const msg = list.querySelector(`.adm-tok-scope-msg[data-token-id="${tokenId}"]`);
-        const scopes = Array.from(panel.querySelectorAll('.adm-tok-scope:checked')).map(input => input.dataset.scope);
-        try {
-          const r = await fetch(`/api/tokens/${tokenId}`, {
-            method: 'PATCH', credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ scopes }),
-          });
-          const d = await r.json().catch(() => ({}));
-          if (!r.ok) throw new Error(d.detail || 'Failed');
-          if (msg) { msg.textContent = 'Saved'; msg.style.color = 'var(--green, #50fa7b)'; setTimeout(() => { msg.textContent = ''; }, 1200); }
-        } catch (err) {
-          cb.checked = !cb.checked;
-          if (msg) { msg.textContent = (err && err.message) || 'Failed'; msg.style.color = 'var(--red)'; }
-        }
-      });
-    });
-  } catch (e) { list.innerHTML = '<div class="admin-error">Failed to load tokens</div>'; }
-}
-
-function initTokenForm() {
-  const addBtn = el('adm-tokenAddBtn');
-  if (!addBtn || addBtn.dataset.bound) return;
-  addBtn.dataset.bound = '1';
-  addBtn.addEventListener('click', async () => {
-    const msg = el('adm-tokenMsg');
-    const reveal = el('adm-tokenReveal');
-    msg.textContent = ''; msg.className = ''; reveal.style.display = 'none';
-    const name = el('adm-tokenName').value.trim();
-    if (!name) { msg.textContent = 'Token name is required'; msg.className = 'admin-error'; return; }
-    const fd = new FormData(); fd.append('name', name);
-    const scopes = (el('adm-tokenScopes')?.value || '').trim();
-    if (scopes) fd.append('scopes', scopes);
-    try {
-      const res = await fetch('/api/tokens', { method: 'POST', body: fd, credentials: 'same-origin' });
-      const data = await res.json();
-      if (res.ok) {
-        el('adm-tokenValue').textContent = data.token;
-        reveal.style.display = '';
-        el('adm-tokenName').value = '';
-        if (el('adm-tokenScopes')) el('adm-tokenScopes').value = '';
-        loadTokens();
-      }
-      else { msg.textContent = data.detail || 'Failed'; msg.className = 'admin-error'; }
-    } catch (e) { msg.textContent = 'Request failed'; msg.className = 'admin-error'; }
-  });
-  const TOKEN_COPY_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-  const TOKEN_CHECK_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-  el('adm-tokenCopyBtn').addEventListener('click', () => {
-    const val = el('adm-tokenValue').textContent;
-    const btn = el('adm-tokenCopyBtn');
-    navigator.clipboard.writeText(val).then(() => {
-      btn.innerHTML = TOKEN_CHECK_ICON;
-      btn.style.color = 'var(--accent, var(--red))';
-      btn.style.opacity = '1';
-      setTimeout(() => {
-        btn.innerHTML = TOKEN_COPY_ICON;
-        btn.style.color = '';
-        btn.style.opacity = '0.7';
-      }, 1600);
-    });
-  });
-}
-
-/* ── Webhooks ── */
-async function loadWebhooks() {
-  const list = el('adm-whList');
-  try {
-    const res = await fetch('/api/webhooks', { credentials: 'same-origin' });
-    const hooks = await res.json();
-    if (!hooks.length) { list.innerHTML = '<div class="admin-empty">No webhooks configured</div>'; return; }
-    list.innerHTML = hooks.map(w => {
-      const events = (w.events || []).map(e => `<span class="admin-badge">${esc(e)}</span>`).join(' ');
-      const statusBadge = w.last_status_code
-        ? `<span class="admin-badge" style="background:${w.last_status_code < 400 ? 'color-mix(in srgb, var(--fg) 20%, transparent)' : 'color-mix(in srgb, var(--red) 20%, transparent)'};color:${w.last_status_code < 400 ? 'var(--fg)' : 'var(--red)'};">${w.last_status_code}</span>`
-        : '';
-      const lastTriggered = w.last_triggered_at ? new Date(w.last_triggered_at).toLocaleString() : 'Never';
-      const errorText = w.last_error ? `<div style="font-size:0.75rem;color:var(--red);margin-top:0.2rem;">Error: ${esc(w.last_error.substring(0, 80))}</div>` : '';
-      return `
-        <div class="admin-ep-item" style="flex-wrap:wrap;">
-          <div class="admin-ep-info" style="flex:1;min-width:200px;">
-            <div class="admin-ep-name">${esc(w.name)} ${w.is_active ? '' : '<span class="admin-badge admin-badge-off">disabled</span>'} ${w.has_secret ? '<span class="admin-badge">signed</span>' : ''}</div>
-            <div class="admin-ep-detail">${esc(w.url)}</div>
-            <div style="margin-top:0.3rem;">${events}</div>
-            <div class="admin-ep-detail">Last: ${lastTriggered} ${statusBadge}</div>
-            ${errorText}
-          </div>
-          <div class="admin-ep-actions">
-            <button class="admin-btn-sm" data-adm-wh-test="${w.id}">Test</button>
-            <button class="admin-btn-sm" data-adm-wh-toggle="${w.id}">${w.is_active ? 'Disable' : 'Enable'}</button>
-            <button class="admin-btn-delete" data-adm-wh-delete="${w.id}">Delete</button>
-          </div>
-        </div>`;
-    }).join('');
-    list.querySelectorAll('[data-adm-wh-test]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const msg = el('adm-whMsg'); msg.textContent = 'Sending test...'; msg.className = '';
-        try {
-          const res = await fetch(`/api/webhooks/${btn.dataset.admWhTest}/test`, { method: 'POST', credentials: 'same-origin' });
-          msg.textContent = res.ok ? 'Test sent!' : 'Test failed'; msg.className = res.ok ? 'admin-success' : 'admin-error';
-          setTimeout(() => loadWebhooks(), 1000);
-        } catch (e) { msg.textContent = 'Failed: ' + e.message; msg.className = 'admin-error'; }
-      });
-    });
-    list.querySelectorAll('[data-adm-wh-toggle]').forEach(btn => {
-      btn.addEventListener('click', async () => { await fetch(`/api/webhooks/${btn.dataset.admWhToggle}`, { method: 'PATCH', credentials: 'same-origin' }); loadWebhooks(); });
-    });
-    list.querySelectorAll('[data-adm-wh-delete]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        if (!await uiModule.styledConfirm('Delete this webhook?', { confirmText: 'Delete', danger: true })) return;
-        await fetch(`/api/webhooks/${btn.dataset.admWhDelete}`, { method: 'DELETE', credentials: 'same-origin' }); loadWebhooks();
-      });
-    });
-  } catch (e) { list.innerHTML = '<div class="admin-error">Failed to load webhooks</div>'; }
-}
-
-function initWebhookForm() {
-  el('adm-whAddBtn').addEventListener('click', async () => {
-    const msg = el('adm-whMsg');
-    msg.textContent = ''; msg.className = '';
-    const name = el('adm-whName').value.trim();
-    const url = el('adm-whUrl').value.trim();
-    const secret = el('adm-whSecret').value.trim();
-    const events = Array.from(modalEl.querySelectorAll('.adm-wh-event:checked')).map(e => e.value).join(',');
-    if (!name) { msg.textContent = 'Name is required'; msg.className = 'admin-error'; return; }
-    if (!url) { msg.textContent = 'URL is required'; msg.className = 'admin-error'; return; }
-    if (!events) { msg.textContent = 'Select at least one event'; msg.className = 'admin-error'; return; }
-    const fd = new FormData();
-    fd.append('name', name); fd.append('url', url); fd.append('secret', secret); fd.append('events', events);
-    try {
-      const res = await fetch('/api/webhooks', { method: 'POST', body: fd, credentials: 'same-origin' });
-      if (res.ok) { msg.textContent = 'Webhook added'; msg.className = 'admin-success'; el('adm-whName').value = ''; el('adm-whUrl').value = ''; el('adm-whSecret').value = ''; loadWebhooks(); }
-      else { const d = await res.json(); msg.textContent = d.detail || 'Failed'; msg.className = 'admin-error'; }
-    } catch (e) { msg.textContent = 'Failed: ' + e.message; msg.className = 'admin-error'; }
-  });
-}
-
-/* ── Features ── */
-const featureLabels = {
-  web_search: 'Web Search', deep_research: 'Deep Research',
-  memory: 'Memory', document_editor: 'Document Editor', rag: 'RAG Knowledge Base', sensitive_filter: 'Sensitive Info Filter',
-  gallery: 'Gallery'
-};
-
-async function loadFeatures() {
-  const container = el('adm-featureToggles');
-  try {
-    const res = await fetch('/api/auth/features', { credentials: 'same-origin' });
-    const features = await res.json();
-    container.innerHTML = Object.entries(featureLabels).map(([key, label]) => `
-      <div class="admin-toggle-row" style="padding:0.4rem 0;border-bottom:1px solid var(--border);">
-        <div class="admin-toggle-label">${label}</div>
-        <label class="admin-switch"><input type="checkbox" data-adm-feature="${key}" ${features[key] ? 'checked' : ''}><span class="admin-slider"></span></label>
-      </div>`).join('');
-    container.querySelectorAll('input[data-adm-feature]').forEach(toggle => {
-      toggle.addEventListener('change', async () => {
-        const body = {}; body[toggle.dataset.admFeature] = toggle.checked;
-        await fetch('/api/auth/features', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      });
-    });
-  } catch (e) { container.innerHTML = '<div class="admin-error">Failed to load features</div>'; }
-}
-
-/* ── CalDAV Config ── */
-function initCalDAV() {
-  const urlIn = el('caldav-url');
-  const userIn = el('caldav-user');
-  const passIn = el('caldav-pass');
-  const saveBtn = el('caldav-save-btn');
-  const testBtn = el('caldav-test-btn');
-  const status = el('caldav-status');
-  if (!urlIn || !saveBtn) return;
-
-  // Load current config
-  fetch(`${API_BASE}/api/calendar/config`, { credentials: 'same-origin' })
-    .then(r => r.json()).then(d => {
-      urlIn.value = d.caldav_url || '';
-      userIn.value = d.caldav_username || '';
-      passIn.value = d.caldav_password || '';
-    }).catch(() => {});
-
-  saveBtn.addEventListener('click', async () => {
-    status.textContent = 'Saving...';
-    try {
-      const res = await fetch(`${API_BASE}/api/calendar/config`, {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ caldav_url: urlIn.value, caldav_username: userIn.value, caldav_password: passIn.value }),
-      });
-      const d = await res.json();
-      status.textContent = d.ok ? 'Saved' : 'Error';
-      status.style.color = d.ok ? 'var(--green)' : 'var(--red)';
-    } catch (e) { status.textContent = 'Error'; status.style.color = 'var(--red)'; }
-    setTimeout(() => { status.textContent = ''; status.style.color = ''; }, 3000);
-  });
-
-  testBtn.addEventListener('click', async () => {
-    status.textContent = 'Testing...';
-    try {
-      // Save first
-      await fetch(`${API_BASE}/api/calendar/config`, {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ caldav_url: urlIn.value, caldav_username: userIn.value, caldav_password: passIn.value }),
-      });
-      const res = await fetch(`${API_BASE}/api/calendar/test`, { method: 'POST', credentials: 'same-origin' });
-      const d = await res.json();
-      status.textContent = d.ok ? `Connected (${d.calendars} calendars)` : `Failed: ${d.error}`;
-      status.style.color = d.ok ? 'var(--green)' : 'var(--red)';
-    } catch (e) { status.textContent = 'Error'; status.style.color = 'var(--red)'; }
-    setTimeout(() => { status.textContent = ''; status.style.color = ''; }, 5000);
-  });
-}
-
-/* ── Data Backup (export/import) ── */
 function initBackup() {
   el('adm-exportDataBtn').addEventListener('click', async () => {
     const btn = el('adm-exportDataBtn');
@@ -3655,8 +2698,8 @@ function initBackup() {
       a.download = filename;
       a.click();
       URL.revokeObjectURL(a.href);
-      msg.textContent = 'Export downloaded.'; msg.className = 'admin-success';
-    } catch (e) { msg.textContent = 'Export failed: ' + e.message; msg.className = 'admin-error'; }
+      _setMsg(msg, 'Export downloaded.', true);
+    } catch (e) { _setMsg(msg, 'Export failed: ' + e.message, false); }
     btn.disabled = false; btn.textContent = 'Export Data';
   });
 
@@ -3686,16 +2729,15 @@ function initBackup() {
         throw new Error(`Import failed: server returned ${res.status}`);
       }
       if (res.ok && result.ok) {
-        msg.textContent = result.message || 'Import successful.'; msg.className = 'admin-success';
+        _setMsg(msg, result.message || 'Import successful.', true);
       } else {
-        msg.textContent = result.message || result.detail || 'Import failed'; msg.className = 'admin-error';
+        _setMsg(msg, result.message || result.detail || 'Import failed', false);
       }
-    } catch (e) { msg.textContent = 'Import failed: ' + e.message; msg.className = 'admin-error'; }
+    } catch (e) { _setMsg(msg, 'Import failed: ' + e.message, false); }
     btn.disabled = false; btn.textContent = 'Import Data';
   });
 }
 
-/* ── Danger Zone ── */
 function initDangerZone() {
   // Per-category Danger Zone wipes. Each button declares its target
   // via data-wipe-kind; one delegated handler handles double-confirm,
@@ -3737,33 +2779,28 @@ function initDangerZone() {
           const fails = results.filter(r => !r.ok).map(r => r.k);
           if (_wipeMsg) {
             if (!fails.length) {
-              _wipeMsg.textContent = `Deleted ${total} items across all ${okCount} categories.`;
-              _wipeMsg.className = 'admin-success';
+              _setMsg(_wipeMsg, `Deleted ${total} items across all ${okCount} categories.`, true);
             } else {
-              _wipeMsg.textContent = `Deleted ${total} items; failed: ${fails.join(', ')}.`;
-              _wipeMsg.className = 'admin-error';
+              _setMsg(_wipeMsg, `Deleted ${total} items; failed: ${fails.join(', ')}.`, false);
             }
           }
         } else {
           const res = await fetch(`/api/admin/wipe/${kind}`, { method: 'DELETE', credentials: 'same-origin' });
           const data = await res.json().catch(() => ({}));
           if (res.ok) {
-            if (_wipeMsg) { _wipeMsg.textContent = `Deleted ${data.count ?? 0} ${label}.`; _wipeMsg.className = 'admin-success'; }
+            if (_wipeMsg) { _setMsg(_wipeMsg, `Deleted ${data.count ?? 0} ${label}.`, true); }
           } else {
-            if (_wipeMsg) { _wipeMsg.textContent = data.detail || 'Failed'; _wipeMsg.className = 'admin-error'; }
+            if (_wipeMsg) { _setMsg(_wipeMsg, data.detail || 'Failed', false); }
           }
         }
       } catch (e) {
-        if (_wipeMsg) { _wipeMsg.textContent = 'Request failed: ' + e.message; _wipeMsg.className = 'admin-error'; }
+        if (_wipeMsg) { _setMsg(_wipeMsg, 'Request failed: ' + e.message, false); }
       }
       btn.disabled = false; btn.innerHTML = prevHtml;
     });
   });
 }
 
-/* ═══════════════════════════════════════════
-   TERMINAL LOGS VIEWER
-   ═══════════════════════════════════════════ */
 let logsPollInterval = null;
 let isLogsPolling = false;
 let cachedLogs = [];
@@ -3964,14 +3001,13 @@ function renderNotificationLogs() {
       copyBtn.innerHTML = copyIcon;
       copyBtn.addEventListener('click', async (event) => {
         event.stopPropagation();
-        try {
-          if (!await copyNotificationText(note.body)) throw new Error('copy failed');
-          copyBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-          copyBtn.classList.add('copied');
-          setTimeout(() => { copyBtn.innerHTML = copyIcon; copyBtn.classList.remove('copied'); }, 1400);
-        } catch (_) {
+        if (!await uiModule.copyToClipboard(note.body, { toast: false })) {
           uiModule.showToast('Could not copy notification');
+          return;
         }
+        copyBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+        copyBtn.classList.add('copied');
+        setTimeout(() => { copyBtn.innerHTML = copyIcon; copyBtn.classList.remove('copied'); }, 1400);
       });
       body.append(bodyText, copyBtn);
       entry.appendChild(body);
@@ -4102,15 +3138,11 @@ function initLogsView() {
   loadLogs(false);
 }
 
-/* ═══════════════════════════════════════════
-   INIT & REFRESH
-   ═══════════════════════════════════════════ */
 function initAll() {
   modalEl = el('settings-modal');
   const inits = [
-    initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
-    initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView,
-    () => settingsModule.initIntegrations()
+    initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm,
+    initBackup, initDangerZone, initLogsView,
   ];
   for (const fn of inits) {
     try { fn(); } catch (e) { console.error('Admin init error in', fn.name || 'anonymous', e); }
@@ -4123,15 +3155,10 @@ function refreshAll() {
   loadUsers();
   loadEndpoints();
   loadBuiltinTools();
-  loadMcpServers();
-  loadTokens();
   loadLogs(false);
   loadNotificationLogs();
 }
 
-/* ═══════════════════════════════════════════
-   PUBLIC API
-   ═══════════════════════════════════════════ */
 export function _initData() {
   if (!initialized) initAll();
   else refreshAll();

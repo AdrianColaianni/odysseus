@@ -135,10 +135,8 @@ export function createDrawing({
     const lineBtn = container.querySelector('.note-form-draw-line');
     const circleBtn = container.querySelector('.note-form-draw-circle');
     const undoBtn = container.querySelector('.note-form-draw-undo');
-    // Single source of truth for what clicks/drags do. Other booleans are
-    // derived from this so we never end up with conflicting "eraser AND text"
-    // states (the bug that made T appear broken after using the eraser).
-    // Modes: 'pen' | 'eraser' | 'text-s' | 'text-m' | 'text-l' | 'line' | 'circle'
+    // Modes: 'pen' | 'eraser' | 'text-s' | 'text-m' | 'text-l' | 'line' | 'circle'.
+    // Other tool booleans derive from this so two tools are never active at once.
     let mode = 'pen';
     let drawing = false;
     let last = null;
@@ -222,7 +220,7 @@ export function createDrawing({
     const _openTextInput = (e) => {
       // Commit any prior pending input before starting a new one : otherwise
       // the first click leaves an orphaned input the user thinks "didn't work".
-      if (_activeTextInput) { try { _activeTextInput.blur(); } catch {} }
+      _activeTextInput?.blur();
       const r = canvas.getBoundingClientRect();
       const t = e.touches ? e.touches[0] : e;
       // Position is anchored to the wrap, not the canvas; since the canvas is

@@ -12,10 +12,11 @@ import re
 import uuid
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
-from core.database import SessionLocal, Signature
+from core.database import Signature, get_db
 from src.auth_helpers import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -84,22 +85,17 @@ def setup_signature_routes() -> APIRouter:
     router = APIRouter(tags=["signatures"])
 
     @router.get("/api/signatures")
-    async def list_signatures(request: Request) -> Dict[str, Any]:
+    def list_signatures(request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
         user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            q = db.query(Signature)
-            if user is not None:
-                # SECURITY: strict ownership — the previous OR predicate
-                # returned every null-owner signature to every user.
-                q = q.filter(Signature.owner == user)
-            sigs = q.order_by(Signature.created_at.desc()).all()
-            return {"signatures": [_to_dict(s) for s in sigs]}
-        finally:
-            db.close()
+        q = db.query(Signature)
+        if user is not None:
+            # Strict match: null-owner rows stay hidden from every user.
+            q = q.filter(Signature.owner == user)
+        sigs = q.order_by(Signature.created_at.desc()).all()
+        return {"signatures": [_to_dict(s) for s in sigs]}
 
     @router.post("/api/signatures")
-    async def create_signature(request: Request, req: SignatureCreate) -> Dict[str, Any]:
+    def create_signature(request: Request, req: SignatureCreate, db: Session = Depends(get_db)) -> Dict[str, Any]:
         user = get_current_user(request)
         b64 = _normalize_signature_png(req.data)
         width = _signature_dimension(req.width)
@@ -114,7 +110,6 @@ def setup_signature_routes() -> APIRouter:
             height=height,
             svg=None,
         )
-        db = SessionLocal()
         try:
             db.add(sig)
             db.commit()
@@ -124,13 +119,10 @@ def setup_signature_routes() -> APIRouter:
             db.rollback()
             logger.error(f"Failed to save signature: {e}")
             raise HTTPException(500, f"Failed to save signature: {e}")
-        finally:
-            db.close()
 
     @router.delete("/api/signatures/{sig_id}")
-    async def delete_signature(sig_id: str, request: Request) -> Dict[str, Any]:
+    def delete_signature(sig_id: str, request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
         user = get_current_user(request)
-        db = SessionLocal()
         try:
             sig = db.query(Signature).filter(Signature.id == sig_id).first()
             if not sig:
@@ -145,7 +137,5 @@ def setup_signature_routes() -> APIRouter:
         except Exception as e:
             db.rollback()
             raise HTTPException(500, f"Failed to delete signature: {e}")
-        finally:
-            db.close()
 
     return router

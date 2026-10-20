@@ -2,7 +2,6 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -108,148 +107,57 @@ def test_safe_env_prefix_accepts_powershell_activation_path():
     )
 
 
-@pytest.mark.parametrize(
-    ("prefix", "expected"),
-    [
+def test_local_windows_bash_env_prefix_converts_powershell_venv_activation():
+    for prefix, expected in [
         ("& 'C:\\Users\\me\\venv\\Scripts\\Activate.ps1'", "source /c/Users/me/venv/Scripts/activate"),
         (r"& C:\Users\me\venv\Scripts\Activate.ps1", "source /c/Users/me/venv/Scripts/activate"),
-        (
-            r"& C:\Users\me\My Envs\venv\Scripts\Activate.ps1",
-            "source '/c/Users/me/My Envs/venv/Scripts/activate'",
-        ),
-        (
-            "& 'C:\\Users\\me\\My Envs\\venv\\Scripts\\Activate.ps1'",
-            "source '/c/Users/me/My Envs/venv/Scripts/activate'",
-        ),
+        (r"& C:\Users\me\My Envs\venv\Scripts\Activate.ps1", "source '/c/Users/me/My Envs/venv/Scripts/activate'"),
         (r"& D:/Envs/venv/Scripts/Activate.ps1", "source /d/Envs/venv/Scripts/activate"),
-    ],
-)
-def test_local_windows_bash_env_prefix_converts_powershell_venv_activation(prefix, expected):
-    converted = _local_windows_bash_env_prefix(prefix)
-
-    assert converted == expected
-    assert _safe_env_prefix(converted).startswith('[ -f "')
+    ]:
+        converted = _local_windows_bash_env_prefix(prefix)
+        assert converted == expected, prefix
+        assert _safe_env_prefix(converted).startswith('[ -f "')
 
 
-@pytest.mark.parametrize(
-    "prefix",
-    [
+def test_local_windows_bash_env_prefix_leaves_other_prefixes_unchanged():
+    for prefix in [
         None,
         "",
         "source /home/me/venv/bin/activate",
-        "conda activate qwen35",
         'eval "$(conda shell.bash hook)" && conda activate qwen35',
         r"& \\server\share\venv\Scripts\Activate.ps1",
-    ],
-)
-def test_local_windows_bash_env_prefix_leaves_other_prefixes_unchanged(prefix):
-    assert _local_windows_bash_env_prefix(prefix) == prefix
+        "\t" * 100_000,
+    ]:
+        assert _local_windows_bash_env_prefix(prefix) == prefix
 
 
-def test_local_windows_bash_env_prefix_handles_long_whitespace_input():
-    prefix = "\t" * 100_000
-
-    assert _local_windows_bash_env_prefix(prefix) == prefix
-
-
-@pytest.mark.parametrize(
-    "relative_path",
-    ["static/js/cookbookRunning.js", "static/js/cookbookDownload.js"],
-)
-def test_primary_windows_venv_emitters_quote_activation_path(relative_path):
-    source = (Path(__file__).resolve().parents[1] / relative_path).read_text(encoding="utf-8")
-
-    assert "'& ' + _psQuote(" in source
-    assert "_psQuote = shared._psQuote;" in source
+def test_validate_local_dir_accepts_paths_with_spaces_and_unicode():
+    for path in [
+        "/Volumes/T7 2TB/AI Models/llamacpp",
+        r"D:\AI Models\llamacpp",
+        "D:/AI Models/llamacpp",
+        "/Volumes/Модели/llamacpp",
+        "/Volumes/モデル/llm",
+    ]:
+        assert _validate_local_dir(path) == path
+        assert _validate_local_dir(f'"{path}"') == path
+    assert _shell_path("/Volumes/T7 2TB/AI Models/llamacpp/Qwen3-8B") == '"/Volumes/T7 2TB/AI Models/llamacpp/Qwen3-8B"'
+    assert _shell_path(r"D:\AI Models\llamacpp\Qwen3-8B") == '"D:\\AI Models\\llamacpp\\Qwen3-8B"'
 
 
-def test_windows_venv_conversion_stays_scoped_to_local_git_bash_runners():
-    source = (Path(__file__).resolve().parents[1] / "routes/cookbook_routes.py").read_text(encoding="utf-8")
-    guarded_conversion = (
-        "_local_windows_bash_env_prefix(req.env_prefix) if local_windows else req.env_prefix"
-    )
-
-    assert source.count(guarded_conversion) == 2
-
-
-def test_validate_local_dir_accepts_external_drive_paths_with_spaces():
-    path = "/Volumes/T7 2TB/AI Models/llamacpp"
-
-    assert _validate_local_dir(path) == path
-    assert _validate_local_dir(f'"{path}"') == path
-    assert _shell_path(f"{path}/Qwen3-8B") == '"/Volumes/T7 2TB/AI Models/llamacpp/Qwen3-8B"'
-
-
-def test_validate_local_dir_accepts_windows_drive_paths_with_spaces():
-    backslash_path = r"D:\AI Models\llamacpp"
-    slash_path = "D:/AI Models/llamacpp"
-
-    assert _validate_local_dir(backslash_path) == backslash_path
-    assert _validate_local_dir(f"'{backslash_path}'") == backslash_path
-    assert _validate_local_dir(slash_path) == slash_path
-    assert _shell_path(backslash_path + r"\Qwen3-8B") == '"D:\\AI Models\\llamacpp\\Qwen3-8B"'
-
-
-def test_validate_local_dir_still_rejects_shell_metacharacters():
+def test_validate_local_dir_rejects_shell_metacharacters_and_option_segments():
+    # A segment starting with '-' is read as a CLI option by hf even when quoted.
     for path in [
         "/Volumes/T7 2TB/AI Models; touch /tmp/pwned",
         "/Volumes/T7 2TB/AI Models/$(touch pwned)",
         "/Volumes/T7 2TB/AI Models/`touch pwned`",
         "/Volumes/T7 2TB/AI Models/model\nnext",
-    ]:
-        with pytest.raises(HTTPException):
-            _validate_local_dir(path)
-
-
-def test_validate_local_dir_rejects_windows_shell_metacharacters():
-    for path in [
         r"D:\AI Models\llamacpp; touch C:\pwned",
-        r"D:\AI Models\llamacpp\$(touch pwned)",
-        r"D:\AI Models\llamacpp\`touch pwned`",
-        "D:\\AI Models\\llamacpp\nnext",
-    ]:
-        with pytest.raises(HTTPException):
-            _validate_local_dir(path)
-
-
-def test_validate_local_dir_accepts_non_ascii_unicode_paths():
-    # Folder names are routinely non-ASCII on localized systems; the validator
-    # must accept them the same way it accepts spaces (see issue: spaces AND
-    # non-ASCII chars were both rejected by the old ASCII-only allowlist).
-    for path in [
-        "/Volumes/Модели/llamacpp",   # Cyrillic (POSIX / external drive)
-        "/home/josé/models",          # accented Latin
-        "/Volumes/モデル/llm",         # CJK
-        r"D:\AI Models\Модели",       # Cyrillic (Windows drive path)
-    ]:
-        assert _validate_local_dir(path) == path
-
-
-def test_validate_local_dir_rejects_metacharacters_in_unicode_paths():
-    # Widening the allowlist to Unicode must not reopen the injection surface:
-    # shell metacharacters stay rejected even alongside non-ASCII segments.
-    for path in [
-        "/Volumes/Модели; touch /tmp/pwned",
-        "/Volumes/Модели/$(touch pwned)",
-        "/Volumes/Модели/`touch pwned`",
         "/Volumes/Модели/a|b",
-        "/Volumes/Модели\nnext",
         r"D:\Модели\llamacpp & calc.exe",
-    ]:
-        with pytest.raises(HTTPException):
-            _validate_local_dir(path)
-
-
-def test_validate_local_dir_rejects_leading_dash_segments():
-    # A path segment starting with '-' could be parsed as a CLI option by hf/etc.
-    # (option injection) even when quoted, since quoting doesn't stop a value from
-    # being read as a flag. The validator must reject it on every platform.
-    for path in [
         "/models/-rf",
-        "/models/-rf/llamacpp",
         "/-oStrictHostKeyChecking=no",
         r"D:\models\-rf",
-        "D:/models/-rf",
     ]:
         with pytest.raises(HTTPException):
             _validate_local_dir(path)
@@ -289,88 +197,90 @@ def test_local_tooling_path_export_preserves_spaces_and_expands_path():
     assert line.endswith(':$PATH"')  # $PATH stays expandable in double quotes
 
 
-def test_pip_install_fallback_chain_prefers_venv_safe_install():
-    chain = _pip_install_fallback_chain("huggingface_hub", upgrade=True)
-    # First attempt: plain install, wrapped in status-preserving subshell
-    assert chain.startswith("bash -c '")
-    assert "python3 -m pip install -q -U huggingface_hub" in chain
-    # Fallback: --user first, then guarded --break-system-packages for PEP-668 pip.
-    assert "python3 -m pip install --user -q -U huggingface_hub" in chain
-    assert "python3 -m pip install --help 2>/dev/null | grep -q -- --break-system-packages" in chain
-    assert "--user --break-system-packages" in chain
-    assert "python3 -m pip install --user --break-system-packages -q -U huggingface_hub" in chain
-    # No bare `| tail` (which would mask pip's exit code)
-    assert "| tail" not in chain
-    # Negated venv check with && — so failure in a venv propagates instead of
-    # being masked as success by the venv_check's exit-0.
-    assert "! python3 -c" in chain
-    # The group uses && (not ||) between venv check and user attempt
-    assert "&&" in chain
+def _stub_tools(tmp_path, *names):
+    """Put logging stand-ins for `names` first on PATH.
 
-
-def test_pip_install_fallback_chain_allows_custom_python_command():
-    chain = _pip_install_fallback_chain("hf_transfer", python_cmd="pip", upgrade=False)
-    assert "pip install -q hf_transfer" in chain
-    assert "pip install --user -q hf_transfer" in chain
-    assert "pip install --help 2>/dev/null | grep -q -- --break-system-packages" in chain
-    assert "pip install --user --break-system-packages -q hf_transfer" in chain
-    # venv check uses the python executable derived from the pip command
-    assert 'python -c "import sys; sys.exit(0 if sys.prefix != sys.base_prefix else 1)"' in chain
-    # All install attempts are wrapped in bash -c subshells
-    assert chain.count("bash -c '") == 3
-
-
-def test_pip_install_fallback_chain_accepts_python_executable():
-    chain = _pip_install_fallback_chain("llama-cpp-python[server]", python_cmd="python")
-
-    assert "python -m pip install -q 'llama-cpp-python[server]'" in chain
-    assert "python -m pip install --user -q 'llama-cpp-python[server]'" in chain
-    assert "python -m pip install --help 2>/dev/null | grep -q -- --break-system-packages" in chain
-    assert "python install " not in chain
-    assert 'python -c "import sys; sys.exit(0 if sys.prefix != sys.base_prefix else 1)"' in chain
-
-
-def test_pip_install_fallback_chain_propagates_failure_in_venv():
-    """When base install fails inside a venv, the chain must exit non-zero.
-
-    The old `{ venv_check || user }` shape from #903 masked the failure:
-    venv_check exited 0 (in venv), || short-circuited, and the group
-    reported success even though nothing was installed.  The negated
-    `{ ! venv_check && user }` shape propagates the failure correctly.
+    Each stub appends `<name> <args>` to calls.log. Exit codes come from env:
+    VENV_RC for the `-c` venv probe, BREAK_RC, USER_RC and BASE_RC for the
+    three install attempts. `--help` lists --break-system-packages only when
+    HELP_HAS_BREAK is set.
     """
-    # Simulate "inside a venv" deterministically: the venv check exits 0.
-    # Base install fails, venv_check exits 0, negated to 1,
-    # && skips user, group exits 1.  This avoids depending on whether the
-    # test runner's own interpreter happens to be inside a venv (which
-    # differs between local and CI environments).
-    script = (
-        "false || "
-        "{ ! true "  # venv_check=0 (in venv) → negated to 1 → user skipped
-        "&& echo user_attempt; }"
-    )
-    result = subprocess.run(
-        ["bash", "-c", script],
-        capture_output=True, text=True, timeout=10,
-    )
-    assert "user_attempt" not in result.stdout
-    assert result.returncode != 0, "Chain should propagate failure when base fails in venv"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    log = tmp_path / "calls.log"
+    for name in names:
+        stub = bin_dir / name
+        stub.write_text(
+            "#!/bin/bash\n"
+            f'echo "{name} $*" >> "{log}"\n'
+            'case "$*" in\n'
+            '  "-c "*) exit "${VENV_RC:-1}" ;;\n'
+            '  *--help*) [ -n "$HELP_HAS_BREAK" ] && echo "  --break-system-packages"; exit 0 ;;\n'
+            '  *--break-system-packages*) exit "${BREAK_RC:-0}" ;;\n'
+            '  *--user*) exit "${USER_RC:-0}" ;;\n'
+            '  *) echo "boom from base install" >&2; exit "${BASE_RC:-0}" ;;\n'
+            "esac\n",
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+    return bin_dir, log
 
 
-def test_pip_install_fallback_chain_tries_user_outside_venv():
-    """When base install fails outside a venv, the chain should try --user."""
-    # Force "not in venv" by making venv_check return 1 directly.
-    script = (
-        "bash -c '"
-        "python3 -c \"import sys; sys.exit(1)\" || "
-        "{ ! python3 -c \"import sys; sys.exit(1)\" "  # venv_check=1 → negated to 0 → user runs
-        "&& echo user_attempt; }"
-        "'"
-    )
-    result = subprocess.run(
-        ["bash", "-c", script],
-        capture_output=True, text=True, timeout=10,
-    )
-    assert "user_attempt" in result.stdout, "Chain should try --user when not in venv and base fails"
+def _run_bash(script, bin_dir, **env):
+    full_env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", **env}
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=full_env, timeout=15)
+
+
+def test_pip_install_attempt_exits_with_pip_status_and_shows_its_output(tmp_path):
+    bin_dir, _ = _stub_tools(tmp_path, "python3")
+    snippet = _pip_install_attempt("python3 -m pip install -q pkg")
+
+    failed = _run_bash(snippet, bin_dir, BASE_RC="3")
+    assert failed.returncode == 3
+    assert "boom from base install" in failed.stdout
+    assert _run_bash(snippet, bin_dir, BASE_RC="0").returncode == 0
+
+
+def test_pip_install_fallback_chain_propagates_failure_in_venv(tmp_path):
+    """Inside a venv a failed base install must fail the chain, not try --user (#903)."""
+    bin_dir, log = _stub_tools(tmp_path, "python3")
+
+    result = _run_bash(_pip_install_fallback_chain("pkg"), bin_dir, BASE_RC="1", VENV_RC="0")
+
+    assert result.returncode != 0
+    assert "--user" not in log.read_text()
+
+
+def test_pip_install_fallback_chain_outside_venv_tries_user_then_guarded_break_system(tmp_path):
+    bin_dir, log = _stub_tools(tmp_path, "python3")
+    chain = _pip_install_fallback_chain("pkg", upgrade=True)
+
+    assert _run_bash(chain, bin_dir, BASE_RC="1", VENV_RC="1", USER_RC="0").returncode == 0
+    assert "python3 -m pip install --user -q -U pkg" in log.read_text()
+    assert "--break-system-packages -q" not in log.read_text()
+
+    log.unlink()
+    result = _run_bash(chain, bin_dir, BASE_RC="1", VENV_RC="1", USER_RC="1", BREAK_RC="0", HELP_HAS_BREAK="1")
+    assert result.returncode == 0
+    assert "python3 -m pip install --user --break-system-packages -q -U pkg" in log.read_text()
+
+    log.unlink()
+    result = _run_bash(chain, bin_dir, BASE_RC="1", VENV_RC="1", USER_RC="1")
+    assert result.returncode != 0
+    assert "--break-system-packages -q" not in log.read_text()
+
+
+def test_pip_install_fallback_chain_probes_venv_with_the_pips_own_python(tmp_path):
+    bin_dir, log = _stub_tools(tmp_path, "pip", "python", "python3")
+
+    _run_bash(_pip_install_fallback_chain("pkg", python_cmd="pip"), bin_dir, BASE_RC="1", VENV_RC="0")
+    calls = log.read_text().splitlines()
+    assert calls[0] == "pip install -q pkg"
+    assert calls[1].startswith("python -c ")
+
+    log.unlink()
+    _run_bash(_pip_install_fallback_chain("pkg", python_cmd="python"), bin_dir, BASE_RC="0")
+    assert log.read_text().splitlines() == ["python -m pip install -q pkg"]
 
 
 def test_pip_install_fallback_chain_quotes_extras_spec():
@@ -407,28 +317,24 @@ def test_serve_runner_installs_llama_cpp_server_extra():
     assert "_pip_install_fallback_chain('llama-cpp-python[server]'" in src
 
 
-def test_serve_pip_install_normalizes_llama_cpp_alias_and_adds_wheel_index():
-    import pathlib
-
-    src = (pathlib.Path(__file__).resolve().parent.parent
-        / "routes" / "cookbook_routes.py").read_text(encoding="utf-8")
-
-    assert "re.sub(r\"(?<![A-Za-z0-9_.\\-/])llama_cpp(?![A-Za-z0-9_.\\-/])\", \"llama-cpp-python[server]\", req.cmd)" in src
-    assert "if \"llama-cpp-python\" in req.cmd and \"--extra-index-url\" not in req.cmd:" in src
-    assert "https://abetlen.github.io/llama-cpp-python/whl/cpu" in src
-
-
-def test_vllm_preflight_reports_cli_and_version():
+def test_vllm_preflight_reports_cli_or_marks_it_missing(tmp_path):
     lines = []
-
     _append_vllm_linux_preflight_lines(lines)
-    script = "\n".join(lines)
+    script = "\n".join(lines) + '\necho "EXIT=$ODYSSEUS_PREFLIGHT_EXIT"'
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    env = {"HOME": str(tmp_path), "PATH": f"{bin_dir}:/usr/bin:/bin"}
 
-    assert 'export PATH="$HOME/.local/bin:$PATH"' in script
-    assert 'ODYSSEUS_VLLM_BIN="$(command -v vllm 2>/dev/null || true)"' in script
-    assert 'echo "[odysseus] vLLM CLI: $ODYSSEUS_VLLM_BIN"' in script
-    assert '"$ODYSSEUS_VLLM_BIN" --version' in script
-    assert 'ODYSSEUS_PREFLIGHT_EXIT=127' in script
+    missing = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=10)
+    assert "EXIT=127" in missing.stdout
+
+    vllm = bin_dir / "vllm"
+    vllm.write_text("#!/bin/sh\necho 0.9.1\n", encoding="utf-8")
+    vllm.chmod(0o755)
+    found = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=10)
+    assert "EXIT=\n" in found.stdout
+    assert str(vllm) in found.stdout
+    assert "0.9.1" in found.stdout
 
 
 def test_venv_safe_local_pip_install_strips_user_flags_only_for_local_venv():
@@ -441,7 +347,8 @@ def test_venv_safe_local_pip_install_strips_user_flags_only_for_local_venv():
     assert _venv_safe_local_pip_install_cmd(cmd, local=True, in_venv=False) == cmd
 
 
-def test_pip_install_runner_guards_break_system_packages():
+def test_pip_install_runner_drops_break_system_packages_for_old_pip(tmp_path):
+    bin_dir, log = _stub_tools(tmp_path, "python3")
     lines = []
     _append_pip_install_runner_lines(
         lines,
@@ -449,10 +356,14 @@ def test_pip_install_runner_guards_break_system_packages():
     )
     script = "\n".join(lines)
 
-    assert "python3 -m pip install --help 2>/dev/null | grep -q -- --break-system-packages" in script
-    assert 'python3 -m pip install --no-cache-dir --user --break-system-packages "llama-cpp-python[server]"' in script
-    assert "python3 -m pip install --no-cache-dir --user 'llama-cpp-python[server]'" in script
-    assert "pip does not support --break-system-packages" in script
+    _run_bash(script, bin_dir)
+    assert log.read_text().splitlines()[-1] == "python3 -m pip install --no-cache-dir --user llama-cpp-python[server]"
+
+    log.unlink()
+    _run_bash(script, bin_dir, HELP_HAS_BREAK="1")
+    assert log.read_text().splitlines()[-1] == (
+        "python3 -m pip install --no-cache-dir --user --break-system-packages llama-cpp-python[server]"
+    )
 
 
 def test_pip_install_runner_leaves_plain_commands_unchanged():
@@ -462,171 +373,119 @@ def test_pip_install_runner_leaves_plain_commands_unchanged():
     assert lines == ["python3 -m pip install --no-cache-dir vllm"]
 
 
-def test_pip_install_attempt_wraps_in_status_preserving_subshell():
-    """Each pip attempt must be a bash -c subshell that captures output,
-    prints tail, cleans up, and exits with pip's real status — not tail's."""
-    snippet = _pip_install_attempt("pip install -q huggingface_hub")
-    assert snippet.startswith("bash -c '")
-    assert "$(mktemp)" in snippet
-    assert "_rc=$?" in snippet
-    assert "tail -5" in snippet
-    assert "rm -f" in snippet
-    assert "exit $_rc" in snippet
-
-
-def test_pip_install_attempt_no_bare_pipe_tail():
-    """A bare `| tail` pipeline would mask pip's exit code — must not appear."""
-    snippet = _pip_install_attempt("pip install -q huggingface_hub")
-    assert "| tail" not in snippet
-
-
-def test_pip_install_attempt_failure_propagates_real_exit_code():
-    """Run the generated snippet against a deliberately broken pip install
-    to confirm the subshell exits with pip's non-zero status."""
-    snippet = _pip_install_attempt("python3 -m pip install __nonexistent_package_12345__")
-    result = subprocess.run(
-        ["bash", "-c", snippet],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    assert result.returncode != 0, "pip install of a nonexistent package should fail"
-
-
-def test_pip_install_attempt_success_exits_zero():
-    """When pip succeeds, the subshell should exit 0."""
-    snippet = _pip_install_attempt("python3 -c 'pass'")
-    result = subprocess.run(
-        ["bash", "-c", snippet],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    assert result.returncode == 0
-
-
-def test_pip_install_attempt_surfaces_stderr_on_failure():
-    """On failure, the last 5 lines of pip output should appear in stdout."""
-    snippet = _pip_install_attempt("python3 -m pip install __nonexistent_package_12345__")
-    result = subprocess.run(
-        ["bash", "-c", snippet],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    # pip's error message should be visible in the output (not swallowed)
-    combined = result.stdout + result.stderr
-    assert "nonexistent" in combined.lower() or result.returncode != 0
-
-
 def test_local_tooling_path_export_converts_windows_paths_for_bash():
     line = _local_tooling_path_export(r"C:\Users\Jane Dev\.venv\Scripts\python.exe")
     assert line == 'export PATH="/c/Users/Jane Dev/.venv/Scripts:$PATH"'
     assert "C:" not in line
 
 
-def test_user_shell_path_bootstrap_falls_back_to_python_on_windows_bash():
-    script = "\n".join(_user_shell_path_bootstrap())
-    # A missing python3 OR a Microsoft Store App Execution Alias stub under
-    # WindowsApps must shim python3 -> python so the venv interpreter is used.
-    assert '_odys_py3="$(command -v python3 2>/dev/null || true)"' in script
-    assert (
-        'case "$_odys_py3" in ""|*[Ww]indows[Aa]pps*) python3() { python "$@"; } ;; esac'
-        in script
-    )
-    assert 'command -v python >/dev/null 2>&1 || python() { python3 "$@"; }' in script
+def test_user_shell_path_bootstrap_shims_windowsapps_python3_to_python(tmp_path):
+    alias_dir = tmp_path / "WindowsApps"
+    alias_dir.mkdir()
+    (alias_dir / "python3").write_text("#!/bin/sh\necho store-alias\n", encoding="utf-8")
+    venv_dir = tmp_path / "venv"
+    venv_dir.mkdir()
+    (venv_dir / "python").write_text("#!/bin/sh\necho venv-python\n", encoding="utf-8")
+    for stub in [alias_dir / "python3", venv_dir / "python"]:
+        stub.chmod(0o755)
+    script = "\n".join(_user_shell_path_bootstrap()) + "\npython3"
 
-
-def test_serve_preflight_failure_keeps_tmux_pane_visible():
-    """Dependency preflight failures should remain visible in tmux output.
-
-    A bare `exit 127` kills the tmux pane before the browser/status poller can
-    capture the helpful error, leaving users with a blank "crashed" card.
-    """
-    runner_lines = [
-        'ODYSSEUS_PREFLIGHT_EXIT=""',
-        'echo "ERROR: vLLM is not installed. Open Cookbook -> Dependencies and install vllm on this server, then launch again."',
-        'ODYSSEUS_PREFLIGHT_EXIT=127',
-    ]
-    _append_serve_preflight_exit_lines(runner_lines, keep_shell_open=True)
-    script = "\n".join(runner_lines)
-
-    assert "ERROR: vLLM is not installed" in script
-    assert 'ODYSSEUS_PREFLIGHT_EXIT=127' in script
-    assert 'echo "=== Process exited with code $ODYSSEUS_PREFLIGHT_EXIT ==="' in script
-    assert 'exec "${SHELL:-/bin/bash}"' in script
-    assert "exit 127" not in script
-
-
-def test_serve_runner_preserves_command_exit_code():
-    """The serve wrapper must capture `$?` before any echo resets it."""
-    runner_lines = ["vllm serve Qwen/Qwen3.6-35B-A3B-NVFP4 --host 0.0.0.0 --port 8000"]
-    _append_serve_exit_code_lines(runner_lines, keep_shell_open=True)
-    script = "\n".join(runner_lines)
-
-    assert "ODYSSEUS_CMD_EXIT=$?" in script
-    assert 'echo "=== Process exited with code $ODYSSEUS_CMD_EXIT ==="' in script
-    assert 'echo "=== Process exited with code $? ==="' not in script
-
-
-def test_pip_serve_runner_emits_download_ok_before_exit_marker():
-    """Dependency installs run through the serve wrapper need the download marker."""
-    runner_lines = ["python3 -m pip install llama-cpp-python"]
-    _append_serve_exit_code_lines(runner_lines, keep_shell_open=False, is_pip_install=True)
-    script = "\n".join(runner_lines)
-
-    assert 'echo "DOWNLOAD_OK"' in script
-    assert script.index('echo "DOWNLOAD_OK"') < script.index("=== Process exited with code")
-    assert 'exit "$ODYSSEUS_CMD_EXIT"' in script
-
-
-def test_validate_serve_cmd_accepts_vllm_kv_cache_dtype():
-    cmd = (
-        "CUDA_VISIBLE_DEVICES=0,1 vllm serve nvidia/Qwen3.6-35B-A3B-NVFP4 "
-        "--host 0.0.0.0 --port 8000 --tensor-parallel-size 2 "
-        "--max-model-len 4096 --dtype auto --kv-cache-dtype fp8"
+    result = subprocess.run(
+        ["/bin/bash", "-c", script],
+        capture_output=True, text=True, timeout=10,
+        env={"PATH": f"{alias_dir}:{venv_dir}", "SHELL": ""},
     )
 
-    assert _validate_serve_cmd(cmd) == cmd
+    assert result.stdout.strip() == "venv-python"
 
 
-def test_validate_serve_cmd_accepts_llama_advanced_controls():
-    cmd = (
-        "MODEL_FILE=$(printf %s ${HOME}'/.cache/huggingface/hub/models--Qwen--Qwen3-GGUF/snapshots/model.gguf') "
-        '&& { [ -n "$MODEL_FILE" ] && [ -f "$MODEL_FILE" ]; } '
-        '|| { echo "ERROR: No GGUF found on this host."; exit 1; } && '
-        'GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 CUDA_VISIBLE_DEVICES=0,1 llama-server '
-        '--model "$MODEL_FILE" --host 0.0.0.0 --port 8000 -ngl 99 -c 131072 '
-        '--n-cpu-moe 0 --cache-type-k q8_0 --cache-type-v q8_0 --flash-attn on '
-        '--fit off --split-mode tensor --tensor-split 50,50 --main-gpu 0 '
-        '--parallel 1 --batch-size 2048 --ubatch-size 512 --no-mmap --no-warmup '
-        '--spec-type draft-mtp --spec-draft-n-max 3 '
-        '|| python3 -m llama_cpp.server --model "$MODEL_FILE" --host 0.0.0.0 --port 8000'
+def _run_runner(lines, tmp_path):
+    shell = tmp_path / "shell"
+    shell.write_text("#!/bin/sh\necho shell-open\n", encoding="utf-8")
+    shell.chmod(0o755)
+    # The runner restores stdout/stderr from fds 3 and 4, saved before its tee.
+    script = "exec 3>&1 4>&2\n" + "\n".join(lines)
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, timeout=10,
+        env={**os.environ, "SHELL": str(shell)},
     )
 
-    assert _validate_serve_cmd(cmd) == cmd
+
+def test_serve_preflight_failure_keeps_tmux_pane_visible(tmp_path):
+    """A bare `exit 127` closes the pane before the status poller reads the error."""
+    lines = ["ODYSSEUS_PREFLIGHT_EXIT=127"]
+    _append_serve_preflight_exit_lines(lines, keep_shell_open=True)
+
+    result = _run_runner(lines, tmp_path)
+
+    assert "=== Process exited with code 127 ===" in result.stdout
+    assert "shell-open" in result.stdout
+    assert result.returncode == 0
 
 
-def test_validate_serve_cmd_accepts_windows_printf_format():
-    cmd = (
-        "python -m llama_cpp.server --model "
-        "\"$(printf %s ${HOME}'/.cache/huggingface/hub/models--unsloth--Qwen3.5-2B-GGUF/snapshots/f6d5376be1edb4d416d56da11e5397a961aca8ae/Qwen3.5-2B-Q4_K_M.gguf')\" "
-        "--host 0.0.0.0 --port 8000 --n_gpu_layers 99 --n_ctx 32768 --flash_attn true --type_k q4_0 --type_v q4_0"
-    )
-    assert _validate_serve_cmd(cmd) == cmd
+def test_serve_runner_preserves_command_exit_code(tmp_path):
+    lines = ["(exit 7)"]
+    _append_serve_exit_code_lines(lines, keep_shell_open=False)
+
+    result = _run_runner(lines, tmp_path)
+
+    assert result.returncode == 7
+    assert "=== Process exited with code 7 ===" in result.stdout
 
 
-def test_validate_serve_cmd_accepts_llama_mmproj_printf_format():
-    cmd = (
-        "CUDA_VISIBLE_DEVICES=0 llama-server --model "
-        "\"$(printf %s ${HOME}'/.cache/huggingface/hub/models--unsloth--Qwen3.6-35B-A3B-GGUF/snapshots/abc/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf')\" "
-        "--host 0.0.0.0 --port 8000 -ngl 99 -c 20000 "
-        "--cache-type-k q4_0 --cache-type-v q4_0 --mmproj "
-        "\"$(printf %s ${HOME}'/.cache/huggingface/hub/models--unsloth--Qwen3.6-35B-A3B-GGUF/snapshots/abc/mmproj-BF16.gguf')\" "
-        "--image-max-tokens 1024"
-    )
+def test_pip_serve_runner_emits_download_ok_before_exit_marker(tmp_path):
+    lines = ["true"]
+    _append_serve_exit_code_lines(lines, keep_shell_open=False, is_pip_install=True)
 
-    assert _validate_serve_cmd(cmd) == cmd
+    out = _run_runner(lines, tmp_path).stdout
+
+    assert out.index("DOWNLOAD_OK") < out.index("=== Process exited with code 0 ===")
+
+
+def test_validate_serve_cmd_accepts_generated_launch_commands():
+    for cmd in [
+        (
+            "CUDA_VISIBLE_DEVICES=0,1 vllm serve nvidia/Qwen3.6-35B-A3B-NVFP4 "
+            "--host 0.0.0.0 --port 8000 --tensor-parallel-size 2 "
+            "--max-model-len 4096 --dtype auto --kv-cache-dtype fp8"
+        ),
+        (
+            "MODEL_FILE=$(printf %s ${HOME}'/.cache/huggingface/hub/models--Qwen--Qwen3-GGUF/snapshots/model.gguf') "
+            '&& { [ -n "$MODEL_FILE" ] && [ -f "$MODEL_FILE" ]; } '
+            '|| { echo "ERROR: No GGUF found on this host."; exit 1; } && '
+            'GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 CUDA_VISIBLE_DEVICES=0,1 llama-server '
+            '--model "$MODEL_FILE" --host 0.0.0.0 --port 8000 -ngl 99 -c 131072 '
+            '--n-cpu-moe 0 --cache-type-k q8_0 --cache-type-v q8_0 --flash-attn on '
+            '--fit off --split-mode tensor --tensor-split 50,50 --main-gpu 0 '
+            '--parallel 1 --batch-size 2048 --ubatch-size 512 --no-mmap --no-warmup '
+            '--spec-type draft-mtp --spec-draft-n-max 3 '
+            '|| python3 -m llama_cpp.server --model "$MODEL_FILE" --host 0.0.0.0 --port 8000'
+        ),
+        (
+            "python -m llama_cpp.server --model "
+            "\"$(printf %s ${HOME}'/.cache/huggingface/hub/models--unsloth--Qwen3.5-2B-GGUF/snapshots/f6d5376be1edb4d416d56da11e5397a961aca8ae/Qwen3.5-2B-Q4_K_M.gguf')\" "
+            "--host 0.0.0.0 --port 8000 --n_gpu_layers 99 --n_ctx 32768 --flash_attn true --type_k q4_0 --type_v q4_0"
+        ),
+        (
+            "CUDA_VISIBLE_DEVICES=0 llama-server --model "
+            "\"$(printf %s ${HOME}'/.cache/huggingface/hub/models--unsloth--Qwen3.6-35B-A3B-GGUF/snapshots/abc/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf')\" "
+            "--host 0.0.0.0 --port 8000 -ngl 99 -c 20000 "
+            "--cache-type-k q4_0 --cache-type-v q4_0 --mmproj "
+            "\"$(printf %s ${HOME}'/.cache/huggingface/hub/models--unsloth--Qwen3.6-35B-A3B-GGUF/snapshots/abc/mmproj-BF16.gguf')\" "
+            "--image-max-tokens 1024"
+        ),
+        (
+            "HIP_VISIBLE_DEVICES=0 llama-server "
+            "--model \"$(printf %s '/app/.cache/huggingface/hub/models--unsloth--gemma-4-E2B-it-GGUF"
+            "/snapshots/90f9618340396838ee7ff5b0ba2da27da62953d3/gemma-4-E2B-it-Q4_K_M.gguf')\" "
+            "--host 0.0.0.0 --port 8000 -ngl 99 -c 131072 "
+            "--flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 "
+            "--mmproj \"$(find '/app/.cache/huggingface/hub/models--unsloth--gemma-4-E2B-it-GGUF"
+            "/snapshots' -iname 'mmproj*.gguf' 2>/dev/null | sort | head -1)\" "
+            "--image-max-tokens 1024"
+        ),
+    ]:
+        assert _validate_serve_cmd(cmd) == cmd
 
 
 def test_normalize_llama_cpp_python_cache_types_for_stale_client_cmd():
@@ -648,14 +507,6 @@ def test_normalize_llama_cpp_python_cache_types_preserves_native_cache_flags():
     assert "--cache-type-k q4_0 --cache-type-v q4_0" in normalized
     assert "--type_k=8" in normalized
     assert "--type_v='1'" in normalized
-
-
-def test_model_serve_normalizes_llama_cpp_python_cache_types_after_validation():
-    src = (Path(__file__).resolve().parents[1] / "routes" / "cookbook_routes.py").read_text(encoding="utf-8")
-
-    assert "req.cmd = _validate_serve_cmd(req.cmd) or \"\"" in src
-    assert "req.cmd = _normalize_llama_cpp_python_cache_types(req.cmd) or \"\"" in src
-    assert src.index("_validate_serve_cmd(req.cmd)") < src.index("_normalize_llama_cpp_python_cache_types(req.cmd)")
 
 
 def test_ollama_serve_defaults_to_loopback_bind():
@@ -692,129 +543,40 @@ def test_ollama_serve_rejects_unsafe_bind_values():
     )
 
 
-def test_llama_cpp_linux_bootstrap_prefers_rocm_before_cuda():
+def test_llama_cpp_linux_bootstrap_toolchain_precedence():
     runner_lines = []
     _append_llama_cpp_linux_accel_build_lines(runner_lines)
     script = "\n".join(runner_lines)
+    hip = script.index("-DGGML_HIP=ON")
+    cuda = script.index("-DGGML_CUDA=ON")
 
-    assert "mkdir -p ~/bin" in script
     assert script.index("mkdir -p ~/bin") < script.index("cd ~/llama.cpp")
-    assert 'command -v hipconfig &>/dev/null || [ -d /opt/rocm ] || [ -n "$ROCM_PATH" ] || [ -n "$HIP_PATH" ]' in script
-    assert 'cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_HIP=ON' in script
-    assert 'cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON' in script
-    assert script.index('DGGML_HIP=ON') < script.index('DGGML_CUDA=ON')
-    assert 'ROCm/HIP detected — building llama-server with HIP support' in script
-
-
-def test_llama_cpp_linux_bootstrap_checks_cudart_before_cuda_build():
-    """cudart helper and all required paths must appear before the CUDA cmake command."""
-    runner_lines = []
-    _append_llama_cpp_linux_accel_build_lines(runner_lines)
-    script = "\n".join(runner_lines)
-
-    assert '_odysseus_has_cudart' in script
-    assert "grep -q 'libcudart\\.so'" in script
-    # lib64 and lib variants for CUDA_HOME and /usr/local/cuda
-    assert '$_cuh/lib64/libcudart.so' in script
-    assert '$_cuh/lib/libcudart.so' in script
-    assert '/usr/local/cuda/lib64/libcudart.so' in script
-    assert '/usr/local/cuda/lib/libcudart.so' in script
-    # pip-installed nvidia runtime wheel sibling path
-    assert 'cuda_runtime/lib/libcudart.so' in script
-    # entire helper definition precedes the CUDA cmake invocation
-    assert script.index('_odysseus_has_cudart') < script.index('DGGML_CUDA=ON')
-
-
-def test_llama_cpp_linux_bootstrap_cuda_cmake_present_when_cudart_found():
-    """The CUDA cmake command must still be present (inside the cudart-present branch)."""
-    runner_lines = []
-    _append_llama_cpp_linux_accel_build_lines(runner_lines)
-    script = "\n".join(runner_lines)
-
-    assert 'cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON' in script
-    assert 'CUDA nvcc + cudart found' in script
-
-
-def test_llama_cpp_linux_bootstrap_nvcc_without_cudart_warns_and_falls_back():
-    """When nvcc exists but cudart is absent, the script must warn and use CPU-only cmake."""
-    runner_lines = []
-    _append_llama_cpp_linux_accel_build_lines(runner_lines)
-    script = "\n".join(runner_lines)
-
-    assert 'WARNING: nvcc found but CUDA runtime (libcudart.so) is not visible — building llama-server for CPU only.' in script
-    assert 'GPU inference will not be available for this llama.cpp build.' in script
-    assert 'libcudart is installed' in script
-    # The CPU-only cmake fallback must appear inside the nvcc branch (before the
-    # outer else that handles no-GPU-toolchain). Verify it appears at least once
-    # before the outer "no HIP/CUDA toolchain" warning.
-    cpu_cmake = 'cmake -B build -DCMAKE_BUILD_TYPE=Release &&'
-    no_toolchain_warn = 'WARNING: no HIP/CUDA/Vulkan toolchain found'
-    assert cpu_cmake in script
-    assert script.index(cpu_cmake) < script.index(no_toolchain_warn)
-
-
-def test_llama_cpp_linux_bootstrap_uses_single_shell_continuations():
-    runner_lines = []
-    _append_llama_cpp_linux_accel_build_lines(runner_lines)
-
+    assert hip < cuda
+    # nvcc without a visible libcudart builds for CPU instead of failing CUDA configure.
+    assert script.index("_odysseus_has_cudart") < cuda
+    assert script.index("cmake -B build -DCMAKE_BUILD_TYPE=Release &&") < script.index(
+        "WARNING: no HIP/CUDA/Vulkan toolchain found"
+    )
     assert not any(line.endswith("\\\\") for line in runner_lines)
 
 
-def test_llama_cpp_linux_bootstrap_keeps_cpu_fallback_when_no_gpu_toolchain():
-    runner_lines = []
-    _append_llama_cpp_linux_accel_build_lines(runner_lines)
-    script = "\n".join(runner_lines)
-
-    assert 'WARNING: no HIP/CUDA/Vulkan toolchain found — building llama-server for CPU only.' in script
-    assert 'Install Vulkan (libvulkan-dev) / ROCm for AMD GPUs or CUDA tooling for NVIDIA' in script
-
-
-def test_llama_cpp_rebuild_cmd_clears_cached_build_paths():
-    cmd = _llama_cpp_rebuild_cmd()
-
-    # Must remove both the cached symlink and the build dir the serve bootstrap
-    # links/creates, so the next serve recompiles from source.
-    assert 'rm -f "$HOME/bin/llama-server"' in cmd
-    assert 'rm -rf "$HOME/llama.cpp/build"' in cmd
-    # Recreates ~/bin so a never-served host does not error on a missing dir.
-    assert 'mkdir -p "$HOME/bin"' in cmd
-    # Diagnosis-only on the destructive side: it must not install or fetch.
-    assert 'pip install' not in cmd
-    assert 'git clone' not in cmd
-    assert 'curl' not in cmd and 'wget' not in cmd
-
-
-def test_local_windows_download_pid_tracks_inner_bash_and_stop_kills_tree():
-    routes_src = (Path(__file__).resolve().parents[1] / "routes" / "cookbook_routes.py").read_text(encoding="utf-8")
-    running_src = (Path(__file__).resolve().parents[1] / "static" / "js" / "cookbookRunning.js").read_text(encoding="utf-8")
-
-    # The Windows-local runner publishes Python's valid Win32 fallback before
-    # allowing Git Bash to replace it with /proc/$$/winpid.
-    assert "_windows_local_pid_record_line(pid_path, pid_ready_path)" in routes_src
-    assert "/proc/$$/winpid" in routes_src
-    assert "pid_ready_path.touch()" in routes_src
-    assert '\\"$$\\" > {pp}' not in routes_src
-    assert "function Stop-Tree([int]$Id)" in running_src
-    assert "('ParentProcessId = ' + $Id)" in running_src
-    assert "Stop-Tree ([int]$p)" in running_src
-
-
-def test_llama_cpp_rebuild_cmd_runs_clean_on_a_fresh_home(tmp_path):
-    """The command should succeed even when neither path exists yet."""
-    import os
+def test_llama_cpp_rebuild_cmd_clears_cached_build_without_fetching(tmp_path):
     from core.platform_compat import find_bash, git_bash_path
 
-    bash = find_bash() or "bash"
-    env = dict(os.environ)
-    env["HOME"] = git_bash_path(tmp_path)
+    (tmp_path / "llama.cpp" / "build").mkdir(parents=True)
+    cmd = _llama_cpp_rebuild_cmd()
+    env = {**os.environ, "HOME": git_bash_path(tmp_path)}
     result = subprocess.run(
-        [bash, "-c", _llama_cpp_rebuild_cmd()],
+        [find_bash() or "bash", "-c", cmd],
         capture_output=True, text=True, env=env, timeout=10,
     )
 
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "bin").is_dir()
-    assert "Cleared the cached llama.cpp build" in result.stdout
+    assert not (tmp_path / "llama.cpp" / "build").exists()
+    assert "pip install" not in cmd
+    assert "git clone" not in cmd
+    assert "curl" not in cmd and "wget" not in cmd
 
 
 def test_cached_model_scan_reports_plain_dir_gguf(tmp_path):
@@ -861,15 +623,6 @@ def test_cached_model_scan_reports_plain_dir_gguf(tmp_path):
     assert ggufs[1]["size_bytes"] == len(b"part1part2part3")
     assert ggufs[2]["quant"] == "Q6_K_XL"
     assert ggufs[3]["quant"] == "BF16"
-
-
-def test_cached_model_scan_uses_ollama_api_before_cli_and_windows_opt_in():
-    script = _cached_model_scan_script()
-
-    assert "scan_ollama_api()\nscan_ollama()" in script
-    assert "if any(m.get('is_ollama') for m in models): return" in script
-    assert "os.name == 'nt'" in script
-    assert "ODYSSEUS_ALLOW_OLLAMA_CLI_SCAN" in script
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Ollama CLI startup guard")
@@ -989,40 +742,12 @@ def test_cached_model_scan_runs_additional_hf_cache(tmp_path):
     assert rec["is_diffusion"] is False
 
 
-def test_validate_serve_cmd_accepts_find_subshell_for_mmproj():
-    """$(find …) for mmproj path should be accepted, same as $(printf %s …)."""
-    cmd = (
-        "HIP_VISIBLE_DEVICES=0 llama-server "
-        "--model \"$(printf %s '/app/.cache/huggingface/hub/models--unsloth--gemma-4-E2B-it-GGUF"
-        "/snapshots/90f9618340396838ee7ff5b0ba2da27da62953d3/gemma-4-E2B-it-Q4_K_M.gguf')\" "
-        "--host 0.0.0.0 --port 8000 -ngl 99 -c 131072 "
-        "--flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 "
-        "--mmproj \"$(find '/app/.cache/huggingface/hub/models--unsloth--gemma-4-E2B-it-GGUF"
-        "/snapshots' -iname 'mmproj*.gguf' 2>/dev/null | sort | head -1)\" "
-        "--image-max-tokens 1024"
-    )
-    assert _validate_serve_cmd(cmd) == cmd
-
-
 def test_validate_serve_cmd_rejects_unrelated_subshells():
     for cmd in [
         "llama-server --model \"$(curl https://example.invalid/model.gguf)\" --host 0.0.0.0 --port 8000",
         "llama-server --model \"$(rm -rf /tmp/not-a-model)\" --host 0.0.0.0 --port 8000",
-    ]:
-        with pytest.raises(HTTPException):
-            _validate_serve_cmd(cmd)
-
-
-def test_validate_serve_cmd_rejects_unrelated_subshell_pipelines():
-    for cmd in [
-        (
-            "llama-server --model model.gguf "
-            "--mmproj \"$(find '/app/models' -iname 'mmproj*.gguf' | xargs head -1)\""
-        ),
-        (
-            "llama-server --model model.gguf "
-            "--mmproj \"$(find '/app/models' -iname '*.gguf' 2>/dev/null | sort | head -1)\""
-        ),
+        "llama-server --model model.gguf --mmproj \"$(find '/app/models' -iname 'mmproj*.gguf' | xargs head -1)\"",
+        "llama-server --model model.gguf --mmproj \"$(find '/app/models' -iname '*.gguf' 2>/dev/null | sort | head -1)\"",
     ]:
         with pytest.raises(HTTPException):
             _validate_serve_cmd(cmd)

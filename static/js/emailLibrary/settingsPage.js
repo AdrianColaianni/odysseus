@@ -12,9 +12,8 @@
 
 import spinnerModule from '../spinner.js';
 import { emailApiUrl } from '../emailShared.js';
-import { showToast } from '../ui.js?v=20260916largetoolscroll1';
+import { esc, showToast } from '../ui.js?v=20260916largetoolscroll1';
 import { state } from './state.js';
-import { _esc } from './utils.js';
 import { _wireEmailInlineImages } from './bodyRender.js';
 import {
   _loadAccounts,
@@ -30,6 +29,7 @@ import {
   _resetEmailListForFreshLoad,
 } from './index.js';
 import { _openUnsubscribeReviewModal } from './unsubscribe.js';
+import { jsonRequest } from '../shared/http.js';
 
 const API_BASE = window.location.origin;
 
@@ -62,12 +62,7 @@ export async function _disableInlineImages(accountId = state._libAccountId) {
   try {
     const res = await fetch(emailApiUrl('/api/email/config', {
       account_id: accountId || undefined,
-    }), {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ email_view_inline_images: false }),
-    });
+    }), jsonRequest('PUT', { email_view_inline_images: false }));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
   } catch (err) {
     console.error('Failed to disable inline images:', err);
@@ -298,7 +293,7 @@ export function _emailSettingsFormHtml(cfg) {
     ? String(activeAccount.from_address || activeAccount.imap_user || activeAccount.email || '').trim()
     : '';
   const accountScope = accountAddress
-    ? ` <span class="email-settings-account-scope">(${_esc(accountAddress)})</span>`
+    ? ` <span class="email-settings-account-scope">(${esc(accountAddress)})</span>`
     : '';
   return `
     <div class="admin-card email-settings-section email-settings-auto-reply-section">
@@ -319,16 +314,16 @@ export function _emailSettingsFormHtml(cfg) {
       </div>
       <div id="email-settings-auto-reply-body" class="email-settings-section-body">
         <div class="email-settings-grid">
-          <label><span>Start date</span><input type="date" id="email-auto-reply-start" value="${_esc(_autoReplyDateValue(cfg.start))}"></label>
-          <label><span>End date</span><input type="date" id="email-auto-reply-end" value="${_esc(_autoReplyDateValue(cfg.end))}"></label>
+          <label><span>Start date</span><input type="date" id="email-auto-reply-start" value="${esc(_autoReplyDateValue(cfg.start))}"></label>
+          <label><span>End date</span><input type="date" id="email-auto-reply-end" value="${esc(_autoReplyDateValue(cfg.end))}"></label>
         </div>
         <label class="email-settings-field">
           <span>Subject</span>
-          <input type="text" id="email-auto-reply-subject" value="${_esc(cfg.subject || _DEFAULT_AUTO_REPLY_SUBJECT)}" placeholder="${_esc(_DEFAULT_AUTO_REPLY_SUBJECT)}">
+          <input type="text" id="email-auto-reply-subject" value="${esc(cfg.subject || _DEFAULT_AUTO_REPLY_SUBJECT)}" placeholder="${esc(_DEFAULT_AUTO_REPLY_SUBJECT)}">
         </label>
         <label class="email-settings-field">
           <span>Message</span>
-          <textarea id="email-auto-reply-message" rows="4">${_esc(cfg.message || _DEFAULT_AUTO_REPLY_MESSAGE)}</textarea>
+          <textarea id="email-auto-reply-message" rows="4">${esc(cfg.message || _DEFAULT_AUTO_REPLY_MESSAGE)}</textarea>
         </label>
         <label class="email-settings-field">
           <span>Send to same sender</span>
@@ -355,7 +350,7 @@ export function _emailCleanupSettingsHtml() {
     ? String(activeAccount.from_address || activeAccount.imap_user || activeAccount.email || '').trim()
     : '';
   const accountScope = accountAddress
-    ? ` <span class="email-settings-account-scope">(${_esc(accountAddress)})</span>`
+    ? ` <span class="email-settings-account-scope">(${esc(accountAddress)})</span>`
     : '';
   return `
     <div class="admin-card email-settings-section email-settings-cleanup-section">
@@ -443,7 +438,7 @@ export function _emailSettingsAccountSelectHtml() {
       ? `${name} · ${address}`
       : (name || address || 'account');
     const suffix = a.is_default ? ' · (default)' : '';
-    return `<option value="${_esc(a.id || '')}" ${state._libAccountId === a.id ? 'selected' : ''}>${_esc(label + suffix)}</option>`;
+    return `<option value="${esc(a.id || '')}" ${state._libAccountId === a.id ? 'selected' : ''}>${esc(label + suffix)}</option>`;
   }).join('');
   const selected = accounts.find(a => a.id === state._libAccountId) || accounts[0];
   const active = !!selected?.is_default;
@@ -452,7 +447,7 @@ export function _emailSettingsAccountSelectHtml() {
     : '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/></svg>';
   const defaultTitle = active ? 'Default account' : 'Make this the default account';
   return `<div class="email-settings-account-picker" style="margin-left:auto;display:inline-flex;align-items:center;gap:8px;">`
-    + `<span class="cookbook-srv-default email-settings-default${active ? ' active' : ''}" role="button" tabindex="0" aria-pressed="${active ? 'true' : 'false'}" data-email-default-id="${_esc(selected?.id || '')}" title="${defaultTitle}"><span class="cookbook-srv-default-icon" aria-hidden="true">${icon}</span><span class="cookbook-srv-default-label">default</span></span>`
+    + `<span class="cookbook-srv-default email-settings-default${active ? ' active' : ''}" role="button" tabindex="0" aria-pressed="${active ? 'true' : 'false'}" data-email-default-id="${esc(selected?.id || '')}" title="${defaultTitle}"><span class="cookbook-srv-default-icon" aria-hidden="true">${icon}</span><span class="cookbook-srv-default-label">default</span></span>`
     + `<select id="email-settings-account-select" class="memory-toolbar-btn" title="Active email for all email settings" style="height:28px;max-width:240px;position:relative;top:-2px;">${opts}</select>`
     + `</div>`;
 }
@@ -500,7 +495,7 @@ export function _emailWritingStyleHtml(style) {
       <div id="email-settings-style-body" class="email-settings-section-body">
         <label class="email-settings-field">
         <span>Writing style</span>
-        <textarea id="email-writing-style-text" rows="6">${_esc(style)}</textarea>
+        <textarea id="email-writing-style-text" rows="6">${esc(style)}</textarea>
         </label>
         <div class="email-settings-actions">
           <button type="button" class="memory-toolbar-btn email-style-settings-extract">
@@ -660,12 +655,7 @@ export function _bindEmailSettingsPageControls(page) {
     try {
       const res = await fetch(emailApiUrl('/api/email/config', {
         account_id: state._libAccountId || undefined,
-      }), {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ email_view_inline_images: enabled }),
-      });
+      }), jsonRequest('PUT', { email_view_inline_images: enabled }));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       document.querySelectorAll('.email-card-reader').forEach(reader => _wireEmailInlineImages(reader));
     } catch (err) {
@@ -720,12 +710,7 @@ export function _bindEmailSettingsPageControls(page) {
     try {
       const res = await fetch(emailApiUrl('/api/email/config', {
         account_id: state._libAccountId || undefined,
-      }), {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify(payload),
-      });
+      }), jsonRequest('PUT', payload));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const savedCfg = {
         enabled: !!payload.email_auto_reply,
@@ -798,12 +783,7 @@ export function _bindEmailSettingsPageControls(page) {
     try {
       const res = await fetch(emailApiUrl('/api/email/style', {
         account_id: state._libAccountId || undefined,
-      }), {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ style: page.querySelector('#email-writing-style-text')?.value || '' }),
-      });
+      }), jsonRequest('PUT', { style: page.querySelector('#email-writing-style-text')?.value || '' }));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       if (status) {
         status.classList.add('is-success');
@@ -844,12 +824,7 @@ export function _bindEmailSettingsPageControls(page) {
     try {
       const res = await fetch(emailApiUrl('/api/email/extract-style', {
         account_id: state._libAccountId || undefined,
-      }), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ sample_count: 15 }),
-      });
+      }), jsonRequest('POST', { sample_count: 15 }));
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success || !data.style) throw new Error(data.error || `HTTP ${res.status}`);
       if (styleEl) styleEl.value = data.style;

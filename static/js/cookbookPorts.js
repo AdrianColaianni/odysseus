@@ -1,6 +1,3 @@
-// Pure port helpers extracted so they're unit-testable without the
-// browser-bound rest of cookbookRunning.js (issue #4507 follow-up).
-
 // Read the port out of a serve launch command. Handles --port 8000,
 // --port=8000, -p 8000, and -p=8000. Returns '' when none is present.
 export function portOf(cmd) {

@@ -8,10 +8,6 @@ exposed the operator's key. The key is read on demand via `_get_provider_key`
 the global, and `get_search_config` scrubs any credential field from its response
 while preserving the `has_api_key` presence flag.
 """
-import os
-
-os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
-
 import pytest
 
 from services.search import core

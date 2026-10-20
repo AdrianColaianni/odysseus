@@ -4,7 +4,7 @@ import os
 from typing import Optional
 from fastapi import Request, HTTPException
 
-from src.owner_identity import auth_disabled, effective_storage_owner
+from src.owner_identity import auth_disabled
 
 
 def is_direct_loopback_request(request: Request) -> bool:
@@ -121,16 +121,6 @@ def _auth_disabled() -> bool:
     return auth_disabled()
 
 
-def storage_owner_for_request(request: Request) -> Optional[str]:
-    """Resolve the storage owner for code paths that need an owner bucket.
-
-    This does not replace route authentication. It only gives auth-disabled
-    no-login mode a stable storage identity instead of writing new data as
-    legacy NULL/ownerless state.
-    """
-    return effective_storage_owner(effective_user(request))
-
-
 def require_user(request: Request) -> str:
     """FastAPI dependency: reject unauthenticated callers when the upstream
     auth middleware was bypassed unexpectedly (e.g. SSRF from a sibling
@@ -218,3 +208,20 @@ def owner_filter(query, model_cls, user: str, *, include_shared: bool = True):
     if include_shared:
         return query.filter((model_cls.owner == user) | (model_cls.owner == None))  # noqa: E711
     return query.filter(model_cls.owner == user)
+
+
+def get_owned_or_404(db, model, row_id, owner: Optional[str], *, detail: str = "Not found",
+                     allow_anonymous: bool = True):
+    """Load `model` by primary key, or raise 404 when it is missing or `owner` does not own it.
+
+    An empty `owner` skips the owner check (single-user mode) unless `allow_anonymous`
+    is False, in which case it gets the same 404.
+    """
+    row = db.get(model, row_id)
+    if row is None:
+        raise HTTPException(404, detail)
+    if not owner and allow_anonymous:
+        return row
+    if not owner or row.owner != owner:
+        raise HTTPException(404, detail)
+    return row

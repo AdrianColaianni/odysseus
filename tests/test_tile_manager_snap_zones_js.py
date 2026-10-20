@@ -1,20 +1,14 @@
 """Regression coverage for desktop modal tile snap edge zones."""
 
-import json
-import shutil
-import subprocess
-import textwrap
 from pathlib import Path
 
-import pytest
+from tests.helpers.node import run_node_module
 
-_REPO = Path(__file__).resolve().parent.parent
-_HELPER = _REPO / "static" / "js" / "tileManager.js"
-_HAS_NODE = shutil.which("node") is not None
+_HELPER = Path(__file__).resolve().parent.parent / "static" / "js" / "tileManager.js"
 
 
 def _run_tile_case():
-    script = textwrap.dedent(
+    return run_node_module(
         f"""
         globalThis.window = {{
           innerWidth: 1200,
@@ -29,7 +23,7 @@ def _run_tile_case():
         }};
         globalThis.document = {{
           readyState: 'loading',
-          body: {{ appendChild() {{}} }},
+          body: {{ appendChild() {{}}, classList: {{ contains() {{ return false; }} }} }},
           documentElement: {{ style: {{ setProperty() {{}}, removeProperty() {{}} }} }},
           addEventListener() {{}},
           getElementById(id) {{ return id === 'sidebar' ? sidebar : null; }},
@@ -39,6 +33,7 @@ def _run_tile_case():
             return {{
               style: {{}},
               classList: {{ add() {{}}, remove() {{}} }},
+              addEventListener() {{}},
               remove() {{}},
             }};
           }},
@@ -65,38 +60,27 @@ def _run_tile_case():
         const settingsModal = {{ id: 'settings-modal' }};
         const settingsContent = {{ closest() {{ return settingsModal; }} }};
 
-        const topWithoutSidebar = pick(mod._zoneForPointerForTests(500, 20));
+        const topWithoutSidebar = pick(mod._zoneForPointer(500, 20));
         sidebarVisible = true;
-        const topWithSidebar = pick(mod._zoneForPointerForTests(500, 20));
+        const topWithSidebar = pick(mod._zoneForPointer(500, 20));
         sidebarVisible = false;
 
         console.log(JSON.stringify({{
-          topEdge: pick(mod._zoneForPointerForTests(500, 0)),
-          topStrip: pick(mod._zoneForPointerForTests(500, 8)),
+          topEdge: pick(mod._zoneForPointer(500, 0)),
+          topStrip: pick(mod._zoneForPointer(500, 8)),
           top: topWithoutSidebar,
           topWithSidebar,
-          left: pick(mod._zoneForPointerForTests(20, 300)),
-          right: pick(mod._zoneForPointerForTests(1190, 300)),
-          bottom: pick(mod._zoneForPointerForTests(500, 790)),
-          memoryBottom: pick(mod._zoneForContentForTests(memoryContent, 500, 790)),
-          settingsTop: pick(mod._zoneForContentForTests(settingsContent, 500, 20)),
-          settingsRight: pick(mod._zoneForContentForTests(settingsContent, 1190, 300)),
+          left: pick(mod._zoneForPointer(20, 300)),
+          right: pick(mod._zoneForPointer(1190, 300)),
+          bottom: pick(mod._zoneForPointer(500, 790)),
+          memoryBottom: pick(mod._zoneForContent(memoryContent, 500, 790)),
+          settingsTop: pick(mod._zoneForContent(settingsContent, 500, 20)),
+          settingsRight: pick(mod._zoneForContent(settingsContent, 1190, 300)),
         }}));
         """
     )
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=script,
-        capture_output=True,
-        text=True,
-        cwd=str(_REPO),
-        timeout=30,
-    )
-    assert proc.returncode == 0, proc.stderr
-    return json.loads(proc.stdout.strip())
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_tile_manager_uses_one_sidebar_aware_maximize_zone_for_the_whole_top_edge():
     zones = _run_tile_case()
 
@@ -113,7 +97,6 @@ def test_tile_manager_uses_one_sidebar_aware_maximize_zone_for_the_whole_top_edg
     }
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_tile_manager_detects_side_edges_but_ignores_the_bottom_edge():
     zones = _run_tile_case()
 
@@ -128,7 +111,6 @@ def test_tile_manager_detects_side_edges_but_ignores_the_bottom_edge():
     assert zones["bottom"] is None
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_regular_tool_modals_are_not_limited_to_fullscreen_only():
     zones = _run_tile_case()
 

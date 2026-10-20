@@ -806,7 +806,7 @@ const searchModule = functionProxy();
 const STUBS = new Map([
   [
     path.join(JS, 'ui.js'),
-    { default: uiModule },
+    { default: uiModule, esc: uiModule.esc },
   ],
   [
     path.join(JS, 'search.js'),

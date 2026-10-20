@@ -11,7 +11,7 @@
 import spinnerModule from '../spinner.js';
 import * as Modals from '../modalManager.js';
 import { state } from './state.js';
-import { _esc } from './utils.js';
+import { esc, showError, showToast } from '../ui.js?v=20260916largetoolscroll1';
 import { _acct, _openCalendarEventFromEmail, _prepareEmailWindowForDocument } from './index.js';
 import { _openEmailAsTab, _openEmailWindow } from './reader.js';
 
@@ -71,10 +71,10 @@ function _wireAttachmentHandlers(reader, folder) {
         a.click();
         a.remove();
         setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
-        try { uiModule.showToast && uiModule.showToast(`Downloading ${count || 'all'} attachments`); } catch (_) {}
+        showToast(`Downloading ${count || 'all'} attachments`);
       } catch (e) {
         console.error('attachments zip download error', e);
-        try { const { showError } = await import('../ui.js?v=20260916largetoolscroll1'); showError('Could not download attachments'); } catch (_) {}
+        showError('Could not download attachments');
       } finally {
         delete btn.dataset.downloading;
         btn.classList.remove('is-loading');
@@ -121,14 +121,11 @@ function _wireAttachmentHandlers(reader, folder) {
         if (existingEventUid && Number(result.imported || 0) === 0 && Number(result.skipped || 0) > 0) {
           _openCalendarEventFromEmail(existingEventUid);
         }
-        try { uiModule.showToast && uiModule.showToast(`${result.imported || 0} event${result.imported === 1 ? '' : 's'} added to ${result.calendar || 'calendar'}`); } catch (_) {}
+        showToast(`${result.imported || 0} event${result.imported === 1 ? '' : 's'} added to ${result.calendar || 'calendar'}`);
         window.dispatchEvent(new CustomEvent('calendar-refresh'));
       } catch (e) {
         console.error('calendar attachment import failed', e);
-        try {
-          const { showError } = await import('../ui.js?v=20260916largetoolscroll1');
-          showError(`Couldn't add ${name} to calendar: ${e?.message || 'Import failed'}`);
-        } catch (_) {}
+        showError(`Couldn't add ${name} to calendar: ${e?.message || 'Import failed'}`);
       } finally {
         delete openBtn.dataset.opening;
         openBtn.classList.remove('is-loading');
@@ -171,7 +168,7 @@ function _wireAttachmentHandlers(reader, folder) {
         const json = await res.json().catch(() => ({}));
         if (!res.ok || !json.doc_id) {
           const msg = (json && json.error) || `HTTP ${res.status}`;
-          try { const { showError } = await import('../ui.js?v=20260916largetoolscroll1'); showError(`Couldn't open ${name}: ${msg}`); } catch (_) { alert(`Couldn't open ${name}: ${msg}`); }
+          showError(`Couldn't open ${name}: ${msg}`);
           return;
         }
         try {
@@ -196,14 +193,14 @@ function _wireAttachmentHandlers(reader, folder) {
           }
         } catch (e) {
           console.error('Open document failed:', e);
-          try { const { showError } = await import('../ui.js?v=20260916largetoolscroll1'); showError('Document opened but panel could not mount'); } catch (_) {}
+          showError('Document opened but panel could not mount');
         }
       } catch (e) {
         console.error('attachment-as-doc error', e);
         const msg = e && e.name === 'AbortError'
           ? `Opening ${name} timed out. Try downloading it instead.`
           : `Couldn't open ${name}`;
-        try { const { showError } = await import('../ui.js?v=20260916largetoolscroll1'); showError(msg); } catch (_) {}
+        showError(msg);
       } finally {
         delete openBtn.dataset.opening;
         openBtn.classList.remove('is-loading');
@@ -352,12 +349,12 @@ export function _buildAttsHtmlFor(uid, data) {
     const chipUid = a.source_uid || a.uid || uid;
     const chipFolder = a.source_folder || data.folder || state._libFolder || 'INBOX';
     const openBtn = calendarAttachment
-      ? `<span class="email-attachment-calendar-open" role="button" tabindex="0" aria-label="Add to calendar" title="Add to calendar" data-open-uid="${_esc(chipUid)}" data-open-index="${a.index}" data-open-name="${_esc(a.filename)}" data-open-folder="${_esc(chipFolder)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="m8 15 2 2 5-5"/></svg></span>`
+      ? `<span class="email-attachment-calendar-open" role="button" tabindex="0" aria-label="Add to calendar" title="Add to calendar" data-open-uid="${esc(chipUid)}" data-open-index="${a.index}" data-open-name="${esc(a.filename)}" data-open-folder="${esc(chipFolder)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="m8 15 2 2 5-5"/></svg></span>`
       : openable
-      ? `<span class="email-attachment-open" role="button" tabindex="0" aria-label="Open in document editor" title="Open in document editor" data-open-uid="${_esc(chipUid)}" data-open-index="${a.index}" data-open-name="${_esc(a.filename)}" data-open-folder="${_esc(chipFolder)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/><line x1="8" y1="9" x2="10" y2="9"/></svg></span>`
+      ? `<span class="email-attachment-open" role="button" tabindex="0" aria-label="Open in document editor" title="Open in document editor" data-open-uid="${esc(chipUid)}" data-open-index="${a.index}" data-open-name="${esc(a.filename)}" data-open-folder="${esc(chipFolder)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/><line x1="8" y1="9" x2="10" y2="9"/></svg></span>`
       : '';
     const downloadBtn = `<span class="email-attachment-download" role="button" tabindex="0" aria-label="Download attachment" title="Download attachment"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span>`;
-    return `<button type="button" class="email-attachment-chip${extraClass}" data-att-uid="${_esc(chipUid)}" data-att-index="${a.index}" data-att-name="${_esc(a.filename)}" data-att-folder="${_esc(chipFolder)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg><span>${_esc(a.filename)}</span><span class="att-size">${Math.round((a.size||0)/1024)} KB</span>${openBtn}${downloadBtn}</button>`;
+    return `<button type="button" class="email-attachment-chip${extraClass}" data-att-uid="${esc(chipUid)}" data-att-index="${a.index}" data-att-name="${esc(a.filename)}" data-att-folder="${esc(chipFolder)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg><span>${esc(a.filename)}</span><span class="att-size">${Math.round((a.size||0)/1024)} KB</span>${openBtn}${downloadBtn}</button>`;
   };
   const chips = visible.map(a => renderChip(a)).join('');
   const hiddenChips = hidden.map(a => renderChip(a, ' email-attachment-chip-muted')).join('');
@@ -380,7 +377,7 @@ export function _buildAttsHtmlFor(uid, data) {
         : `Hidden inline attachments (${hidden.length})`;
   const startCollapsed = !visible.length && !related.length;
   const downloadAllBtn = visible.length > 4
-    ? `<button type="button" class="email-attachments-download-all" title="Download all attachments" data-att-uid="${_esc(uid)}" data-att-folder="${_esc(data.folder || state._libFolder || 'INBOX')}" data-att-count="${visible.length}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span>All</span></button>`
+    ? `<button type="button" class="email-attachments-download-all" title="Download all attachments" data-att-uid="${esc(uid)}" data-att-folder="${esc(data.folder || state._libFolder || 'INBOX')}" data-att-count="${visible.length}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span>All</span></button>`
     : '';
   return (
     `<div class="email-reader-atts-wrap${startCollapsed ? ' collapsed' : ''}">`

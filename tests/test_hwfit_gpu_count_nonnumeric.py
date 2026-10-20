@@ -14,6 +14,7 @@ from copy import deepcopy
 import pytest
 
 from routes.hwfit_routes import setup_hwfit_routes
+from tests.helpers.routes import route_endpoint
 from tests.hwfit_publication_fixtures import publication_catalog  # noqa: F401
 
 SYSTEM = {
@@ -33,11 +34,7 @@ SYSTEM = {
 
 
 def _get_models():
-    router = setup_hwfit_routes()
-    for route in router.routes:
-        if getattr(route, "path", "").endswith("/models") and "GET" in getattr(route, "methods", set()):
-            return route.endpoint
-    raise AssertionError("hwfit /models route not found")
+    return route_endpoint(setup_hwfit_routes(), "/api/hwfit/models", "GET")
 
 
 @pytest.fixture

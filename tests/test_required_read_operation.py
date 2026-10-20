@@ -52,16 +52,16 @@ def test_actual_contract_read_operation_field_is_consumed():
     assert limit == 3
 
 
-@pytest.mark.parametrize("name,args", [
-    ("manage_notes", {"action": "add", "title": "Do not create"}),
-    ("manage_notes", {}), ("manage_calendar", {"action": "delete"}),
-    ("web_search", {"query": "IANA"}), ("bash", {"command": "true"}),
-    ("read_file", {"path": "/workspace/test"}),
-    ("list_emails", {}), ("mcp__email__send_email", {}),
-    ("mcp__other__list_email_accounts", {}),
-])
-def test_recovery_never_acquires_mutation_search_or_shell_scope(name, args):
-    assert al._required_safe_read_operation(contract(Operation(name, args))) is None
+def test_recovery_never_acquires_mutation_search_or_shell_scope():
+    for name, args in [
+        ("manage_notes", {"action": "add", "title": "Do not create"}),
+        ("manage_notes", {}), ("manage_calendar", {"action": "delete"}),
+        ("web_search", {"query": "IANA"}), ("bash", {"command": "true"}),
+        ("read_file", {"path": "/workspace/test"}),
+        ("list_emails", {}), ("mcp__email__send_email", {}),
+        ("mcp__other__list_email_accounts", {}),
+    ]:
+        assert al._required_safe_read_operation(contract(Operation(name, args))) is None
 
 
 def test_operation_requires_permission_and_valid_shape():
@@ -147,7 +147,7 @@ def run_terminal_branch(monkeypatch, native_calls, result, operation=None, *, ma
         round_endpoint_ids=[], round_endpoint_labels=[], _last_route_request_messages=[],
         _last_route_context_length=4096, real_input_tokens=20, real_output_tokens=5,
         has_real_usage=True, time_to_first_token=0.1, _t0=time.time(),
-        json=json, time=time,
+        json=json, time=time, _sse=al._sse,
     )
     wrapper = ast.parse("async def run():\n    yield 'unexpected synthesis'\n").body[0]
     wrapper.body.insert(0, branch)
@@ -165,21 +165,21 @@ def run_terminal_branch(monkeypatch, native_calls, result, operation=None, *, ma
     return events
 
 
-@pytest.mark.parametrize("args", [None, "{broken", '{"action":"add","title":"Bad"}', '{"action":"list"}'])
-def test_omitted_invalid_and_valid_model_args_use_immutable_read_and_finish(monkeypatch, args):
-    native = [] if args is None else [{"id": "call_native", "name": "manage_notes", "arguments": args}]
-    events = run_terminal_branch(monkeypatch, native, notes_result())
-    payloads = [json.loads(event[6:]) for event in events if event != "data: [DONE]\n\n"]
-    final = next(item for item in payloads if item.get("type") == "final_response")
-    assert final["content"].count("#note-") == 3
-    assert final["render_owner"] == "structured"
-    assert final["replacement_scope"] == "turn"
-    metrics = next(item["data"] for item in payloads if item.get("type") == "metrics")
-    assert metrics["required_operation_succeeded"] is True
-    assert metrics["render_owner"] == "structured"
-    assert len(metrics["tool_events"]) == 1
-    assert payloads[0]["call_id"] == ("call_native" if args == '{"action":"list"}' else "required-read-1")
-    assert events[-1] == "data: [DONE]\n\n"
+def test_omitted_invalid_and_valid_model_args_use_immutable_read_and_finish(monkeypatch):
+    for args in [None, "{broken", '{"action":"add","title":"Bad"}', '{"action":"list"}']:
+        native = [] if args is None else [{"id": "call_native", "name": "manage_notes", "arguments": args}]
+        events = run_terminal_branch(monkeypatch, native, notes_result())
+        payloads = [json.loads(event[6:]) for event in events if event != "data: [DONE]\n\n"]
+        final = next(item for item in payloads if item.get("type") == "final_response")
+        assert final["content"].count("#note-") == 3
+        assert final["render_owner"] == "structured"
+        assert final["replacement_scope"] == "turn"
+        metrics = next(item["data"] for item in payloads if item.get("type") == "metrics")
+        assert metrics["required_operation_succeeded"] is True
+        assert metrics["render_owner"] == "structured"
+        assert len(metrics["tool_events"]) == 1
+        assert payloads[0]["call_id"] == ("call_native" if args == '{"action":"list"}' else "required-read-1")
+        assert events[-1] == "data: [DONE]\n\n"
 
 
 def test_failed_read_reports_failure_without_retry_or_false_success(monkeypatch):

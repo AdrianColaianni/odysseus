@@ -1,24 +1,23 @@
 """Tests for the GitHub Copilot provider integration (src/copilot.py + wiring)."""
 import types
-import pytest
 
 from src import copilot
 
 
 # ── Provider detection ─────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("url,expected", [
-    ("https://api.githubcopilot.com", True),
-    ("https://api.githubcopilot.com/chat/completions", True),
-    ("https://copilot-api.acme.ghe.com", True),
-    ("https://sub.githubcopilot.com", True),
-    ("https://api.openai.com/v1", False),
-    ("https://githubcopilot.com.evil.test", False),  # lookalike host
-    ("", False),
-    (None, False),
-])
-def test_is_copilot_base(url, expected):
-    assert copilot.is_copilot_base(url) is expected
+def test_is_copilot_base():
+    for url, expected in (
+        ("https://api.githubcopilot.com", True),
+        ("https://api.githubcopilot.com/chat/completions", True),
+        ("https://copilot-api.acme.ghe.com", True),
+        ("https://sub.githubcopilot.com", True),
+        ("https://api.openai.com/v1", False),
+        ("https://githubcopilot.com.evil.test", False),  # lookalike host
+        ("", False),
+        (None, False),
+    ):
+        assert copilot.is_copilot_base(url) is expected, url
 
 
 def test_detect_provider_copilot():

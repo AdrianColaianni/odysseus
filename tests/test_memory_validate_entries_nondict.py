@@ -6,7 +6,7 @@ def test_validate_entries_skips_non_dict_rows(tmp_path):
     # that drops a bare string / number / null into the array made the old loop
     # do item assignment on a non-dict and raise TypeError, losing the whole
     # memory store. Bad rows are now skipped.
-    m = MemoryManager(str(tmp_path))
+    m = MemoryManager(str(tmp_path / "memory.json"))
     out = m._validate_entries([
         {"id": "a", "text": "real memory"},
         "corrupt-row",

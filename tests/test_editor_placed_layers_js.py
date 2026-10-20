@@ -1,26 +1,15 @@
 import json
-import subprocess
 import textwrap
 from pathlib import Path
+from tests.helpers.node import run_node_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = (ROOT / "static/js/editor/placed-layer.js").as_uri()
 
 
-def run_node(source: str):
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", source],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return json.loads(result.stdout)
-
-
 def test_affine_composition_and_bounds_preserve_source_geometry():
-    data = run_node(textwrap.dedent(f"""
+    data = run_node_module(textwrap.dedent(f"""
         import {{ affineBounds, frameTransformMatrix, initialPlacedMatrix, multiplyAffine }} from {json.dumps(MODULE)};
         const initial = initialPlacedMatrix(400, 200, {{ x: 10, y: 20, width: 200, height: 100 }});
         const bounds = {{ ...affineBounds(initial, 400, 200), centerX: 110, centerY: 70 }};
@@ -33,7 +22,7 @@ def test_affine_composition_and_bounds_preserve_source_geometry():
 
 
 def test_replacement_matrix_keeps_document_corners():
-    data = run_node(textwrap.dedent(f"""
+    data = run_node_module(textwrap.dedent(f"""
         import {{ normalizeAffine, transformPoint }} from {json.dumps(MODULE)};
         const oldW = 400, oldH = 200, newW = 800, newH = 100;
         const [a,b,c,d,e,f] = normalizeAffine([0.5, 0.2, -0.1, 0.6, 30, 40]);
@@ -43,16 +32,3 @@ def test_replacement_matrix_keeps_document_corners():
         console.log(JSON.stringify({{ oldCorners, newCorners }}));
     """))
     assert data["newCorners"] == data["oldCorners"]
-
-
-def test_module_exposes_non_destructive_source_and_rasterize_boundaries():
-    source = (ROOT / "static/js/editor/placed-layer.js").read_text()
-    editor = (ROOT / "static/js/galleryEditor.js").read_text()
-    assert "placed.sourceCanvas" in source
-    assert "drawImage(placed.sourceCanvas" in source
-    assert "export function replacePlacedSource" in source
-    assert "export function rasterizePlacedLayer" in source
-    assert "function _canMutateLayerPixels" in editor
-    assert "'applying a pixel filter'" in editor
-    assert "'erasing pixels'" in editor
-    assert "'filling pixels'" in editor

@@ -72,7 +72,7 @@ export function setWorkspace(path) {
  */
 export async function vetAndSetWorkspace(path) {
   try {
-    const res = await fetch(`${API_BASE}/api/workspace/vet?path=${encodeURIComponent(path)}`, { credentials: 'same-origin' });
+    const res = await fetch(`${API_BASE}/api/workspace/vet?path=${encodeURIComponent(path)}`);
     if (!res.ok) return { ok: false, path: null };
     const data = await res.json();
     if (data.ok && data.path) {
@@ -87,7 +87,7 @@ export async function vetAndSetWorkspace(path) {
 
 export async function loadDefaultWorkspace() {
   if (_defaultWorkspaceLoad) return _defaultWorkspaceLoad;
-  _defaultWorkspaceLoad = fetch(`${API_BASE}/api/workspace/default`, { credentials: 'same-origin' })
+  _defaultWorkspaceLoad = fetch(`${API_BASE}/api/workspace/default`)
     .then(async (res) => {
       if (!res.ok) return { ok: false, path: null };
       const data = await res.json();
@@ -108,7 +108,7 @@ export function clearWorkspace() {
 
 async function _load(path) {
   const url = `${API_BASE}/api/workspace/browse${path ? `?path=${encodeURIComponent(path)}` : ''}`;
-  const res = await fetch(url, { credentials: 'same-origin' });
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`browse failed: ${res.status}`);
   return res.json();
 }

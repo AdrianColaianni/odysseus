@@ -793,26 +793,6 @@
         ]
       }
     },
-    "/api/skills/index": {
-      "get": {
-        "description": "The lightweight `[{name, description, category}]` list that the\nagent's system prompt sees. Useful for the UI's \"what does the model\nactually have access to?\" view.",
-        "operationId": "get_index_api_skills_index_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Index",
-        "tags": [
-          "skills"
-        ]
-      }
-    },
     "/api/skills/search": {
       "post": {
         "operationId": "search_skills_api_skills_search_post",

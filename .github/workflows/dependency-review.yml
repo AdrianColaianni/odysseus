@@ -1,15 +1,5 @@
-# Supply-chain review
-#
-# Purpose: defend against "side-chain" / supply-chain attacks -- a pull request
-# that adds (or bumps) a dependency to a version with a known vulnerability or a
-# disallowed license. Two layers:
-#
-#   - dependency-review: runs ONLY on pull requests. It compares the
-#     dependencies before and after the PR and blocks the merge if the change
-#     pulls in a package with a known security advisory. This is the gate.
-#   - pip-audit: scans the project's current Python requirements against the
-#     advisory database. Advisory only (it never blocks a merge), because it can
-#     flag a pre-existing issue in an already-shipped dependency.
+# dependency-review blocks a PR that adds a dependency with a known advisory;
+# pip-audit is advisory, since it also flags already-shipped dependencies.
 
 name: Dependency review
 

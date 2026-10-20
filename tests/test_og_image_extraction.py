@@ -1,10 +1,10 @@
-"""Tests for og:image extraction (src/search/content.py)."""
+"""Tests for og:image extraction (services/search/content.py)."""
 import pytest
 
 pytest.importorskip("bs4")
 from bs4 import BeautifulSoup
 
-from src.search.content import _extract_og_image
+from services.search.content import _extract_og_image
 
 
 def _soup(html: str) -> BeautifulSoup:

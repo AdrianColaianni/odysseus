@@ -1,29 +1,11 @@
 import json
-import shutil
-import subprocess
-from pathlib import Path
 
-import pytest
-
-
-ROOT = Path(__file__).resolve().parents[1]
-pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node binary not on PATH")
-
-
-def _node_eval(source):
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", source],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return json.loads(result.stdout)
+from tests.helpers.node import run_node_module
 
 
 def _resolve(state):
     """Run resolveVisibility(state) in node; return {selector: visible}."""
-    return _node_eval(
+    return run_node_module(
         f"""
         const {{ resolveVisibility }} = await import('./static/js/ui_visibility.js');
         console.log(JSON.stringify(resolveVisibility({json.dumps(state)})));
@@ -32,7 +14,7 @@ def _resolve(state):
 
 
 def _map():
-    return _node_eval(
+    return run_node_module(
         """
         const { UI_VIS_MAP } = await import('./static/js/ui_visibility.js');
         console.log(JSON.stringify(UI_VIS_MAP));

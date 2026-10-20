@@ -1,27 +1,8 @@
 """Browser coverage for Markdown-style block shortcuts in Rich Text documents."""
 
-import json
-import subprocess
-from pathlib import Path
 
-from tests.helpers.stylesheets import app_css
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source
-
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-STYLE = app_css()
-
-
-def test_input_rules_are_scoped_to_plain_blocks():
-    for marker in ("#", "##", "###", "####", "-", "*", "1.", ">", "```", "- [ ]", "- [x]"):
-        assert f"['{marker}', {{ action:" in DOC_JS
-    assert "listItem.parentElement.classList.add('rich-checklist')" in DOC_JS
-    assert "element.closest('pre, blockquote, td, th')" in DOC_JS
-    assert "_applyRichBlockInputRule(rich)" in DOC_JS
-    assert ".doc-email-richbody.richtext-mode ol > li" in STYLE
-    assert "padding-inline-start: 0.2em" in STYLE
+from tests.helpers.node import run_node_module
 
 
 def test_typing_markers_converts_blocks_and_preserves_following_text():
@@ -104,15 +85,7 @@ def test_typing_markers_converts_blocks_and_preserves_following_text():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
+    assert run_node_module(script, timeout=120) == {
         "heading": "Heading two",
         "bullet": "Bullet item",
         "numbered": "Numbered item",

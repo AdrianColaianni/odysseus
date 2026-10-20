@@ -11,9 +11,6 @@ from src.constants import MAX_OUTPUT_CHARS
 _mcp_manager = None
 _upload_handler = None
 
-# ---------------------------------------------------------------------------
-# MCP Manager singleton
-# ---------------------------------------------------------------------------
 
 def set_mcp_manager(manager):
     """Set the global MCP manager instance."""
@@ -25,10 +22,6 @@ def get_mcp_manager():
     return _mcp_manager
 
 
-# ---------------------------------------------------------------------------
-# Shared upload lifecycle handler
-# ---------------------------------------------------------------------------
-
 def set_upload_handler(handler):
     """Register the process's UploadHandler without importing app modules."""
     global _upload_handler
@@ -39,9 +32,6 @@ def get_upload_handler():
     """Return the shared UploadHandler used by route and agent writers."""
     return _upload_handler
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     """
     Truncate text to *limit* characters with a suffix note.

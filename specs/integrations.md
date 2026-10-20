@@ -49,7 +49,7 @@ The local integration skill/helper files require `ODYSSEUS_URL` and `ODYSSEUS_AP
 
 ## Bundle Distribution
 
-`/api/codex/plugin.zip` ships the Codex plugin tree from `integrations/codex/`. `/api/claude/plugin.zip` ships only the Claude `skills/` subtree from `integrations/claude/skills/`. These routes require an authenticated browser/user request and do not embed an API token.
+`/api/codex/plugin.zip` ships the Codex plugin tree from `integrations/codex/`. `/api/claude/plugin.zip` ships only the Claude `skills/` subtree from `integrations/claude/skills/`, plus the one `odysseus_api.py` from `integrations/codex/scripts/`. These routes require an authenticated browser/user request and do not embed an API token.
 
 Setup instructions are duplicated in integration READMEs and `static/js/settings.js`; they need to stay aligned with live route surfaces and `/api/codex/capabilities`.
 

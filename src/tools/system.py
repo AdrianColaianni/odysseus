@@ -1,18 +1,9 @@
-"""System-domain tool implementations.
-
-Extracted from tool_implementations.py as part of slice 1 (#4082/#4071).
-Holds the skills/tasks tools plus the generic API bridges (api_call, app_api).
-The admin manage_* tools (endpoints, mcp, webhooks, tokens, settings) live in
-``src.agent_tools.admin_tools`` after the upstream registry migration (#3629);
-``src.tool_implementations`` re-exports both sets for backward compatibility.
-"""
+"""Skills/tasks agent tools plus the generic API bridges (api_call, app_api)."""
 import json
 import logging
-import os
-import re
 from typing import Any, Dict, List, Optional
 
-from src.tools._common import _parse_tool_args
+from src.tools._common import _INTERNAL_BASE, _internal_headers, parsed_tool_args
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +12,8 @@ logger = logging.getLogger(__name__)
 # Skills management tool
 # ---------------------------------------------------------------------------
 
-async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
+@parsed_tool_args
+async def do_manage_skills(args: dict, owner: Optional[str] = None) -> Dict:
     """Handle manage_skills tool calls.
 
     SKILL.md-backed CRUD with progressive disclosure (Hermes-style). Actions:
@@ -41,11 +33,6 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
       delete {name}              — Remove the skill directory.
       search {query}             — Relevance match on published skills.
     """
-    try:
-        args = _parse_tool_args(content)
-    except ValueError:
-        return {"error": "Invalid JSON arguments", "exit_code": 1}
-
     action = (args.get("action") or "").strip().lower()
     if not action:
         return {"error": "action is required (list|view|view_ref|add|edit|patch|publish|delete|search)", "exit_code": 1}
@@ -345,16 +332,12 @@ def _admin_task_action_denied(owner: Optional[str], task_type: Optional[str], ac
     return None
 
 
-async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
+@parsed_tool_args
+async def do_manage_tasks(args: dict, owner: Optional[str] = None) -> Dict:
     """Handle manage_tasks tool calls: CRUD on scheduled tasks."""
     import uuid as _uuid
     from core.database import SessionLocal, ScheduledTask
     from src.task_scheduler import compute_next_run
-
-    try:
-        args = _parse_tool_args(content)
-    except ValueError:
-        return {"error": "Invalid JSON arguments", "exit_code": 1}
 
     if not args.get("action") and any(args.get(k) is not None for k in ("task", "description", "schedule", "time", "day_of_week")):
         args["action"] = "create"
@@ -805,7 +788,8 @@ _APP_API_BLOCKLIST_METHOD_PATH = (
 )
 
 
-async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
+@parsed_tool_args
+async def do_app_api(args: dict, owner: Optional[str] = None) -> Dict:
     """Generic loopback to allowed internal Odysseus API endpoints. Lets the
     agent reach the full UI-button surface (cookbook, email, notes,
     calendar, skills, sessions, gallery, research, etc.) without us
@@ -823,18 +807,7 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
     refuses sensitive auth/user/admin/shell paths and method-specific
     host-control routes to keep blast radius bounded.
     """
-    # `_internal_headers` and `_INTERNAL_BASE` still live in
-    # tool_implementations.py (shared by many domain tools). Function-local
-    # import avoids a top-level circular dependency until a later task
-    # relocates them.
-    from src.tool_implementations import _internal_headers, _INTERNAL_BASE
-
     import httpx
-    try:
-        args = _parse_tool_args(content) if content.strip() else {}
-    except ValueError:
-        return {"error": "Invalid JSON arguments", "exit_code": 1}
-
     action = (args.get("action") or "call").lower()
     base = _INTERNAL_BASE
 

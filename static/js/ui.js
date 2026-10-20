@@ -4,11 +4,10 @@
  * UI utilities for toasts, modals, scrolling, and user feedback
  */
 
-import themeModule from './theme.js?v=20260911organsrain1';
 import * as Modals from './modalManager.js';
 import spinnerModule from './spinner.js';
 import { registerMenuDismiss, dismissTopEscapeLayer, dismissOrRemove } from './escMenuStack.js';
-import { nextToolWindowZ, topToolWindowZ } from './toolWindowZOrder.js';
+import { raiseToolWindow } from './toolWindowZOrder.js';
 
 let toastEl = null;
 let autoScrollEnabled = true;
@@ -152,9 +151,11 @@ function _closeHoveredWindow() {
   if (modalForWin?.id === 'email-lib-modal') {
     const closeBtn = document.getElementById('email-lib-close') || modalForWin.querySelector('.close-btn');
     if (closeBtn) {
-      try { closeBtn.click(); return true; } catch {}
+      closeBtn.click();
+      return true;
     }
-    try { modalForWin.remove(); return true; } catch {}
+    modalForWin.remove();
+    return true;
   }
   const id = _spaceWindowId(win);
   if (id && Modals.isRegistered(id)) {
@@ -164,11 +165,9 @@ function _closeHoveredWindow() {
   const modal = _visibleModalForSpace(win);
   if (!modal) return false;
   const closeBtn = modal.querySelector('.close-btn, .modal-close, .modal-close-btn, [data-action="close"]');
-  if (closeBtn) {
-    try { closeBtn.click(); return true; } catch {}
-  }
-  try { modal.classList.add('hidden'); return true; } catch {}
-  return false;
+  if (closeBtn) closeBtn.click();
+  else modal.classList.add('hidden');
+  return true;
 }
 
 function _spaceIsBlocked(e, surface) {
@@ -191,7 +190,7 @@ function _activateSpaceCard(card) {
   card.dataset.spaceToggle = '1';
   card.click();
   setTimeout(() => {
-    try { delete card.dataset.spaceToggle; } catch {}
+    delete card.dataset.spaceToggle;
   }, 0);
   return true;
 }
@@ -247,12 +246,13 @@ function _initHoverCardSpaceToggle() {
 _initHoverCardSpaceToggle();
 
 /**
- * Copy text to clipboard
+ * Copy text to clipboard. Resolves true when the copy went through.
  */
-export async function copyToClipboard(text) {
+export async function copyToClipboard(text, { toast = true } = {}) {
+  let ok;
   try {
     await navigator.clipboard.writeText(text);
-    showToast('Copied');
+    ok = true;
   }
   catch {
     const ta = document.createElement('textarea');
@@ -260,10 +260,11 @@ export async function copyToClipboard(text) {
     ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0';
     document.body.appendChild(ta);
     ta.select();
-    document.execCommand('copy');
+    try { ok = document.execCommand('copy'); } catch { ok = false; }
     document.body.removeChild(ta);
-    showToast('Copied');
   }
+  if (ok && toast) showToast('Copied');
+  return ok;
 }
 
 // Wire swipe-to-dismiss on the shared toast element. Runs once, the first
@@ -332,10 +333,10 @@ function _wireToastSwipe(el) {
  */
 export function showToast(msg, durationOrOpts) {
   fetch('/api/tasks/notification-logs', {
-    method: 'POST', credentials: 'same-origin',
+    method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ body: String(msg || ''), status: 'success' }),
-  }).catch(() => {});
+  }).catch((e) => console.warn('Toast notification log failed:', e));
   if (!toastEl) {
     toastEl = document.getElementById('toast');
   }
@@ -463,10 +464,10 @@ export function showToast(msg, durationOrOpts) {
  */
 export function showError(msg) {
   fetch('/api/tasks/notification-logs', {
-    method: 'POST', credentials: 'same-origin',
+    method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ body: String(msg || ''), status: 'error' }),
-  }).catch(() => {});
+  }).catch((e) => console.warn('Error notification log failed:', e));
   if (!toastEl) {
     toastEl = document.getElementById('toast');
   }
@@ -718,12 +719,7 @@ export function styledConfirm(message, { confirmText = 'Confirm', cancelText = '
     const titleEl = document.getElementById('styled-confirm-title');
     const okBtn = document.getElementById('styled-confirm-ok');
     const cancelBtn = document.getElementById('styled-confirm-cancel');
-    let altBtn = document.getElementById('styled-confirm-alt');
-    if (!altBtn) {
-      altBtn = document.createElement('button');
-      altBtn.id = 'styled-confirm-alt';
-      okBtn.parentNode.insertBefore(altBtn, okBtn);
-    }
+    const altBtn = document.getElementById('styled-confirm-alt');
 
     if (titleEl) titleEl.textContent = title || 'Confirm';
     msgEl.textContent = message;
@@ -753,7 +749,7 @@ export function styledConfirm(message, { confirmText = 'Confirm', cancelText = '
       altBtn.removeEventListener('click', onAlt);
       overlay.removeEventListener('click', onBackdrop);
       document.removeEventListener('keydown', onKey, true);
-      try { _prevFocus && _prevFocus.focus && _prevFocus.focus(); } catch {}
+      _prevFocus?.focus?.();
       resolve(result);
     }
     function onOk() { cleanup(true); }
@@ -857,7 +853,7 @@ export function styledPrompt(message, {
       overlay.removeEventListener('click', onBackdrop);
       document.removeEventListener('keydown', onKey);
       input.removeEventListener('keydown', onInputKey);
-      try { _prevFocus && _prevFocus.focus && _prevFocus.focus(); } catch {}
+      _prevFocus?.focus?.();
       resolve(result);
     }
     function onOk() { cleanup(inputType === 'password' ? input.value : (input.value || '').trim()); }
@@ -906,7 +902,7 @@ const _ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '
  * Canonical implementation — other modules should use uiModule.esc() instead of local copies.
  */
 export function esc(s) {
-  return (s || '').replace(/[&<>"']/g, (m) => _ESC_MAP[m]);
+  return String(s || '').replace(/[&<>"']/g, (m) => _ESC_MAP[m]);
 }
 
 // ── Mobile: suppress synthetic click/mousedown on backdrop ──
@@ -1240,22 +1236,12 @@ if ('ontouchstart' in window) {
 
 // ---- Bring modal to front on click ----
 {
-  const raiseModalToFront = (modal, floor = 250) => {
-    const z = nextToolWindowZ({
-      exclude: modal,
-      current: getComputedStyle(modal).zIndex,
-      floor,
-    });
-    modal.style.setProperty('z-index', String(z), 'important');
-    return z;
-  };
-
   document.addEventListener('mousedown', (e) => {
     const modalContent = e.target.closest('.modal-content');
     if (!modalContent) return;
     const modal = modalContent.closest('.modal');
     if (!modal) return;
-    raiseModalToFront(modal);
+    raiseToolWindow(modal);
   });
 
   // Backdrop tap to close — delegated for all modals
@@ -1315,16 +1301,11 @@ if ('ontouchstart' in window || window.innerWidth <= 768) {
       // a typeahead input rebuilds the DOM on every keystroke — would
       // re-scroll the modal and yank the page up and down as the user
       // types.
-      try {
-        const r = el.getBoundingClientRect();
-        const vh = (window.visualViewport?.height) || window.innerHeight;
-        const margin = 24;
-        const fullyVisible = r.top >= margin && r.bottom <= vh - margin;
-        if (fullyVisible) return;
-        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      } catch {
-        try { el.scrollIntoView(); } catch {}
-      }
+      const r = el.getBoundingClientRect();
+      const vh = (window.visualViewport?.height) || window.innerHeight;
+      const margin = 24;
+      if (r.top >= margin && r.bottom <= vh - margin) return;
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
     }, 300);
   });
 }
@@ -1336,29 +1317,13 @@ if ('ontouchstart' in window || window.innerWidth <= 768) {
 if (!window._odyEscExpandGuard) {
   window._odyEscExpandGuard = true;
 
-  // Auto-promote any modal that becomes visible to the top of the z-stack.
-  // Every modal shares `z-index: 250` from the base `.modal` rule, so visual
-  // stacking falls back to DOM order — which is unpredictable (cookbook is
-  // a static HTML node, calendar gets appended once and stays, compare and
-  // research get re-appended on each open). Result: opening compare AFTER
-  // cookbook can render compare UNDER it. Bumping the z-index on every
-  // open guarantees most-recently-opened wins both visually AND for ESC.
-  let _zCounter = 1000;
+  // Every modal shares the base `.modal` z-index, so stacking would fall back
+  // to DOM order; raise each modal as it becomes visible so the most recently
+  // opened wins visually and for ESC.
   const _isVisible = (m) => !m.classList.contains('hidden') && getComputedStyle(m).display !== 'none';
   const _promote = (m) => {
     if (!m?.classList?.contains('modal') || !_isVisible(m)) return;
-    // Re-entry guard: setting style.zIndex itself fires the observer that
-    // calls us back. Skip if this element is already pinned to the top
-    // (matches the current counter) so we don't spin into an infinite loop.
-    const cur = parseInt(getComputedStyle(m).zIndex, 10) || 0;
-    if (cur === _zCounter && cur > topToolWindowZ({ exclude: m })) return;
-    const z = nextToolWindowZ({
-      exclude: m,
-      current: cur,
-      floor: _zCounter,
-    });
-    _zCounter = Math.max(_zCounter, z);
-    if (z !== cur) m.style.setProperty('z-index', String(z), 'important');
+    raiseToolWindow(m);
   };
   new MutationObserver((muts) => {
     for (const m of muts) {
@@ -1402,9 +1367,7 @@ if (!window._odyEscExpandGuard) {
     const calendarEventForm = calendarModal?.querySelector('.cal-form');
     if (calendarEventForm && _isVisible(calendarModal)) {
       e.stopImmediatePropagation(); e.preventDefault();
-      try {
-        (calendarEventForm.querySelector('#cal-f-cancel, #cal-form-mobile-cancel'))?.click();
-      } catch {}
+      calendarEventForm.querySelector('#cal-f-cancel, #cal-form-mobile-cancel')?.click();
       return;
     }
     // Selection mode is rendered as a visible bulk bar in several modules.
@@ -1432,7 +1395,7 @@ if (!window._odyEscExpandGuard) {
     }
     if (selectionCancel) {
       e.stopImmediatePropagation(); e.preventDefault();
-      try { selectionCancel.click(); } catch {}
+      selectionCancel.click();
       return;
     }
     // Bulk selection is an inner Gallery layer, so cancel it before the
@@ -1451,16 +1414,16 @@ if (!window._odyEscExpandGuard) {
     const think = document.querySelector('.thinking-content.expanded');
     if (expanded) {
       e.stopImmediatePropagation(); e.preventDefault();
-      try { expanded.click(); } catch {}
+      expanded.click();
       return;
     }
     if (think) {
       e.stopImmediatePropagation(); e.preventDefault();
       const thinkHeader = think.closest('.thinking-section')?.querySelector('.thinking-header[data-thinking-id]');
-      if (thinkHeader) { try { thinkHeader.click(); } catch {} }
+      if (thinkHeader) thinkHeader.click();
       else {
         // No header found — collapse the content directly.
-        try { think.classList.remove('expanded'); } catch {}
+        think.classList.remove('expanded');
       }
       return;
     }
@@ -1501,7 +1464,7 @@ if (!window._odyEscExpandGuard) {
     const closeBtn = topModal.querySelector('.close-btn, .modal-close-btn, [data-action="close"]');
     e.stopImmediatePropagation();
     e.preventDefault();
-    if (closeBtn) { try { closeBtn.click(); } catch {} }
-    else { try { topModal.classList.add('hidden'); } catch {} }
+    if (closeBtn) closeBtn.click();
+    else topModal.classList.add('hidden');
   }, true);
 }

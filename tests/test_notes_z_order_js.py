@@ -5,51 +5,30 @@ shared tool-window stack helper must account for both Notes and normal modals
 without importing the full browser-heavy modules.
 """
 
-import json
-import shutil
-import subprocess
-import textwrap
 from pathlib import Path
 
-import pytest
+from tests.helpers.node import run_node_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "static" / "js" / "toolWindowZOrder.js"
-pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node binary not on PATH")
-
-
-def _node_eval(source: str):
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=source,
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert proc.returncode == 0, proc.stderr
-    return json.loads(proc.stdout.strip())
 
 
 def test_notes_z_order_uses_floor_when_no_tool_windows_are_open():
-    values = _node_eval(
-        textwrap.dedent(
-            f"""
+    values = run_node_module(
+        f"""
             import {{ topToolWindowZ }} from '{HELPER.as_uri()}';
             const root = {{ querySelectorAll() {{ return []; }} }};
             console.log(JSON.stringify({{ z: topToolWindowZ({{ root, getStyle: () => ({{}}) }}) }}));
             """
-        )
     )
 
     assert values == {"z": 250}
 
 
 def test_notes_z_order_lands_above_highest_visible_tool_window():
-    values = _node_eval(
-        textwrap.dedent(
-            f"""
+    values = run_node_module(
+        f"""
             import {{ topToolWindowZ }} from '{HELPER.as_uri()}';
             const cls = (...names) => ({{ contains: (name) => names.includes(name) }});
             const elements = [
@@ -61,16 +40,14 @@ def test_notes_z_order_lands_above_highest_visible_tool_window():
             const top = topToolWindowZ({{ root, getStyle: (el) => el.style }});
             console.log(JSON.stringify({{ top, notes: top + 1 }}));
             """
-        )
     )
 
     assert values == {"top": 415, "notes": 416}
 
 
 def test_modal_z_order_handoff_lands_above_notes_tie_on_first_click():
-    values = _node_eval(
-        textwrap.dedent(
-            f"""
+    values = run_node_module(
+        f"""
             import {{ nextToolWindowZ }} from '{HELPER.as_uri()}';
             const cls = (...names) => ({{ contains: (name) => names.includes(name) }});
             const modal = {{ id: 'modal', classList: cls(), style: {{ zIndex: '416' }} }};
@@ -85,16 +62,14 @@ def test_modal_z_order_handoff_lands_above_notes_tie_on_first_click():
             }});
             console.log(JSON.stringify({{ z }}));
             """
-        )
     )
 
     assert values == {"z": 417}
 
 
 def test_modal_z_order_keeps_current_z_when_already_above_stack():
-    values = _node_eval(
-        textwrap.dedent(
-            f"""
+    values = run_node_module(
+        f"""
             import {{ nextToolWindowZ }} from '{HELPER.as_uri()}';
             const cls = (...names) => ({{ contains: (name) => names.includes(name) }});
             const modal = {{ id: 'modal', classList: cls(), style: {{ zIndex: '420' }} }};
@@ -108,16 +83,14 @@ def test_modal_z_order_keeps_current_z_when_already_above_stack():
             }});
             console.log(JSON.stringify({{ z }}));
             """
-        )
     )
 
     assert values == {"z": 420}
 
 
 def test_notes_z_order_ignores_hidden_minimized_and_excluded_windows():
-    values = _node_eval(
-        textwrap.dedent(
-            f"""
+    values = run_node_module(
+        f"""
             import {{ topToolWindowZ }} from '{HELPER.as_uri()}';
             const cls = (...names) => ({{ contains: (name) => names.includes(name) }});
             const excluded = {{ id: 'notes', classList: cls(), style: {{ zIndex: '900' }} }};
@@ -133,7 +106,6 @@ def test_notes_z_order_ignores_hidden_minimized_and_excluded_windows():
             const top = topToolWindowZ({{ exclude: excluded, root, getStyle: (el) => el.style }});
             console.log(JSON.stringify({{ top }}));
             """
-        )
     )
 
     assert values == {"top": 310}

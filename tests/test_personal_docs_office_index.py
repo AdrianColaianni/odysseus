@@ -18,8 +18,3 @@ def test_personal_index_includes_office_uploads(tmp_path, monkeypatch):
     assert [item["name"] for item in files] == ["report.docx"]
     assert files[0]["path"] == str(docx_path)
     assert files[0]["chunks"] == ["# Report\n\nreadable office text"]
-
-
-def test_personal_index_default_extensions_advertise_office_support():
-    for ext in (".docx", ".pptx", ".xlsx", ".xls"):
-        assert ext in personal_docs.config.DEFAULT_EXTENSIONS

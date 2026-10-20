@@ -112,17 +112,7 @@ async def test_host_shell_auto_polls_implicit_long_job(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("payload", "expected_error"),
-    [
-        ({"error": "request rejected", "exit_code": 1}, "request rejected"),
-        ({"output": "looks fine", "exit_code": "zero"}, "invalid exit_code"),
-        ({"output": "looks fine", "exit_code": False}, "invalid exit_code"),
-    ],
-)
-async def test_host_shell_turns_malformed_bridge_results_into_tool_failures(
-    monkeypatch, payload, expected_error,
-):
+async def test_host_shell_turns_malformed_bridge_results_into_tool_failures(monkeypatch):
     from src.agent_tools import subprocess_tools
 
     class Client:
@@ -139,21 +129,24 @@ async def test_host_shell_turns_malformed_bridge_results_into_tool_failures(
             return _FakeResponse(payload)
 
     monkeypatch.setattr(subprocess_tools.httpx, "AsyncClient", Client)
-    result = await subprocess_tools.HostShellTool().execute(
-        '{"command":"printf ready"}',
-        {
-            "client_runtime_context": {
-                "host_shell_bridge": {
-                    "url": "http://127.0.0.1:17654/run",
-                    "token": "bridge-token",
+    for payload, expected_error in (
+        ({"error": "request rejected", "exit_code": 1}, "request rejected"),
+        ({"output": "looks fine", "exit_code": False}, "invalid exit_code"),
+    ):
+        result = await subprocess_tools.HostShellTool().execute(
+            '{"command":"printf ready"}',
+            {
+                "client_runtime_context": {
+                    "host_shell_bridge": {
+                        "url": "http://127.0.0.1:17654/run",
+                        "token": "bridge-token",
+                    }
                 }
-            }
-        },
-    )
-
-    assert expected_error in result["error"]
-    assert result["exit_code"] == 1
-    assert result["host_bridge"] == "tui"
+            },
+        )
+        assert expected_error in result["error"]
+        assert result["exit_code"] == 1
+        assert result["host_bridge"] == "tui"
 
 
 @pytest.mark.asyncio

@@ -3,16 +3,12 @@ import mimetypes
 import os
 import sys
 import asyncio
+import importlib
 import time
 import shutil
 import socket
 
-# On Windows, asyncio.create_subprocess_exec/shell require the ProactorEventLoop.
-# When started via `python -m uvicorn` from a terminal, uvicorn sets this
-# automatically. But the VS Code debugger (and other non-uvicorn entrypoints)
-# use the default SelectorEventLoop, which raises NotImplementedError on any
-# subprocess call. Force ProactorEventLoop here so the right loop is always
-# used, regardless of how the process is launched.
+# Windows subprocesses need the ProactorEventLoop, which only uvicorn's own CLI sets.
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
@@ -42,14 +38,9 @@ if os.name == "nt":
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 from dotenv import load_dotenv
-# encoding="utf-8-sig" tolerates a UTF-8 BOM in .env — a common Windows gotcha
-# when the file is saved from Notepad. Without this, the first key parses as
-# "﻿AUTH_ENABLED" instead of "AUTH_ENABLED", so AUTH_ENABLED=false (etc.)
-# is silently ignored and the user is unexpectedly forced to log in (issue #142).
-# utf-8-sig reads plain UTF-8 (no BOM) identically, so this is safe everywhere.
+# utf-8-sig drops the BOM Notepad writes, which would otherwise rename the first key.
 load_dotenv(encoding="utf-8-sig")
 
-import asyncio
 import logging
 import secrets
 from datetime import datetime, timezone
@@ -65,10 +56,10 @@ from starlette.middleware.gzip import GZipMiddleware
 
 # Core imports
 from core.constants import (
-    BASE_DIR, STATIC_DIR, SESSIONS_FILE,
-    REQUEST_TIMEOUT, OPENAI_API_KEY, AUTH_FILE,
+    APP_PORT, BASE_DIR, DATA_DIR, STATIC_DIR, SESSIONS_FILE,
+    REQUEST_TIMEOUT, OPENAI_API_KEY,
 )
-from core.database import SessionLocal, ApiToken
+from core.database import SessionLocal, ApiToken, init_db
 from core.middleware import (
     SecurityHeadersMiddleware,
     get_application_route_path,
@@ -91,7 +82,6 @@ from starlette.responses import RedirectResponse
 
 # ========= LOGGING =========
 import logging.handlers
-from core.constants import DATA_DIR
 
 _root_logger = logging.getLogger()
 _root_logger.setLevel(logging.INFO)
@@ -123,10 +113,10 @@ except Exception as e:
 
 logger = logging.getLogger(__name__)
 
+# Before the managers below, which read the database while app.py loads.
+init_db()
+
 # ========= APP =========
-# Lifespan is defined below (after all helpers it references are in scope)
-# and passed to FastAPI so we can use the modern context-manager lifecycle
-# instead of the deprecated @app.on_event("startup"/"shutdown") decorators.
 app = FastAPI(
     title="AI Chat Application",
     description="Comprehensive AI chat with memory, research, and multi-modal capabilities",
@@ -155,13 +145,7 @@ app.add_middleware(
 )
 
 # ========= RESPONSE COMPRESSION (gzip) =========
-# The frontend's text assets (style.css, index.html, the JS bundles) shipped
-# uncompressed on every cold load. gzip cuts CSS/JS/HTML by ~75-85% on the wire
-# with no behavioural change. Starlette's GZipMiddleware excludes
-# `text/event-stream` by default, so the SSE streams (chat, shell, research,
-# model-probe — all served with media_type="text/event-stream") are never
-# compressed or buffered; only complete bodies over minimum_size are. The
-# security-header middleware composes cleanly on top.
+# GZipMiddleware skips text/event-stream, so SSE streams are never buffered.
 if os.getenv("RESPONSE_COMPRESSION_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}:
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 
@@ -170,15 +154,7 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 
 # ========= REQUEST TIMEOUT (FALLBACK FOR HUNG HANDLERS) =========
-# If a single request takes longer than REQUEST_HARD_TIMEOUT, abort it and
-# return 504 instead of holding the event loop hostage. Whitelisted paths
-# (streaming, long-running shell exec, research) are exempt because they
-# legitimately stay open. Without this, a single hung subprocess.run or
-# missing-timeout httpx call locks up the entire server for everyone.
-import asyncio as _asyncio
-from starlette.middleware.base import BaseHTTPMiddleware as _BaseHTTPMiddleware
-from starlette.responses import JSONResponse as _JSONResponse
-
+# Streaming and long-running paths are exempt because they legitimately stay open.
 REQUEST_HARD_TIMEOUT = float(os.getenv("REQUEST_HARD_TIMEOUT", "45"))
 _TIMEOUT_EXEMPT_PREFIXES = (
     "/api/chat",            # streaming
@@ -194,21 +170,21 @@ _TIMEOUT_EXEMPT_PREFIXES = (
 )
 
 
-class _RequestTimeoutMiddleware(_BaseHTTPMiddleware):
+class _RequestTimeoutMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         path = request.url.path or ""
         if any(path.startswith(p) for p in _TIMEOUT_EXEMPT_PREFIXES):
             return await call_next(request)
         try:
-            return await _asyncio.wait_for(call_next(request), timeout=REQUEST_HARD_TIMEOUT)
-        except _asyncio.TimeoutError:
-            return _JSONResponse(
+            return await asyncio.wait_for(call_next(request), timeout=REQUEST_HARD_TIMEOUT)
+        except asyncio.TimeoutError:
+            return JSONResponse(
                 {"detail": f"Request exceeded {REQUEST_HARD_TIMEOUT:.0f}s timeout"},
                 status_code=504,
             )
 
 
-class _InteractiveActivityMiddleware(_BaseHTTPMiddleware):
+class _InteractiveActivityMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         from src.interactive_gate import should_track_interactive_request, track_interactive_request
 
@@ -225,7 +201,7 @@ class _InteractiveActivityMiddleware(_BaseHTTPMiddleware):
             return await call_next(request)
 
 
-class _SlowRequestLogMiddleware(_BaseHTTPMiddleware):
+class _SlowRequestLogMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         start = time.perf_counter()
         status = 500
@@ -278,14 +254,8 @@ if AUTH_ENABLED:
         "/login",
     }
     AUTH_EXEMPT_PREFIXES = ["/static"]
-    # Dynamic paths whose own handler proves identity via a path-embedded
-    # secret instead of the session/bearer auth. The route handler at
-    # routes/task_routes.py validates the per-task `webhook_token` itself
-    # and returns 404 on mismatch, so the path is the credential — the
-    # UI labels these URLs "no auth needed" precisely because external
-    # callers (Zapier, n8n, curl) can't supply a session cookie. Without
-    # this exemption AuthMiddleware rejects every POST with 401 before
-    # the token is ever checked.
+    # The task webhook handler checks the path-embedded webhook_token itself,
+    # since external callers (Zapier, n8n, curl) have no session cookie.
     import re as _re
     AUTH_EXEMPT_PATTERNS = [
         _re.compile(r"^/api/tasks/[^/]+/webhook/[^/]+/?$"),
@@ -304,8 +274,7 @@ if AUTH_ENABLED:
     # version bumps (token created/revoked) — see _token_cache_invalidate
     # in app.state, called by routes/api_token_routes.
     _token_cache: dict = {}
-    _token_cache_lock = _asyncio.Lock()
-    _token_cache_dirty = True
+    _token_cache_lock = asyncio.Lock()
 
     def _token_cache_invalidate():
         nonlocal_dict = app.state.__dict__
@@ -428,7 +397,7 @@ if AUTH_ENABLED:
                     if app.state._token_cache_dirty:
                         async with _token_cache_lock:
                             if app.state._token_cache_dirty:
-                                await _asyncio.to_thread(_refresh_token_cache)
+                                await asyncio.to_thread(_refresh_token_cache)
                     candidates = list(_token_cache.get(prefix, ()))
                     matched_id = None
                     matched_owner = None
@@ -454,10 +423,10 @@ if AUTH_ENABLED:
                                 finally:
                                     _db.close()
                             try:
-                                await _asyncio.to_thread(_do)
+                                await asyncio.to_thread(_do)
                             except Exception as _e:
                                 logger.debug("Failed to update token last_used_at", exc_info=_e)
-                        _asyncio.create_task(_touch_last_used(matched_id))
+                        asyncio.create_task(_touch_last_used(matched_id))
                         # Keep bearer-token callers out of normal cookie/user
                         request.state.current_user = "api"
                         request.state.api_token = True
@@ -471,8 +440,8 @@ if AUTH_ENABLED:
                 return JSONResponse(status_code=401, content={"error": "Invalid API token"})
 
             # --- Cookie-based session auth ---
-            token = request.cookies.get(SESSION_COOKIE)
-            if not auth_manager.validate_token(token):
+            username = auth_manager.get_username_for_token(request.cookies.get(SESSION_COOKIE))
+            if username is None:
                 if path.startswith("/api/"):
                     return JSONResponse(status_code=401, content={"error": "Not authenticated"})
                 return RedirectResponse(
@@ -480,8 +449,7 @@ if AUTH_ENABLED:
                     status_code=302,
                 )
 
-            # Attach current username to request state for downstream routes
-            request.state.current_user = auth_manager.get_username_for_token(token)
+            request.state.current_user = username
             request.state.api_token = False
             return await call_next(request)
 
@@ -491,17 +459,9 @@ else:
     logger.info("Auth middleware disabled (set AUTH_ENABLED=true to enable)")
 
 # ========= STATIC FILES =========
-os.makedirs(STATIC_DIR, exist_ok=True)
-
-
 class _RevalidatingStatic(StaticFiles):
-    """Serve static assets normally, but force the browser to REVALIDATE
-    source files (.js/.css/.html) on every load instead of serving a stale
-    copy from disk cache. The app ships raw ES modules with no build step or
-    versioned URLs, so browsers were caching modules across deploys — a code
-    change wouldn't appear without a manual hard-refresh. `no-cache` keeps the
-    cached bytes but requires a conditional request; unchanged files still
-    return a cheap 304 (ETag/Last-Modified are preserved)."""
+    """Make browsers revalidate .js/.css/.html: the ES modules ship with no
+    versioned URLs, so a cached copy would outlive a deploy."""
 
     async def get_response(self, path, scope):
         resp = await super().get_response(path, scope)
@@ -597,15 +557,7 @@ from services.youtube import init_youtube
 init_youtube()
 
 # ========= RAG (vector document RAG) =========
-# VectorRAG (ChromaDB-backed personal-document semantic search). Initialized
-# lazily via get_rag_manager() — returns None if ChromaDB isn't reachable
-# (no server running on the configured host:port), in which case personal-doc
-# routes return a clean 503 instead of busy-retrying every request.
-#
-# Note: this was previously hardcoded off because chromadb 1.4.1 / pydantic
-# 2.12 were mutually incompatible at the time. With the current pins
-# (chromadb 1.5.x + pydantic 2.13.x) the init works and Personal Docs
-# (POST /api/personal/add_directory etc.) is functional again.
+# get_rag_manager() returns None when ChromaDB is unreachable; personal-doc routes then 503.
 from src.rag_singleton import get_rag_manager
 rag_manager = get_rag_manager()
 rag_available = rag_manager is not None
@@ -616,9 +568,6 @@ else:
         "Vector document RAG not available at startup "
         "(ChromaDB may not be reachable yet — routes will retry lazily)"
     )
-
-# ========= IMPORT CONFIG =========
-from src.config import config
 
 # ========= COMPONENT INITIALIZATION =========
 from src.app_initializer import initialize_managers
@@ -654,21 +603,15 @@ tts_service = get_tts_service()
 logger.info("TTS service initialized (provider managed via admin settings)")
 
 # ========= EXCEPTION HANDLERS =========
-@app.exception_handler(SessionNotFoundError)
-async def session_not_found_handler(request: Request, exc: SessionNotFoundError):
-    return JSONResponse(status_code=404, content={"error": "SESSION_NOT_FOUND", "message": str(exc)})
-
-@app.exception_handler(InvalidFileUploadError)
-async def invalid_file_upload_handler(request: Request, exc: InvalidFileUploadError):
-    return JSONResponse(status_code=400, content={"error": "INVALID_FILE_UPLOAD", "message": str(exc)})
-
-@app.exception_handler(LLMServiceError)
-async def llm_service_error_handler(request: Request, exc: LLMServiceError):
-    return JSONResponse(status_code=502, content={"error": "LLM_SERVICE_ERROR", "message": str(exc)})
-
-@app.exception_handler(WebSearchError)
-async def web_search_error_handler(request: Request, exc: WebSearchError):
-    return JSONResponse(status_code=502, content={"error": "WEB_SEARCH_ERROR", "message": str(exc)})
+for _exc_type, (_status, _code) in {
+    SessionNotFoundError: (404, "SESSION_NOT_FOUND"),
+    InvalidFileUploadError: (400, "INVALID_FILE_UPLOAD"),
+    LLMServiceError: (502, "LLM_SERVICE_ERROR"),
+    WebSearchError: (502, "WEB_SEARCH_ERROR"),
+}.items():
+    async def _error_handler(request: Request, exc: Exception, _status=_status, _code=_code):
+        return JSONResponse(status_code=_status, content={"error": _code, "message": str(exc)})
+    app.add_exception_handler(_exc_type, _error_handler)
 
 # ========= WEBHOOK MANAGER =========
 from src.webhook_manager import WebhookManager
@@ -712,11 +655,6 @@ upload_router, upload_cleanup_func = setup_upload_routes(upload_handler)
 app.include_router(upload_router)
 upload_cleanup_task = None
 
-# Emoji SVG proxy (same-origin, lazy-cached Twemoji) — lets the chat render
-# emojis as flat SVG instead of system color glyphs.
-from routes.emoji_routes import setup_emoji_routes
-app.include_router(setup_emoji_routes())
-
 # Sessions
 from routes.session_routes import setup_session_routes
 session_config = {"REQUEST_TIMEOUT": REQUEST_TIMEOUT, "OPENAI_API_KEY": OPENAI_API_KEY, "SESSIONS_FILE": SESSIONS_FILE}
@@ -757,41 +695,21 @@ app.include_router(setup_research_routes(research_handler, session_manager=sessi
 from routes.history.history_routes import setup_history_routes
 app.include_router(setup_history_routes(session_manager, upload_handler=upload_handler))
 
-# Search
-from routes.search.search_routes import setup_search_routes
-app.include_router(setup_search_routes(config))
-
 # Presets
 from routes.preset_routes import setup_preset_routes
 app.include_router(setup_preset_routes(preset_manager))
 
 # Diagnostics
 from routes.diagnostics_routes import setup_diagnostics_routes
-app.include_router(setup_diagnostics_routes(rag_manager, rag_available, research_handler, memory_vector))
-
-# Cleanup
-from routes.cleanup.cleanup_routes import setup_cleanup_routes
-app.include_router(setup_cleanup_routes(session_manager))
+app.include_router(setup_diagnostics_routes(rag_manager, memory_vector))
 
 # Personal docs
 from routes.personal_routes import setup_personal_routes
 app.include_router(setup_personal_routes(personal_docs_mgr, rag_manager, rag_available))
 
-# Embedding model management
-from routes.embedding_routes import setup_embedding_routes
-app.include_router(setup_embedding_routes())
-
 # Models
 from routes.model_routes import setup_model_routes
 app.include_router(setup_model_routes(model_discovery))
-
-# GitHub Copilot device-flow login
-from routes.copilot_routes import setup_copilot_routes
-app.include_router(setup_copilot_routes())
-
-# ChatGPT Subscription device-flow login
-from routes.chatgpt_subscription_routes import setup_chatgpt_subscription_routes
-app.include_router(setup_chatgpt_subscription_routes())
 
 # TTS
 from routes.tts_routes import setup_tts_routes
@@ -809,18 +727,6 @@ from routes.document.document_routes import setup_document_routes
 document_router = setup_document_routes(session_manager, upload_handler)
 app.include_router(document_router)
 
-# Signatures (reusable image stamps)
-from routes.signature_routes import setup_signature_routes
-app.include_router(setup_signature_routes())
-
-# Gallery (image library)
-from routes.gallery.gallery_routes import setup_gallery_routes
-app.include_router(setup_gallery_routes())
-
-# Persisted image-editor drafts (server-backed projects)
-from routes.editor_draft_routes import setup_editor_draft_routes
-app.include_router(setup_editor_draft_routes())
-
 # Scheduled tasks + event bus
 from src.task_scheduler import TaskScheduler
 task_scheduler = TaskScheduler(session_manager)
@@ -837,35 +743,13 @@ from routes.calendar_routes import setup_calendar_routes
 calendar_router = setup_calendar_routes(upload_handler=upload_handler)
 app.include_router(calendar_router)
 
-# Shell (user-facing command execution)
-from routes.shell_routes import setup_shell_routes
-app.include_router(setup_shell_routes())
-
-# Cookbook (model download/serve/cache, cookbook state sync)
-from routes.cookbook_routes import setup_cookbook_routes
-app.include_router(setup_cookbook_routes())
-
-from routes.workspace_routes import setup_workspace_routes
-app.include_router(setup_workspace_routes())
-
-# Hardware model fitting (cookbook "What Fits?" tab)
-from routes.hwfit_routes import setup_hwfit_routes
-app.include_router(setup_hwfit_routes())
-
 # Model A/B Comparison
 from routes.compare.compare_routes import setup_compare_routes
 app.include_router(setup_compare_routes(session_manager))
 
-# User Preferences
-from routes.prefs_routes import setup_prefs_routes
-app.include_router(setup_prefs_routes())
-
 # Backup (export/import user data)
 from routes.backup_routes import setup_backup_routes
 app.include_router(setup_backup_routes(memory_manager, preset_manager, skills_manager))
-
-from routes.font_routes import setup_font_routes
-app.include_router(setup_font_routes())
 
 
 # MCP (Model Context Protocol)
@@ -889,18 +773,14 @@ logger.info("AI interaction tools initialized (session, memory, RAG, UI control)
 from routes.webhook.webhook_routes import setup_webhook_routes
 app.include_router(setup_webhook_routes(webhook_manager, auth_manager, session_manager, api_key_manager))
 
-# API Tokens
-from routes.api_token_routes import setup_api_token_routes
-app.include_router(setup_api_token_routes())
-
-logger.info("Webhook & API token routes initialized")
+logger.info("Webhook routes initialized")
 
 # Notes (Google Keep-style notes/todos)
 from routes.note.note_routes import setup_note_routes
 app.include_router(setup_note_routes(task_scheduler, upload_handler=upload_handler))
 
 # Email
-from routes.email_routes import setup_email_routes
+from routes.email.email_routes import setup_email_routes
 email_router = setup_email_routes()
 app.include_router(email_router)
 
@@ -918,15 +798,28 @@ app.include_router(setup_codex_routes(
 ))
 app.include_router(setup_claude_routes())
 
-from routes.vault.vault_routes import setup_vault_routes
-app.include_router(setup_vault_routes())
 
-# Contacts (CardDAV)
-from routes.contacts.contacts_routes import setup_contacts_routes
-app.include_router(setup_contacts_routes())
-
-from companion import setup_companion_routes
-app.include_router(setup_companion_routes())
+# Routers whose factories take no arguments.
+for _module, _factory in (
+    ("routes.emoji_routes", "setup_emoji_routes"),
+    ("routes.search.search_routes", "setup_search_routes"),
+    ("routes.copilot_routes", "setup_copilot_routes"),
+    ("routes.chatgpt_subscription_routes", "setup_chatgpt_subscription_routes"),
+    ("routes.signature_routes", "setup_signature_routes"),
+    ("routes.gallery.gallery_routes", "setup_gallery_routes"),
+    ("routes.editor_draft_routes", "setup_editor_draft_routes"),
+    ("routes.shell_routes", "setup_shell_routes"),
+    ("routes.cookbook_routes", "setup_cookbook_routes"),
+    ("routes.workspace_routes", "setup_workspace_routes"),
+    ("routes.hwfit_routes", "setup_hwfit_routes"),
+    ("routes.prefs_routes", "setup_prefs_routes"),
+    ("routes.font_routes", "setup_font_routes"),
+    ("routes.api_token_routes", "setup_api_token_routes"),
+    ("routes.vault.vault_routes", "setup_vault_routes"),
+    ("routes.contacts.contacts_routes", "setup_contacts_routes"),
+    ("companion", "setup_companion_routes"),
+):
+    app.include_router(getattr(importlib.import_module(_module), _factory)())
 
 # ========= ROUTES (kept in app.py) =========
 
@@ -942,41 +835,9 @@ async def serve_index(request: Request):
     # bundled-template routes instead of mislabelling the fault as a 404.
     return serve_html_with_nonce(request, abs_join(BASE_DIR, "index.html"))
 
-@app.get("/notes")
-async def serve_notes(request: Request):
-    return await serve_index(request)
-
-@app.get("/calendar")
-async def serve_calendar(request: Request):
-    return await serve_index(request)
-
-# Per-tool deep-link routes — all serve the same SPA, the JS auto-opens
-# the matching modal based on window.location.pathname. Each route also
-# gets a unique favicon + page title via inline script in index.html so
-# bookmarks render with tool-specific icons.
-@app.get("/cookbook")
-async def serve_cookbook(request: Request):
-    return await serve_index(request)
-
-@app.get("/email")
-async def serve_email(request: Request):
-    return await serve_index(request)
-
-@app.get("/memory")
-async def serve_memory(request: Request):
-    return await serve_index(request)
-
-@app.get("/gallery")
-async def serve_gallery(request: Request):
-    return await serve_index(request)
-
-@app.get("/tasks")
-async def serve_tasks(request: Request):
-    return await serve_index(request)
-
-@app.get("/library")
-async def serve_library(request: Request):
-    return await serve_index(request)
+# Deep links: the SPA opens the matching tool from window.location.pathname.
+for _path in ("/notes", "/calendar", "/cookbook", "/email", "/memory", "/gallery", "/tasks", "/library"):
+    app.add_api_route(_path, serve_index, methods=["GET"])
 
 @app.get("/backgrounds")
 async def serve_backgrounds(request: Request):
@@ -1267,15 +1128,7 @@ async def _startup_event():
 
     async def _ensure_default_tasks():
         # Create/reconcile default automation tasks + personal assistant for every user.
-        owners = set()
-        try:
-            import json as _json
-            auth_path = AUTH_FILE
-            with open(auth_path, encoding="utf-8") as f:
-                users = _json.load(f).get("users", {})
-            owners.update(users.keys())
-        except Exception as e:
-            logger.debug(f"Default task auth-owner scan: {e}")
+        owners = set(auth_manager.users)
 
         # Also reconcile owners already present in scheduled_tasks. This cleans
         # up stale/demo/deleted-user built-ins that are no longer in auth.json;
@@ -1324,10 +1177,7 @@ async def _startup_event():
         logger.debug(f"Built-in skill installation skipped: {e}")
 
     try:
-        import json as _json
-        auth_path = AUTH_FILE
-        with open(auth_path, encoding="utf-8") as f:
-            users = _json.load(f).get("users", {})
+        users = auth_manager.users
         primary_owner = None
         for uname, udata in users.items():
             if udata.get("is_admin") is True:
@@ -1373,12 +1223,7 @@ async def _startup_event():
     # an authenticated owner's skill namespace, and its model activity can
     # defer the real per-owner task at the same time of night.
 
-    # Cookbook serve lifecycle — kills scheduler-launched serves whose
-    # window-end has passed. Paired with the cookbook_serve builtin
-    # action; both are no-ops unless a scheduled task actually launches
-    # something with end_after_min set. Removing this line + the
-    # cookbook_serve entry in BUILTIN_ACTIONS + src/cookbook_serve_lifecycle.py
-    # removes the feature.
+    # Stops scheduler-launched serves past their window; pairs with the cookbook_serve builtin action.
     from src.cookbook_serve_lifecycle import cookbook_serve_lifecycle_loop
     _startup_tasks.append(asyncio.create_task(cookbook_serve_lifecycle_loop()))
 
@@ -1415,8 +1260,8 @@ async def _shutdown_event():
     # Stop task scheduler (no-op if it never started under the gate)
     try:
         await task_scheduler.stop()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Task scheduler shutdown error: {e}")
     # Close webhook manager
     try:
         await webhook_manager.close()
@@ -1434,6 +1279,5 @@ if __name__ == "__main__":
     import uvicorn
 
     bind_host = os.getenv("APP_BIND", "127.0.0.1")
-    bind_port = int(os.getenv("APP_PORT", "7011"))
 
-    uvicorn.run(app, host=bind_host, port=bind_port, log_level="info")
+    uvicorn.run(app, host=bind_host, port=APP_PORT, log_level="info")

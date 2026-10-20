@@ -4,12 +4,8 @@ from types import SimpleNamespace
 from tests.helpers.cli_loader import load_script
 
 
-def _load_cli():
-    return load_script("odysseus-research")
-
-
 def test_list_skips_non_object_research_records(tmp_path, monkeypatch):
-    cli = _load_cli()
+    cli = load_script("odysseus-research")
     cli._DATA_DIR = tmp_path
     (tmp_path / "good.json").write_text(json.dumps({"query": "hello", "status": "complete"}))
     (tmp_path / "list.json").write_text("[]")

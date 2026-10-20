@@ -1,35 +1,7 @@
 """Browser coverage for undoable rich-text table header controls."""
 
-import json
-import subprocess
-from pathlib import Path
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source, function_body
-
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-
-
-def test_table_header_controls_use_tag_replacement_and_native_history():
-    table_actions = DOC_JS.split("function _applyRichTableAction", 1)[1].split(
-        "function applyMdFormat", 1
-    )[0]
-    menu_state = function_body("_richDropdownCurrentActions")
-
-    assert "function _replaceRichTableCellTag" in DOC_JS
-    assert "table:toggle-header-row" in table_actions
-    assert "table:toggle-header-column" in table_actions
-    assert "const headerModes = _richTableHeaderModes(clone)" in table_actions
-    assert "headerModes.headerRow = !headerModes.headerRow" in table_actions
-    assert "headerModes.headerColumn = !headerModes.headerColumn" in table_actions
-    assert "_applyRichTableHeaderModes(clone, headerModes)" in table_actions
-    header_normalizer = function_body("_applyRichTableHeaderModes")
-    assert "_replaceRichTableCellTag" in header_normalizer
-    assert "_replaceRichTable(rich, original, clone" in table_actions
-    assert "current.add('table:toggle-header-row')" in menu_state
-    assert "current.add('table:toggle-header-column')" in menu_state
-    assert "tableHeaderToggle" in DOC_JS
+from tests.helpers.node import run_node_module
 
 
 def test_mobile_header_row_and_column_toggle_independently_with_undo():
@@ -116,15 +88,7 @@ def test_mobile_header_row_and_column_toggle_independently_with_undo():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
     header_checks = lambda state: {
         label: value for label, value in state["checks"].items() if "Header" in label
     }

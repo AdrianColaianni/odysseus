@@ -13,8 +13,6 @@ ROOT = Path(__file__).resolve().parent.parent
 MIGRATION = ROOT / "scripts" / "migrate_searxng_settings.py"
 COMPOSE_FILES = (
     ROOT / "docker-compose.yml",
-    ROOT / "docker-compose.gpu-amd.yml",
-    ROOT / "docker-compose.gpu-nvidia.yml",
 )
 
 
@@ -88,24 +86,21 @@ def test_fresh_generated_settings_are_left_byte_identical(tmp_path):
     assert result.stdout == ""
 
 
-@pytest.mark.parametrize(
-    "key",
-    (
+def test_explicit_top_level_setting_is_not_overridden(tmp_path):
+    for key in (
         b"use_default_settings: false\n",
         b"use_default_settings:\n  engines:\n    keep_only:\n      - brave\n",
         b"'use_default_settings': true\n",
         b'"use_default_settings": true\n',
-    ),
-)
-def test_explicit_top_level_setting_is_not_overridden(tmp_path, key):
-    settings = tmp_path / "settings.yml"
-    original = key + b"server:\n  secret_key: retained\n"
-    settings.write_bytes(original)
+    ):
+        settings = tmp_path / "settings.yml"
+        original = key + b"server:\n  secret_key: retained\n"
+        settings.write_bytes(original)
 
-    result = _run(settings)
+        result = _run(settings)
 
-    assert result.returncode == 0, result.stderr
-    assert settings.read_bytes() == original
+        assert result.returncode == 0, result.stderr
+        assert settings.read_bytes() == original
 
 
 def test_key_is_inserted_inside_explicit_yaml_document(tmp_path):
@@ -133,25 +128,22 @@ def test_indented_root_mapping_keeps_its_existing_indent(tmp_path):
     assert settings.read_bytes() == b"  use_default_settings: true\n" + original
 
 
-@pytest.mark.parametrize(
-    "property_line",
-    (b"!!map\n", b"&settings\n", b"--- !!map\n"),
-)
-def test_block_mapping_properties_stay_attached_to_the_root(tmp_path, property_line):
-    settings = tmp_path / "settings.yml"
-    mapping = b"server:\n  secret_key: retained\nsearch:\n  safe_search: 1\n"
-    original = property_line + mapping
-    settings.write_bytes(original)
-    original_data = yaml.safe_load(original)
+def test_block_mapping_properties_stay_attached_to_the_root(tmp_path):
+    for property_line in (b"!!map\n", b"&settings\n", b"--- !!map\n"):
+        settings = tmp_path / "settings.yml"
+        mapping = b"server:\n  secret_key: retained\nsearch:\n  safe_search: 1\n"
+        original = property_line + mapping
+        settings.write_bytes(original)
+        original_data = yaml.safe_load(original)
 
-    result = _run(settings)
+        result = _run(settings)
 
-    assert result.returncode == 0, result.stderr
-    expected = property_line + b"use_default_settings: true\n" + mapping
-    assert settings.read_bytes() == expected
-    migrated_data = yaml.safe_load(settings.read_bytes())
-    assert migrated_data.pop("use_default_settings") is True
-    assert migrated_data == original_data
+        assert result.returncode == 0, result.stderr
+        expected = property_line + b"use_default_settings: true\n" + mapping
+        assert settings.read_bytes() == expected
+        migrated_data = yaml.safe_load(settings.read_bytes())
+        assert migrated_data.pop("use_default_settings") is True
+        assert migrated_data == original_data
 
 
 def test_flow_mapping_gains_default_inheritance_without_reformatting(tmp_path):
@@ -167,9 +159,8 @@ def test_flow_mapping_gains_default_inheritance_without_reformatting(tmp_path):
     )
 
 
-@pytest.mark.parametrize(
-    ("original", "expected"),
-    (
+def test_other_flow_mapping_shapes_gain_only_the_root_key(tmp_path):
+    for original, expected in (
         (b"{}\n", b"{use_default_settings: true}\n"),
         (
             b"{server: {use_default_settings: false, secret_key: retained}}\n",
@@ -180,55 +171,45 @@ def test_flow_mapping_gains_default_inheritance_without_reformatting(tmp_path):
             b"!!map {server: {secret_key: retained}}\n",
             b"!!map {use_default_settings: true, server: {secret_key: retained}}\n",
         ),
-    ),
-)
-def test_other_flow_mapping_shapes_gain_only_the_root_key(tmp_path, original, expected):
-    settings = tmp_path / "settings.yml"
-    settings.write_bytes(original)
+    ):
+        settings = tmp_path / "settings.yml"
+        settings.write_bytes(original)
 
-    result = _run(settings)
+        result = _run(settings)
 
-    assert result.returncode == 0, result.stderr
-    assert settings.read_bytes() == expected
+        assert result.returncode == 0, result.stderr
+        assert settings.read_bytes() == expected
 
 
-@pytest.mark.parametrize(
-    "original",
-    (
+def test_flow_mapping_with_existing_setting_is_left_untouched(tmp_path):
+    for original in (
         b"{use_default_settings: true, server: {secret_key: retained}}\n",
         b'{"use_default_settings": {engines: {keep_only: [brave]}}}\n',
         b"{use_default_settings: true, server: {secret_key: abc#def}}\n",
         b"{use_default_settings: true, server: {secret_key: 'ab''cd'}}\n",
-    ),
-)
-def test_flow_mapping_with_existing_setting_is_left_untouched(tmp_path, original):
-    settings = tmp_path / "settings.yml"
-    settings.write_bytes(original)
+    ):
+        settings = tmp_path / "settings.yml"
+        settings.write_bytes(original)
 
-    result = _run(settings)
+        result = _run(settings)
 
-    assert result.returncode == 0, result.stderr
-    assert settings.read_bytes() == original
+        assert result.returncode == 0, result.stderr
+        assert settings.read_bytes() == original
 
 
-@pytest.mark.parametrize(
-    "original",
-    (
+def test_valid_document_metadata_with_existing_key_is_left_untouched(tmp_path):
+    for original in (
         b"%YAML 1.1\n---\nuse_default_settings: true\n"
         b"server:\n  secret_key: retained\n",
         b"use_default_settings: true\nserver:\n  secret_key: retained\n...\n",
-    ),
-)
-def test_valid_document_metadata_with_existing_key_is_left_untouched(
-    tmp_path, original
-):
-    settings = tmp_path / "settings.yml"
-    settings.write_bytes(original)
+    ):
+        settings = tmp_path / "settings.yml"
+        settings.write_bytes(original)
 
-    result = _run(settings)
+        result = _run(settings)
 
-    assert result.returncode == 0, result.stderr
-    assert settings.read_bytes() == original
+        assert result.returncode == 0, result.stderr
+        assert settings.read_bytes() == original
 
 
 def test_invalid_utf8_is_not_replaced(tmp_path):
@@ -306,18 +287,18 @@ def test_replace_failure_preserves_original_and_removes_temporary_file(
     assert list(tmp_path.iterdir()) == [settings]
 
 
-@pytest.mark.parametrize("compose_file", COMPOSE_FILES, ids=lambda path: path.name)
-def test_compose_runs_migration_for_all_variants(compose_file):
-    text = compose_file.read_text(encoding="utf-8")
+def test_compose_runs_migration_for_all_variants():
+    for compose_file in COMPOSE_FILES:
+        text = compose_file.read_text(encoding="utf-8")
 
-    # The `|| true` is load-bearing: the entrypoint runs under `set -eu`, so
-    # without it a settings file the migration cannot parse or rewrite stops
-    # searxng from starting at all instead of merely going unmigrated.
-    assert (
-        "/usr/local/searxng/.venv/bin/python /tmp/migrate-searxng-settings.py "
-        "/etc/searxng/settings.yml || true" in text
-    )
-    assert (
-        "./scripts/migrate_searxng_settings.py:"
-        "/tmp/migrate-searxng-settings.py:ro,z" in text
-    )
+        # The `|| true` is load-bearing: the entrypoint runs under `set -eu`, so
+        # without it a settings file the migration cannot parse or rewrite stops
+        # searxng from starting at all instead of merely going unmigrated.
+        assert (
+            "/usr/local/searxng/.venv/bin/python /tmp/migrate-searxng-settings.py "
+            "/etc/searxng/settings.yml || true" in text
+        )
+        assert (
+            "./scripts/migrate_searxng_settings.py:"
+            "/tmp/migrate-searxng-settings.py:ro,z" in text
+        )

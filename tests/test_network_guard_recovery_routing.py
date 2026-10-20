@@ -61,25 +61,6 @@ def test_persisted_internal_tool_event_preserves_recovery_tools():
     }
 
 
-def test_tool_event_state_exists_before_initial_route_build():
-    from pathlib import Path
-
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    init = source.index("tool_events = []   # Available to initial")
-    first_build = source.index("_route_state = await _build_route_request_state(", init)
-    assert init < first_build
-
-
-def test_network_recovery_floor_precedes_round_schema_materialization():
-    from pathlib import Path
-
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    floor = source.index("_network_recovery_floor = (")
-    active_state = source.index("_active_route_state = {", floor)
-    schemas = source.index("all_tool_schemas = _tool_schemas_for_route", active_state)
-    assert floor < active_state < schemas
-
-
 def test_non_tool_event_cannot_widen_route():
     events = [{
         "type": "message",

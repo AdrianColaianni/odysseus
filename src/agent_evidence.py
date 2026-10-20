@@ -171,12 +171,6 @@ _LOCALIZED_ARTIFACT_REQUEST_RE = re.compile(
     rf"[^\n]{{0,80}}?(?P<path>{_ARTIFACT_PATH})",
     re.IGNORECASE,
 )
-_TEST_COMMAND_RE = re.compile(
-    r"(?:^|[;&|\s])(?:pytest|python(?:3)?\s+-m\s+pytest|npm\s+(?:run\s+)?test|"
-    r"pnpm\s+test|yarn\s+test|make\s+test|cargo\s+test|go\s+test|"
-    r"/(?:tests?|verifier)/[^\s;&|]+)",
-    re.IGNORECASE,
-)
 _MUTATION_COMMAND_RE = re.compile(
     r"(?:\b(?:write_file|edit_file|apply_patch|touch|tee|cp|mv|mkdir|ln|install)\b|"
     r"\b(?:ffmpeg|sox)\b[^\n;&|]*(?:/workspace/|\.(?:mp4|webm|mov|mkv|avi|mp3|wav|m4a|aac|flac|ogg|opus)\b)|"
@@ -188,14 +182,6 @@ _MUTATION_COMMAND_RE = re.compile(
     r"\b(?:os\.(?:makedirs|mkdir|rename|replace|remove|unlink|symlink)|"
     r"shutil\.(?:copy|copy2|copyfile|copytree|move))\s*\(|"
     r"\bopen\s*\([^\n]{0,240}?[\"'](?:w|a|x)[+b]?[\"'])",
-    re.IGNORECASE,
-)
-_VALIDATION_COMMAND_RE = re.compile(
-    r"(?:\btest\s+-[efsd]\b|\b(?:cat|head|tail|stat|wc|jq|cmp|diff)\b|"
-    r"(?:^|[;&|\s])(?:coqc|gcc|g\+\+|clang|clang\+\+|javac|rustc)\b|"
-    r"(?:^|[;&|\s])(?:cargo\s+(?:build|check)|go\s+build|npm\s+(?:run\s+)?build|"
-    r"pnpm\s+build|yarn\s+build)\b|"
-    r"\.read_(?:text|bytes)\s*\(|\bopen\s*\([^\n]{0,240}?[\"']r[+b]?[\"'])",
     re.IGNORECASE,
 )
 

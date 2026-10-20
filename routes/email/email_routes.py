@@ -14,12 +14,11 @@ handlers need. The split is mechanical — no behavior change.
 
 import asyncio
 import os
-import sqlite3 as _sql3
+import threading
 import time
 import email as email_mod
 import email.header
 import email.utils
-import smtplib
 import ssl
 import json
 import re
@@ -39,7 +38,10 @@ from email.mime.multipart import MIMEMultipart
 from starlette.concurrency import run_in_threadpool
 from fastapi import APIRouter, Query, UploadFile, File, BackgroundTasks, HTTPException, Depends, Request
 from fastapi.responses import FileResponse, StreamingResponse
-from src.constants import DATA_DIR
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session as DbSession
+from core.database import get_db
+from src.constants import APP_PORT, DATA_DIR, FIXTURE_EMAIL_MESSAGES_FILE
 from src.path_confinement import confine
 
 from src.llm_core import llm_call_async
@@ -56,15 +58,20 @@ from .email_helpers import (
     make_oauth_state, verify_oauth_state,
     EmailNotConfiguredError,
     _imap_connect, _imap, _decode_header, _detect_sent_folder, _detect_drafts_folder,
+    _folder_name_from_list_line, _folder_role_from_name, _uid_from_fetch_meta,
+    _parse_list_unsubscribe_header, _email_unsubscribe_candidate_from_msg,
+    _unsubscribe_candidate_dedupe_key, _dedupe_unsubscribe_candidates,
+    _email_search_terms, _smtp_ready,
     _extract_attachment_text, _list_attachments_from_msg, _has_visible_attachments, _is_likely_signature_image_attachment,
     _extract_attachment_to_disk, _extract_html, _extract_text,
     _fetch_sender_thread_context, _pre_retrieve_context,
     _EMAIL_REPLY_SYS_PROMPT_BASE, _POOL_HOOKS,
-    _friendly_email_auth_error, _email_summary_failure_log_detail,
+    _email_summary_failure_log_detail,
     _mail_connection_test_error, _mail_private_blocked, _PolicySMTP, _PolicySMTP_SSL,
     _generate_email_summary, EMAIL_SUMMARY_ERROR_CODE, EMAIL_SUMMARY_ERROR_MESSAGE,
     SendEmailRequest, ExtractStyleRequest,
-    ATTACHMENTS_DIR, COMPOSE_UPLOADS_DIR, SCHEDULED_DB,
+    _AUTO_REPLY_BOOL_KEYS, _AUTO_REPLY_TEXT_KEYS, _AUTO_REPLY_KEYS, _get_auto_reply_settings_for_account,
+    COMPOSE_UPLOADS_DIR, _scheduled_db,
     attachment_extract_dir, _email_cache_owner_clause, email_translation_body_hash,
 )
 from .email_pollers import _start_poller
@@ -144,33 +151,6 @@ def _set_email_view_inline_images(settings: dict, enabled: bool, account_id: str
         settings["email_view_inline_images_by_account"] = by_account
     else:
         settings["email_view_inline_images"] = bool(enabled)
-
-
-_AUTO_REPLY_BOOL_KEYS = {
-    "email_auto_reply",
-    "email_auto_reply_exclude_automated",
-    "email_auto_reply_pause_notifications",
-}
-_AUTO_REPLY_TEXT_KEYS = {
-    "email_auto_reply_start",
-    "email_auto_reply_end",
-    "email_auto_reply_subject",
-    "email_auto_reply_message",
-    "email_auto_reply_cooldown",
-    "email_auto_reply_scope",
-    "email_auto_reply_account_id",
-    "email_auto_reply_enabled_at",
-}
-_AUTO_REPLY_KEYS = _AUTO_REPLY_BOOL_KEYS | _AUTO_REPLY_TEXT_KEYS
-
-
-def _get_auto_reply_settings_for_account(settings: dict, account_id: str | None = None) -> dict:
-    key = _email_style_key(account_id)
-    out = {k: settings.get(k) for k in _AUTO_REPLY_KEYS if k in settings}
-    by_account = settings.get("email_auto_reply_by_account") or {}
-    if key and isinstance(by_account, dict) and isinstance(by_account.get(key), dict):
-        out.update({k: v for k, v in by_account[key].items() if k in _AUTO_REPLY_KEYS})
-    return out
 
 
 def _set_auto_reply_settings_for_account(settings: dict, data: dict, account_id: str | None = None) -> tuple[bool, bool]:
@@ -364,28 +344,27 @@ def _hide_unlinked_calendar_tags(emails: list[dict]) -> None:
 
 def _clear_done_response_tags(owner: str, account_id: str | None, folder: str, uid: str) -> None:
     try:
-        conn = _sql3.connect(SCHEDULED_DB)
-        owner_clause, owner_params = _email_tag_owner_clause(account_id, owner)
-        account_clause, account_params = _email_tag_account_clause(account_id)
-        rows = conn.execute(
-            f"SELECT rowid, tags FROM email_tags WHERE folder=? AND uid=? AND {owner_clause} AND {account_clause}",
-            [folder, str(uid), *owner_params, *account_params],
-        ).fetchall()
-        for rowid, tags_raw in rows:
-            try:
-                tags = json.loads(tags_raw or "[]")
-            except Exception:
-                tags = []
-            if not isinstance(tags, list):
-                tags = []
-            kept = [
-                t for t in tags
-                if str(t).strip().lower().replace("_", "-") not in _DONE_RESPONSE_TAGS
-            ]
-            if kept != tags:
-                conn.execute("UPDATE email_tags SET tags=? WHERE rowid=?", (json.dumps(kept), rowid))
-        conn.commit()
-        conn.close()
+        with _scheduled_db() as conn:
+            owner_clause, owner_params = _email_tag_owner_clause(account_id, owner)
+            account_clause, account_params = _email_tag_account_clause(account_id)
+            rows = conn.execute(
+                f"SELECT rowid, tags FROM email_tags WHERE folder=? AND uid=? AND {owner_clause} AND {account_clause}",
+                [folder, str(uid), *owner_params, *account_params],
+            ).fetchall()
+            for rowid, tags_raw in rows:
+                try:
+                    tags = json.loads(tags_raw or "[]")
+                except Exception:
+                    tags = []
+                if not isinstance(tags, list):
+                    tags = []
+                kept = [
+                    t for t in tags
+                    if str(t).strip().lower().replace("_", "-") not in _DONE_RESPONSE_TAGS
+                ]
+                if kept != tags:
+                    conn.execute("UPDATE email_tags SET tags=? WHERE rowid=?", (json.dumps(kept), rowid))
+            conn.commit()
     except Exception as e:
         logger.debug(f"clear done response tags skipped: {e}")
 
@@ -408,8 +387,7 @@ def _record_email_received_events(owner: str, account_id: str | None, folder: st
         if not keys:
             return
 
-        conn = _sql3.connect(SCHEDULED_DB)
-        try:
+        with _scheduled_db() as conn:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS email_event_seen ("
                 "owner TEXT NOT NULL, account_key TEXT NOT NULL, folder TEXT NOT NULL, "
@@ -436,8 +414,6 @@ def _record_email_received_events(owner: str, account_id: str | None, folder: st
                 [(owner, account_key, folder, k, now) for k in keys],
             )
             conn.commit()
-        finally:
-            conn.close()
 
         if count and new_keys:
             for _ in new_keys[:50]:
@@ -464,14 +440,6 @@ def _record_email_received_events(owner: str, account_id: str | None, folder: st
                 logger.debug("No running event loop for immediate away-reply check")
     except Exception:
         logger.debug("email_received event detection skipped", exc_info=True)
-
-
-def _folder_name_from_list_line(line) -> str | None:
-    decoded = line.decode() if isinstance(line, bytes) else str(line)
-    match = re.search(r'"([^"]*)"\s*$|(\S+)\s*$', decoded)
-    if not match:
-        return None
-    return match.group(1) or match.group(2)
 
 
 def _list_imap_folders(conn) -> tuple[list, list[str]]:
@@ -534,17 +502,6 @@ def _mail_folder_role_hint(name: str) -> str:
         return "junk"
     if lower in {"trash", "bin", "deleted", "deleted items", "deleted messages"}:
         return "trash"
-    return ""
-
-
-def _folder_role_from_name(name: str) -> str:
-    lower = (name or "").lower()
-    if "trash" in lower or "bin" in lower or "deleted" in lower:
-        return "trash"
-    if "spam" in lower or "junk" in lower:
-        return "junk"
-    if "archive" in lower or "all mail" in lower:
-        return "archive"
     return ""
 
 
@@ -633,158 +590,6 @@ def _message_id_chain(*values: str) -> list[str]:
                 seen.add(mid)
                 out.append(mid)
     return out
-
-
-def _uid_from_fetch_meta(meta_b: bytes) -> str:
-    m = re.search(rb"\bUID\s+(\d+)\b", meta_b)
-    return m.group(1).decode() if m else ""
-
-
-def _parse_list_unsubscribe_header(value: str | None) -> list[dict]:
-    """Parse RFC List-Unsubscribe entries into safe reviewable actions.
-
-    We return mailto/http entries but only the mailto kind is executable by the
-    first-pass Odysseus flow. HTTP unsubscribe links are useful evidence but
-    often contain tracking tokens and should be opened manually unless/until we
-    add a browser-confirmed flow.
-    """
-    raw = str(value or "").strip()
-    if not raw:
-        return []
-    pieces = re.findall(r"<([^>]+)>", raw)
-    if not pieces:
-        pieces = [p.strip() for p in raw.split(",") if p.strip()]
-    out: list[dict] = []
-    seen = set()
-    for piece in pieces:
-        target = piece.strip().strip("<>").strip()
-        if not target:
-            continue
-        parsed = urlparse(target)
-        scheme = parsed.scheme.lower()
-        key = target.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        if scheme == "mailto":
-            addr = unquote(parsed.path or "").strip()
-            if not addr or "\r" in addr or "\n" in addr:
-                continue
-            query = parse_qs(parsed.query or "", keep_blank_values=True)
-            subject = unquote((query.get("subject") or ["unsubscribe"])[0] or "unsubscribe")
-            body = unquote((query.get("body") or ["unsubscribe"])[0] or "unsubscribe")
-            subject = re.sub(r"[\r\n]+", " ", subject).strip() or "unsubscribe"
-            body = re.sub(r"[\r\n]+", "\n", body).strip() or "unsubscribe"
-            out.append({
-                "kind": "mailto",
-                "target": addr,
-                "subject": subject[:200],
-                "body": body[:1000],
-                "executable": True,
-            })
-        elif scheme in {"http", "https"}:
-            out.append({
-                "kind": "url",
-                "target": target,
-                "executable": False,
-            })
-    return out
-
-
-def _email_unsubscribe_candidate_from_msg(msg, uid: str, folder: str, *, spam_cached: dict | None = None) -> dict | None:
-    sender = _decode_header(msg.get("From", ""))
-    sender_name, sender_addr = email.utils.parseaddr(sender)
-    subject = _decode_header(msg.get("Subject", "(no subject)"))
-    list_id = _decode_header(msg.get("List-Id", ""))
-    precedence = (msg.get("Precedence") or "").strip().lower()
-    auto_submitted = (msg.get("Auto-Submitted") or "").strip().lower()
-    methods = _parse_list_unsubscribe_header(msg.get("List-Unsubscribe"))
-    has_unsub = bool(methods)
-    reasons: list[str] = []
-    score = 0
-    if has_unsub:
-        score += 45
-        reasons.append("has unsubscribe header")
-    if list_id:
-        score += 20
-        reasons.append("mailing-list header")
-    if precedence in {"bulk", "junk", "list"}:
-        score += 20
-        reasons.append(f"precedence={precedence}")
-    if auto_submitted and auto_submitted != "no":
-        score += 10
-        reasons.append(f"auto-submitted={auto_submitted}")
-    if spam_cached and spam_cached.get("spam"):
-        score += 35
-        if spam_cached.get("reason"):
-            reasons.append(str(spam_cached.get("reason")))
-        else:
-            reasons.append("previously classified as spam")
-    subj_l = (subject or "").lower()
-    if re.search(r"\b(unsubscribe|newsletter|sale|discount|offer|promo|limited time)\b", subj_l):
-        score += 10
-        reasons.append("promotional subject")
-    executable = [m for m in methods if m.get("executable")]
-    if score < 45 or not has_unsub:
-        return None
-    return {
-        "uid": str(uid),
-        "folder": folder,
-        "message_id": (msg.get("Message-ID") or "").strip(),
-        "subject": subject,
-        "from_name": sender_name or sender_addr,
-        "from_address": sender_addr,
-        "list_id": list_id,
-        "score": min(score, 100),
-        "reasons": reasons[:5],
-        "methods": methods,
-        "can_execute": bool(executable),
-        "recommended_method": executable[0] if executable else (methods[0] if methods else None),
-        "spam_reason": (spam_cached or {}).get("reason") or "",
-    }
-
-
-def _unsubscribe_candidate_dedupe_key(candidate: dict) -> tuple[str, str, str]:
-    list_id = str(candidate.get("list_id") or "").strip().lower()
-    method = candidate.get("recommended_method") or {}
-    method_kind = str(method.get("kind") or "").strip().lower()
-    method_target = str(method.get("target") or "").strip().lower()
-    sender = str(candidate.get("from_address") or "").strip().lower()
-    # A sender address is the actionable identity here. Newsletter links are
-    # often tokenized per message, so list/url keys would show the same sender
-    # repeatedly and cause repeated unsubscribe attempts.
-    if sender:
-        return ("sender", sender, "")
-    if list_id:
-        return ("list", list_id, method_target)
-    if method_target:
-        return ("method", method_kind, method_target)
-    return ("sender", "", str(candidate.get("subject") or "").strip().lower())
-
-
-def _dedupe_unsubscribe_candidates(candidates: list[dict]) -> list[dict]:
-    deduped: dict[tuple[str, str, str], dict] = {}
-    for candidate in candidates or []:
-        key = _unsubscribe_candidate_dedupe_key(candidate)
-        existing = deduped.get(key)
-        if not existing:
-            copy = dict(candidate)
-            copy["duplicate_count"] = 1
-            copy["duplicate_uids"] = [str(candidate.get("uid") or "")]
-            deduped[key] = copy
-            continue
-        existing["duplicate_count"] = int(existing.get("duplicate_count") or 1) + 1
-        uid = str(candidate.get("uid") or "")
-        if uid:
-            existing.setdefault("duplicate_uids", []).append(uid)
-        if int(candidate.get("score") or 0) > int(existing.get("score") or 0):
-            keep_count = existing.get("duplicate_count")
-            keep_uids = existing.get("duplicate_uids")
-            replacement = dict(candidate)
-            replacement["duplicate_count"] = keep_count
-            replacement["duplicate_uids"] = keep_uids
-            deduped[key] = replacement
-    return list(deduped.values())
 
 
 _FETCH_SEQ_RE = re.compile(rb"^(\d+)\s+\(")
@@ -883,8 +688,7 @@ def _email_index_rows(owner: str, account_id: str | None, folder: str, uids: lis
     if not uids:
         return {}
     try:
-        conn = _sql3.connect(SCHEDULED_DB)
-        try:
+        with _scheduled_db() as conn:
             placeholders = ",".join("?" * len(uids))
             rows = conn.execute(
                 f"""
@@ -895,8 +699,6 @@ def _email_index_rows(owner: str, account_id: str | None, folder: str, uids: lis
                 """,
                 [owner or "", _account_cache_key(account_id, owner), folder, *uids],
             ).fetchall()
-        finally:
-            conn.close()
     except Exception as e:
         logger.debug(f"email index read skipped: {e}")
         return {}
@@ -949,8 +751,7 @@ def _email_index_list(owner: str, account_id: str | None, folder: str, filter_: 
         clauses.append("has_attachments=1")
     where = " AND ".join(clauses)
     try:
-        conn = _sql3.connect(SCHEDULED_DB)
-        try:
+        with _scheduled_db() as conn:
             total_row = conn.execute(
                 f"SELECT COUNT(*), MAX(updated_at) FROM email_message_index WHERE {where}",
                 params,
@@ -969,8 +770,6 @@ def _email_index_list(owner: str, account_id: str | None, folder: str, filter_: 
                 """,
                 [*params, limit, offset],
             ).fetchall()
-        finally:
-            conn.close()
     except Exception:
         logger.debug("email index list skipped", exc_info=True)
         return [], 0, None
@@ -1034,8 +833,7 @@ def _email_index_search(owner: str, account_id: str | None, folder: str, query: 
         like = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         params.extend([like, like, like, like, like, like])
     try:
-        conn = _sql3.connect(SCHEDULED_DB)
-        try:
+        with _scheduled_db() as conn:
             total_row = conn.execute(
                 f"""
                 SELECT COUNT(*), MAX(updated_at)
@@ -1061,8 +859,6 @@ def _email_index_search(owner: str, account_id: str | None, folder: str, query: 
                 """,
                 [*params, limit],
             ).fetchall()
-        finally:
-            conn.close()
     except Exception:
         logger.debug("email index search skipped", exc_info=True)
         return [], 0, None
@@ -1091,41 +887,6 @@ def _email_index_search(owner: str, account_id: str | None, folder: str, query: 
             "folder": row_folder or folder,
         })
     return emails, total, (total_row or [None, None])[1]
-
-
-def _email_search_terms(query: str) -> list[str]:
-    q = (query or "").strip()
-    if not q:
-        return []
-    # Preserve quoted phrases, then split the rest. This makes:
-    #   honda insurance -> honda AND insurance
-    #   "Yoko Honda" insurance -> "Yoko Honda" AND insurance
-    # The cap avoids creating huge IMAP expressions from pasted paragraphs.
-    parts = []
-    consumed = []
-    for m in re.finditer(r'"([^"]{1,120})"', q):
-        phrase = m.group(1).strip()
-        if phrase:
-            parts.append(phrase)
-        consumed.append((m.start(), m.end()))
-    remainder = q
-    for start, end in reversed(consumed):
-        remainder = remainder[:start] + " " + remainder[end:]
-    parts.extend(re.findall(r"[^\s,;]+", remainder))
-    out = []
-    seen = set()
-    for p in parts:
-        p = p.strip().strip('"').strip()
-        if len(p) < 2:
-            continue
-        key = p.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(p)
-        if len(out) >= 6:
-            break
-    return out
 
 
 def _imap_or_many(keys: list[str]) -> str:
@@ -1185,8 +946,7 @@ def _email_index_upsert(owner: str, account_id: str | None, folder: str, emails:
     if not rows:
         return
     try:
-        conn = _sql3.connect(SCHEDULED_DB)
-        try:
+        with _scheduled_db() as conn:
             conn.executemany(
                 """
                 INSERT INTO email_message_index
@@ -1212,16 +972,13 @@ def _email_index_upsert(owner: str, account_id: str | None, folder: str, emails:
                 rows,
             )
             conn.commit()
-        finally:
-            conn.close()
     except Exception as e:
         logger.debug(f"email index write skipped: {e}")
 
 
 def _email_index_update_flags(owner: str, account_id: str | None, folder: str, uid: str, flag: str, add: bool):
     try:
-        conn = _sql3.connect(SCHEDULED_DB)
-        try:
+        with _scheduled_db() as conn:
             row = conn.execute(
                 "SELECT flags FROM email_message_index WHERE owner=? AND account_key=? AND folder=? AND uid=?",
                 (owner or "", _account_cache_key(account_id, owner), folder, str(uid)),
@@ -1238,16 +995,13 @@ def _email_index_update_flags(owner: str, account_id: str | None, folder: str, u
                 (" ".join(sorted(parts)), datetime.utcnow().isoformat() + "Z", owner or "", _account_cache_key(account_id, owner), folder, str(uid)),
             )
             conn.commit()
-        finally:
-            conn.close()
     except Exception:
         logger.debug("email index flag update skipped", exc_info=True)
 
 
 def _email_index_delete(owner: str, account_id: str | None, folder: str | None, uid: str):
     try:
-        conn = _sql3.connect(SCHEDULED_DB)
-        try:
+        with _scheduled_db() as conn:
             if folder:
                 conn.execute(
                     "DELETE FROM email_message_index WHERE owner=? AND account_key=? AND folder=? AND uid=?",
@@ -1259,16 +1013,13 @@ def _email_index_delete(owner: str, account_id: str | None, folder: str | None, 
                     (owner or "", _account_cache_key(account_id, owner), str(uid)),
                 )
             conn.commit()
-        finally:
-            conn.close()
     except Exception:
         logger.debug("email index delete skipped", exc_info=True)
 
 
 def _email_preview_cache_get(owner: str, account_id: str | None, folder: str, uid: str) -> dict | None:
     try:
-        conn = _sql3.connect(SCHEDULED_DB)
-        try:
+        with _scheduled_db() as conn:
             row = conn.execute(
                 """
                 SELECT payload_json, updated_at
@@ -1277,8 +1028,6 @@ def _email_preview_cache_get(owner: str, account_id: str | None, folder: str, ui
                 """,
                 (owner or "", _account_cache_key(account_id, owner), folder, str(uid)),
             ).fetchone()
-        finally:
-            conn.close()
         if not row:
             return None
         payload = json.loads(row[0] or "{}")
@@ -1299,8 +1048,7 @@ def _email_preview_cache_put(owner: str, account_id: str | None, folder: str, ui
         message_id = (payload.get("message_id") or "").strip()
         stored = dict(payload)
         stored["sync"] = {"source": "preview_cache", "updated_at": now}
-        conn = _sql3.connect(SCHEDULED_DB)
-        try:
+        with _scheduled_db() as conn:
             conn.execute(
                 """
                 INSERT INTO email_body_preview_cache
@@ -1322,16 +1070,13 @@ def _email_preview_cache_put(owner: str, account_id: str | None, folder: str, ui
                 ),
             )
             conn.commit()
-        finally:
-            conn.close()
     except Exception:
         logger.debug("email preview cache write skipped", exc_info=True)
 
 
 def _email_attachment_meta_cache_get(owner: str, account_id: str | None, folder: str, uid: str) -> list[dict] | None:
     try:
-        conn = _sql3.connect(SCHEDULED_DB)
-        try:
+        with _scheduled_db() as conn:
             row = conn.execute(
                 """
                 SELECT attachments_json
@@ -1351,8 +1096,6 @@ def _email_attachment_meta_cache_get(owner: str, account_id: str | None, folder:
                     """,
                     (owner or "", folder, str(uid)),
                 ).fetchone()
-        finally:
-            conn.close()
         if not row:
             return None
         data = json.loads(row[0] or "[]")
@@ -1364,8 +1107,7 @@ def _email_attachment_meta_cache_get(owner: str, account_id: str | None, folder:
 
 def _email_attachment_meta_cache_put(owner: str, account_id: str | None, folder: str, uid: str, message_id: str, attachments: list[dict]):
     try:
-        conn = _sql3.connect(SCHEDULED_DB)
-        try:
+        with _scheduled_db() as conn:
             conn.execute(
                 """
                 INSERT INTO email_attachment_metadata_cache
@@ -1413,16 +1155,8 @@ def _email_attachment_meta_cache_put(owner: str, account_id: str | None, folder:
                 ),
             )
             conn.commit()
-        finally:
-            conn.close()
     except Exception:
         logger.debug("email attachment metadata cache write skipped", exc_info=True)
-
-
-def _smtp_ready(cfg: dict) -> bool:
-    if not cfg.get("smtp_host") or not cfg.get("smtp_user"):
-        return False
-    return bool(cfg.get("smtp_password") or cfg.get("oauth_provider"))
 
 
 def _resolve_send_config(account_id: str | None = None, owner: str = "") -> dict:
@@ -1699,25 +1433,76 @@ def _sanitize_email_html(raw: str) -> str:
     return f"<html><body>{inner}</body></html>"
 
 
+class MailboxRef(BaseModel):
+    folder: str | None = "INBOX"
+    account_id: str | None = None
+
+
+class UnsubscribeExecuteRequest(MailboxRef):
+    uid: str | int | None = ""
+    method_index: int | None = 0
+    move_to_spam: bool | None = False
+
+
+class UnsubscribeCleanupRequest(MailboxRef):
+    action: str | None = ""
+    uids: list[str | int | None] | None = None
+    scope: str | None = ""
+    sender: str | None = ""
+
+
+class BulkDeleteRequest(MailboxRef):
+    uids: list[str | int | None] | None = None
+
+
+class OdysseusAttachmentRef(BaseModel):
+    kind: str | None = ""
+    id: str | int | None = ""
+
+
+class OdysseusZipRequest(BaseModel):
+    items: list[OdysseusAttachmentRef] | None = None
+
+
+class EmailTextRequest(BaseModel):
+    body: str | None = ""
+    subject: str | None = ""
+    sender: str | None = Field("", alias="from")
+    uid: str | int | None = ""
+    folder: str | None = ""
+    account_id: str | None = None
+    message_id: str | None = ""
+
+
+class TranslateRequest(EmailTextRequest):
+    target_language: str | None = "English"
+    auto: bool | None = False
+
+
+class ScheduleEmailRequest(BaseModel):
+    send_at: str | None = None
+    to: str | None = ""
+    cc: str | None = None
+    bcc: str | None = None
+    subject: str | None = None
+    body: str | None = None
+    in_reply_to: str | None = None
+    references: str | None = None
+    attachments: list[str] | None = None
+    account_id: str | None = None
+    odysseus_kind: str | None = None
+
+
 def setup_email_routes():
     _start_poller()
     router = APIRouter(prefix="/api/email", tags=["email"])
 
     # ── In-memory cache + prefetch + IMAP connection pool ──
-    # Three layers stacked because every cold click was hitting Dovecot
-    # over a fresh TCP+TLS+LOGIN handshake plus a full RFC822 fetch.
-    #   1. _LIST_CACHE: list-emails responses keyed by (account, folder, filter,
-    #      limit, offset). 8s TTL — short enough that flag changes show up
-    #      quickly but long enough to absorb burst polls and tab switches.
-    #   2. _READ_CACHE: per-(account, folder, uid) parsed email bodies.
-    #      60s TTL — bodies don't change.
-    #   3. _IMAP_POOL: per-account live IMAP connection reused across
-    #      requests. Recycled if NOOP fails or it's been idle >60s.
-    #   4. Prefetch task: after a list load, kick off background reads of
-    #      the top-N visible UIDs so clicks land in the read cache.
-    import asyncio as _asyncio
-    import time as _time
-    import threading as _threading
+    # Spares each click a fresh TCP+TLS+LOGIN handshake and full RFC822 fetch:
+    #   _LIST_CACHE: list responses, invalidated on flag changes.
+    #   _READ_CACHE: parsed bodies per (account, folder, uid); bodies don't change.
+    #   _IMAP_POOL: one live connection per account, recycled if NOOP fails or idle >60s.
+    #   Prefetch: after a list load, warm reads of the top visible UIDs.
 
     _LIST_CACHE = {}  # key → (expires_at, response_dict)
     _LIST_TTL = 45.0
@@ -1731,7 +1516,7 @@ def setup_email_routes():
     _WARM_READ_LIMIT = 6
     _WARM_MAX_BYTES = 192 * 1024
     _WARM_RECENT_SECONDS = 7 * 24 * 60 * 60
-    _pool_lock = _threading.Lock()
+    _pool_lock = threading.Lock()
 
     def _pooled_connect(account_id, owner=""):
         """Reuse a live IMAP connection if one is in the pool and still
@@ -1745,7 +1530,7 @@ def setup_email_routes():
         with `account_id=None` don't share a pooled connection.
         """
         pool_key = (account_id, owner)
-        now = _time.monotonic()
+        now = time.monotonic()
         with _pool_lock:
             entry = _IMAP_POOL.get(pool_key)
             if entry:
@@ -1775,7 +1560,7 @@ def setup_email_routes():
             except Exception: pass
             return
         with _pool_lock:
-            _IMAP_POOL[(account_id, owner)] = (conn, _time.monotonic())
+            _IMAP_POOL[(account_id, owner)] = (conn, time.monotonic())
 
     def _invalidate_imap_pool(account_id=None, owner=""):
         """Close pooled IMAP handles for a manual refresh.
@@ -1810,13 +1595,13 @@ def setup_email_routes():
     def _list_cache_get(key):
         v = _LIST_CACHE.get(key)
         if not v: return None
-        if v[0] < _time.monotonic():
+        if v[0] < time.monotonic():
             _LIST_CACHE.pop(key, None)
             return None
         return v[1]
 
     def _list_cache_put(key, value):
-        _LIST_CACHE[key] = (_time.monotonic() + _LIST_TTL, value)
+        _LIST_CACHE[key] = (time.monotonic() + _LIST_TTL, value)
         # Cap size
         if len(_LIST_CACHE) > 64:
             for k in list(_LIST_CACHE.keys())[:-32]:
@@ -1827,7 +1612,7 @@ def setup_email_routes():
         v = _FOLDER_CACHE.get(key)
         if not v:
             return None
-        if v[0] < _time.monotonic():
+        if v[0] < time.monotonic():
             _FOLDER_CACHE.pop(key, None)
             return None
         return v[1]
@@ -1837,7 +1622,7 @@ def setup_email_routes():
         return v[1] if v else None
 
     def _folder_cache_put(account_id, owner, value):
-        _FOLDER_CACHE[(account_id or "", owner or "")] = (_time.monotonic() + _FOLDER_TTL, value)
+        _FOLDER_CACHE[(account_id or "", owner or "")] = (time.monotonic() + _FOLDER_TTL, value)
         if len(_FOLDER_CACHE) > 32:
             for k in list(_FOLDER_CACHE.keys())[:-16]:
                 _FOLDER_CACHE.pop(k, None)
@@ -1890,28 +1675,17 @@ def setup_email_routes():
     def _read_cache_get(key):
         v = _READ_CACHE.get(key)
         if not v: return None
-        if v[0] < _time.monotonic():
+        if v[0] < time.monotonic():
             _READ_CACHE.pop(key, None)
             return None
         return v[1]
 
     def _read_cache_put(key, value):
-        _READ_CACHE[key] = (_time.monotonic() + _READ_TTL, value)
+        _READ_CACHE[key] = (time.monotonic() + _READ_TTL, value)
         if len(_READ_CACHE) > 256:
             for k in list(_READ_CACHE.keys())[:-128]:
                 _READ_CACHE.pop(k, None)
 
-    # Expose helpers in the closure to be used by handlers below
-    router._email_pool = {
-        "connect": _pooled_connect,
-        "release": _pooled_release,
-        "list_cache_get": _list_cache_get,
-        "list_cache_put": _list_cache_put,
-        "list_cache_key": _list_cache_key,
-        "read_cache_get": _read_cache_get,
-        "read_cache_put": _read_cache_put,
-        "read_cache_key": _read_cache_key,
-    }
     # Wire the module-level _imap() context manager into the pool so every
     # `with _imap(account_id, owner=owner) as conn:` reuses an existing connection
     # instead of paying TCP+TLS+LOGIN per request.
@@ -1919,7 +1693,7 @@ def setup_email_routes():
     _POOL_HOOKS["release"] = _pooled_release
 
     def _fixture_email_file() -> Path:
-        return Path(DATA_DIR) / "fixture_email_messages.json"
+        return Path(FIXTURE_EMAIL_MESSAGES_FILE)
 
     def _fixture_email_enabled() -> bool:
         return os.environ.get("ODYSSEUS_EMAIL_FIXTURE") == "1" and _fixture_email_file().exists()
@@ -2326,74 +2100,72 @@ def setup_email_routes():
                 _tag_message_ids = []
                 _tag_seq_fallback = []
                 try:
-                    import sqlite3 as _sql3t
-                    _ct = _sql3t.connect(SCHEDULED_DB)
-                    _owner_clause, _owner_params = _email_tag_owner_clause(account_id, owner)
-                    _account_clause, _account_params = _email_tag_account_clause(account_id)
-                    # SECURITY: owner-scope the lookup (review C2/H8). Without
-                    # this, user A's `tag:urgent` filter would surface UIDs
-                    # written by user B and IMAP would return whatever
-                    # happens to live at those UIDs in A's mailbox. Account
-                    # mailbox aliases are included because the background
-                    # urgency task may be owned by the mailbox address while
-                    # the UI is owned by the app user.
-                    if _tag_name == "spam":
-                        rows_t = _ct.execute(
-                            "SELECT message_id, uid FROM email_tags "
-                            "WHERE folder=? AND spam_verdict=1 "
-                            f"AND {_owner_clause} AND {_account_clause}",
-                            (folder, *_owner_params, *_account_params),
-                        ).fetchall()
-                        for mid, uid in rows_t:
-                            if uid:
-                                _tag_seq_fallback.append(str(uid).strip())
-                            elif mid:
-                                _tag_message_ids.append(str(mid).strip())
-                    else:
-                        rows_t = _ct.execute(
-                            "SELECT message_id, uid, tags FROM email_tags "
-                            "WHERE folder=? AND tags IS NOT NULL AND tags != '' "
-                            f"AND {_owner_clause} AND {_account_clause}",
-                            (folder, *_owner_params, *_account_params),
-                        ).fetchall()
-                        _idx_flags_by_uid = {}
-                        _idx_flags_by_mid = {}
-                        try:
-                            _uid_vals = [str(r[1]).strip() for r in rows_t if r[1]]
-                            _mid_vals = [str(r[0]).strip() for r in rows_t if r[0]]
-                            _idx_clauses = []
-                            _idx_params = [owner or "", _account_cache_key(account_id, owner), folder]
-                            if _uid_vals:
-                                _idx_clauses.append("uid IN (" + ",".join("?" * len(_uid_vals)) + ")")
-                                _idx_params.extend(_uid_vals)
-                            if _mid_vals:
-                                _idx_clauses.append("message_id IN (" + ",".join("?" * len(_mid_vals)) + ")")
-                                _idx_params.extend(_mid_vals)
-                            if _idx_clauses:
-                                for _uid_i, _mid_i, _flags_i in _ct.execute(
-                                    "SELECT uid, message_id, flags FROM email_message_index "
-                                    "WHERE owner=? AND account_key=? AND folder=? AND (" + " OR ".join(_idx_clauses) + ")",
-                                    _idx_params,
-                                ).fetchall():
-                                    if _uid_i:
-                                        _idx_flags_by_uid[str(_uid_i)] = _flags_i or ""
-                                    if _mid_i:
-                                        _idx_flags_by_mid[str(_mid_i).strip()] = _flags_i or ""
-                        except Exception as _idx_e:
-                            logger.debug(f"tag filter index flag lookup skipped: {_idx_e}")
-                        for r in rows_t:
+                    with _scheduled_db() as _ct:
+                        _owner_clause, _owner_params = _email_tag_owner_clause(account_id, owner)
+                        _account_clause, _account_params = _email_tag_account_clause(account_id)
+                        # SECURITY: owner-scope the lookup (review C2/H8). Without
+                        # this, user A's `tag:urgent` filter would surface UIDs
+                        # written by user B and IMAP would return whatever
+                        # happens to live at those UIDs in A's mailbox. Account
+                        # mailbox aliases are included because the background
+                        # urgency task may be owned by the mailbox address while
+                        # the UI is owned by the app user.
+                        if _tag_name == "spam":
+                            rows_t = _ct.execute(
+                                "SELECT message_id, uid FROM email_tags "
+                                "WHERE folder=? AND spam_verdict=1 "
+                                f"AND {_owner_clause} AND {_account_clause}",
+                                (folder, *_owner_params, *_account_params),
+                            ).fetchall()
+                            for mid, uid in rows_t:
+                                if uid:
+                                    _tag_seq_fallback.append(str(uid).strip())
+                                elif mid:
+                                    _tag_message_ids.append(str(mid).strip())
+                        else:
+                            rows_t = _ct.execute(
+                                "SELECT message_id, uid, tags FROM email_tags "
+                                "WHERE folder=? AND tags IS NOT NULL AND tags != '' "
+                                f"AND {_owner_clause} AND {_account_clause}",
+                                (folder, *_owner_params, *_account_params),
+                            ).fetchall()
+                            _idx_flags_by_uid = {}
+                            _idx_flags_by_mid = {}
                             try:
-                                tg = json.loads(r[2] or "[]")
-                                flags = _idx_flags_by_mid.get(str(r[0] or "").strip()) or _idx_flags_by_uid.get(str(r[1] or "").strip()) or ""
-                                row_tags = set(_sanitize_visible_email_tags(tg, is_answered="\\Answered" in flags))
-                                if _tag_name in row_tags:
-                                    if r[1]:
-                                        _tag_seq_fallback.append(str(r[1]).strip())
-                                    elif r[0]:
-                                        _tag_message_ids.append(str(r[0]).strip())
-                            except Exception:
-                                continue
-                    _ct.close()
+                                _uid_vals = [str(r[1]).strip() for r in rows_t if r[1]]
+                                _mid_vals = [str(r[0]).strip() for r in rows_t if r[0]]
+                                _idx_clauses = []
+                                _idx_params = [owner or "", _account_cache_key(account_id, owner), folder]
+                                if _uid_vals:
+                                    _idx_clauses.append("uid IN (" + ",".join("?" * len(_uid_vals)) + ")")
+                                    _idx_params.extend(_uid_vals)
+                                if _mid_vals:
+                                    _idx_clauses.append("message_id IN (" + ",".join("?" * len(_mid_vals)) + ")")
+                                    _idx_params.extend(_mid_vals)
+                                if _idx_clauses:
+                                    for _uid_i, _mid_i, _flags_i in _ct.execute(
+                                        "SELECT uid, message_id, flags FROM email_message_index "
+                                        "WHERE owner=? AND account_key=? AND folder=? AND (" + " OR ".join(_idx_clauses) + ")",
+                                        _idx_params,
+                                    ).fetchall():
+                                        if _uid_i:
+                                            _idx_flags_by_uid[str(_uid_i)] = _flags_i or ""
+                                        if _mid_i:
+                                            _idx_flags_by_mid[str(_mid_i).strip()] = _flags_i or ""
+                            except Exception as _idx_e:
+                                logger.debug(f"tag filter index flag lookup skipped: {_idx_e}")
+                            for r in rows_t:
+                                try:
+                                    tg = json.loads(r[2] or "[]")
+                                    flags = _idx_flags_by_mid.get(str(r[0] or "").strip()) or _idx_flags_by_uid.get(str(r[1] or "").strip()) or ""
+                                    row_tags = set(_sanitize_visible_email_tags(tg, is_answered="\\Answered" in flags))
+                                    if _tag_name in row_tags:
+                                        if r[1]:
+                                            _tag_seq_fallback.append(str(r[1]).strip())
+                                        elif r[0]:
+                                            _tag_message_ids.append(str(r[0]).strip())
+                                except Exception:
+                                    continue
                 except Exception as _te:
                     logger.warning(f"tag filter lookup failed: {_te}")
                 if not _tag_message_ids and not _tag_seq_fallback:
@@ -2401,8 +2173,6 @@ def setup_email_routes():
                 # Exact account/folder-scoped UIDs avoid one remote IMAP search
                 # per tagged message (especially costly on Gmail). Message-ID
                 # lookup is retained only for legacy rows that have no UID.
-                def _imap_search_quote(value: str) -> str:
-                    return '"' + str(value or "").replace("\\", "\\\\").replace('"', '\\"') + '"'
                 _uids = set()
                 for _mid in dict.fromkeys(_tag_message_ids):
                     if not _mid:
@@ -2467,27 +2237,25 @@ def setup_email_routes():
             # Preload tag rows once — keyed by uid (as str) for the emails we'll render
             _tag_by_uid = {}
             try:
-                import sqlite3 as _sql3
-                _c = _sql3.connect(SCHEDULED_DB)
-                _uid_strs = [u.decode() for u in uid_list]
-                if _uid_strs:
-                    placeholders = ",".join("?" * len(_uid_strs))
-                    _owner_clause, _owner_params = _email_tag_owner_clause(account_id, owner)
-                    _account_clause, _account_params = _email_tag_account_clause(account_id)
-                    rows = _c.execute(
-                        f"SELECT uid, tags, spam_verdict FROM email_tags "
-                        f"WHERE folder=? AND {_owner_clause} AND {_account_clause} AND uid IN ({placeholders})",
-                        [folder, *_owner_params, *_account_params, *_uid_strs],
-                    ).fetchall()
-                    for r in rows:
-                        try:
-                            tg = json.loads(r[1] or "[]")
-                        except Exception:
-                            tg = []
-                        if isinstance(tg, list):
-                            tg = _sanitize_visible_email_tags(tg)
-                        _tag_by_uid[r[0]] = {"tags": tg, "spam": bool(r[2])}
-                _c.close()
+                with _scheduled_db() as _c:
+                    _uid_strs = [u.decode() for u in uid_list]
+                    if _uid_strs:
+                        placeholders = ",".join("?" * len(_uid_strs))
+                        _owner_clause, _owner_params = _email_tag_owner_clause(account_id, owner)
+                        _account_clause, _account_params = _email_tag_account_clause(account_id)
+                        rows = _c.execute(
+                            f"SELECT uid, tags, spam_verdict FROM email_tags "
+                            f"WHERE folder=? AND {_owner_clause} AND {_account_clause} AND uid IN ({placeholders})",
+                            [folder, *_owner_params, *_account_params, *_uid_strs],
+                        ).fetchall()
+                        for r in rows:
+                            try:
+                                tg = json.loads(r[1] or "[]")
+                            except Exception:
+                                tg = []
+                            if isinstance(tg, list):
+                                tg = _sanitize_visible_email_tags(tg)
+                            _tag_by_uid[r[0]] = {"tags": tg, "spam": bool(r[2])}
             except Exception as e:
                 logger.warning(f"Tag preload failed: {e}")
 
@@ -2528,18 +2296,16 @@ def setup_email_routes():
                         if mid:
                             header_ids.append(mid)
                     if header_ids:
-                        import sqlite3 as _sql3m
-                        _cm = _sql3m.connect(SCHEDULED_DB)
-                        _owner_clause_m, _owner_params_m = _email_tag_owner_clause(account_id, owner)
-                        _account_clause_m, _account_params_m = _email_tag_account_clause(account_id)
-                        _mid_ph = ",".join("?" * len(header_ids))
-                        rows_m = _cm.execute(
-                            f"SELECT message_id, tags, spam_verdict FROM email_tags "
-                            f"WHERE folder=? AND {_owner_clause_m} AND {_account_clause_m} "
-                            f"AND message_id IN ({_mid_ph})",
-                            [folder, *_owner_params_m, *_account_params_m, *header_ids],
-                        ).fetchall()
-                        _cm.close()
+                        with _scheduled_db() as _cm:
+                            _owner_clause_m, _owner_params_m = _email_tag_owner_clause(account_id, owner)
+                            _account_clause_m, _account_params_m = _email_tag_account_clause(account_id)
+                            _mid_ph = ",".join("?" * len(header_ids))
+                            rows_m = _cm.execute(
+                                f"SELECT message_id, tags, spam_verdict FROM email_tags "
+                                f"WHERE folder=? AND {_owner_clause_m} AND {_account_clause_m} "
+                                f"AND message_id IN ({_mid_ph})",
+                                [folder, *_owner_params_m, *_account_params_m, *header_ids],
+                            ).fetchall()
                         for mid, tags_raw, spam_raw in rows_m:
                             try:
                                 tags = json.loads(tags_raw or "[]")
@@ -2577,41 +2343,39 @@ def setup_email_routes():
 
             if emails:
                 try:
-                    import sqlite3 as _sql3i
-                    _ci = _sql3i.connect(SCHEDULED_DB)
-                    _owner_clause_i, _owner_params_i = _email_tag_owner_clause(account_id, owner)
-                    _account_clause_i, _account_params_i = _email_tag_account_clause(account_id)
-                    uid_vals = [str(e.get("uid") or "") for e in emails if e.get("uid")]
-                    mid_vals = [(e.get("message_id") or "").strip() for e in emails if e.get("message_id")]
-                    clauses = []
-                    params = [folder, *_owner_params_i, *_account_params_i]
-                    if uid_vals:
-                        clauses.append("uid IN (" + ",".join("?" * len(uid_vals)) + ")")
-                        params.extend(uid_vals)
-                    if mid_vals:
-                        clauses.append("message_id IN (" + ",".join("?" * len(mid_vals)) + ")")
-                        params.extend(mid_vals)
-                    tag_by_uid = {}
-                    tag_by_mid = {}
-                    if clauses:
-                        rows_i = _ci.execute(
-                            f"SELECT uid, message_id, tags, spam_verdict FROM email_tags "
-                            f"WHERE folder=? AND {_owner_clause_i} AND {_account_clause_i} AND ({' OR '.join(clauses)})",
-                            params,
-                        ).fetchall()
-                        for uid_i, mid_i, tags_raw_i, spam_i in rows_i:
-                            try:
-                                tags_i = json.loads(tags_raw_i or "[]")
-                            except Exception:
-                                tags_i = []
-                            if isinstance(tags_i, list):
-                                tags_i = _sanitize_visible_email_tags(tags_i)
-                            entry_i = {"tags": tags_i if isinstance(tags_i, list) else [], "spam": bool(spam_i)}
-                            if uid_i:
-                                tag_by_uid[str(uid_i)] = entry_i
-                            if mid_i:
-                                tag_by_mid[str(mid_i).strip()] = entry_i
-                    _ci.close()
+                    with _scheduled_db() as _ci:
+                        _owner_clause_i, _owner_params_i = _email_tag_owner_clause(account_id, owner)
+                        _account_clause_i, _account_params_i = _email_tag_account_clause(account_id)
+                        uid_vals = [str(e.get("uid") or "") for e in emails if e.get("uid")]
+                        mid_vals = [(e.get("message_id") or "").strip() for e in emails if e.get("message_id")]
+                        clauses = []
+                        params = [folder, *_owner_params_i, *_account_params_i]
+                        if uid_vals:
+                            clauses.append("uid IN (" + ",".join("?" * len(uid_vals)) + ")")
+                            params.extend(uid_vals)
+                        if mid_vals:
+                            clauses.append("message_id IN (" + ",".join("?" * len(mid_vals)) + ")")
+                            params.extend(mid_vals)
+                        tag_by_uid = {}
+                        tag_by_mid = {}
+                        if clauses:
+                            rows_i = _ci.execute(
+                                f"SELECT uid, message_id, tags, spam_verdict FROM email_tags "
+                                f"WHERE folder=? AND {_owner_clause_i} AND {_account_clause_i} AND ({' OR '.join(clauses)})",
+                                params,
+                            ).fetchall()
+                            for uid_i, mid_i, tags_raw_i, spam_i in rows_i:
+                                try:
+                                    tags_i = json.loads(tags_raw_i or "[]")
+                                except Exception:
+                                    tags_i = []
+                                if isinstance(tags_i, list):
+                                    tags_i = _sanitize_visible_email_tags(tags_i)
+                                entry_i = {"tags": tags_i if isinstance(tags_i, list) else [], "spam": bool(spam_i)}
+                                if uid_i:
+                                    tag_by_uid[str(uid_i)] = entry_i
+                                if mid_i:
+                                    tag_by_mid[str(mid_i).strip()] = entry_i
                     for e in emails:
                         tag_entry = tag_by_mid.get((e.get("message_id") or "").strip()) or tag_by_uid.get(str(e.get("uid") or ""))
                         if tag_entry:
@@ -2621,18 +2385,16 @@ def setup_email_routes():
                     logger.debug(f"email index tag merge skipped: {e}")
 
                 try:
-                    import sqlite3 as _sql3c
                     ids = [(e.get("message_id") or "").strip() for e in emails if e.get("message_id")]
                     if ids:
-                        _ccal = _sql3c.connect(SCHEDULED_DB)
-                        owner_clause, owner_params = _email_cache_owner_clause(owner)
-                        ph = ",".join("?" * len(ids))
-                        cal_rows = _ccal.execute(
-                            f"SELECT message_id, event_uids FROM email_calendar_extractions "
-                            f"WHERE message_id IN ({ph}) AND {owner_clause}",
-                            (*ids, *owner_params),
-                        ).fetchall()
-                        _ccal.close()
+                        with _scheduled_db() as _ccal:
+                            owner_clause, owner_params = _email_cache_owner_clause(owner)
+                            ph = ",".join("?" * len(ids))
+                            cal_rows = _ccal.execute(
+                                f"SELECT message_id, event_uids FROM email_calendar_extractions "
+                                f"WHERE message_id IN ({ph}) AND {owner_clause}",
+                                (*ids, *owner_params),
+                            ).fetchall()
                         by_mid = {}
                         for mid, raw_uids in cal_rows:
                             try:
@@ -2666,16 +2428,14 @@ def setup_email_routes():
             try:
                 ids = [e.get("message_id", "") for e in emails if e.get("message_id")]
                 if ids:
-                    import sqlite3 as _sql3
-                    _c = _sql3.connect(SCHEDULED_DB)
-                    placeholders = ",".join("?" * len(ids))
-                    owner_clause, owner_params = _email_cache_owner_clause(owner)
-                    rows = _c.execute(
-                        f"SELECT message_id, summary FROM email_summaries "
-                        f"WHERE message_id IN ({placeholders}) AND {owner_clause}",
-                        (*ids, *owner_params),
-                    ).fetchall()
-                    _c.close()
+                    with _scheduled_db() as _c:
+                        placeholders = ",".join("?" * len(ids))
+                        owner_clause, owner_params = _email_cache_owner_clause(owner)
+                        rows = _c.execute(
+                            f"SELECT message_id, summary FROM email_summaries "
+                            f"WHERE message_id IN ({placeholders}) AND {owner_clause}",
+                            (*ids, *owner_params),
+                        ).fetchall()
                     by_id = {r[0]: r[1] for r in rows}
                     for e in emails:
                         s = by_id.get(e.get("message_id", ""))
@@ -2786,7 +2546,7 @@ def setup_email_routes():
     ):
         """List emails. Uses an 8s in-memory cache + offloads blocking IMAP
         calls to a worker thread so the event loop never stalls."""
-        started_at = _time.monotonic()
+        started_at = time.monotonic()
         for field_name, value in (("date_from", date_from), ("date_to", date_to)):
             if value:
                 try:
@@ -2841,14 +2601,14 @@ def setup_email_routes():
                 sync_meta = dict(cached.get("sync") or {})
                 sync_meta["source"] = "memory_cache"
                 cached["sync"] = sync_meta
-                elapsed_ms = int((_time.monotonic() - started_at) * 1000)
+                elapsed_ms = int((time.monotonic() - started_at) * 1000)
                 if elapsed_ms > 500:
                     logger.info(
                         "email list cache hit slow owner=%s account=%s folder=%s filter=%s limit=%s offset=%s total=%sms",
                         owner, account_id or "", folder, filter, limit, offset, elapsed_ms,
                     )
                 return cached
-        result = await _asyncio.to_thread(
+        result = await asyncio.to_thread(
             _list_emails_sync, folder, limit, offset, filter, account_id, from_addr,
             bool(has_attachments), owner, manual_refresh, date_from or "", date_to or "",
         )
@@ -2857,7 +2617,7 @@ def setup_email_routes():
                 _record_email_received_events(owner, account_id, folder, result.get("emails") or [])
                 _schedule_recent_email_warm(result.get("emails") or [], folder, account_id, owner)
             _list_cache_put(ck, result)
-        elapsed_ms = int((_time.monotonic() - started_at) * 1000)
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
         if elapsed_ms > 1500:
             logger.warning(
                 "Slow email list owner=%s account=%s folder=%s filter=%s limit=%s offset=%s cache_bust=%s emails=%s total=%s elapsed=%sms",
@@ -2889,8 +2649,7 @@ def setup_email_routes():
             }
         try:
             account_key = _account_cache_key(account_id, owner)
-            conn = _sql3.connect(SCHEDULED_DB)
-            try:
+            with _scheduled_db() as conn:
                 row = conn.execute(
                     """
                     SELECT COUNT(*),
@@ -2906,8 +2665,6 @@ def setup_email_routes():
                     "SELECT COUNT(*), MAX(updated_at) FROM email_message_index WHERE owner=? AND account_key=? AND folder=?",
                     (owner or "", account_key, folder),
                 ).fetchone()
-            finally:
-                conn.close()
             indexed_total = int((total_row or [0])[0] or 0)
             if indexed_total:
                 return {
@@ -2923,7 +2680,7 @@ def setup_email_routes():
         except Exception:
             logger.debug("unread-state index lookup skipped", exc_info=True)
 
-        result = await _asyncio.to_thread(
+        result = await asyncio.to_thread(
             _list_emails_sync, folder, 1, 0, "unread", account_id, None, False, owner,
         )
         emails = (result or {}).get("emails") or []
@@ -2941,17 +2698,16 @@ def setup_email_routes():
         }
 
     @router.post("/{uid}/unflag-spam")
-    async def unflag_spam(uid: str, owner: str = Depends(require_owner)):
+    def unflag_spam(uid: str, owner: str = Depends(require_owner)):
         """User override — mark email as not spam."""
         try:
             owner_clause, owner_params = _email_tag_owner_clause(None, owner)
-            _c = _sql3.connect(SCHEDULED_DB)
-            _c.execute(
-                f"UPDATE email_tags SET spam_verdict=0, spam_reason='' WHERE uid=? AND {owner_clause}",
-                [uid, *owner_params],
-            )
-            _c.commit()
-            _c.close()
+            with _scheduled_db() as _c:
+                _c.execute(
+                    f"UPDATE email_tags SET spam_verdict=0, spam_reason='' WHERE uid=? AND {owner_clause}",
+                    [uid, *owner_params],
+                )
+                _c.commit()
             return {"ok": True}
         except Exception as e:
             logger.error(f"unflag-spam failed: {e}")
@@ -2960,8 +2716,7 @@ def setup_email_routes():
     def _unsubscribe_spam_cache(owner: str, account_id: str | None, folder: str) -> dict[str, dict]:
         out: dict[str, dict] = {}
         try:
-            conn = _sql3.connect(SCHEDULED_DB)
-            try:
+            with _scheduled_db() as conn:
                 owner_clause, owner_params = _email_tag_owner_clause(account_id, owner)
                 account_clause, account_params = _email_tag_account_clause(account_id)
                 rows = conn.execute(
@@ -2970,8 +2725,6 @@ def setup_email_routes():
                     f"{owner_clause} AND {account_clause}",
                     (folder, *owner_params, *account_params),
                 ).fetchall()
-            finally:
-                conn.close()
             for uid, message_id, spam_verdict, spam_reason in rows:
                 payload = {"spam": bool(spam_verdict), "reason": spam_reason or ""}
                 if uid:
@@ -3140,23 +2893,23 @@ def setup_email_routes():
         if _fixture_email_enabled():
             return {"success": True, "candidates": [], "total": 0, "scanned": 0, "folder": folder, "sync": {"source": "local"}}
         try:
-            return await _asyncio.to_thread(_scan_unsubscribe_candidates_sync, folder, account_id, owner, limit, max_scan)
+            return await asyncio.to_thread(_scan_unsubscribe_candidates_sync, folder, account_id, owner, limit, max_scan)
         except Exception as e:
             logger.error(f"unsubscribe scan failed: {e}")
             return {"success": False, "error": "Mail operation failed", "candidates": []}
 
     @router.post("/unsubscribe/execute")
-    def execute_unsubscribe(data: dict, owner: str = Depends(require_owner)):
+    def execute_unsubscribe(data: UnsubscribeExecuteRequest, owner: str = Depends(require_owner)):
         """Execute an approved unsubscribe action.
 
         First implementation supports mailto List-Unsubscribe only. The message
         header is re-read server-side; client-supplied addresses are not trusted.
         """
-        uid = str((data or {}).get("uid") or "").strip()
-        folder = str((data or {}).get("folder") or "INBOX").strip() or "INBOX"
-        account_id = (data or {}).get("account_id") or None
-        method_index = int((data or {}).get("method_index") or 0)
-        move_to_spam = bool((data or {}).get("move_to_spam"))
+        uid = str(data.uid or "").strip()
+        folder = (data.folder or "INBOX").strip() or "INBOX"
+        account_id = data.account_id or None
+        method_index = data.method_index or 0
+        move_to_spam = bool(data.move_to_spam)
         if not uid:
             raise HTTPException(400, "Missing uid")
         if account_id:
@@ -3241,14 +2994,14 @@ def setup_email_routes():
             return {"success": False, "error": "Mail operation failed"}
 
     @router.post("/unsubscribe/cleanup")
-    def cleanup_unsubscribe_candidates(data: dict, owner: str = Depends(require_owner)):
+    def cleanup_unsubscribe_candidates(data: UnsubscribeCleanupRequest, owner: str = Depends(require_owner)):
         """Move reviewed unsubscribe candidates to Junk, Trash, or both."""
-        folder = str((data or {}).get("folder") or "INBOX").strip() or "INBOX"
-        account_id = (data or {}).get("account_id") or None
-        action = str((data or {}).get("action") or "").strip().lower()
-        raw_uids = (data or {}).get("uids") or []
-        scope = str((data or {}).get("scope") or "").strip().lower()
-        sender = str((data or {}).get("sender") or "").strip()
+        folder = (data.folder or "INBOX").strip() or "INBOX"
+        account_id = data.account_id or None
+        action = (data.action or "").strip().lower()
+        raw_uids = data.uids or []
+        scope = (data.scope or "").strip().lower()
+        sender = (data.sender or "").strip()
         if action not in {"junk", "delete", "junk_delete"}:
             raise HTTPException(400, "Unsupported cleanup action")
         if account_id:
@@ -3341,13 +3094,12 @@ def setup_email_routes():
         won't appear yet."""
         ql = (q or "").strip().lower()
         try:
-            conn = _sql3.connect(SCHEDULED_DB)
-            owner_clause, owner_params = _email_tag_owner_clause(None, owner)
-            rows = conn.execute(
-                f"SELECT sender FROM email_tags WHERE sender IS NOT NULL AND sender != '' AND {owner_clause}",
-                owner_params,
-            ).fetchall()
-            conn.close()
+            with _scheduled_db() as conn:
+                owner_clause, owner_params = _email_tag_owner_clause(None, owner)
+                rows = conn.execute(
+                    f"SELECT sender FROM email_tags WHERE sender IS NOT NULL AND sender != '' AND {owner_clause}",
+                    owner_params,
+                ).fetchall()
             seen = {}
             for (s,) in rows:
                 try:
@@ -3703,61 +3455,59 @@ def setup_email_routes():
             cached_ai_reply = None
             cached_boundaries = None
             try:
-                import sqlite3 as _sql3
-                _c = _sql3.connect(SCHEDULED_DB)
-                owner_clause, owner_params = _email_cache_owner_clause(owner)
-                _row = _c.execute(
-                    f"SELECT summary FROM email_summaries WHERE message_id = ? AND {owner_clause}",
-                    (message_id.strip(), *owner_params),
-                ).fetchone()
-                if _row:
-                    cached_summary = _row[0]
-                _row2 = _c.execute(
-                    f"SELECT reply FROM email_ai_replies WHERE message_id = ? AND {owner_clause}",
-                    (message_id.strip(), *owner_params),
-                ).fetchone()
-                if _row2:
-                    cached_ai_reply = _apply_email_style_mechanics(_extract_reply(_row2[0] or ""))
-                _row3 = _c.execute(
-                    "SELECT sig_start, quote_start, turns_json FROM email_boundaries WHERE message_id = ?",
-                    (message_id.strip(),),
-                ).fetchone()
-                cached_turns = None
-                cached_sender_sig = None
-                # Look up a per-sender cached signature (built by the
-                # `learn_sender_signatures` action). Used by the renderer
-                # to fold sigs consistently from the same address.
-                try:
-                    if sender_addr:
-                        _rs = _c.execute(
-                            f"SELECT signature_text FROM sender_signatures "
-                            f"WHERE from_address = ? AND {owner_clause}",
-                            (sender_addr.lower().strip(), *owner_params),
-                        ).fetchone()
-                        if _rs and _rs[0]:
-                            cached_sender_sig = _rs[0]
-                except Exception:
-                    pass
-                if _row3:
-                    cached_boundaries = {"sig_start": _row3[0], "quote_start": _row3[1]}
-                    if _row3[2]:
-                        try:
-                            from src.email_thread_parser import THREAD_PARSER_VERSION
-                            _parsed = json.loads(_row3[2])
-                            # Versioned envelope: {"v": N, "turns": [...]}.
-                            # Anything else (bare list from older code, wrong
-                            # version) is treated as a cache miss so the
-                            # on-the-fly parser re-runs and the next write
-                            # warms the cache with the current shape.
-                            if (
-                                isinstance(_parsed, dict)
-                                and _parsed.get("v") == THREAD_PARSER_VERSION
-                                and isinstance(_parsed.get("turns"), list)
-                            ):
-                                cached_turns = _parsed["turns"]
-                        except Exception:
-                            cached_turns = None
-                _c.close()
+                with _scheduled_db() as _c:
+                    owner_clause, owner_params = _email_cache_owner_clause(owner)
+                    _row = _c.execute(
+                        f"SELECT summary FROM email_summaries WHERE message_id = ? AND {owner_clause}",
+                        (message_id.strip(), *owner_params),
+                    ).fetchone()
+                    if _row:
+                        cached_summary = _row[0]
+                    _row2 = _c.execute(
+                        f"SELECT reply FROM email_ai_replies WHERE message_id = ? AND {owner_clause}",
+                        (message_id.strip(), *owner_params),
+                    ).fetchone()
+                    if _row2:
+                        cached_ai_reply = _apply_email_style_mechanics(_extract_reply(_row2[0] or ""))
+                    _row3 = _c.execute(
+                        "SELECT sig_start, quote_start, turns_json FROM email_boundaries WHERE message_id = ?",
+                        (message_id.strip(),),
+                    ).fetchone()
+                    cached_turns = None
+                    cached_sender_sig = None
+                    # Look up a per-sender cached signature (built by the
+                    # `learn_sender_signatures` action). Used by the renderer
+                    # to fold sigs consistently from the same address.
+                    try:
+                        if sender_addr:
+                            _rs = _c.execute(
+                                f"SELECT signature_text FROM sender_signatures "
+                                f"WHERE from_address = ? AND {owner_clause}",
+                                (sender_addr.lower().strip(), *owner_params),
+                            ).fetchone()
+                            if _rs and _rs[0]:
+                                cached_sender_sig = _rs[0]
+                    except Exception:
+                        pass
+                    if _row3:
+                        cached_boundaries = {"sig_start": _row3[0], "quote_start": _row3[1]}
+                        if _row3[2]:
+                            try:
+                                from src.email_thread_parser import THREAD_PARSER_VERSION
+                                _parsed = json.loads(_row3[2])
+                                # Versioned envelope: {"v": N, "turns": [...]}.
+                                # Anything else (bare list from older code, wrong
+                                # version) is treated as a cache miss so the
+                                # on-the-fly parser re-runs and the next write
+                                # warms the cache with the current shape.
+                                if (
+                                    isinstance(_parsed, dict)
+                                    and _parsed.get("v") == THREAD_PARSER_VERSION
+                                    and isinstance(_parsed.get("turns"), list)
+                                ):
+                                    cached_turns = _parsed["turns"]
+                            except Exception:
+                                cached_turns = None
             except Exception:
                 pass
 
@@ -3851,7 +3601,7 @@ def setup_email_routes():
             # A cache hit already holds a complete, valid message. Await the
             # STORE so the response reports the real flag state, but never let
             # a failed STORE withhold a body we are holding in memory.
-            if mark_seen and not await _asyncio.to_thread(
+            if mark_seen and not await asyncio.to_thread(
                 _mark_email_seen_sync, uid, folder, account_id, owner
             ):
                 return {**cached, "mark_seen_failed": True}
@@ -3860,12 +3610,12 @@ def setup_email_routes():
             persisted = _email_preview_cache_get(owner, account_id, folder, uid)
             if persisted and persisted.get("attachment_version") == EMAIL_READ_ATTACHMENT_VERSION:
                 _read_cache_put(ck, persisted)
-                if mark_seen and not await _asyncio.to_thread(
+                if mark_seen and not await asyncio.to_thread(
                     _mark_email_seen_sync, uid, folder, account_id, owner
                 ):
                     return {**persisted, "mark_seen_failed": True}
                 return persisted
-        result = await _asyncio.to_thread(_read_email_sync, uid, folder, account_id, owner, mark_seen, full)
+        result = await asyncio.to_thread(_read_email_sync, uid, folder, account_id, owner, mark_seen, full)
         if result and not result.get("error"):
             # `mark_seen_failed` describes this request, not the message, so it
             # must not enter either cache — a later reader would otherwise be
@@ -3879,7 +3629,7 @@ def setup_email_routes():
     def _schedule_recent_email_warm(emails: list, folder: str, account_id: str | None, owner: str):
         if not emails or folder == "__scheduled__":
             return
-        now = _time.time()
+        now = time.time()
         selected = []
         for em in emails:
             uid = str((em or {}).get("uid") or "").strip()
@@ -3908,28 +3658,28 @@ def setup_email_routes():
             return
 
         async def _warm():
-            await _asyncio.sleep(0.25)
+            await asyncio.sleep(0.25)
             for uid, ck in selected:
                 if _read_cache_get(ck) is not None:
                     _WARMING_READS.discard(ck)
                     continue
                 try:
-                    result = await _asyncio.to_thread(_read_email_sync, uid, folder, account_id, owner, False, False)
+                    result = await asyncio.to_thread(_read_email_sync, uid, folder, account_id, owner, False, False)
                     if result and not result.get("error"):
                         _read_cache_put(ck, result)
                 except Exception as e:
                     logger.debug(f"email read warm skipped uid={uid}: {e}")
                 finally:
                     _WARMING_READS.discard(ck)
-                    await _asyncio.sleep(0.35)
+                    await asyncio.sleep(0.35)
 
         try:
-            _asyncio.create_task(_warm())
+            asyncio.create_task(_warm())
         except RuntimeError:
             pass
 
     @router.get("/attachments/{uid}")
-    async def list_attachments(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
+    def list_attachments(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
         """List attachments for an email."""
         fixture = _fixture_email_read(uid, folder, owner)
         if fixture is not None and not fixture.get("error"):
@@ -3957,7 +3707,7 @@ def setup_email_routes():
             return {"attachments": [], "error": "Mail operation failed"}
 
     @router.get("/attachment/{uid}/{index}")
-    async def download_attachment(uid: str, index: int, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
+    def download_attachment(uid: str, index: int, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
         """Download a specific attachment by email UID and attachment index. Saves to local disk and returns the file."""
         fixture_att = _fixture_attachment_source(uid, index, owner, folder)
         if fixture_att is not None:
@@ -3998,7 +3748,7 @@ def setup_email_routes():
             return {"error": "Mail operation failed"}
 
     @router.get("/attachments-download/{uid}")
-    async def download_all_attachments(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
+    def download_all_attachments(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
         """Download all visible attachments for an email as a zip archive."""
         try:
             with _imap(account_id, owner=owner) as conn:
@@ -4186,7 +3936,7 @@ def setup_email_routes():
         )
 
     @router.get("/inline-image/{uid}")
-    async def inline_image(
+    def inline_image(
         uid: str,
         cid: str = Query(...),
         folder: str = Query("INBOX"),
@@ -4440,7 +4190,6 @@ def setup_email_routes():
                 return upload_id, dest_path
 
             def _create_pdf_document_from_path(pdf_path: _Path, original_name: str, body_text: str | None = None):
-                from src.constants import UPLOAD_DIR
                 from src.pdf_forms import has_form_fields, extract_fields
                 from src.pdf_form_doc import (
                     save_field_sidecar,
@@ -4598,7 +4347,7 @@ def setup_email_routes():
             return {"error": "Mail operation failed"}
 
     @router.post("/attachment-path/{uid}/{index}")
-    async def get_attachment_path(uid: str, index: int, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
+    def get_attachment_path(uid: str, index: int, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
         """Extract attachment to local disk and return the path (for AI to read via read_file)."""
         fixture_att = _fixture_attachment_source(uid, index, owner, folder)
         if fixture_att is not None:
@@ -4629,58 +4378,46 @@ def setup_email_routes():
             logger.error(f"Failed to get attachment path {uid}/{index}: {e}")
             return {"error": "Mail operation failed"}
 
-    @router.post("/mark-unread/{uid}")
-    async def mark_unread(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
-        """Mark an email as unread (clear \\Seen flag)."""
+    def _set_email_flag(uid, folder, account_id, owner, flag: str, add: bool) -> dict:
         try:
             with _imap(account_id, owner=owner) as conn:
                 conn.select(_q(folder))
-                if not _store_email_flag(conn, uid, "\\Seen", add=False):
+                if not _store_email_flag(conn, uid, flag, add=add):
                     return {"success": False, "error": "Email not found"}
-            _email_index_update_flags(owner, account_id, folder, uid, "\\Seen", False)
+            _email_index_update_flags(owner, account_id, folder, uid, flag, add)
+            if flag == "\\Answered" and add:
+                _clear_done_response_tags(owner, account_id, folder, uid)
             _invalidate_list_cache(account_id, folder)
             return {"success": True}
         except Exception as e:
-            logger.error(f"Failed to mark unread {uid}: {e}")
+            logger.error(f"Failed to {'set' if add else 'clear'} {flag} on {uid}: {e}")
             return {"success": False, "error": "Mail operation failed"}
 
+    @router.post("/mark-unread/{uid}")
+    def mark_unread(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
+        """Mark an email as unread (clear \\Seen flag)."""
+        return _set_email_flag(uid, folder, account_id, owner, "\\Seen", False)
+
     @router.post("/flag/{uid}")
-    async def flag_email(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None),
+    def flag_email(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None),
                          on: bool = Query(True), owner: str = Depends(require_owner)):
         """Toggle the \\Flagged flag (a.k.a. favorite / star) on an email.
         Pass `on=true` to favorite, `on=false` to unfavorite."""
         fixture_ok = _fixture_email_update(uid, owner, source_folder=folder, favorite=bool(on))
         if fixture_ok is not None:
             return {"success": bool(fixture_ok), "flagged": bool(on), **({} if fixture_ok else {"error": "Email not found"})}
-        try:
-            with _imap(account_id, owner=owner) as conn:
-                conn.select(_q(folder))
-                if not _store_email_flag(conn, uid, "\\Flagged", add=bool(on)):
-                    return {"success": False, "error": "Email not found"}
-            _email_index_update_flags(owner, account_id, folder, uid, "\\Flagged", bool(on))
-            _invalidate_list_cache(account_id, folder)
-            return {"success": True, "flagged": bool(on)}
-        except Exception as e:
-            logger.error(f"Failed to flag {uid}: {e}")
-            return {"success": False, "error": "Mail operation failed"}
+        result = _set_email_flag(uid, folder, account_id, owner, "\\Flagged", bool(on))
+        if result["success"]:
+            result["flagged"] = bool(on)
+        return result
 
     @router.post("/mark-read/{uid}")
-    async def mark_read(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
+    def mark_read(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
         """Mark an email as read (set \\Seen flag)."""
         fixture_ok = _fixture_email_update(uid, owner, source_folder=folder, read=True)
         if fixture_ok is not None:
             return {"success": bool(fixture_ok), **({} if fixture_ok else {"error": "Email not found"})}
-        try:
-            with _imap(account_id, owner=owner) as conn:
-                conn.select(_q(folder))
-                if not _store_email_flag(conn, uid, "\\Seen", add=True):
-                    return {"success": False, "error": "Email not found"}
-            _email_index_update_flags(owner, account_id, folder, uid, "\\Seen", True)
-            _invalidate_list_cache(account_id, folder)
-            return {"success": True}
-        except Exception as e:
-            logger.error(f"Failed to mark read {uid}: {e}")
-            return {"success": False, "error": "Mail operation failed"}
+        return _set_email_flag(uid, folder, account_id, owner, "\\Seen", True)
 
     @router.post("/archive/{uid}")
     # Sync def: blocking IMAP I/O with no awaits — see search_emails above. Runs in a
@@ -4703,7 +4440,7 @@ def setup_email_routes():
             return {"success": False, "error": "Mail operation failed"}
 
     @router.delete("/delete/{uid}")
-    async def delete_email(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), message_id: str | None = Query(None), owner: str = Depends(require_owner)):
+    def delete_email(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), message_id: str | None = Query(None), owner: str = Depends(require_owner)):
         """Move email to Trash."""
         logger.info(
             "Email delete requested uid=%s folder=%s account=%s message_id=%s fixture=%s",
@@ -4754,7 +4491,7 @@ def setup_email_routes():
             return {"success": False, "error": "Mail operation failed"}
 
     @router.delete("/delete-permanent/{uid}")
-    async def delete_email_permanent(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
+    def delete_email_permanent(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
         """Permanently delete an email (no Trash)."""
         try:
             with _imap(account_id, owner=owner) as conn:
@@ -4770,16 +4507,15 @@ def setup_email_routes():
             return {"success": False, "error": "Mail operation failed"}
 
     @router.post("/delete-bulk")
-    def delete_email_bulk(data: dict, owner: str = Depends(require_owner)):
+    def delete_email_bulk(data: BulkDeleteRequest, owner: str = Depends(require_owner)):
         """Move a selected batch to Trash using one IMAP connection."""
-        payload = data or {}
-        folder = str(payload.get("folder") or "INBOX").strip() or "INBOX"
-        account_id = payload.get("account_id") or None
+        folder = (data.folder or "INBOX").strip() or "INBOX"
+        account_id = data.account_id or None
         if account_id:
             _assert_owns_account(account_id, owner)
         uids = []
         seen = set()
-        for raw_uid in payload.get("uids") or []:
+        for raw_uid in data.uids or []:
             uid = str(raw_uid or "").strip()
             if uid and uid not in seen and uid.isdigit():
                 seen.add(uid)
@@ -4886,7 +4622,7 @@ def setup_email_routes():
                     _invalidate_list_cache(account_id, trash_folder)
 
     @router.delete("/odysseus/reminders")
-    async def delete_odysseus_reminder_emails(
+    def delete_odysseus_reminder_emails(
         account_id: str | None = Query(None),
         permanent: bool = Query(False),
         owner: str = Depends(require_owner),
@@ -4905,11 +4641,8 @@ def setup_email_routes():
             ]
             own_addrs = [a for i, a in enumerate(own_addrs) if a and a not in own_addrs[:i]]
 
-            def _search_quote(value: str) -> str:
-                return '"' + (value or "").replace("\\", "\\\\").replace('"', '\\"') + '"'
-
             def _search_uids(conn, criteria: str):
-                st, data = conn.uid("SEARCH", None, criteria)
+                st, data = _imap_uid_search(conn, criteria)
                 return set(data[0].split()) if st == "OK" and data and data[0] else set()
 
             with _imap(account_id, owner=owner) as conn:
@@ -4929,16 +4662,16 @@ def setup_email_routes():
                         # Match the Reminders filter: new messages have the
                         # explicit kind header, and subject fallback catches
                         # clients/providers that stripped custom headers.
-                        uids.update(_search_uids(conn, f'(HEADER X-Odysseus-Kind {_search_quote("reminder")})'))
-                        uids.update(_search_uids(conn, f'(SUBJECT {_search_quote("Reminder (Odysseus):")})'))
+                        uids.update(_search_uids(conn, f'(HEADER X-Odysseus-Kind {_imap_search_quote("reminder")})'))
+                        uids.update(_search_uids(conn, f'(SUBJECT {_imap_search_quote("Reminder (Odysseus):")})'))
                         for addr in own_addrs:
-                            addr_q = _search_quote(addr)
-                            uids.update(_search_uids(conn, f'(FROM {addr_q} SUBJECT {_search_quote("Reminder (Odysseus):")})'))
+                            addr_q = _imap_search_quote(addr)
+                            uids.update(_search_uids(conn, f'(FROM {addr_q} SUBJECT {_imap_search_quote("Reminder (Odysseus):")})'))
                             # Legacy reminders created before the Odysseus
                             # prefix still came from this mailbox as
                             # "Reminder: ..."; include them in Clear without
                             # sweeping unrelated external reminder emails.
-                            uids.update(_search_uids(conn, f'(FROM {addr_q} SUBJECT {_search_quote("Reminder:")})'))
+                            uids.update(_search_uids(conn, f'(FROM {addr_q} SUBJECT {_imap_search_quote("Reminder:")})'))
                         if not uids:
                             continue
                         for uid in sorted(uids, key=lambda b: int(b)):
@@ -4961,7 +4694,7 @@ def setup_email_routes():
             return {"success": False, "error": "Mail operation failed"}
 
     @router.post("/move/{uid}")
-    async def move_email(uid: str, folder: str = Query("INBOX"), dest: str = Query(...), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
+    def move_email(uid: str, folder: str = Query("INBOX"), dest: str = Query(...), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
         """Move an email to another folder."""
         fixture_ok = _fixture_email_update(uid, owner, source_folder=folder, folder=dest)
         if fixture_ok is not None:
@@ -5027,10 +4760,10 @@ def setup_email_routes():
             }
 
         try:
-            payload = await _asyncio.wait_for(_asyncio.to_thread(_list_folders_sync), timeout=8.0)
+            payload = await asyncio.wait_for(asyncio.to_thread(_list_folders_sync), timeout=8.0)
             _folder_cache_put(account_id, owner, payload)
             return payload
-        except _asyncio.TimeoutError:
+        except asyncio.TimeoutError:
             logger.warning(f"list_folders timed out for account={account_id or 'default'} owner={owner}")
             stale = _folder_cache_get_stale(account_id, owner)
             if stale:
@@ -5050,35 +4783,14 @@ def setup_email_routes():
             return {"folders": [], "error": "Mail operation failed"}
 
     @router.post("/mark-answered/{uid}")
-    async def mark_answered(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
+    def mark_answered(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
         """Mark an email as answered (set \\Answered flag)."""
-        try:
-            with _imap(account_id, owner=owner) as conn:
-                conn.select(_q(folder))
-                if not _store_email_flag(conn, uid, "\\Answered", add=True):
-                    return {"success": False, "error": "Email not found"}
-            _email_index_update_flags(owner, account_id, folder, uid, "\\Answered", True)
-            _clear_done_response_tags(owner, account_id, folder, uid)
-            _invalidate_list_cache(account_id, folder)
-            return {"success": True}
-        except Exception as e:
-            logger.error(f"Failed to mark answered {uid}: {e}")
-            return {"success": False, "error": "Mail operation failed"}
+        return _set_email_flag(uid, folder, account_id, owner, "\\Answered", True)
 
     @router.post("/clear-answered/{uid}")
-    async def clear_answered(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
+    def clear_answered(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
         """Clear the \\Answered flag from an email."""
-        try:
-            with _imap(account_id, owner=owner) as conn:
-                conn.select(_q(folder))
-                if not _store_email_flag(conn, uid, "\\Answered", add=False):
-                    return {"success": False, "error": "Email not found"}
-            _email_index_update_flags(owner, account_id, folder, uid, "\\Answered", False)
-            _invalidate_list_cache(account_id, folder)
-            return {"success": True}
-        except Exception as e:
-            logger.error(f"Failed to clear answered {uid}: {e}")
-            return {"success": False, "error": "Mail operation failed"}
+        return _set_email_flag(uid, folder, account_id, owner, "\\Answered", False)
 
     @router.post("/compose-upload")
     async def compose_upload(file: UploadFile = File(...), owner: str = Depends(require_owner)):
@@ -5177,23 +4889,18 @@ def setup_email_routes():
         raise HTTPException(status_code=400, detail="Unknown attachment kind")
 
     @router.post("/compose-from-odysseus")
-    async def compose_from_odysseus(data: dict, owner: str = Depends(require_owner)):
+    async def compose_from_odysseus(data: OdysseusAttachmentRef, owner: str = Depends(require_owner),
+                                    db: DbSession = Depends(get_db)):
         """Stage an Odysseus document or gallery image as a compose upload."""
-        kind = str(data.get("kind") or "").strip().lower()
-        item_id = str(data.get("id") or "").strip()
+        kind = (data.kind or "").strip().lower()
+        item_id = str(data.id or "").strip()
         if kind not in {"document", "gallery"} or not item_id:
             raise HTTPException(status_code=400, detail="Expected kind and id")
         try:
-            from core.database import SessionLocal as _SL
-
-            db = _SL()
-            try:
-                src = _load_odysseus_attachment_source(db, kind, item_id, owner)
-                if "path" in src:
-                    return _stage_compose_file(src["filename"], src["path"])
-                return _stage_compose_bytes(src["filename"], src["content"])
-            finally:
-                db.close()
+            src = _load_odysseus_attachment_source(db, kind, item_id, owner)
+            if "path" in src:
+                return _stage_compose_file(src["filename"], src["path"])
+            return _stage_compose_bytes(src["filename"], src["content"])
         except HTTPException:
             raise
         except Exception as e:
@@ -5201,51 +4908,44 @@ def setup_email_routes():
             return {"success": False, "error": "Mail operation failed"}
 
     @router.post("/compose-from-odysseus-zip")
-    async def compose_from_odysseus_zip(data: dict, owner: str = Depends(require_owner)):
+    async def compose_from_odysseus_zip(data: OdysseusZipRequest, owner: str = Depends(require_owner),
+                                        db: DbSession = Depends(get_db)):
         """Stage several Odysseus documents/gallery images as one zip attachment."""
-        raw_items = data.get("items") or []
-        if not isinstance(raw_items, list) or not raw_items:
+        raw_items = data.items or []
+        if not raw_items:
             raise HTTPException(status_code=400, detail="Expected items")
         if len(raw_items) > 100:
             raise HTTPException(status_code=400, detail="Too many attachments")
         try:
-            from core.database import SessionLocal as _SL
+            buf = io.BytesIO()
+            used_names: dict[str, int] = {}
 
-            db = _SL()
-            try:
-                buf = io.BytesIO()
-                used_names: dict[str, int] = {}
+            def unique_name(name: str) -> str:
+                safe = _safe_attachment_zip_name(name, "attachment")
+                stem = Path(safe).stem or "attachment"
+                suffix = Path(safe).suffix
+                idx = used_names.get(safe, 0)
+                used_names[safe] = idx + 1
+                if idx == 0:
+                    return safe
+                return f"{stem}-{idx + 1}{suffix}"
 
-                def unique_name(name: str) -> str:
-                    safe = _safe_attachment_zip_name(name, "attachment")
-                    stem = Path(safe).stem or "attachment"
-                    suffix = Path(safe).suffix
-                    idx = used_names.get(safe, 0)
-                    used_names[safe] = idx + 1
-                    if idx == 0:
-                        return safe
-                    return f"{stem}-{idx + 1}{suffix}"
-
-                with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                    for item in raw_items:
-                        if not isinstance(item, dict):
-                            continue
-                        kind = str(item.get("kind") or "").strip().lower()
-                        item_id = str(item.get("id") or "").strip()
-                        if kind not in {"document", "gallery"} or not item_id:
-                            continue
-                        src = _load_odysseus_attachment_source(db, kind, item_id, owner)
-                        zname = unique_name(src["filename"])
-                        if "path" in src:
-                            zf.write(src["path"], arcname=zname)
-                        else:
-                            zf.writestr(zname, src["content"])
-                content = buf.getvalue()
-                if not content:
-                    raise HTTPException(status_code=400, detail="No valid attachments")
-                return _stage_compose_bytes("odysseus-attachments.zip", content)
-            finally:
-                db.close()
+            with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for item in raw_items:
+                    kind = (item.kind or "").strip().lower()
+                    item_id = str(item.id or "").strip()
+                    if kind not in {"document", "gallery"} or not item_id:
+                        continue
+                    src = _load_odysseus_attachment_source(db, kind, item_id, owner)
+                    zname = unique_name(src["filename"])
+                    if "path" in src:
+                        zf.write(src["path"], arcname=zname)
+                    else:
+                        zf.writestr(zname, src["content"])
+            content = buf.getvalue()
+            if not content:
+                raise HTTPException(status_code=400, detail="No valid attachments")
+            return _stage_compose_bytes("odysseus-attachments.zip", content)
         except HTTPException:
             raise
         except Exception as e:
@@ -5253,7 +4953,7 @@ def setup_email_routes():
             return {"success": False, "error": "Mail operation failed"}
 
     @router.post("/compose-from-attachment/{uid}/{index}")
-    async def compose_from_attachment(
+    def compose_from_attachment(
         uid: str,
         index: int,
         folder: str = Query("INBOX"),
@@ -5355,18 +5055,16 @@ def setup_email_routes():
         _cleanup_compose_uploads(attachments)
 
     @router.post("/schedule")
-    async def schedule_email(req: dict, owner: str = Depends(require_owner)):
+    async def schedule_email(req: ScheduleEmailRequest, owner: str = Depends(require_owner)):
         """Schedule an email to be sent at a specific time. ISO8601 UTC."""
-        import sqlite3
         import uuid as _uuid
         try:
-            send_at = req.get("send_at")
+            send_at = req.send_at
             if not send_at:
                 return {"success": False, "error": "send_at required (ISO8601 UTC)"}
             # Body-based account_id — dep can't see it, check here.
-            _acct = req.get("account_id")
-            if _acct:
-                _assert_owns_account(_acct, owner)
+            if req.account_id:
+                _assert_owns_account(req.account_id, owner)
             # Validate parseable + reject past times (the poller fires
             # anything in the past immediately on the next tick — a
             # 1970-dated schedule would deliver right now).
@@ -5391,29 +5089,28 @@ def setup_email_routes():
             send_at = parsed_at.isoformat()
 
             sid = _uuid.uuid4().hex[:16]
-            conn = sqlite3.connect(SCHEDULED_DB)
-            conn.execute("""
-                INSERT INTO scheduled_emails
-                (id, to_addr, cc, bcc, subject, body, in_reply_to, references_hdr, attachments, send_at, created_at, status, account_id, odysseus_kind, owner)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
-            """, (
-                sid,
-                req.get("to", ""),
-                req.get("cc") or None,
-                req.get("bcc") or None,
-                req.get("subject") or "",
-                req.get("body") or "",
-                req.get("in_reply_to") or None,
-                req.get("references") or None,
-                json.dumps(req.get("attachments") or []),
-                send_at,
-                datetime.utcnow().isoformat(),
-                req.get("account_id") or None,
-                req.get("odysseus_kind") or "scheduled",
-                owner or "",
-            ))
-            conn.commit()
-            conn.close()
+            with _scheduled_db() as conn:
+                conn.execute("""
+                    INSERT INTO scheduled_emails
+                    (id, to_addr, cc, bcc, subject, body, in_reply_to, references_hdr, attachments, send_at, created_at, status, account_id, odysseus_kind, owner)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                """, (
+                    sid,
+                    req.to,
+                    req.cc or None,
+                    req.bcc or None,
+                    req.subject or "",
+                    req.body or "",
+                    req.in_reply_to or None,
+                    req.references or None,
+                    json.dumps(req.attachments or []),
+                    send_at,
+                    datetime.utcnow().isoformat(),
+                    req.account_id or None,
+                    req.odysseus_kind or "scheduled",
+                    owner or "",
+                ))
+                conn.commit()
             logger.info(f"Scheduled email {sid} for {send_at}")
             return {"success": True, "id": sid, "send_at": send_at}
         except Exception as e:
@@ -5423,16 +5120,14 @@ def setup_email_routes():
     @router.get("/scheduled")
     async def list_scheduled(owner: str = Depends(require_owner)):
         """List all scheduled (pending) emails."""
-        import sqlite3
         try:
-            conn = sqlite3.connect(SCHEDULED_DB)
-            rows = conn.execute("""
-                SELECT id, to_addr, cc, subject, send_at, created_at, status, error
-                FROM scheduled_emails
-                WHERE status IN ('pending', 'failed') AND owner = ?
-                ORDER BY send_at ASC
-            """, (owner or "",)).fetchall()
-            conn.close()
+            with _scheduled_db() as conn:
+                rows = conn.execute("""
+                    SELECT id, to_addr, cc, subject, send_at, created_at, status, error
+                    FROM scheduled_emails
+                    WHERE status IN ('pending', 'failed') AND owner = ?
+                    ORDER BY send_at ASC
+                """, (owner or "",)).fetchall()
             return {"scheduled": [
                 {
                     "id": r[0], "to": r[1], "cc": r[2], "subject": r[3],
@@ -5446,15 +5141,13 @@ def setup_email_routes():
     @router.delete("/scheduled/{sid}")
     async def cancel_scheduled(sid: str, owner: str = Depends(require_owner)):
         """Cancel a scheduled email."""
-        import sqlite3
         try:
-            conn = sqlite3.connect(SCHEDULED_DB)
-            conn.execute(
-                "DELETE FROM scheduled_emails WHERE id = ? AND status = 'pending' AND owner = ?",
-                (sid, owner or ""),
-            )
-            conn.commit()
-            conn.close()
+            with _scheduled_db() as conn:
+                conn.execute(
+                    "DELETE FROM scheduled_emails WHERE id = ? AND status = 'pending' AND owner = ?",
+                    (sid, owner or ""),
+                )
+                conn.commit()
             return {"success": True}
         except Exception as e:
             logger.error(f"cancel_scheduled {sid!r} failed: {e}")
@@ -5471,16 +5164,15 @@ def setup_email_routes():
     async def list_pending_agent_drafts(owner: str = Depends(require_owner)):
         import sqlite3
         try:
-            conn = sqlite3.connect(SCHEDULED_DB)
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                """SELECT id, to_addr, subject, body, created_at, account_id
-                   FROM scheduled_emails
-                   WHERE status = 'agent_draft' AND owner = ?
-                   ORDER BY created_at DESC""",
-                (owner or "",),
-            ).fetchall()
-            conn.close()
+            with _scheduled_db() as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    """SELECT id, to_addr, subject, body, created_at, account_id
+                       FROM scheduled_emails
+                       WHERE status = 'agent_draft' AND owner = ?
+                       ORDER BY created_at DESC""",
+                    (owner or "",),
+                ).fetchall()
             return {"pending": [dict(r) for r in rows]}
         except Exception as e:
             logger.error(f"list_pending_agent_drafts failed: {e}")
@@ -5491,18 +5183,16 @@ def setup_email_routes():
         """Approve a draft staged by the agent: flip status → pending and
         backdate send_at so the scheduled-send poller picks it up
         immediately."""
-        import sqlite3
         try:
-            conn = sqlite3.connect(SCHEDULED_DB)
-            cur = conn.execute(
-                """UPDATE scheduled_emails
-                   SET status = 'pending', send_at = ?
-                   WHERE id = ? AND status = 'agent_draft' AND owner = ?""",
-                (datetime.utcnow().isoformat(), sid, owner or ""),
-            )
-            conn.commit()
-            affected = cur.rowcount
-            conn.close()
+            with _scheduled_db() as conn:
+                cur = conn.execute(
+                    """UPDATE scheduled_emails
+                       SET status = 'pending', send_at = ?
+                       WHERE id = ? AND status = 'agent_draft' AND owner = ?""",
+                    (datetime.utcnow().isoformat(), sid, owner or ""),
+                )
+                conn.commit()
+                affected = cur.rowcount
             if not affected:
                 return {"success": False, "error": "Draft not found or already handled"}
             return {"success": True}
@@ -5513,17 +5203,15 @@ def setup_email_routes():
     @router.delete("/pending/{sid}")
     async def cancel_agent_draft(sid: str, owner: str = Depends(require_owner)):
         """Discard a draft the agent staged for approval."""
-        import sqlite3
         try:
-            conn = sqlite3.connect(SCHEDULED_DB)
-            cur = conn.execute(
-                """UPDATE scheduled_emails SET status = 'cancelled'
-                   WHERE id = ? AND status = 'agent_draft' AND owner = ?""",
-                (sid, owner or ""),
-            )
-            conn.commit()
-            affected = cur.rowcount
-            conn.close()
+            with _scheduled_db() as conn:
+                cur = conn.execute(
+                    """UPDATE scheduled_emails SET status = 'cancelled'
+                       WHERE id = ? AND status = 'agent_draft' AND owner = ?""",
+                    (sid, owner or ""),
+                )
+                conn.commit()
+                affected = cur.rowcount
             if not affected:
                 return {"success": False, "error": "Draft not found or already handled"}
             return {"success": True}
@@ -5532,7 +5220,7 @@ def setup_email_routes():
             return {"success": False, "error": "Mail operation failed"}
 
     @router.get("/resolve-contact")
-    async def resolve_contact(name: str = Query(..., description="Name to search for"), owner: str = Depends(require_owner)):
+    def resolve_contact(name: str = Query(..., description="Name to search for"), owner: str = Depends(require_owner)):
         """Search Sent folder for a contact by name. Returns matching email addresses."""
         try:
             with _imap(owner=owner) as conn:
@@ -6012,17 +5700,17 @@ def setup_email_routes():
             return {"success": False, "error": "Mail operation failed"}
 
     @router.post("/summarize")
-    async def summarize_email(data: dict, owner: str = Depends(require_owner)):
+    async def summarize_email(data: EmailTextRequest, owner: str = Depends(require_owner)):
         """Generate a quick AI summary of an email body."""
         try:
             from src.endpoint_resolver import resolve_endpoint
 
-            body = data.get("body", "")
-            subject = data.get("subject", "")
-            sender = data.get("from", "")
-            uid = data.get("uid", "")
-            folder = data.get("folder", "INBOX") or "INBOX"
-            account_id = data.get("account_id")
+            body = data.body
+            subject = data.subject
+            sender = data.sender
+            uid = data.uid
+            folder = data.folder or "INBOX"
+            account_id = data.account_id
             if account_id:
                 _assert_owns_account(account_id, owner)
             if not body:
@@ -6099,21 +5787,19 @@ def setup_email_routes():
                 }
 
             # Cache the summary if we have a message_id
-            mid = data.get("message_id", "")
+            mid = data.message_id
             if mid:
                 try:
-                    import sqlite3 as _sql3
-                    _c = _sql3.connect(SCHEDULED_DB)
-                    _c.execute("""
-                        INSERT OR REPLACE INTO email_summaries
-                        (message_id, owner, uid, folder, subject, sender, summary, model_used, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        mid, owner, data.get("uid", ""), data.get("folder", ""),
-                        subject, sender, content, model, datetime.utcnow().isoformat(),
-                    ))
-                    _c.commit()
-                    _c.close()
+                    with _scheduled_db() as _c:
+                        _c.execute("""
+                            INSERT OR REPLACE INTO email_summaries
+                            (message_id, owner, uid, folder, subject, sender, summary, model_used, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            mid, owner, data.uid, data.folder,
+                            subject, sender, content, model, datetime.utcnow().isoformat(),
+                        ))
+                        _c.commit()
                 except Exception as e:
                     logger.warning(f"Failed to cache summary: {e}")
 
@@ -6130,7 +5816,7 @@ def setup_email_routes():
             }
 
     @router.post("/translate")
-    async def translate_email(data: dict, owner: str = Depends(require_owner)):
+    async def translate_email(data: TranslateRequest, owner: str = Depends(require_owner)):
         """Translate an email body into a target language."""
         try:
             from src.endpoint_resolver import (
@@ -6139,24 +5825,23 @@ def setup_email_routes():
             )
             from src.llm_core import llm_call_async_with_fallback
 
-            body = (data.get("body") or "").strip()
-            subject = (data.get("subject") or "").strip()
-            sender = (data.get("from") or "").strip()
-            target_language = (data.get("target_language") or "English").strip() or "English"
-            auto = bool(data.get("auto", False))
+            body = (data.body or "").strip()
+            subject = (data.subject or "").strip()
+            sender = (data.sender or "").strip()
+            target_language = (data.target_language or "English").strip() or "English"
+            auto = bool(data.auto)
             if not body:
                 return {"success": False, "error": "No body provided"}
 
             body_hash = email_translation_body_hash(body)
             try:
-                _c = _sql3.connect(SCHEDULED_DB)
-                owner_clause, owner_params = _email_cache_owner_clause(owner)
-                row = _c.execute(
-                    f"SELECT translation, same_language, model_used FROM email_translations "
-                    f"WHERE body_hash = ? AND target_language = ? AND {owner_clause}",
-                    (body_hash, target_language, *owner_params),
-                ).fetchone()
-                _c.close()
+                with _scheduled_db() as _c:
+                    owner_clause, owner_params = _email_cache_owner_clause(owner)
+                    row = _c.execute(
+                        f"SELECT translation, same_language, model_used FROM email_translations "
+                        f"WHERE body_hash = ? AND target_language = ? AND {owner_clause}",
+                        (body_hash, target_language, *owner_params),
+                    ).fetchone()
                 if row:
                     if int(row[1] or 0):
                         return {
@@ -6236,18 +5921,17 @@ def setup_email_routes():
             content = _extract_reply(content)
             if "<<<SAME_LANGUAGE>>>" in content:
                 try:
-                    _c = _sql3.connect(SCHEDULED_DB)
-                    _c.execute("""
-                        INSERT OR REPLACE INTO email_translations
-                        (body_hash, owner, target_language, uid, folder, subject, sender,
-                         translation, same_language, model_used, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        body_hash, owner, target_language, data.get("uid", ""), data.get("folder", ""),
-                        subject, sender, "", 1, model, datetime.utcnow().isoformat(),
-                    ))
-                    _c.commit()
-                    _c.close()
+                    with _scheduled_db() as _c:
+                        _c.execute("""
+                            INSERT OR REPLACE INTO email_translations
+                            (body_hash, owner, target_language, uid, folder, subject, sender,
+                             translation, same_language, model_used, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            body_hash, owner, target_language, data.uid, data.folder,
+                            subject, sender, "", 1, model, datetime.utcnow().isoformat(),
+                        ))
+                        _c.commit()
                 except Exception as e:
                     logger.warning(f"Failed to cache same-language email translation: {e}")
                 return {"success": True, "same_language": True, "language": target_language, "model_used": model}
@@ -6260,18 +5944,17 @@ def setup_email_routes():
             if not content:
                 return {"success": False, "error": "Empty response from model"}
             try:
-                _c = _sql3.connect(SCHEDULED_DB)
-                _c.execute("""
-                    INSERT OR REPLACE INTO email_translations
-                    (body_hash, owner, target_language, uid, folder, subject, sender,
-                     translation, same_language, model_used, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    body_hash, owner, target_language, data.get("uid", ""), data.get("folder", ""),
-                    subject, sender, content, 0, model, datetime.utcnow().isoformat(),
-                ))
-                _c.commit()
-                _c.close()
+                with _scheduled_db() as _c:
+                    _c.execute("""
+                        INSERT OR REPLACE INTO email_translations
+                        (body_hash, owner, target_language, uid, folder, subject, sender,
+                         translation, same_language, model_used, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        body_hash, owner, target_language, data.uid, data.folder,
+                        subject, sender, content, 0, model, datetime.utcnow().isoformat(),
+                    ))
+                    _c.commit()
             except Exception as e:
                 logger.warning(f"Failed to cache email translation: {e}")
             return {"success": True, "translation": content, "language": target_language, "model_used": model}
@@ -6324,13 +6007,12 @@ def setup_email_routes():
             # would silently override them.
             if message_id and not user_hint and not account_id and not callable(data.get('_emit')):
                 try:
-                    _c = _sql3.connect(SCHEDULED_DB)
-                    owner_clause, owner_params = _email_cache_owner_clause(owner)
-                    _row = _c.execute(
-                        f"SELECT reply, model_used FROM email_ai_replies WHERE message_id = ? AND {owner_clause}",
-                        (message_id, *owner_params),
-                    ).fetchone()
-                    _c.close()
+                    with _scheduled_db() as _c:
+                        owner_clause, owner_params = _email_cache_owner_clause(owner)
+                        _row = _c.execute(
+                            f"SELECT reply, model_used FROM email_ai_replies WHERE message_id = ? AND {owner_clause}",
+                            (message_id, *owner_params),
+                        ).fetchone()
                     if _row and _row[0]:
                         cached_reply = _apply_email_style_mechanics(_extract_reply(_row[0] or ""))
                         # Older failures could be cached as a one-word
@@ -6367,14 +6049,7 @@ def setup_email_routes():
             headers = None
             if session_id:
                 try:
-                    # The chat-session ORM model is `Session`, not `ChatSession`
-                    # — the old import threw ImportError, was swallowed by the
-                    # except, and left url=None so EVERY reply silently fell back
-                    # to the "default" endpoint (wrong model). Its auth lives in
-                    # `headers` (JSON), and `endpoint_url` is already the full
-                    # chat-completions URL the chat path uses verbatim — so use
-                    # those directly rather than rebuilding via a nonexistent
-                    # `api_key` field.
+                    # `endpoint_url` is already the full chat URL and auth lives in `headers` (JSON).
                     from core.database import SessionLocal as _SL, Session as _CS
                     _db = _SL()
                     sess = _db.query(_CS).filter(_CS.id == session_id, _CS.owner == owner).first()
@@ -6615,14 +6290,13 @@ def setup_email_routes():
             # Cache so next click is instant
             if message_id:
                 try:
-                    _c = _sql3.connect(SCHEDULED_DB)
-                    _c.execute("""
-                        INSERT OR REPLACE INTO email_ai_replies
-                        (message_id, owner, uid, folder, reply, model_used, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """, (message_id, owner, source_uid, source_folder, reply, model, datetime.utcnow().isoformat()))
-                    _c.commit()
-                    _c.close()
+                    with _scheduled_db() as _c:
+                        _c.execute("""
+                            INSERT OR REPLACE INTO email_ai_replies
+                            (message_id, owner, uid, folder, reply, model_used, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """, (message_id, owner, source_uid, source_folder, reply, model, datetime.utcnow().isoformat()))
+                        _c.commit()
                 except Exception as e:
                     logger.warning(f"Failed to cache ai_reply: {e}")
 
@@ -7229,7 +6903,7 @@ def setup_email_routes():
             raise HTTPException(400, "GOOGLE_OAUTH_CLIENT_ID not set — add it to .env")
         redirect_uri = (
             os.environ.get("GOOGLE_OAUTH_REDIRECT_URI")
-            or f"{request.url.scheme}://{request.headers.get('host', 'localhost:7000')}/api/email/oauth/google/callback"
+            or f"{request.url.scheme}://{request.headers.get('host', f'localhost:{APP_PORT}')}/api/email/oauth/google/callback"
         )
         state = make_oauth_state(account_id, owner)
         params = urllib.parse.urlencode({
@@ -7251,7 +6925,6 @@ def setup_email_routes():
         error: str = Query(None),
         request: Request = None,
     ):
-        import urllib.parse
         from fastapi.responses import RedirectResponse as _RR
         if error:
             return _RR("/?section=integrations&email_oauth_error=google_error")
@@ -7266,7 +6939,7 @@ def setup_email_routes():
         client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
         redirect_uri = (
             os.environ.get("GOOGLE_OAUTH_REDIRECT_URI")
-            or f"{request.url.scheme}://{request.headers.get('host', 'localhost:7000')}/api/email/oauth/google/callback"
+            or f"{request.url.scheme}://{request.headers.get('host', f'localhost:{APP_PORT}')}/api/email/oauth/google/callback"
         )
         import httpx as _httpx
         try:

@@ -76,9 +76,7 @@ export function createQuickAdd({
         titleEl.setSelectionRange(titleEl.value.length, titleEl.value.length);
       }
     };
-    // Expand only on real intent: a click directly on the input, or actual
-    // typing. Focus alone : including focus stolen from a missed nearby
-    // click : no longer creates an empty form.
+    // Expand on a click or typing, not on focus, which a missed nearby click can steal.
     input.addEventListener('click', () => expandToForm(currentType, input.value));
     input.addEventListener('input', () => expandToForm(currentType, input.value));
     wrap.querySelector('[data-action="photo"]').addEventListener('click', (e) => {

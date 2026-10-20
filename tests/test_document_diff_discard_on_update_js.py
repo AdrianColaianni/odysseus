@@ -18,10 +18,8 @@ still overwrite the new doc. Kept as a static source check because document.js i
 browser-coupled and not importable in pytest.
 """
 
-from pathlib import Path
 from tests.helpers.document_source import document_source
 
-ROOT = Path(__file__).resolve().parents[1]
 DOC_JS = document_source()
 
 GUARD = "if (_diffModeActive) exitDiffMode(true);"
@@ -69,13 +67,6 @@ def test_stream_doc_open_discards_pending_diff_before_switching():
     # streamed new doc gets overwritten by the stale diff (the issue's own repro).
     assert GUARD in STREAM_DOC_OPEN
     assert STREAM_DOC_OPEN.index(GUARD) < STREAM_DOC_OPEN.index("activeDocId = docId;")
-
-
-def test_diff_discard_reuses_the_existing_idiom():
-    # Sanity: this exact guard is the established pattern (switchToDoc,
-    # enterDiffMode, handleDocUpdate, streamDocOpen, …) — the fix reuses it
-    # rather than inventing a new mechanism.
-    assert DOC_JS.count(GUARD) >= 4
 
 
 def test_same_document_update_does_not_save_stale_diff_over_new_server_content():

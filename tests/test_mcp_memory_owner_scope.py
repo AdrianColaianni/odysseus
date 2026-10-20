@@ -39,7 +39,7 @@ def _configure_server(monkeypatch, manager, vector=None):
 
 
 def test_mcp_memory_uses_configured_owner_for_all_operations(monkeypatch, tmp_path):
-    manager = MemoryManager(str(tmp_path))
+    manager = MemoryManager(str(tmp_path / "memory.json"))
     vector = FakeVector()
     alice = _entry(
         manager,
@@ -96,7 +96,7 @@ def test_mcp_memory_uses_configured_owner_for_all_operations(monkeypatch, tmp_pa
 
 
 def test_mcp_memory_fails_closed_without_owner_for_owner_scoped_store(monkeypatch, tmp_path):
-    manager = MemoryManager(str(tmp_path))
+    manager = MemoryManager(str(tmp_path / "memory.json"))
     alice = _entry(manager, "Alice private memory", owner="alice", memory_id="aaaaaaaa-0000")
     bob = _entry(manager, "Bob private memory", owner="bob", memory_id="bbbbbbbb-0000")
     manager.save([alice, bob])
@@ -118,7 +118,7 @@ def test_mcp_memory_fails_closed_without_owner_for_owner_scoped_store(monkeypatc
 
 
 def test_mcp_memory_preserves_ownerless_local_behavior(monkeypatch, tmp_path):
-    manager = MemoryManager(str(tmp_path))
+    manager = MemoryManager(str(tmp_path / "memory.json"))
     legacy = _entry(
         manager,
         "Legacy local memory",

@@ -5,8 +5,6 @@ share one pruning helper (src/index_walk) so they cannot drift again.
 """
 import os
 
-os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
-
 from src.personal_docs import load_personal_index
 
 

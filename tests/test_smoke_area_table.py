@@ -8,7 +8,6 @@ registered, a failure outranks a pass, and the whole thing stays ASCII.
 """
 from pathlib import Path
 
-import pytest
 
 from tests.smoke import areas
 
@@ -60,15 +59,15 @@ def test_declared_gaps_are_printed_with_their_reason():
         assert " ".join(gap.reason.split()[:3]) in " ".join(table.split()), gap.reason
 
 
-@pytest.mark.parametrize("outcomes,expected", [
-    ([], areas.NOT_RUN),
-    ([areas.PASS], areas.PASS),
-    ([areas.PASS, areas.SKIP], areas.SKIP),
-    ([areas.PASS, areas.SKIP, areas.FAIL], areas.FAIL),
-    ([areas.PASS, areas.FAIL], areas.FAIL),
-])
-def test_the_worst_outcome_decides_the_row(outcomes, expected):
-    assert areas.resolve(outcomes) == expected
+def test_the_worst_outcome_decides_the_row():
+    for outcomes, expected in (
+        ([], areas.NOT_RUN),
+        ([areas.PASS], areas.PASS),
+        ([areas.PASS, areas.SKIP], areas.SKIP),
+        ([areas.PASS, areas.SKIP, areas.FAIL], areas.FAIL),
+        ([areas.PASS, areas.FAIL], areas.FAIL),
+    ):
+        assert areas.resolve(outcomes) == expected
 
 
 def test_the_table_is_ascii_only():

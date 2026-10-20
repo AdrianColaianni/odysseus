@@ -39,14 +39,14 @@ async def _request_values(request: Request) -> Dict[str, Any]:
     return values
 
 
-def setup_search_routes(config) -> APIRouter:
+def setup_search_routes() -> APIRouter:
     router = APIRouter(tags=["search"])
 
     @router.get("/search/web", response_class=HTMLResponse)
     async def web_search_page(request: Request, q: str = Query("", min_length=0)) -> HTMLResponse:
         """Browser-facing search results page for clickable agent web_search rows."""
         # The site CSP allows inline script only with the per-request nonce
-        # (SecurityHeadersMiddleware); without it this page's script never ran.
+        # (SecurityHeadersMiddleware).
         nonce = html.escape(getattr(request.state, "csp_nonce", "") or "", quote=True)
         safe_q = str(q or "").strip()
         title = html.escape(safe_q or "Web search")

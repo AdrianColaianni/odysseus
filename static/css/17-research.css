@@ -1,28 +1,10 @@
-/* 17-research - part of the former static/style.css.
- *
- * The stylesheet is split by area, but the split is mechanical: rules were
- * moved verbatim and NOT regrouped. The numeric prefix is the load order, and
- * that order is what preserves the cascade. A rule sits in the file its
- * original position fell into, so an area's rules are not all in its file and
- * a file is not only that area's rules.
- *
- * Do not reorder the <link> tags in static/index.html, and do not move a rule
- * between files: with 1,151 redeclarations and 1,886 !important in this
- * cascade, either can change which declaration wins.
- *
- * static/index.html and the PRECACHE list in static/sw.js must agree on this
- * order. tests/test_static_stylesheet_manifest.py and
- * tests/test_css_computed_style_snapshot.py fail if that drifts.
- */
 button.cal-btn { background:color-mix(in srgb, var(--fg) 8%, transparent); border:1px solid var(--border); color:var(--fg); border-radius:5px; padding:0 14px; height:28px; font-size:11px; font-weight:500; cursor:pointer; font-family:inherit; display:inline-flex; align-items:center; justify-content:center; box-sizing:border-box; transition:background 0.15s, border-color 0.15s; }
 button.cal-btn:hover { background:color-mix(in srgb, var(--fg) 14%, transparent); }
-button.cal-btn.cal-btn-primary { background:var(--accent, var(--red)); color:var(--bg); border-color:var(--accent, var(--red)); }
-button.cal-btn.cal-btn-primary:hover { opacity:0.9; background:var(--accent, var(--red)); }
+button.cal-btn.cal-btn-primary { background:var(--red); color:var(--bg); border-color:var(--red); }
+button.cal-btn.cal-btn-primary:hover { opacity:0.9; background:var(--red); }
 @media (max-width: 600px) {
-  .cal-modal-container { max-width:100vw; width:100vw; border-radius:0; max-height:100vh; height:100vh; }
   .cal-day { min-height:58px; padding:3px; }
   .cal-day-num { font-size:10px; }
-  .cal-event-preview { display:none; }
   .cal-multiday { font-size:8.5px; padding:0 4px; }
   .cal-event-row { min-height:16px; padding:2px 3px; gap:3px; }
   .cal-event-row-name,
@@ -106,9 +88,9 @@ button.cal-btn.cal-btn-primary:hover { opacity:0.9; background:var(--accent, var
     from var(--research-orbit-angle, 0deg),
     transparent 0deg,
     transparent 300deg,
-    color-mix(in srgb, var(--accent, var(--red)) 70%, transparent) 335deg,
-    var(--accent, var(--red)) 350deg,
-    color-mix(in srgb, var(--accent, var(--red)) 70%, transparent) 358deg,
+    color-mix(in srgb, var(--red) 70%, transparent) 335deg,
+    var(--red) 350deg,
+    color-mix(in srgb, var(--red) 70%, transparent) 358deg,
     transparent 360deg
   );
   -webkit-mask:
@@ -229,7 +211,7 @@ button.cal-btn.cal-btn-primary:hover { opacity:0.9; background:var(--accent, var
 }
 .research-setting-label {
   font-size:9px; text-transform:uppercase; letter-spacing:0.5px;
-  color:var(--accent, var(--red)); opacity:1; margin-bottom:2px;
+  color:var(--red); opacity:1; margin-bottom:2px;
 }
 .research-native-select {
   position: absolute !important;
@@ -253,8 +235,8 @@ button.cal-btn.cal-btn-primary:hover { opacity:0.9; background:var(--accent, var
 }
 .research-picker-btn:hover,
 .research-picker.open .research-picker-btn {
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 62%, var(--border));
-  background: color-mix(in srgb, var(--accent, var(--red)) 5%, var(--bg));
+  border-color: color-mix(in srgb, var(--red) 62%, var(--border));
+  background: color-mix(in srgb, var(--red) 5%, var(--bg));
 }
 .research-picker-current {
   min-width: 0; flex: 1; display: flex; align-items: center; gap: 6px;
@@ -262,7 +244,7 @@ button.cal-btn.cal-btn-primary:hover { opacity:0.9; background:var(--accent, var
 .research-picker-icon {
   width: 15px; height: 15px; flex: 0 0 15px;
   display: inline-flex; align-items: center; justify-content: center;
-  color: var(--accent, var(--red));
+  color: var(--red);
 }
 .research-picker-icon svg { width: 15px; height: 15px; display: block; }
 .research-picker-btn > svg {
@@ -292,10 +274,10 @@ button.cal-btn.cal-btn-primary:hover { opacity:0.9; background:var(--accent, var
   background: color-mix(in srgb, var(--fg) 7%, transparent);
 }
 .research-picker-option.active {
-  color: var(--accent, var(--red));
-  background: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
 }
-.research-picker-check { margin-left: auto; opacity: 0; color: var(--accent, var(--red)); }
+.research-picker-check { margin-left: auto; opacity: 0; color: var(--red); }
 .research-controls-row {
   display:flex; align-items:center; gap:8px; margin-top:10px;
 }
@@ -305,7 +287,6 @@ button.cal-btn.cal-btn-primary:hover { opacity:0.9; background:var(--accent, var
   height:28px; padding:0 14px; border:none; border-radius:6px;
   background:var(--accent-primary, var(--red)); color:var(--bg);
   font-size:12px; font-weight:600; cursor:pointer;
-  transition:opacity 0.15s;
 }
 .research-start-btn:hover { opacity:0.85; color:var(--fg); }
 .research-start-btn:hover svg { color:inherit; }
@@ -353,8 +334,8 @@ button.cal-btn.cal-btn-primary:hover { opacity:0.9; background:var(--accent, var
   border-color: color-mix(in srgb, var(--red) 40%, transparent);
   color: var(--red);
 }
-/* Match the Cookbook "Trending models" toggle (a left-aligned memory-toolbar-btn
-   with an arrow + label) instead of the old tiny-uppercase borderless text. */
+/* Match the Cookbook "Trending models" toggle (a left-aligned
+   memory-toolbar-btn with an arrow + label). */
 .research-settings-toggle {
   display:flex; align-items:center; gap:6px;
   width:100%; text-align:left;
@@ -473,7 +454,7 @@ button.cal-btn.cal-btn-primary:hover { opacity:0.9; background:var(--accent, var
 .research-job-card.error,
 .research-job-card.cancelled { --cat-color: #f44336; }
 /* Per-category theming — picks up a category accent, badge, and soft tint */
-.research-job-card[data-category] { --cat-color: var(--accent, var(--red)); }
+.research-job-card[data-category] { --cat-color: var(--red); }
 .research-job-card[data-category="product"]    { --cat-color: #5b8abf; }
 .research-job-card[data-category="comparison"] { --cat-color: #e5a33a; }
 .research-job-card[data-category="howto"]      { --cat-color: #82c882; }
@@ -1058,7 +1039,7 @@ input.cp-swatch-input::selection { background: transparent; }
   flex: 0 0 26px;
   transition: background 0.1s, color 0.1s;
 }
-.cp-copy:hover { background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent); color: var(--accent, var(--red)); }
+.cp-copy:hover { background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red); }
 .cp-eyedropper {
   width: 26px; height: 26px;
   padding: 0;
@@ -1152,7 +1133,7 @@ input.cp-swatch-input::selection { background: transparent; }
   font-family: inherit;
 }
 .sig-modal-overlay .sig-smoothness {
-  accent-color: var(--accent, var(--red));
+  accent-color: var(--red);
   margin: 0;
 }
 .sig-modal-overlay .sig-name {
@@ -1196,15 +1177,15 @@ input.cp-swatch-input::selection { background: transparent; }
   box-sizing: border-box;
   font-size: 0.85rem;
   line-height: 1;
-  border: 1px solid var(--accent, var(--red));
+  border: 1px solid var(--red);
   background: #fff;
-  color: var(--accent, var(--red));
+  color: var(--red);
   border-radius: 50%;
   cursor: pointer;
   opacity: 1;
 }
 .sig-modal-overlay .sig-tile-del:hover {
-  background: color-mix(in srgb, var(--accent, var(--red)) 10%, #fff);
+  background: color-mix(in srgb, var(--red) 10%, #fff);
 }
 .sig-modal-overlay .sig-new-tile {
   border: 2px dashed var(--border);
@@ -1270,9 +1251,7 @@ body.theme-frosted .gallery-modal-content,
 body.theme-frosted .notes-pane,
 body.theme-frosted .research-pane,
 body.theme-frosted .calendar-pane,
-body.theme-frosted .cookbook-pane,
 body.theme-frosted .doc-pane,
-body.theme-frosted .doc-pane-floating,
 body.theme-frosted .cp-popover,
 body.theme-frosted .dropdown,
 body.theme-frosted .overflow-menu,
@@ -1353,9 +1332,7 @@ body.theme-frosted .gallery-modal-content,
 body.theme-frosted .notes-pane,
 body.theme-frosted .research-pane,
 body.theme-frosted .calendar-pane,
-body.theme-frosted .cookbook-pane,
-body.theme-frosted .doc-pane,
-body.theme-frosted .doc-pane-floating {
+body.theme-frosted .doc-pane {
   box-shadow:
     0 14px 36px rgba(0, 0, 0, 0.5),
     inset 0 1px 0 color-mix(in srgb, var(--fg, #fff) 14%, transparent),
@@ -1387,8 +1364,6 @@ body.theme-frosted .modal {
           mask: var(--em) center / contain no-repeat;
 }
 
-.assistant-message a[href^="#event-"] .emoji,
-.ai-message a[href^="#event-"] .emoji,
 .message.assistant a[href^="#event-"] .emoji {
   position: relative;
   top: 2px;
@@ -1415,8 +1390,7 @@ body.theme-frosted .modal {
   flex: 0 0 auto !important; min-height: 0 !important;
   overflow: visible !important; max-height: none !important;
 }
-/* The tabbed research panel replaces the old single body scroller above:
-   each result tab now owns its list viewport. */
+/* Each result tab owns its list viewport. */
 #research-pane .research-tab-panel {
   flex: 1 1 auto !important;
   min-height: 0 !important;
@@ -1476,8 +1450,8 @@ body.theme-frosted .modal {
 /* Visual Report button tinted with the research type colour (--cat-color),
    falling back to the accent for "standard" (uncategorized) research. */
 .research-job-action.research-job-action-report {
-  color: var(--cat-color, var(--accent, var(--red)));
-  border-color: color-mix(in srgb, var(--cat-color, var(--accent, var(--red))) 45%, var(--border));
+  color: var(--cat-color, var(--red));
+  border-color: color-mix(in srgb, var(--cat-color, var(--red)) 45%, var(--border));
 }
 
 .research-start-btn svg,
@@ -1501,7 +1475,7 @@ body.theme-frosted .modal {
 }
 .research-library-link {
   background: none; border: none; padding: 0; cursor: pointer;
-  font: inherit; color: var(--accent, var(--red)); text-decoration: underline;
+  font: inherit; color: var(--red); text-decoration: underline;
 }
 
 
@@ -1575,7 +1549,7 @@ body.theme-frosted .modal {
 ):hover:not(:disabled) {
   opacity: 1;
   color: var(--fg);
-  background-color: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent);
+  background-color: color-mix(in srgb, var(--red) 10%, transparent);
   transform: translateX(1px);
 }
 
@@ -1597,7 +1571,7 @@ body.theme-frosted .modal {
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--fg-muted, #888);
+  color: var(--color-muted);
   padding: 6px 10px 2px;
   opacity: 0.7;
 }
@@ -1611,11 +1585,11 @@ body.theme-frosted .modal {
   white-space: nowrap;
   overflow: hidden;
 }
-.slash-ac-row:hover { background-color: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent); }
-.slash-ac-row-sel  { background-color: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent); }
+.slash-ac-row:hover { background-color: color-mix(in srgb, var(--red) 10%, transparent); }
+.slash-ac-row-sel  { background-color: color-mix(in srgb, var(--red) 14%, transparent); }
 .slash-ac-token {
   font-family: 'Fira Code', ui-monospace, monospace;
-  color: var(--accent, var(--red));
+  color: var(--red);
   font-weight: 600;
   flex-shrink: 0;
 }
@@ -1628,7 +1602,7 @@ body.theme-frosted .modal {
   text-overflow: ellipsis;
 }
 .slash-ac-usage {
-  color: var(--fg-muted, #888);
+  color: var(--color-muted);
   font-family: 'Fira Code', ui-monospace, monospace;
   font-size: 11px;
   opacity: 0.55;
@@ -1636,12 +1610,12 @@ body.theme-frosted .modal {
 }
 .slash-ac-empty {
   padding: 10px;
-  color: var(--fg-muted, #888);
+  color: var(--color-muted);
   font-style: italic;
 }
 .slash-ac-empty code {
   font-family: 'Fira Code', ui-monospace, monospace;
-  color: var(--accent, var(--red));
+  color: var(--red);
 }
 
 /* ══ iOS focus-zoom fix — Safari touch devices only; desktop sizes untouched ══
@@ -1670,7 +1644,7 @@ body.theme-frosted .modal {
   /* 2 ── Fields that pin their own !important at specificity our catch-all
      can't beat. Each is matched at equal-or-higher specificity and, being
      later in the file, wins the tie. */
-  #message { font-size: 16px !important; }                                  /* chat composer (was 13px !important) */
+  #message { font-size: 16px !important; }                                  /* chat composer */
   .cookbook-dl-repo,
   .hwfit-search { font-size: 16px !important; }                             /* cookbook repo path + hardware search */
   .ge-topbar input { font-size: 16px !important; }                          /* image-editor topbar input */
@@ -1687,10 +1661,10 @@ body.theme-frosted .modal {
      onto M on touch). All three editor layers move together so the
      highlight/line-number overlay stays metrically aligned with the textarea. */
   .doc-font-m .doc-editor-textarea, .doc-font-m .doc-editor-highlight, .doc-font-m .doc-line-numbers {
-    font-size: 16px !important;   /* was 13px */
+    font-size: 16px !important;
   }
   .doc-font-l .doc-editor-textarea, .doc-font-l .doc-editor-highlight, .doc-font-l .doc-line-numbers {
-    font-size: 18px !important;   /* was 15px — keep L > M */
+    font-size: 18px !important;   /* keep L > M */
   }
   /* Email compose rich-body. Medium (15px) zooms, so bump it; large (17px)
      is already ≥16px and never zoomed — leave it so we don't shrink it. */
@@ -1699,16 +1673,6 @@ body.theme-frosted .modal {
 }
 
 /* GitHub Copilot device-flow connect block (model endpoints → API) */
-.adm-copilot-connect {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-.adm-copilot-connect #adm-copilotStatus { flex-basis: 100%; margin-top: 0; }
 .adm-copilot-panel {
   display: flex;
   flex-direction: column;
@@ -1753,11 +1717,6 @@ body.theme-frosted .modal {
   text-decoration: none;
   padding: 7px 12px;
   font-size: 12px;
-}
-.adm-copilot-hint {
-  font-size: 11px;
-  line-height: 1.4;
-  color: color-mix(in srgb, var(--fg) 45%, transparent);
 }
 /* ChatGPT Subscription per-account usage card (Settings → Added Models) */
 .adm-chatgpt-controls {
@@ -1906,10 +1865,6 @@ body.theme-frosted .modal {
   font-size: 11px;
   opacity: 0.75;
 }
-.hwfit-schedule-label {
-  font-size: 11px;
-  opacity: 0.75;
-}
 .hwfit-sched-days {
   display: inline-flex;
   flex-wrap: wrap;
@@ -1936,26 +1891,13 @@ body.theme-frosted .modal {
   cursor: pointer;
   transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
-.hwfit-sched-day-chip:hover { border-color: var(--accent, var(--red)); }
+.hwfit-sched-day-chip:hover { border-color: var(--red); }
 .hwfit-sched-day-chip.is-on {
-  background: var(--accent, var(--red));
+  background: var(--red);
   color: var(--panel, #fff);
-  border-color: var(--accent, var(--red));
+  border-color: var(--red);
 }
-.hwfit-schedule-actions-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.hwfit-schedule-actions-spacer { flex: 1; }
 
-/* Days row hosts the day-chip strip on the left and the Cancel / Save
-   action buttons on the right. The spacer between them pushes the
-   actions to the right edge. */
-.hwfit-schedule-days-row {
-  align-items: center;
-}
 /* Cancel + Save sit on the right side of the days row with matching
    icon-plus-label chrome. */
 .hwfit-sched-cancel,
@@ -2023,12 +1965,6 @@ body.theme-frosted .modal {
 /* Focused only programmatically (tabIndex -1) to move SR/keyboard position; no
    visible outline on the whole card box. */
 .ask-user-card:focus { outline: none; }
-.ask-user-head {
-  display: none;
-}
-.ask-user-close {
-  display: none !important;
-}
 .ask-user-question {
   margin: 0 0 10px;
   font-size: 11px !important;
@@ -2069,8 +2005,8 @@ body.theme-frosted .modal {
   transition: background 0.12s ease, border-color 0.12s ease;
 }
 .ask-user-option:hover:not(:disabled) {
-  border-color: var(--accent, var(--red));
-  background: color-mix(in srgb, var(--accent, var(--red)) 10%, var(--bg));
+  border-color: var(--red);
+  background: color-mix(in srgb, var(--red) 10%, var(--bg));
 }
 .ask-user-option:disabled { cursor: default; }
 .ask-user-card.ask-user-answered {
@@ -2093,7 +2029,7 @@ body.theme-frosted .modal {
   font-size: 11px !important;
   font-weight: 500;
   line-height: 1.35;
-  color: var(--accent, var(--red));
+  color: var(--red);
 }
 .ask-user-option-desc {
   flex-basis: 100%;
@@ -2149,16 +2085,16 @@ body.theme-frosted .modal {
   align-items: flex-start;
   gap: 8px;
   padding: 7px 9px;
-  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 24%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--red) 24%, var(--border));
   border-radius: 8px;
-  background: color-mix(in srgb, var(--accent, var(--red)) 8%, var(--bg));
+  background: color-mix(in srgb, var(--red) 8%, var(--bg));
   color: var(--fg);
   font-size: 11px !important;
   line-height: 1.35;
 }
 .ask-user-answer-label {
   flex: 0 0 auto;
-  color: var(--accent, var(--red));
+  color: var(--red);
   font-weight: 600;
 }
 .ask-user-answer-value {
@@ -2279,8 +2215,8 @@ body.theme-frosted .modal {
   opacity: 0.62;
 }
 .settings-system-logs-tab.active {
-  border-bottom-color: var(--accent, var(--red));
-  color: var(--accent, var(--red));
+  border-bottom-color: var(--red);
+  color: var(--red);
 }
 .settings-system-logs-col {
   gap: 10px;
@@ -2507,18 +2443,18 @@ body.theme-frosted .modal {
     white-space: nowrap;
   }
   .compare-mobile-add > span:first-child {
-    color: var(--accent, var(--red));
+    color: var(--red);
     font-size: 15px;
     font-weight: 500;
     line-height: 1;
   }
   .compare-mobile-add:disabled { opacity: .35; cursor: default; }
   .compare-mobile-add:not(:disabled):active {
-    background: color-mix(in srgb, var(--accent, var(--red)) 12%, var(--bg));
+    background: color-mix(in srgb, var(--red) 12%, var(--bg));
   }
   .compare-mobile-tab.active {
-    border-color: color-mix(in srgb, var(--accent, var(--red)) 70%, var(--border));
-    background: color-mix(in srgb, var(--accent, var(--red)) 11%, var(--bg));
+    border-color: color-mix(in srgb, var(--red) 70%, var(--border));
+    background: color-mix(in srgb, var(--red) 11%, var(--bg));
     color: var(--fg);
   }
   .compare-mobile-tab-slot {
@@ -2534,7 +2470,7 @@ body.theme-frosted .modal {
     font-weight: 700;
   }
   .compare-mobile-tab.active .compare-mobile-tab-slot {
-    background: var(--accent, var(--red));
+    background: var(--red);
     color: var(--bg);
   }
   .compare-mobile-tab-label {
@@ -2555,7 +2491,7 @@ body.theme-frosted .modal {
     animation: compare-mobile-tab-pulse 1s ease-in-out infinite !important;
     will-change: opacity, transform, box-shadow;
   }
-  .compare-mobile-tab.is-awaiting-input .compare-mobile-tab-state { background: var(--accent, var(--red)); }
+  .compare-mobile-tab.is-awaiting-input .compare-mobile-tab-state { background: var(--red); }
   .compare-mobile-tab.is-done .compare-mobile-tab-state {
     width: auto;
     height: auto;
@@ -2572,8 +2508,7 @@ body.theme-frosted .modal {
     0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 0 color-mix(in srgb, var(--red, #e06c75) 65%, transparent); }
     50% { opacity: .45; transform: scale(.72); box-shadow: 0 0 0 5px color-mix(in srgb, var(--red, #e06c75) 0%, transparent); }
   }
-  .compare-grid[data-cols],
-  .compare-grid.sequential-layout {
+  .compare-grid[data-cols] {
     display: block !important;
     grid-template-columns: none !important;
     flex: 1 1 0;
@@ -2581,8 +2516,7 @@ body.theme-frosted .modal {
     padding: 0 8px 6px;
     overflow: hidden;
   }
-  .compare-grid > .compare-pane,
-  .compare-grid.sequential-layout > .compare-pane {
+  .compare-grid > .compare-pane {
     display: none;
     width: 100%;
     height: 100%;
@@ -2590,14 +2524,9 @@ body.theme-frosted .modal {
     margin-left: 0 !important;
     box-sizing: border-box;
   }
-  .compare-grid > .compare-pane.compare-pane-mobile-active,
-  .compare-grid.sequential-layout > .compare-pane.compare-pane-mobile-active {
+  .compare-grid > .compare-pane.compare-pane-mobile-active {
     display: flex;
     animation: compare-mobile-card-in .16s ease-out;
-  }
-  .compare-grid.sequential-layout .compare-pane .pane-header {
-    clip-path: none;
-    padding-left: 10px;
   }
   @keyframes compare-mobile-card-in {
     from { opacity: .55; transform: translateY(2px); }
@@ -2685,11 +2614,6 @@ body.theme-frosted .modal {
     border-radius: 14px 14px 0 0 !important;
   }
 
-  .cal-modal-container {
-    height: auto !important;
-    max-height: 95dvh !important;
-  }
-
   body.doc-view .doc-editor-pane,
   body.notes-view .notes-pane {
     inset: auto 0 0 !important;
@@ -2768,7 +2692,7 @@ body.theme-frosted .modal {
   #lib-select-btn,
   #hwfit-cache-select
 ).active::before {
-  background-color: var(--accent, var(--red));
+  background-color: var(--red);
   -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M18 6 6 18M6 6l12 12' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E");
   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M18 6 6 18M6 6l12 12' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E");
 }
@@ -2821,7 +2745,7 @@ body.theme-frosted .modal {
 #research-pane .research-history-title-row h2 > svg {
   width: 14px;
   height: 14px;
-  color: var(--accent, var(--red));
+  color: var(--red);
   flex: 0 0 14px;
 }
 #research-pane .research-history-head-count {
@@ -2859,7 +2783,7 @@ body.theme-frosted .modal {
   z-index: 1;
   width: 12px;
   height: 12px;
-  color: var(--accent, var(--red));
+  color: var(--red);
   pointer-events: none;
 }
 #research-pane .research-history-search-wrap .memory-search-input {
@@ -3048,8 +2972,8 @@ body.theme-frosted .modal {
 }
 #research-pane #research-past-list .research-job-actions .task-status-badge:hover {
   color: var(--fg);
-  background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 40%, var(--border));
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  border-color: color-mix(in srgb, var(--red) 40%, var(--border));
 }
 #research-pane #research-past-list .research-job-actions .task-status-badge > svg {
   width: 11px;
@@ -3061,13 +2985,13 @@ body.theme-frosted .modal {
   height: 10px;
 }
 #research-pane #research-past-list .research-job-report-badge {
-  color: var(--cat-color, var(--accent, var(--red)));
-  background: color-mix(in srgb, var(--cat-color, var(--accent, var(--red))) 16%, transparent);
-  border-color: color-mix(in srgb, var(--cat-color, var(--accent, var(--red))) 38%, transparent);
+  color: var(--cat-color, var(--red));
+  background: color-mix(in srgb, var(--cat-color, var(--red)) 16%, transparent);
+  border-color: color-mix(in srgb, var(--cat-color, var(--red)) 38%, transparent);
 }
 #research-pane #research-past-list .research-job-report-badge:hover {
-  background: color-mix(in srgb, var(--cat-color, var(--accent, var(--red))) 25%, transparent);
-  border-color: color-mix(in srgb, var(--cat-color, var(--accent, var(--red))) 58%, transparent);
+  background: color-mix(in srgb, var(--cat-color, var(--red)) 25%, transparent);
+  border-color: color-mix(in srgb, var(--cat-color, var(--red)) 58%, transparent);
 }
 #research-pane #research-past-list .research-job-retry-badge,
 #research-pane #research-past-list .research-job-edit-badge {

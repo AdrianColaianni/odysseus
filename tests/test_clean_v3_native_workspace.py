@@ -6,8 +6,8 @@ from PIL import Image
 from src.clean_agent_preview import (
     NATIVE_WORKSPACE_TOOLS,
     bounded_visual_result_blocks,
+    evaluate_preview_call,
     native_input_files_clause,
-    preview_call_allowed,
     preview_http_timeout,
     protocol_safe_tool_calls,
     scope_preview_contract,
@@ -19,13 +19,13 @@ from src.turn_contract import resolve_full_inventory_contract
 
 def test_native_workspace_tools_require_native_authority():
     arguments = {"path": "/workspace/input.png"}
-    assert not preview_call_allowed("inspect_media", arguments, "inspect the file")
-    assert preview_call_allowed(
+    assert not evaluate_preview_call("inspect_media", arguments, "inspect the file").allowed
+    assert evaluate_preview_call(
         "inspect_media",
         arguments,
         "inspect the file",
         allow_native_workspace=True,
-    )
+    ).allowed
 
 
 def test_native_workspace_contract_includes_pdf_extraction_for_document_tasks():
@@ -51,21 +51,21 @@ def test_native_workspace_allows_scoped_write_and_python_only_when_enabled():
     write = {"path": "/workspace/output.html", "content": "<html></html>"}
     python = {"code": "1 + 1"}
 
-    assert not preview_call_allowed("write_file", write, "write the output")
-    assert not preview_call_allowed("python", python, "analyze the file")
-    assert preview_call_allowed(
+    assert not evaluate_preview_call("write_file", write, "write the output").allowed
+    assert not evaluate_preview_call("python", python, "analyze the file").allowed
+    assert evaluate_preview_call(
         "python", python, "analyze the file", allow_execute_code=True
-    )
-    assert preview_call_allowed(
+    ).allowed
+    assert evaluate_preview_call(
         "write_file", write, "write the output", allow_native_workspace=True
-    )
-    assert preview_call_allowed(
+    ).allowed
+    assert evaluate_preview_call(
         "python",
         python,
         "analyze the file",
         allow_execute_code=True,
         allow_native_workspace=True,
-    )
+    ).allowed
 
 
 def test_native_workspace_exposes_exact_edit_and_search_without_interactive_access():
@@ -75,8 +75,8 @@ def test_native_workspace_exposes_exact_edit_and_search_without_interactive_acce
         ('grep', {'pattern': 'alpha', 'path': '/workspace'}),
     ]:
         assert name in NATIVE_WORKSPACE_TOOLS
-        assert preview_call_allowed(name, args, 'Use the workspace tool', allow_native_workspace=True)
-        assert not preview_call_allowed(name, args, 'Use the workspace tool')
+        assert evaluate_preview_call(name, args, 'Use the workspace tool', allow_native_workspace=True).allowed
+        assert not evaluate_preview_call(name, args, 'Use the workspace tool').allowed
 
 
 def test_native_followup_tool_floor_respects_explicit_denials():

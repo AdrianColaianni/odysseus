@@ -1,6 +1,5 @@
 """Execute the actual DOCX handlers with deferred network responses."""
 import subprocess
-from pathlib import Path
 from tests.helpers.document_source import document_source
 
 

@@ -1,4 +1,3 @@
-# routes/note_routes.py
 """Google Keep-style notes / checklists API."""
 
 import json
@@ -6,10 +5,11 @@ import uuid
 import logging
 from typing import Dict, Any, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Depends
+from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
-from core.database import SessionLocal, Note
+from core.database import SessionLocal, Note, get_db
 from core.middleware import INTERNAL_TOOL_USER
 from src.auth_helpers import require_user
 from src.constants import DATA_DIR
@@ -18,10 +18,6 @@ from sqlalchemy.orm.attributes import flag_modified
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Request models
-# ---------------------------------------------------------------------------
 
 class NoteCreate(BaseModel):
     title: str = ""
@@ -56,10 +52,6 @@ class NoteUpdate(BaseModel):
     sort_order: Optional[int] = None
     agent_session_id: Optional[str] = None
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _note_to_dict(note: Note) -> Dict[str, Any]:
     items = None
@@ -127,12 +119,8 @@ def _reminder_text_from_note(note: Note) -> tuple[str, str]:
     return title, (note.content or "").strip()[:400]
 
 
-
-# ---------------------------------------------------------------------------
-# Reminder dispatch — module-level so background tasks (built-in actions)
-# can call it directly without an HTTP roundtrip + auth cookie. The route
-# version below is a thin wrapper that pulls `owner` from the request.
-# ---------------------------------------------------------------------------
+# Reminder dispatch is module-level so built-in actions can call it without an
+# HTTP roundtrip; the route below only pulls `owner` from the request.
 
 # Scheduler reference — set by setup_note_routes() so dispatch_reminder can
 # push a parallel in-app notification (frontend polls the scheduler's queue
@@ -242,18 +230,9 @@ async def dispatch_reminder(
                 # last surviving line — that's the actual warm sentence.
                 if synthesis:
                     import re as _re
-                    # Tightened: target ACTUAL self-talk (model narrating what
-                    # it'll do) rather than any first-person sentence. The old
-                    # pattern killed legit warm sentences like "I'll see you
-                    # tomorrow" or "I should be done by then". New rules:
-                    #  • "I (need|should|have|'ll|will) (write|draft|reply|…)"
-                    #    only matches when followed by a TASK verb taking an
-                    #    OBJECT (so first-person + intransitive verb passes).
-                    #  • Self-instructional patterns the model emits verbatim:
-                    #    "I should write something that reminds them…",
-                    #    "I need to draft…", "Let me think…".
-                    #  • Explicit instructions echoed back from the prompt:
-                    #    "Keep it under 25 words", "No greetings".
+                    # Match self-talk (a first-person task verb with an object,
+                    # "Let me think", echoed prompt rules), not any first-person
+                    # sentence, so "I'll see you tomorrow" survives.
                     _reasoning = _re.compile(
                         r"^\s*(?:"
                         # "I should write/draft/compose…" with a task-object follow
@@ -304,7 +283,7 @@ async def dispatch_reminder(
     email_error = ""
     if channel == "email":
         try:
-            from routes.email_routes import _get_email_config, _smtp_ready
+            from routes.email.email_routes import _get_email_config, _smtp_ready
             from email.mime.text import MIMEText
             from email.mime.multipart import MIMEMultipart
             from datetime import datetime as _dt
@@ -336,8 +315,7 @@ async def dispatch_reminder(
                     logger.debug(f"Reminder SMTP fallback lookup failed: {_fallback_error}")
             from_addr = (cfg.get("from_address") or cfg.get("smtp_user") or "").strip()
             recipient = (settings.get("reminder_email_to") or "").strip() or from_addr
-            # Loud diagnostic so we can see WHY a reminder didn't send (the
-            # previous "silently no-op when cfg has no smtp_host" was invisible).
+            # Logged so a reminder that does not send shows which setting is missing.
             logger.info(
                 "dispatch_reminder[email] note_id=%s owner=%r "
                 "has_smtp_host=%s has_smtp_user=%s has_from=%s has_recipient=%s",
@@ -373,10 +351,7 @@ async def dispatch_reminder(
                 msg["X-Odysseus-Origin"] = "odysseus-ui"
                 msg["X-Odysseus-Kind"] = "reminder"
                 msg["X-Odysseus-Ref"] = str(note_id)
-                # Body shape: synthesis (warm sentence) → blank line → bold
-                # title header → note details. The title was previously only
-                # in the subject line, so the email read like a faceless
-                # to-do list with no anchor to which note triggered it.
+                # Body: synthesis, blank line, bold title, note details.
                 _body_chunks = []
                 if synthesis:
                     _body_chunks.append(synthesis)
@@ -388,7 +363,7 @@ async def dispatch_reminder(
                 msg.attach(MIMEText(plain, "plain", "utf-8"))
 
                 def _smtp_send():
-                    from routes.email_helpers import _send_smtp_message
+                    from routes.email.email_helpers import _send_smtp_message
                     _send_smtp_message(cfg, from_addr, [recipient], msg.as_string())
 
                 import asyncio as _aio
@@ -542,7 +517,7 @@ async def dispatch_reminder(
             from datetime import datetime as _dt, timezone as _tz
             from pathlib import Path as _P
             # Per-owner cache so the scanner's prune step on user A's run
-            # doesn't drop user B's just-fired entry (review C4).
+            # doesn't drop user B's just-fired entry.
             _STATE = cache_path
             if _STATE is None:
                 _slug = "".join(c if (c.isalnum() or c in "-_.@") else "_" for c in (owner or "default"))
@@ -574,10 +549,6 @@ async def dispatch_reminder(
     }
 
 
-# ---------------------------------------------------------------------------
-# Router factory
-# ---------------------------------------------------------------------------
-
 def setup_note_routes(task_scheduler=None, upload_handler=None):
     # Expose the scheduler to module-level `dispatch_reminder` so reminders
     # can also push to the in-app notification queue (the polling system
@@ -589,15 +560,9 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
     router = APIRouter(prefix="/api/notes", tags=["notes"])
 
     def _owner(request: Request) -> Optional[str]:
-        # require_user, not bare get_current_user: a request that reaches
-        # these owner-scoped routes with NO identity (auth-middleware
-        # regression, SSRF from a sibling service) must fail closed (401)
-        # when auth is configured — not be treated as the single-user mode
-        # and handed blanket access to every account's notes. The documented
-        # anonymous modes (AUTH_ENABLED=false, LOCALHOST_BYPASS on loopback,
-        # unconfigured first-run) still resolve to None, the single-user
-        # path. fire_reminder below already gated this way; the CRUD routes
-        # did not.
+        # require_user, not get_current_user: no identity must fail closed (401)
+        # when auth is configured. The documented anonymous modes still resolve
+        # to None, the single-user path.
         return require_user(request) or None
 
     def _reserve_note_uploads(owner: Optional[str], *values) -> None:
@@ -622,37 +587,32 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
         except Exception:
             return False
 
-    # --- LIST ---
     @router.get("")
     def list_notes(
         request: Request,
         archived: Optional[bool] = None,
         label: Optional[str] = None,
+        db: Session = Depends(get_db),
     ):
         user = _owner(request)
-        db = SessionLocal()
-        try:
-            q = db.query(Note)
-            if user is not None:
-                q = q.filter(Note.owner == user)
-            if archived is not None:
-                q = q.filter(Note.archived == archived)
-            else:
-                q = q.filter(Note.archived == False)
-            if label:
-                q = q.filter(Note.label == label)
-            # Archived view: most recently archived first. Active view: pin + manual order.
-            if archived is True:
-                notes = q.order_by(Note.updated_at.desc()).all()
-            else:
-                notes = q.order_by(Note.pinned.desc(), Note.sort_order.asc(), Note.updated_at.desc()).all()
-            return {"notes": [_note_to_dict(n) for n in notes]}
-        finally:
-            db.close()
+        q = db.query(Note)
+        if user is not None:
+            q = q.filter(Note.owner == user)
+        if archived is not None:
+            q = q.filter(Note.archived == archived)
+        else:
+            q = q.filter(Note.archived == False)
+        if label:
+            q = q.filter(Note.label == label)
+        # Archived view: most recently archived first. Active view: pin + manual order.
+        if archived is True:
+            notes = q.order_by(Note.updated_at.desc()).all()
+        else:
+            notes = q.order_by(Note.pinned.desc(), Note.sort_order.asc(), Note.updated_at.desc()).all()
+        return {"notes": [_note_to_dict(n) for n in notes]}
 
-    # --- CREATE ---
     @router.post("")
-    def create_note(request: Request, body: NoteCreate):
+    def create_note(request: Request, body: NoteCreate, db: Session = Depends(get_db)):
         user = _owner(request)
         _reserve_note_uploads(
             user,
@@ -661,191 +621,144 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
             body.content,
             json.dumps(body.items) if body.items is not None else None,
         )
-        db = SessionLocal()
-        try:
-            note = Note(
-                id=str(uuid.uuid4()),
-                owner=user,
-                title=body.title,
-                content=body.content,
-                items=json.dumps(body.items) if body.items is not None else None,
-                note_type=body.note_type,
-                color=body.color,
-                label=body.label,
-                pinned=body.pinned,
-                due_date=body.due_date,
-                source=body.source,
-                session_id=body.session_id,
-                image_url=body.image_url,
-                gallery_id=body.gallery_id,
-                repeat=body.repeat or "none",
-                sort_order=body.sort_order if body.sort_order is not None else 0,
-            )
-            db.add(note)
-            db.commit()
-            db.refresh(note)
-            return _note_to_dict(note)
-        finally:
-            db.close()
+        note = Note(
+            id=str(uuid.uuid4()),
+            owner=user,
+            title=body.title,
+            content=body.content,
+            items=json.dumps(body.items) if body.items is not None else None,
+            note_type=body.note_type,
+            color=body.color,
+            label=body.label,
+            pinned=body.pinned,
+            due_date=body.due_date,
+            source=body.source,
+            session_id=body.session_id,
+            image_url=body.image_url,
+            gallery_id=body.gallery_id,
+            repeat=body.repeat or "none",
+            sort_order=body.sort_order if body.sort_order is not None else 0,
+        )
+        db.add(note)
+        db.commit()
+        db.refresh(note)
+        return _note_to_dict(note)
 
-    # --- GET ONE ---
     @router.get("/{note_id}")
-    def get_note(request: Request, note_id: str):
+    def get_note(request: Request, note_id: str, db: Session = Depends(get_db)):
         user = _owner(request)
-        db = SessionLocal()
-        try:
-            note = db.query(Note).filter(Note.id == note_id).first()
-            if not note:
-                raise HTTPException(404, "Note not found")
-            # SECURITY: strict ownership — previously `note.owner and note.owner != user`
-            # let any user touch a row whose owner field was null/empty.
-            if user is not None and note.owner != user:
-                raise HTTPException(404, "Note not found")
-            return _note_to_dict(note)
-        finally:
-            db.close()
+        note = db.query(Note).filter(Note.id == note_id).first()
+        if not note:
+            raise HTTPException(404, "Note not found")
+        if user is not None and note.owner != user:
+            raise HTTPException(404, "Note not found")
+        return _note_to_dict(note)
 
-    # --- UPDATE ---
     @router.put("/{note_id}")
-    def update_note(request: Request, note_id: str, body: NoteUpdate):
+    def update_note(request: Request, note_id: str, body: NoteUpdate, db: Session = Depends(get_db)):
         user = _owner(request)
-        db = SessionLocal()
-        try:
-            note = db.query(Note).filter(Note.id == note_id).first()
-            if not note:
-                raise HTTPException(404, "Note not found")
-            # SECURITY: strict ownership — previously `note.owner and note.owner != user`
-            # let any user touch a row whose owner field was null/empty.
-            if user is not None and note.owner != user:
-                raise HTTPException(404, "Note not found")
+        note = db.query(Note).filter(Note.id == note_id).first()
+        if not note:
+            raise HTTPException(404, "Note not found")
+        if user is not None and note.owner != user:
+            raise HTTPException(404, "Note not found")
 
-            _reserve_note_uploads(
-                user,
-                body.image_url,
-                body.color,
-                body.content,
-                json.dumps(body.items) if body.items is not None else None,
-            )
-            if body.title is not None:
-                note.title = body.title
-            if body.content is not None:
-                note.content = body.content
-            if body.items is not None:
-                note.items = json.dumps(body.items)
-                flag_modified(note, "items")
-            if body.note_type is not None:
-                note.note_type = body.note_type
-            if body.color is not None:
-                note.color = body.color
-            if body.label is not None:
-                note.label = body.label
-            if body.pinned is not None:
-                note.pinned = body.pinned
-            if body.archived is not None:
-                note.archived = body.archived
-            if body.due_date is not None:
-                note.due_date = body.due_date
-            if body.image_url is not None:
-                note.image_url = body.image_url
-            if body.gallery_id is not None:
-                note.gallery_id = body.gallery_id
-            if body.repeat is not None:
-                note.repeat = body.repeat
-            if body.sort_order is not None:
-                note.sort_order = body.sort_order
-            if body.agent_session_id is not None:
-                note.agent_session_id = body.agent_session_id
-
-            db.commit()
-            db.refresh(note)
-            return _note_to_dict(note)
-        finally:
-            db.close()
-
-    # --- DELETE ---
-    @router.delete("/{note_id}")
-    def delete_note(request: Request, note_id: str):
-        user = _owner(request)
-        db = SessionLocal()
-        try:
-            note = db.query(Note).filter(Note.id == note_id).first()
-            if not note:
-                raise HTTPException(404, "Note not found")
-            # SECURITY: strict ownership — previously `note.owner and note.owner != user`
-            # let any user touch a row whose owner field was null/empty.
-            if user is not None and note.owner != user:
-                raise HTTPException(404, "Note not found")
-            db.delete(note)
-            db.commit()
-            return {"ok": True}
-        finally:
-            db.close()
-
-    # --- TOGGLE PIN ---
-    @router.post("/{note_id}/pin")
-    def toggle_pin(request: Request, note_id: str):
-        user = _owner(request)
-        db = SessionLocal()
-        try:
-            note = db.query(Note).filter(Note.id == note_id).first()
-            if not note:
-                raise HTTPException(404, "Note not found")
-            # SECURITY: strict ownership — previously `note.owner and note.owner != user`
-            # let any user touch a row whose owner field was null/empty.
-            if user is not None and note.owner != user:
-                raise HTTPException(404, "Note not found")
-            note.pinned = not note.pinned
-            db.commit()
-            return {"ok": True, "pinned": note.pinned}
-        finally:
-            db.close()
-
-    # --- TOGGLE ARCHIVE ---
-    @router.post("/{note_id}/archive")
-    def toggle_archive(request: Request, note_id: str):
-        user = _owner(request)
-        db = SessionLocal()
-        try:
-            note = db.query(Note).filter(Note.id == note_id).first()
-            if not note:
-                raise HTTPException(404, "Note not found")
-            # SECURITY: strict ownership — previously `note.owner and note.owner != user`
-            # let any user touch a row whose owner field was null/empty.
-            if user is not None and note.owner != user:
-                raise HTTPException(404, "Note not found")
-            note.archived = not note.archived
-            db.commit()
-            return {"ok": True, "archived": note.archived}
-        finally:
-            db.close()
-
-    # --- TOGGLE CHECKLIST ITEM ---
-    @router.post("/{note_id}/items/{index}/toggle")
-    def toggle_item(request: Request, note_id: str, index: int):
-        user = _owner(request)
-        db = SessionLocal()
-        try:
-            note = db.query(Note).filter(Note.id == note_id).first()
-            if not note:
-                raise HTTPException(404, "Note not found")
-            # SECURITY: strict ownership — previously `note.owner and note.owner != user`
-            # let any user touch a row whose owner field was null/empty.
-            if user is not None and note.owner != user:
-                raise HTTPException(404, "Note not found")
-            if not note.items:
-                raise HTTPException(400, "Note has no checklist items")
-            items = json.loads(note.items)
-            if index < 0 or index >= len(items):
-                raise HTTPException(400, f"Item index {index} out of range")
-            items[index]["done"] = not items[index].get("done", False)
-            note.items = json.dumps(items)
+        _reserve_note_uploads(
+            user,
+            body.image_url,
+            body.color,
+            body.content,
+            json.dumps(body.items) if body.items is not None else None,
+        )
+        if body.title is not None:
+            note.title = body.title
+        if body.content is not None:
+            note.content = body.content
+        if body.items is not None:
+            note.items = json.dumps(body.items)
             flag_modified(note, "items")
-            db.commit()
-            return {"ok": True, "items": items}
-        finally:
-            db.close()
+        if body.note_type is not None:
+            note.note_type = body.note_type
+        if body.color is not None:
+            note.color = body.color
+        if body.label is not None:
+            note.label = body.label
+        if body.pinned is not None:
+            note.pinned = body.pinned
+        if body.archived is not None:
+            note.archived = body.archived
+        if body.due_date is not None:
+            note.due_date = body.due_date
+        if body.image_url is not None:
+            note.image_url = body.image_url
+        if body.gallery_id is not None:
+            note.gallery_id = body.gallery_id
+        if body.repeat is not None:
+            note.repeat = body.repeat
+        if body.sort_order is not None:
+            note.sort_order = body.sort_order
+        if body.agent_session_id is not None:
+            note.agent_session_id = body.agent_session_id
 
-    # --- FIRE REMINDER ---
+        db.commit()
+        db.refresh(note)
+        return _note_to_dict(note)
+
+    @router.delete("/{note_id}")
+    def delete_note(request: Request, note_id: str, db: Session = Depends(get_db)):
+        user = _owner(request)
+        note = db.query(Note).filter(Note.id == note_id).first()
+        if not note:
+            raise HTTPException(404, "Note not found")
+        if user is not None and note.owner != user:
+            raise HTTPException(404, "Note not found")
+        db.delete(note)
+        db.commit()
+        return {"ok": True}
+
+    @router.post("/{note_id}/pin")
+    def toggle_pin(request: Request, note_id: str, db: Session = Depends(get_db)):
+        user = _owner(request)
+        note = db.query(Note).filter(Note.id == note_id).first()
+        if not note:
+            raise HTTPException(404, "Note not found")
+        if user is not None and note.owner != user:
+            raise HTTPException(404, "Note not found")
+        note.pinned = not note.pinned
+        db.commit()
+        return {"ok": True, "pinned": note.pinned}
+
+    @router.post("/{note_id}/archive")
+    def toggle_archive(request: Request, note_id: str, db: Session = Depends(get_db)):
+        user = _owner(request)
+        note = db.query(Note).filter(Note.id == note_id).first()
+        if not note:
+            raise HTTPException(404, "Note not found")
+        if user is not None and note.owner != user:
+            raise HTTPException(404, "Note not found")
+        note.archived = not note.archived
+        db.commit()
+        return {"ok": True, "archived": note.archived}
+
+    @router.post("/{note_id}/items/{index}/toggle")
+    def toggle_item(request: Request, note_id: str, index: int, db: Session = Depends(get_db)):
+        user = _owner(request)
+        note = db.query(Note).filter(Note.id == note_id).first()
+        if not note:
+            raise HTTPException(404, "Note not found")
+        if user is not None and note.owner != user:
+            raise HTTPException(404, "Note not found")
+        if not note.items:
+            raise HTTPException(400, "Note has no checklist items")
+        items = json.loads(note.items)
+        if index < 0 or index >= len(items):
+            raise HTTPException(400, f"Item index {index} out of range")
+        items[index]["done"] = not items[index].get("done", False)
+        note.items = json.dumps(items)
+        flag_modified(note, "items")
+        db.commit()
+        return {"ok": True, "items": items}
+
     @router.post("/fire-reminder")
     async def fire_reminder(request: Request):
         """Dispatch a reminder according to user settings.
@@ -903,41 +816,32 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
             settings_override=_override or None,
         )
 
-    # --- REORDER NOTES ---
     @router.post("/reorder")
-    async def reorder_notes(request: Request):
+    async def reorder_notes(request: Request, db: Session = Depends(get_db)):
         """Update sort_order for a list of note IDs in the order provided."""
         user = _owner(request)
         body = await request.json()
         ids = body.get("ids", [])
         if not isinstance(ids, list):
             raise HTTPException(400, "ids must be a list")
-        # v2 review HIGH-12: drop the legacy `(owner == user) | (owner ==
-        # None)` OR which let an authenticated user silently reorder
-        # every legacy-null-owner note belonging to other accounts. In
-        # an unconfigured (single-user) auth deploy the OR is still safe
-        # because there's no second user to attack; we keep that branch
-        # explicit and gated on AuthManager.is_configured.
+        # Legacy null-owner notes are reorderable only when auth is unconfigured,
+        # since then there is no second user they could belong to.
         try:
             from core.auth import AuthManager
             _allow_null = not AuthManager().is_configured
         except Exception:
             _allow_null = False
-        db = SessionLocal()
-        try:
-            for i, nid in enumerate(ids):
-                q = db.query(Note).filter(Note.id == nid)
-                if user is not None:
-                    if _allow_null:
-                        q = q.filter((Note.owner == user) | (Note.owner == None))  # noqa: E711
-                    else:
-                        q = q.filter(Note.owner == user)
-                note = q.first()
-                if note:
-                    note.sort_order = i
-            db.commit()
-            return {"ok": True, "count": len(ids)}
-        finally:
-            db.close()
+        q = db.query(Note).filter(Note.id.in_(ids))
+        if user is not None:
+            if _allow_null:
+                q = q.filter((Note.owner == user) | (Note.owner == None))  # noqa: E711
+            else:
+                q = q.filter(Note.owner == user)
+        notes = {note.id: note for note in q.all()}
+        for i, nid in enumerate(ids):
+            if nid in notes:
+                notes[nid].sort_order = i
+        db.commit()
+        return {"ok": True, "count": len(ids)}
 
     return router

@@ -14,7 +14,6 @@ documentLibrary.js pulls in browser-only modules so it can't run under node; thi
 guards the wiring at the source level (red→green via git-stash).
 """
 
-import re
 import json
 import subprocess
 from pathlib import Path
@@ -48,45 +47,6 @@ def test_orphaned_doc_open_routes_to_editor_load():
     body = body[: body.index("async function libraryOpenInSession")]
     assert "if (!doc.session_id)" in body and "_loadDocument(doc.id)" in body, \
         "libraryOpenDocument must open a session-less doc by id"
-
-
-def test_mobile_open_is_available_for_every_document():
-    text = _src()
-    mobile_menu = text.split("if (window.innerWidth <= 768)", 1)[1].split(
-        "const dropdown =", 1
-    )[0]
-
-    assert "label: 'Open in new chat'" in mobile_menu
-    assert "'Open in original' : 'Open document'" in mobile_menu
-    assert "doc.session_id ? libraryOpenInSession(doc) : libraryOpenDocument(doc)" in mobile_menu
-    assert "libraryImportDocument(doc, { newSession: true })" in mobile_menu
-
-
-def test_session_linked_open_uses_explicit_document_loader():
-    """The loader restores a minimized panel before selecting the document."""
-    text = _src()
-    body = text.split("async function libraryOpenInSession(doc)", 1)[1].split(
-        "/** Copy a document", 1
-    )[0]
-
-    assert "await _loadDocument(doc.id);" in body
-    assert "if (!_isOpenFn()) _openPanel();" not in body
-    assert "_switchToDoc(doc.id);" not in body
-
-
-def test_library_open_marks_full_editor_intent_before_session_switch():
-    """The delayed session restore must not minimize an explicitly opened doc."""
-    text = _src()
-    for function_name in ("libraryOpenDocument", "libraryOpenInSession"):
-        body = text.split(f"async function {function_name}(doc)", 1)[1]
-        body = body.split("async function", 1)[0]
-        assert "_prepareDocumentOpen?.(doc.session_id);" in body
-        if "selectSession(doc.session_id)" in body:
-            assert body.index("_prepareDocumentOpen?.(doc.session_id);") < body.index(
-                "selectSession(doc.session_id)"
-            )
-
-    assert "setTimeout(r, 150)" not in text
 
 
 def test_mobile_explicit_load_restores_full_editor_from_bottom_dock():

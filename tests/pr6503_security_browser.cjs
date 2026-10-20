@@ -198,9 +198,12 @@ function documentFunction(name, text = source) {
 
     const names = ['_unfoldEmailHeaderLines', '_parseEmailHeader', '_looksLikeWrappedEmailContent', '_decodeBase64EmailWrapper',
       '_sanitizeOutgoingEmailBody', '_emailHtmlToPlainText', '_aiReply',
-      '_loadOdysseusAttachItems', '_odysseusAttachLabel', '_escHtml',
+      '_loadOdysseusAttachItems', '_odysseusAttachLabel',
       '_normalizeRichLinkUrl', '_smartRichPasteUrl', '_insertSmartRichPasteLink', '_cleanRichTextPasteHtml', 'exportAsPdf'];
     const functions = Object.fromEntries(names.map(name => [name, documentFunction(name)]));
+    const uiSource = readFileSync('static/js/ui.js', 'utf8');
+    functions.esc = uiSource.match(/^const _ESC_MAP = .*$/m)[0] + '\n'
+      + uiSource.match(/^export function esc\(.*?^}/ms)[0].replace('export ', '') + '\nreturn esc;';
     const email = await page.evaluate(async functions => {
       window.executed = 0;
       const _unfoldEmailHeaderLines = eval('(' + functions._unfoldEmailHeaderLines + ')');
@@ -270,7 +273,7 @@ function documentFunction(name, text = source) {
 
     const gallery = await page.evaluate(async functions => {
       const API_BASE = '';
-      const _escHtml = eval('(' + functions._escHtml + ')');
+      const uiModule = { esc: new Function(functions.esc)() };
       const _odysseusAttachLabel = eval('(' + functions._odysseusAttachLabel + ')');
       const spinnerModule = { createLoadingRow: () => document.createElement('div') };
       const _syncOdysseusAttachSelection = () => {};

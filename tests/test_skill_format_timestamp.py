@@ -11,7 +11,6 @@ right shape, but emits local wall time, which would silently backdate or
 postdate skills for every user outside UTC.
 """
 
-import os
 import re
 import time
 import warnings
@@ -39,10 +38,9 @@ def test_now_iso_emits_no_deprecation_warning():
     not hasattr(time, "tzset"),
     reason="time.tzset is unavailable on this platform",
 )
-def test_now_iso_is_utc_not_local_time():
+def test_now_iso_is_utc_not_local_time(monkeypatch):
     """Pin UTC under a non-UTC local timezone, where the two visibly diverge."""
-    original_tz = os.environ.get("TZ")
-    os.environ["TZ"] = "Asia/Amman"  # UTC+3, never UTC
+    monkeypatch.setenv("TZ", "Asia/Amman")  # UTC+3, never UTC
     time.tzset()
     try:
         emitted = datetime.strptime(_now_iso(), "%Y-%m-%dT%H:%M:%SZ").replace(
@@ -51,8 +49,5 @@ def test_now_iso_is_utc_not_local_time():
         drift = abs((emitted - datetime.now(timezone.utc)).total_seconds())
         assert drift < 60, f"timestamp is {drift}s off UTC — local time leaked in"
     finally:
-        if original_tz is None:
-            os.environ.pop("TZ", None)
-        else:
-            os.environ["TZ"] = original_tz
+        monkeypatch.undo()
         time.tzset()

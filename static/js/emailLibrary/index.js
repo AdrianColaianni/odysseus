@@ -1,24 +1,14 @@
-/**
- * emailLibrary/index.js — Email library popup modal.
- * Similar pattern to documentLibrary.js. Shows emails in a grid with search/filter.
- *
- * `static/js/emailLibrary.js` re-exports this module's public surface so the
- * old import path keeps resolving; see the comment there.
- */
-
 import spinnerModule from '../spinner.js';
-import { styledConfirm, showToast, emptyStateIcon } from '../ui.js?v=20260916largetoolscroll1';
-import { folderDisplayName, sortedFolders } from '../emailInbox.js?v=20260914aireply4';
+import { esc, showError, styledConfirm, showToast, emptyStateIcon } from '../ui.js?v=20260916largetoolscroll1';
 import settingsModule from '../settings.js?v=20260912writingstyle3';
 import * as Modals from '../modalManager.js';
 import { makeWindowDraggable } from '../windowDrag.js';
 import {
-  _esc,
-  _escLinkify,
+  folderDisplayName,
+  sortedFolders,
   _extractName,
   _formatRecipients,
   _senderColor,
-  _sanitizeHtml,
 } from './utils.js';
 import { state } from './state.js';
 import { getSettings } from '../appConfig.js';
@@ -64,6 +54,7 @@ import {
   _syncEmailAutoReplyTitle,
   _syncEmailSettingsAccountPicker,
 } from './settingsPage.js';
+import { jsonRequest } from '../shared/http.js';
 
 const API_BASE = window.location.origin;
 let _emailUnreadChipClickWired = false;
@@ -158,7 +149,7 @@ function _emailReaderLoadErrorHtml(message) {
   return `
     <div class="email-reader-load-error">
       <div class="email-reader-load-error-title">Could not load email</div>
-      <div class="email-reader-load-error-msg">${_esc(message || 'Failed to load email')}</div>
+      <div class="email-reader-load-error-msg">${esc(message || 'Failed to load email')}</div>
       <button type="button" class="memory-toolbar-btn email-reader-retry-btn">Retry</button>
     </div>`;
 }
@@ -217,9 +208,9 @@ function _emailTagPillHtml(tag, em) {
     : '';
   if (normalized === 'calendar') {
     if (!eventUid) return '';
-    return `<button type="button" class="email-tag email-tag-${_esc(normalized)} email-tag-clickable" data-calendar-event-uid="${_esc(eventUid)}" title="Open calendar event">${_esc(normalized)}</button>`;
+    return `<button type="button" class="email-tag email-tag-${esc(normalized)} email-tag-clickable" data-calendar-event-uid="${esc(eventUid)}" title="Open calendar event">${esc(normalized)}</button>`;
   }
-  return `<button type="button" class="email-tag email-tag-${_esc(normalized)} email-tag-clickable" data-email-filter-tag="${_esc(normalized)}" title="Show ${_esc(normalized)} emails">${_esc(normalized)}</button>`;
+  return `<button type="button" class="email-tag email-tag-${esc(normalized)} email-tag-clickable" data-email-filter-tag="${esc(normalized)}" title="Show ${esc(normalized)} emails">${esc(normalized)}</button>`;
 }
 
 function _emailTagGroupHtml(tags, em) {
@@ -444,12 +435,12 @@ export function _recipientChipHtml(full, label, extraClass = '') {
   const addr = _emailAddressFromRecipientText(fullText);
   const labelText = String(label || addr || fullText || '').trim();
   const cls = `recipient-chip${extraClass ? ` ${extraClass}` : ''}`;
-  return `<span class="${cls}" data-full="${_esc(fullText || labelText)}" data-email="${_esc(addr)}" title="Click for details"><span class="recipient-chip-label">${_esc(labelText)}</span><button type="button" class="recipient-chip-copy" title="Copy email" aria-label="Copy email" hidden>${_COPY_EMAIL_ICON}</button></span>`;
+  return `<span class="${cls}" data-full="${esc(fullText || labelText)}" data-email="${esc(addr)}" title="Click for details"><span class="recipient-chip-label">${esc(labelText)}</span><button type="button" class="recipient-chip-copy" title="Copy email" aria-label="Copy email" hidden>${_COPY_EMAIL_ICON}</button></span>`;
 }
 
 let _recipientChipPopoverCtl = null;
 function _closeRecipientChipPopover() {
-  try { _recipientChipPopoverCtl?.abort(); } catch {}
+  _recipientChipPopoverCtl?.abort();
   _recipientChipPopoverCtl = null;
   document.querySelector('.recipient-chip-popover')?.remove();
   document.querySelectorAll('.recipient-chip.popover-open').forEach(chip => {
@@ -473,8 +464,8 @@ function _showRecipientChipPopover(chip) {
   pop.setAttribute('aria-label', 'Sender details');
   pop.innerHTML = `
     <div class="recipient-chip-popover-main">
-      ${name && detail !== name ? `<div class="recipient-chip-popover-name">${_esc(name)}</div>` : ''}
-      <div class="recipient-chip-popover-detail">${_esc(detail)}</div>
+      ${name && detail !== name ? `<div class="recipient-chip-popover-name">${esc(name)}</div>` : ''}
+      <div class="recipient-chip-popover-detail">${esc(detail)}</div>
     </div>
     ${email ? `<button type="button" class="recipient-chip-popover-copy" title="Copy email" aria-label="Copy email">${_COPY_EMAIL_ICON}</button>` : ''}
   `;
@@ -913,8 +904,6 @@ function _hasDesktopRoomForEmailAndDocument(modal, opts = {}) {
   const emailWidth = isFullscreen
     ? Math.min(440, Math.max(360, Math.round(window.innerWidth * 0.30)))
     : Math.max(360, Math.round(rect?.width || 440));
-  // Relaxed thresholds — the old 560 + 72 forced an unnecessary tab-down
-  // on ~1200–1300px viewports where there was visually plenty of room.
   const docMinWidth = 460;
   const breathingRoom = 40;
   const leftEdgeNow = isFullscreen ? _emailSplitLeftEdge() : Math.max(0, Math.round(rect?.left || _emailSplitLeftEdge()));
@@ -1152,15 +1141,10 @@ export async function _exportSelectedAttachments() {
     if (cancelBtn) cancelBtn.disabled = true;
     if (selectAll) selectAll.disabled = true;
     if (countEl) countEl.textContent = `Exporting attachments from ${messages.length}…`;
-    const res = await fetch(`${API_BASE}/api/email/attachments-download-bulk`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages,
-        category: String(state._libFilter || '').replace(/^tag:/, ''),
-      }),
-    });
+    const res = await fetch(`${API_BASE}/api/email/attachments-download-bulk`, jsonRequest('POST', {
+      messages,
+      category: String(state._libFilter || '').replace(/^tag:/, ''),
+    }));
     if (!res.ok) {
       let detail = '';
       try {
@@ -2053,7 +2037,7 @@ export function _publishActiveAccount() {
     if (state._libAccountId) localStorage.setItem(_LIB_LAST_ACCOUNT_KEY, state._libAccountId);
   } catch (_) {}
   // Publish the active account's own address so reply-all can exclude us from
-  // the recipient list. This global was read in emailInbox.js but never set.
+  // the recipient list.
   try {
     const accts = state._libAccounts || [];
     const active = accts.find(a => a && a.id === state._libAccountId)
@@ -2565,15 +2549,8 @@ export function openEmailLibrary(opts = {}) {
       showToast('Failed to clear reminder emails');
     }
   });
-  // The old "sort" dropdown (Latest / Unread first / Favorites first) was merged
-  // into the filter dropdown above — "Favorites" is now a filter (server-side
-  // \Flagged search). _libSort stays at its 'recent' default so the grid keeps
-  // the API's newest-first order.
-
-  // Chip-bar search: pills represent contact + free-text filters; the live
-  // input below drives the autocomplete dropdown. Old behavior — instant
-  // local filter on every keystroke + server-side IMAP search after 350ms
-  // — is replaced by deterministic local filtering against the snapshot.
+  // Chip-bar search: pills are contact and free-text filters; the live input
+  // drives the autocomplete dropdown.
   _initEmailSearchChipBar();
 
   document.getElementById('email-lib-refresh-btn').addEventListener('click', async () => {
@@ -2923,11 +2900,8 @@ export function _renderAccountsStrip() {
   const strip = document.getElementById('email-lib-accounts');
   if (!strip) return;
   strip.style.display = 'flex';
-  const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
-  // The 'Default' chip caused desync bugs (changing the server-side
-  // default via the dot while still on the cached 'default' view would
-  // open the wrong account's emails). Each account renders as its own
-  // chip; the active one is selected explicitly via _loadAccounts.
+  // No 'Default' chip: each account is its own chip, and _loadAccounts picks
+  // the active one, so a server-side default change cannot open the wrong mailbox.
   let html = '';
   // Keep the server default first; unread status remains the only dot on a
   // mailbox chip, while the explicit default control lives in Settings.
@@ -3170,32 +3144,14 @@ export function closeEmailLibrary() {
   try { window._restoreSidebarIfRouteCollapsed?.(); } catch (_) {}
 }
 
-// Make a modal draggable by its header. If `modal` and `fsClass` are
-// provided, dragging to the top edge of the viewport snaps to fullscreen
-// (Aero Snap). Dragging away from the top while fullscreen unsnaps.
+// Make a modal draggable by its header. Dragging away from the top while
+// fullscreen (`fsClass`) unsnaps.
 export function _makeDraggable(content, modal, fsClass) {
   if (!content) return;
   const header = content.querySelector('.modal-header');
   if (!header) return;
-  // Per-modal fullscreen behavior — caller supplies fsClass, we apply
-  // the same inline-style fullscreen pattern email-lib + email-window
-  // both use. exitFullscreen restores the default windowed size
-  // (min(720px, 92vw) × 85vh) and centers around the cursor.
-  const enterFullscreen = () => {
-    if (!fsClass || modal.classList.contains(fsClass)) return;
-    modal.classList.add(fsClass);
-    content.style.position = 'fixed';
-    content.style.left = '0';
-    content.style.top = '0';
-    content.style.right = '0';
-    content.style.bottom = '0';
-    content.style.width = '100vw';
-    content.style.maxWidth = '100vw';
-    content.style.height = '100vh';
-    content.style.maxHeight = '100vh';
-    content.style.borderRadius = '0';
-    content.style.transform = 'none';
-  };
+  // exitFullscreen restores the default windowed size (min(720px, 92vw) x
+  // 85vh) and centers around the cursor.
   const exitFullscreen = (cx, cy) => {
     if (!fsClass || !modal.classList.contains(fsClass)) return;
     modal.classList.remove(fsClass);
@@ -3233,7 +3189,6 @@ export function _makeDraggable(content, modal, fsClass) {
       content.style.transform = 'none';
       content.style.margin = '0';
     },
-    onEnterFullscreen: fsClass ? enterFullscreen : null,
     onExitFullscreen: fsClass ? exitFullscreen : null,
   });
 }
@@ -3361,25 +3316,6 @@ export async function _loadFolders({ resetMissing = false, live = false } = {}) 
 	    _renderFolderPicker();
 	  } catch (e) {}
 	}
-
-function _crossFolderCandidates() {
-  const available = Array.isArray(state._libFolders) ? state._libFolders.filter(Boolean) : [];
-  const lower = new Map(available.map(f => [String(f).toLowerCase(), f]));
-  const pick = (patterns, fallback) => {
-    for (const p of patterns) {
-      const direct = lower.get(String(p).toLowerCase());
-      if (direct) return direct;
-    }
-    const match = available.find(f => patterns.some(p => String(f).toLowerCase().includes(String(p).toLowerCase())));
-    return match || fallback;
-  };
-  const candidates = [
-    pick(['INBOX'], 'INBOX'),
-    pick(['[Gmail]/Sent Mail', 'Sent Mail', 'Sent Items', 'INBOX.Sent', 'Sent'], '[Gmail]/Sent Mail'),
-    pick(['Archive', '[Gmail]/All Mail', 'All Mail'], '[Gmail]/All Mail'),
-  ];
-  return Array.from(new Set(candidates.filter(Boolean)));
-}
 
 function _findEmailFolder(patterns, fallback) {
   const available = Array.isArray(state._libFolders) ? state._libFolders.filter(Boolean) : [];
@@ -3794,7 +3730,6 @@ function _renderSearchPills() {
   const visiblePillCount = pills.length + filterPills.length + (showingFolderPill ? 1 : 0);
   if (chipBar) chipBar.classList.toggle('has-email-lib-pills', visiblePillCount > 0);
   if (input) input.placeholder = visiblePillCount > 0 ? '' : 'Search by name or text';
-  const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
   const folderLabel = folderDisplayName(folder);
   const folderPill = showingFolderPill
     ? `<span class="email-lib-pill email-lib-folder-pill" data-folder-pill="${esc(folder)}" title="${esc(folderLabel)}" style="display:inline-flex;align-items:center;gap:3px;padding:0 5px 0 7px;border-radius:999px;background:color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);color:var(--accent, var(--red));font-size:11px;line-height:20px;height:20px;font-weight:600;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;">
@@ -3998,7 +3933,6 @@ function _renderSearchSuggestions(items) {
   const menu = document.getElementById('email-lib-suggest');
   if (!menu) return;
   if (!items.length) { menu.style.display = 'none'; menu.innerHTML = ''; return; }
-  const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
   menu.innerHTML = items.map((s, i) => {
     const highlight = i === _libSuggestionFocusIdx ? 'background:color-mix(in srgb, var(--fg) 8%, transparent);' : '';
     if (s.kind === 'filter') {
@@ -4198,12 +4132,8 @@ async function _initEmailSearchChipBar() {
         input.value = '';
         state._libSearchDraft = '';
         _hideSearchSuggestions();
-        // Pill-only filtering used to only check emails already loaded into
-        // state._libEmails (the visible page of the inbox). Searches for
-        // names/text that aren't in the current page returned "no emails"
-        // even when matches existed on the server. Trigger the IMAP
-        // search so state._libEmails is replaced with the actual hits,
-        // then the pill filter narrows to matches.
+        // Search the server, not just the loaded page; the pill filter then
+        // narrows the hits.
         state._libSearch = v;
         _doSearch();
       }
@@ -4441,7 +4371,7 @@ async function _doSearch() {
     paintSearchData(data, false);
   } catch (e) {
     if (stats) stats.textContent = originalStatsText || 'Search failed';
-    try { console.error('[email-search] fetch failed:', e); } catch {}
+    console.error('[email-search] fetch failed:', e);
   } finally {
     _libSearchInFlight = false;
     _setEmailSyncStatus({ loading: false });
@@ -4520,7 +4450,6 @@ function _renderFolderPicker() {
   const labelEl = btn.querySelector('.email-folder-label');
   if (iconWrap) iconWrap.innerHTML = _folderIcon(value);
   if (labelEl) labelEl.textContent = label;
-  const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
   const rows = [];
   for (const opt of sel.children) {
     if (opt.disabled) {
@@ -4535,13 +4464,8 @@ function _renderFolderPicker() {
   menu.innerHTML = rows.join('');
 }
 
-function _initFolderPicker() {
-  const sel = document.getElementById('email-lib-folder');
-  const picker = document.getElementById('email-folder-picker');
-  const btn = document.getElementById('email-folder-btn');
-  const menu = document.getElementById('email-folder-menu');
-  if (!sel || !picker || !btn || !menu || picker._wired) return;
-  picker._wired = true;
+// The folder and filter pickers are exclusive: opening one closes the other.
+function _wirePicker({ sel, picker, btn, menu, itemSelector, siblingName, onOpen }) {
   let dismiss = () => {};
   const finishClose = () => {
     menu.hidden = true;
@@ -4549,12 +4473,12 @@ function _initFolderPicker() {
     dismiss = () => {};
   };
   const open = () => {
-    const filterMenu = document.getElementById('email-filter-menu');
-    const filterBtn = document.getElementById('email-filter-btn');
-    filterMenu?._dismiss?.();
-    if (filterMenu && !filterMenu.hidden) filterMenu.hidden = true;
-    if (filterBtn) filterBtn.setAttribute('aria-expanded', 'false');
-    _renderFolderPicker();
+    const siblingMenu = document.getElementById(`email-${siblingName}-menu`);
+    const siblingBtn = document.getElementById(`email-${siblingName}-btn`);
+    siblingMenu?._dismiss?.();
+    if (siblingMenu && !siblingMenu.hidden) siblingMenu.hidden = true;
+    if (siblingBtn) siblingBtn.setAttribute('aria-expanded', 'false');
+    onOpen?.();
     menu.hidden = false;
     btn.setAttribute('aria-expanded', 'true');
     dismiss = bindMenuDismiss(menu, finishClose, e => !picker.contains(e.target));
@@ -4564,15 +4488,22 @@ function _initFolderPicker() {
     if (menu.hidden) open(); else dismiss();
   });
   menu.addEventListener('click', (e) => {
-    const item = e.target.closest('.email-folder-item');
+    const item = e.target.closest(itemSelector);
     if (!item) return;
     sel.value = item.dataset.value;
     sel.dispatchEvent(new Event('change', { bubbles: true }));
     dismiss();
   });
-  document.addEventListener('click', (e) => {
-    if (!menu.hidden && !picker.contains(e.target)) dismiss();
-  });
+}
+
+function _initFolderPicker() {
+  const sel = document.getElementById('email-lib-folder');
+  const picker = document.getElementById('email-folder-picker');
+  const btn = document.getElementById('email-folder-btn');
+  const menu = document.getElementById('email-folder-menu');
+  if (!sel || !picker || !btn || !menu || picker._wired) return;
+  picker._wired = true;
+  _wirePicker({ sel, picker, btn, menu, itemSelector: '.email-folder-item', siblingName: 'filter', onOpen: _renderFolderPicker });
   _renderFolderPicker();
 }
 
@@ -4619,36 +4550,7 @@ function _initFilterPicker() {
     </button>`;
   }).join('');
 
-  let dismiss = () => {};
-  const finishClose = () => {
-    menu.hidden = true;
-    btn.setAttribute('aria-expanded', 'false');
-    dismiss = () => {};
-  };
-  const open = () => {
-    const folderMenu = document.getElementById('email-folder-menu');
-    const folderBtn = document.getElementById('email-folder-btn');
-    folderMenu?._dismiss?.();
-    if (folderMenu && !folderMenu.hidden) folderMenu.hidden = true;
-    if (folderBtn) folderBtn.setAttribute('aria-expanded', 'false');
-    menu.hidden = false;
-    btn.setAttribute('aria-expanded', 'true');
-    dismiss = bindMenuDismiss(menu, finishClose, e => !picker.contains(e.target));
-  };
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (menu.hidden) open(); else dismiss();
-  });
-  menu.addEventListener('click', (e) => {
-    const item = e.target.closest('.email-filter-item');
-    if (!item) return;
-    sel.value = item.dataset.value;
-    sel.dispatchEvent(new Event('change', { bubbles: true }));
-    dismiss();
-  });
-  document.addEventListener('click', (e) => {
-    if (!menu.hidden && !picker.contains(e.target)) dismiss();
-  });
+  _wirePicker({ sel, picker, btn, menu, itemSelector: '.email-filter-item', siblingName: 'folder' });
   _renderFilterPickerCurrent();
 }
 
@@ -4942,7 +4844,7 @@ export async function _loadEmails({ force = false, useCache = true } = {}) {
     // wiping it for "Failed to load" when there's still readable content.
     if (!paintedExisting) {
       const msg = e && e.message ? `Failed to load: ${e.message}` : 'Failed to load';
-      grid.innerHTML = `<div class="email-loading">${_esc(msg)}${_emailSetupHintHtml()}</div>`;
+      grid.innerHTML = `<div class="email-loading">${esc(msg)}${_emailSetupHintHtml()}</div>`;
       _wireEmailSetupHint(grid);
     }
   } finally {
@@ -4985,13 +4887,13 @@ async function _loadScheduled(grid, sp) {
 
     content.innerHTML = `
       <div style="display:flex;align-items:center;gap:6px;">
-        <span class="memory-item-title">${_esc(subject)}</span>
+        <span class="memory-item-title">${esc(subject)}</span>
         ${it.status === 'failed' ? '<span style="font-size:9px;color:var(--red);border:1px solid var(--red);padding:1px 4px;border-radius:4px;">FAILED</span>' : '<span style="font-size:9px;opacity:0.6;border:1px solid var(--border);padding:1px 4px;border-radius:4px;">PENDING</span>'}
       </div>
       <div style="font-size:10px;opacity:0.7;margin-top:2px;">
-        To: ${_esc(toDisplay)} · Sends ${_esc(dateStr)}
+        To: ${esc(toDisplay)} · Sends ${esc(dateStr)}
       </div>
-      ${it.error ? `<div style="font-size:10px;color:var(--red);margin-top:2px;">${_esc(it.error)}</div>` : ''}
+      ${it.error ? `<div style="font-size:10px;color:var(--red);margin-top:2px;">${esc(it.error)}</div>` : ''}
     `;
     card.appendChild(content);
 
@@ -5002,7 +4904,6 @@ async function _loadScheduled(grid, sp) {
     cancelBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
     cancelBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
-      const { styledConfirm } = await import('../ui.js?v=20260916largetoolscroll1');
       const ok = await styledConfirm(`Cancel scheduled email "${subject}"?`, { confirmText: 'Cancel Send', cancelText: 'Keep', danger: true });
       if (!ok) return;
       try {
@@ -5108,7 +5009,6 @@ export function _renderGrid() {
   grid.innerHTML = '';
 
   let filtered = state._libEmails;
-  try { console.log('[email-search] _renderGrid: state._libEmails.length=', (state._libEmails || []).length, 'pills=', (state._libSearchPills || []).length, 'draft=', JSON.stringify(state._libSearchDraft || ''), 'libSearch=', JSON.stringify(state._libSearch || '')); } catch {}
   _syncSearchOptionsMenu();
 
   // 'recent' is the default order from the API. Date stays the primary
@@ -5479,10 +5379,10 @@ function _createCard(em) {
   const prettyFolder = folderDisplayName(cardFolder);
   const sentChip = isSentFolderEarly ? '<span class="email-sent-chip" title="Sent email">Sent</span>' : '';
   const folderChip = showFolderChip && !isSentFolderEarly
-    ? `<span class="email-folder-chip" title="${_esc(cardFolder)}">${_esc(prettyFolder)}</span>`
+    ? `<span class="email-folder-chip" title="${esc(cardFolder)}">${esc(prettyFolder)}</span>`
     : '';
   const senderPrefix = isSentFolderEarly ? 'to ' : '';
-  meta.innerHTML = `${sentChip}<span class="email-meta-sender" data-email="${_esc(senderAddress || '')}" data-name="${_esc(senderName || '')}"><span style="opacity:0.55">${senderPrefix}</span><span style="color:${color};font-weight:600">${_esc(senderName)}</span></span><span class="email-meta-sep"> · </span><span class="email-meta-date-group"><span class="email-meta-date">${_esc(dateStr)}</span>${folderChip}</span>`;
+  meta.innerHTML = `${sentChip}<span class="email-meta-sender" data-email="${esc(senderAddress || '')}" data-name="${esc(senderName || '')}"><span style="opacity:0.55">${senderPrefix}</span><span style="color:${color};font-weight:600">${esc(senderName)}</span></span><span class="email-meta-sep"> · </span><span class="email-meta-date-group"><span class="email-meta-date">${esc(dateStr)}</span>${folderChip}</span>`;
   content.appendChild(meta);
 
   card.appendChild(content);
@@ -5596,45 +5496,6 @@ async function _openDraftInComposer(em) {
   if (data.error) throw new Error(data.error);
   await state._docModule.openEmailDraft({ ...em, ...data });
   return true;
-}
-
-const _emailReadPrefetching = new Set();
-let _emailReadPrefetchTimer = null;
-
-function _prefetchAdjacentEmails(card, count = 1) {
-  if (!card || state._libFolder === '__scheduled__') return;
-  const grid = card.closest('.doclib-grid');
-  if (!grid) return;
-  const cards = [...grid.querySelectorAll('.doclib-card[data-uid]')];
-  const idx = cards.indexOf(card);
-  if (idx === -1) return;
-  const targets = [];
-  for (let i = 1; i <= count; i++) {
-    if (cards[idx + i]) targets.push(cards[idx + i]);
-  }
-  if (targets.length < count) {
-    for (let i = 1; targets.length < count && cards[idx - i]; i++) targets.push(cards[idx - i]);
-  }
-  const target = targets.find(t => t?.dataset?.uid);
-  const uid = target?.dataset?.uid;
-  if (!uid) return;
-  // Use the email's actual folder when it was stamped by the search
-  // endpoint; otherwise default to the currently-selected folder.
-  const _emFold = (() => {
-    const emObj = (state._libEmails || []).find(e => String(e.uid) === String(uid));
-    return (emObj && emObj.folder) || state._libFolder || 'INBOX';
-  })();
-  const key = `${state._libAccountId || ''}|${_emFold}|${uid}`;
-  if (_emailReadPrefetching.has(key) || _emailReadPrefetching.size > 0) return;
-  if (_emailReadPrefetchTimer) clearTimeout(_emailReadPrefetchTimer);
-  _emailReadPrefetchTimer = setTimeout(() => {
-    _emailReadPrefetchTimer = null;
-    if (document.hidden) return;
-    _emailReadPrefetching.add(key);
-    fetch(`${API_BASE}/api/email/read/${encodeURIComponent(uid)}?folder=${encodeURIComponent(_emFold)}${_acct()}&mark_seen=false`)
-      .catch(() => {})
-      .finally(() => _emailReadPrefetching.delete(key));
-  }, 2500);
 }
 
 export async function _toggleCardPreview(card, em) {
@@ -6044,7 +5905,7 @@ export async function _translateEmail(reader, language, opts = {}) {
   const targetLanguage = language || 'English';
   const sourceText = _emailBodyTextForTranslate(reader);
   if (!sourceText) {
-    try { uiModule?.showError?.('No email body to translate'); } catch {}
+    showError('No email body to translate');
     return;
   }
 
@@ -6054,7 +5915,7 @@ export async function _translateEmail(reader, language, opts = {}) {
   panel.innerHTML =
     '<div class="email-summary-header email-summary-toggle" role="button" tabindex="0">'
     +   '<svg class="email-translation-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>'
-    +   `<span>Translation · ${_esc(targetLanguage)}</span>`
+    +   `<span>Translation · ${esc(targetLanguage)}</span>`
     +   '<svg class="email-summary-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:auto;transition:transform .15s ease;"><polyline points="6 9 12 15 18 9"/></svg>'
     + '</div>'
     + '<div class="email-summary-content email-translation-loading"><span class="email-translation-busy"><span class="email-translation-spinner"></span><span class="email-translation-loading-text">Translating...</span></span></div>';
@@ -6072,17 +5933,13 @@ export async function _translateEmail(reader, language, opts = {}) {
   const sp = spinnerModule.createWhirlpool(18);
   content.querySelector('.email-translation-spinner')?.appendChild(sp.element);
   try {
-    const res = await fetch(`${API_BASE}/api/email/translate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        body: sourceText,
-        subject: reader.dataset.emailSubject || '',
-        from: reader.dataset.emailFrom || '',
-        target_language: targetLanguage,
-        auto: !!opts.auto,
-      }),
-    });
+    const res = await fetch(`${API_BASE}/api/email/translate`, jsonRequest('POST', {
+      body: sourceText,
+      subject: reader.dataset.emailSubject || '',
+      from: reader.dataset.emailFrom || '',
+      target_language: targetLanguage,
+      auto: !!opts.auto,
+    }));
     const result = await res.json().catch(() => ({}));
     sp.destroy();
     content.innerHTML = '';
@@ -6095,12 +5952,12 @@ export async function _translateEmail(reader, language, opts = {}) {
         .trim();
     } else {
       panel.remove();
-      try { uiModule?.showError?.(result.error || 'Failed to translate'); } catch {}
+      showError(result.error || 'Failed to translate');
     }
   } catch (_) {
     sp.destroy();
     panel.remove();
-    try { uiModule?.showError?.('Failed to translate'); } catch {}
+    showError('Failed to translate');
   }
 }
 
@@ -6173,22 +6030,3 @@ export function _wireReaderActionOverflow(reader) {
   requestAnimationFrame(() => _fitReaderActions(meta));
   _readerActionFitObserver?.observe(meta);
 }
-
-
-// _extractName lives in ./emailLibrary/utils.js
-
-
-// Sanitize untrusted HTML email bodies before injecting via innerHTML.
-//
-// Denylist sanitizer — has to block every well-known XSS sink:
-//   - <script>, <iframe>, <object>, <embed>, <form>, <style>, <link>
-//   - SVG entirely (event handlers, <use href="javascript:">, <foreignObject>,
-//     <animate>, <set>, etc.). Email clients don't need SVG.
-//   - <math> (MathML can carry handlers).
-//   - <base href="...">, <meta http-equiv="refresh">, <noscript>, <frame>,
-//     <frameset>, <applet>, <portal>.
-//   - on* attributes; javascript:/vbscript:/data: URLs in href/src/srcset/
-//     formaction/action/background/poster/data attributes.
-//   - srcdoc (defensive — iframe is already nuked).
-//   - inline `style` declarations containing javascript: or expression().
-// _sanitizeHtml / _escLinkify live in ./emailLibrary/utils.js

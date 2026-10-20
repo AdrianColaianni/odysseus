@@ -7,7 +7,6 @@ from typing import Optional
 
 
 DEFAULT_LOCAL_OWNER = "__odysseus_local__"
-DEFAULT_LOCAL_OWNER_LABEL = "Local"
 INTERNAL_TOOL_USER = "internal-tool"
 
 REQUEST_SENTINEL_OWNERS = frozenset({INTERNAL_TOOL_USER, "api", "demo", "system"})
@@ -51,6 +50,3 @@ def effective_storage_owner(owner: str | None, *, auth_is_disabled: bool | None 
         return DEFAULT_LOCAL_OWNER
     return None
 
-
-def is_default_local_owner(owner: str | None) -> bool:
-    return owner_key(owner) == DEFAULT_LOCAL_OWNER

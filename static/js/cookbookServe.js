@@ -1,10 +1,5 @@
-// ============================================
-// COOKBOOK SERVE SUB-MODULE
-// Serve tab: cached model list, serve panel building,
-// command building, preset slots, launch logic
-// ============================================
-
 import uiModule from './ui.js?v=20260916largetoolscroll1';
+import { fetchWithTimeout, SERVE_STATE_KEY, _normalizeCookbookModelDir } from './cookbook.js';
 import spinnerModule from './spinner.js';
 import { providerLogo } from './providers.js';
 import { modelColor } from './chatRenderer.js?v=20260914metricssummary1';
@@ -46,23 +41,7 @@ let _launchServeTask;
 let _retryDownload;
 let _nextAvailablePort;
 
-function _fetchCookbookWithTimeout(input, init = {}, timeoutMs = 20000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const parentSignal = init.signal;
-  const abortFromParent = () => controller.abort();
-  if (parentSignal) {
-    if (parentSignal.aborted) controller.abort();
-    else parentSignal.addEventListener('abort', abortFromParent, { once: true });
-  }
-  return fetch(input, { ...init, signal: controller.signal }).finally(() => {
-    clearTimeout(timer);
-    parentSignal?.removeEventListener('abort', abortFromParent);
-  });
-}
 
-// Storage keys
-const SERVE_STATE_KEY = 'cookbook-serve-state';
 const SERVE_FAVORITES_KEY = 'cookbook-serve-favorite-models';
 
 let _cachedAllModels = [];
@@ -76,11 +55,6 @@ function _syncServeStats() {
   if (!stats) return;
   const count = _cachedAllModels.length;
   stats.textContent = `${count} model${count === 1 ? '' : 's'}`;
-}
-
-function _normalizeCookbookModelDir(dir) {
-  const d = String(dir || '').replaceAll('✕', '').replaceAll('✖', '').trim();
-  return /^(home|mnt|media|data|opt|srv|var)\//.test(d) ? `/${d}` : d;
 }
 
 function _serveCmdPort(cmd) {
@@ -862,7 +836,7 @@ async function _fetchServeRuntimePackage(panel, backend) {
     if (target.venv) params.set('venv', target.venv);
   }
   if (repo) params.set('model_hint', repo);
-  const res = await _fetchCookbookWithTimeout('/api/cookbook/packages' + (params.toString() ? '?' + params.toString() : ''), { credentials: 'same-origin' });
+  const res = await fetchWithTimeout('/api/cookbook/packages' + (params.toString() ? '?' + params.toString() : ''), { credentials: 'same-origin' });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
   const pkg = (data.packages || []).find(p => p.name === packageName);
@@ -882,8 +856,6 @@ function _runtimeNoteText(backend, pkg, target) {
   }
   return note ? `${label} missing on ${target.label}: ${note}` : `${label} missing on ${target.label}.`;
 }
-
-// ── Filter/sort cached model list ──
 
 function _filterCachedList() {
   const list = document.getElementById('hwfit-cached-list');
@@ -1191,7 +1163,7 @@ function _rerenderCachedModels() {
     html += `<div class="memory-item-meta" style="font-size:10px;opacity:0.4;margin-top:2px;">${metaParts.join(' \u00b7 ')}</div>`;
     html += `</div>`;
     const _bk = _detectBackend(m).backend;
-    const _bkIco = _bk === 'llamacpp' ? '<svg viewBox="0 0 24 24" width="18" height="18"><path d="M7 3C5.5 5 5 8 5 11v7c0 1.5 1 3 3 3h1v-4h6v4h1c2 0 3-1.5 3-3v-7c0-3-.5-6-2-8l-1 3c-.5-2-1.5-4-3-5-.5 2-1 3-1.5 3S11 3.5 10.5 2L7 3z" fill="currentColor"/><circle cx="9" cy="11" r="1.5" fill="var(--bg,#1a1a2e)"/><circle cx="15" cy="11" r="1.5" fill="var(--bg,#1a1a2e)"/></svg>'
+    const _bkIco = _bk === 'llamacpp' ? '<svg viewBox="0 0 24 24" width="18" height="18"><path d="M7 3C5.5 5 5 8 5 11v7c0 1.5 1 3 3 3h1v-4h6v4h1c2 0 3-1.5 3-3v-7c0-3-.5-6-2-8l-1 3c-.5-2-1.5-4-3-5-.5 2-1 3-1.5 3S11 3.5 10.5 2L7 3z" fill="currentColor"/><circle cx="9" cy="11" r="1.5" fill="var(--bg)"/><circle cx="15" cy="11" r="1.5" fill="var(--bg)"/></svg>'
       : _bk === 'diffusers' ? '<svg viewBox="0 0 24 24" width="18" height="18"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm0 3c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2zM6 9c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2zm0 6c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2zm6 4c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm4-8c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z" fill="currentColor"/></svg>'
       : '<svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 4l8 16 8-16h-4l-4 8-4-8z" fill="currentColor"/></svg>';
     html += `<span class="doclib-card-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>`;
@@ -1542,9 +1514,9 @@ function _rerenderCachedModels() {
         const _warnText = m.status === 'stalled'
           ? `This model looks like a stale download shell (${esc(m.size || '0 KB')}). The weights aren't on disk — the serve will fail to load. Re-download first, or pick another model.`
           : `This model's download isn't complete yet (${esc(m.size || 'partial')}). The serve will start but is likely to crash on a missing shard. Wait for the download to finish, or relaunch after it's done.`;
-        panelHtml += `<div class="hwfit-serve-warn" style="margin:0 0 8px;padding:6px 10px;border-radius:5px;font-size:11px;background:color-mix(in srgb, var(--color-warning, #f0ad4e) 14%, transparent);border:1px solid color-mix(in srgb, var(--color-warning, #f0ad4e) 40%, transparent);color:var(--color-warning, #f0ad4e);display:flex;gap:6px;align-items:flex-start;line-height:1.4;"><span aria-hidden="true">⚠</span><span>${_warnText}</span></div>`;
+        panelHtml += `<div class="hwfit-serve-warn" style="margin:0 0 8px;padding:6px 10px;border-radius:5px;font-size:11px;background:color-mix(in srgb, var(--color-warning) 14%, transparent);border:1px solid color-mix(in srgb, var(--color-warning) 40%, transparent);color:var(--color-warning);display:flex;gap:6px;align-items:flex-start;line-height:1.4;"><span aria-hidden="true">⚠</span><span>${_warnText}</span></div>`;
       }
-      panelHtml += `<div class="hwfit-serve-vision-warn" style="display:none;margin:0 0 8px;padding:6px 10px;border-radius:5px;font-size:11px;background:color-mix(in srgb, var(--color-warning, #f0ad4e) 14%, transparent);border:1px solid color-mix(in srgb, var(--color-warning, #f0ad4e) 40%, transparent);color:var(--color-warning, #f0ad4e);gap:6px;align-items:flex-start;line-height:1.4;"><span aria-hidden="true">⚠</span><span>Vision is enabled, but no mmproj GGUF projector was found in the cached model scan. Download an mmproj-*.gguf for this model, then refresh the cached model list before launching.</span></div>`;
+      panelHtml += `<div class="hwfit-serve-vision-warn" style="display:none;margin:0 0 8px;padding:6px 10px;border-radius:5px;font-size:11px;background:color-mix(in srgb, var(--color-warning) 14%, transparent);border:1px solid color-mix(in srgb, var(--color-warning) 40%, transparent);color:var(--color-warning);gap:6px;align-items:flex-start;line-height:1.4;"><span aria-hidden="true">⚠</span><span>Vision is enabled, but no mmproj GGUF projector was found in the cached model scan. Download an mmproj-*.gguf for this model, then refresh the cached model list before launching.</span></div>`;
       // Row 1: Engine + Server + Env
       panelHtml += `<div class="hwfit-serve-row">`;
       const backendOpts = _backendChoices.map(([v,l]) => `<option value="${v}"${defaultBackend===v?' selected':''}>${l}</option>`).join('');
@@ -1632,12 +1604,8 @@ function _rerenderCachedModels() {
       const _ctxValue = _isMiniMaxMSeries && ['20000', '32768'].includes(String(_ctxSavedValue)) ? _ctxDefault : _ctxSavedValue;
       panelHtml += `<label class="hwfit-context-label">${_l('Context','Max tokens per request. Calculate suggests a value from model limit + selected GPU VRAM; edit manually to override.')}<span class="hwfit-context-control"><input type="text" class="hwfit-sf" data-field="ctx" value="${esc(_ctxValue)}" /><button type="button" class="hwfit-context-calc-btn cookbook-btn" title="Calculate and use suggested context from scanned hardware">Auto</button></span><span class="hwfit-auto-ctx-note"></span></label>`;
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('Max Seqs','Maximum concurrent requests. Lower = less memory. Default 4 — prosumer GPUs often OOM on vLLM default 256 during CUDA graph capture.')}<input type="text" class="hwfit-sf" data-field="max_seqs" value="${esc(sv('max_seqs', '4'))}" placeholder="4" /></label>`;
-      // GPU "auto" field removed — the GPU button strip below already
-      // writes data-field="gpus" (the canonical comma-separated device
-      // list) and the command builders now read from that single source.
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('GPU Mem','Fraction of GPU memory (0.0–1.0). Lower if OOM')}<input type="text" class="hwfit-sf" data-field="gpu_mem" value="${esc(sv('gpu_mem', _isMiniMaxMSeries ? '0.95' : '0.90'))}" /></label>`;
       panelHtml += `</div>`;
-      // ── Advanced (collapsed by default) ──
       // Everything below the fold is tuning users only touch occasionally:
       // vLLM kernel/env knobs, llama.cpp fit/cache/split controls, the
       // GGUF batch sizes, the speculative-decoding row, and the live VRAM
@@ -1719,12 +1687,8 @@ function _rerenderCachedModels() {
       // Row 3: Advanced toggles for vLLM/SGLang. Several concepts overlap,
       // but the actual flags differ; keep labels backend-neutral where a
       // shared checkbox maps to different runtime flags.
-      // Order: Trust Remote → Auto Tool → Reasoning Parser (when the
-      // model has one) → Enforce Eager → Prefix Caching. Reasoning
-      // Parser was previously in a separate row below; the user wanted
-      // it inline with the other vLLM toggles between Auto Tool and
-      // Enforce Eager so the "what the model needs" decisions sit
-      // together at the top.
+      // Order: Trust Remote, Auto Tool, Reasoning Parser (when the model has
+      // one), Enforce Eager, Prefix Caching.
       const _opts2_row3 = _detectModelOptimizations(repo);
       const _rp_flag = _opts2_row3.flags.find(f => f.includes('--reasoning-parser'));
       const _rp_name = _rp_flag ? _rp_flag.split(' ')[1] : '';
@@ -1739,10 +1703,8 @@ function _rerenderCachedModels() {
       panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm hwfit-backend-sglang"><input type="checkbox" class="hwfit-sf" data-field="reasoning_parser" data-parser="${_rp_name || ''}"${sv('reasoning_parser',_reasoningDefault)?' checked':''} /> Reasoning Parser${_rp_name ? ` <span class="hwfit-parser-tag">${_rp_name}</span>` : ''}${_h('SGLang/vLLM: splits thinking tokens into a reasoning channel using the detected parser.')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="enforce_eager"${sv('enforce_eager',false)?' checked':''} /> Disable CUDA Graphs${_h('vLLM: --enforce-eager. SGLang: --disable-cuda-graph. Slower, but useful for graph-capture crashes.')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="prefix_cache"${sv('prefix_cache',false)?' checked':''} /> Prefix / Radix Cache${_h('vLLM: prefix caching. SGLang: RadixAttention prefix cache; when off Odysseus adds --disable-radix-cache.')}</label>`;
-      // Inline the previously-second vLLM checks row so Expert Parallel /
-      // Speculative / MoE Env sit next to Prefix Caching with no gap. All
-      // three are vLLM-only — class-gated so they hide on SGLang. Always
-      // render so the user can flip them on for any MoE model.
+      // Expert Parallel, Speculative and MoE Env are vLLM-only, class-gated so
+      // they hide on SGLang.
       panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm hwfit-backend-sglang"><input type="checkbox" class="hwfit-sf" data-field="expert_parallel"${sv('expert_parallel',_expertParallelDefault)?' checked':''} /> Expert Parallel${_h('SGLang/vLLM MoE: shard expert layers across GPUs. Useful for DeepSeek/MiniMax/Qwen MoE; avoid on dense models.')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb hwfit-backend-sglang">Decode Graph${_h('SGLang only: tune decode CUDA graph capture. Smaller batch can fix DeepSeek-V4 graph-capture errors; disabled is safest but slower.')} <select class="hwfit-sf" data-field="sglang_decode_graph" style="height:24px;max-width:92px;"><option value=""${sv('sglang_decode_graph','') === '' ? ' selected' : ''}>auto</option><option value="bs16"${sv('sglang_decode_graph','') === 'bs16' ? ' selected' : ''}>bs 16</option><option value="disabled"${sv('sglang_decode_graph','') === 'disabled' ? ' selected' : ''}>off</option></select></label>`;
       panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="language_model_only"${sv('language_model_only',_isMiniMaxM3)?' checked':''} /> Language Model Only${_h('vLLM --language-model-only. Needed by MiniMax M3 text serving when the repo also contains VL components.')}</label>`;
@@ -1762,7 +1724,6 @@ function _rerenderCachedModels() {
       // the user can still flip it on without re-fitting model detection.
       panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="moe_env" /> MoE Env Vars${_h('Adds MoE-specific env vars to the launch command: VLLM_USE_DEEP_GEMM=0, VLLM_USE_FLASHINFER_MOE_FP16=1, OMP_NUM_THREADS=4. Helpful on MoE models like Qwen3 A3B/A10B, MiniMax, DeepSeek V3+; ignored on dense models.')}</label>`;
       panelHtml += `</div>`;
-      // ── llama.cpp Advanced — grouped by purpose ──
       // Three clean field rows + one checkbox row, all selects/inputs the
       // same 28px height (no per-field `top:-Npx` nudges). Groups follow
       // user mental model: (1) where it runs on GPU, (2) how memory is
@@ -1791,11 +1752,6 @@ function _rerenderCachedModels() {
       panelHtml += `<label>${_l('UBatch','llama.cpp physical micro-batch size. Blank = default.')}<input type="text" class="hwfit-sf" data-field="llama_ubatch_size" value="${esc(sv('llama_ubatch_size', ''))}" placeholder="512" /></label>`;
       panelHtml += `<label>${_l('Parallel','llama.cpp parallel slots. Blank = default; 1 matches single-lane presets.')}<input type="text" class="hwfit-sf" data-field="llama_parallel" value="${esc(sv('llama_parallel', ''))}" placeholder="1" /></label>`;
       panelHtml += `</div>`;
-      // Auto-profile chips row removed — visual fit with the rest of the
-      // serve panel was off, and the manual ctx/n_cpu_moe/cache controls
-      // above are already sufficient. The hwfit profile API
-      // (/api/hwfit/profiles) is still available for any caller that
-      // wants it.
       // Live VRAM / RAM-spillover monitor for the serve target's GPU. Polls
       // /api/cookbook/gpus while the panel is open so you can SEE whether the
       // config fits VRAM (fast) or spills to system RAM (slow). Populated after mount.
@@ -1835,7 +1791,6 @@ function _rerenderCachedModels() {
       panelHtml += `<div class="hwfit-serve-extra">`;
       panelHtml += `<label>Extra args<input type="text" class="hwfit-sf" data-field="extra" value="${esc(sv('extra', ''))}" placeholder="--flag value" /></label>`;
       panelHtml += `</div>`;
-      // ── End Advanced fold ──
       panelHtml += `</details>`;
       // Command preview + actions. Wrap the textarea so a floating Copy
       // button can sit at its top-right corner — same pattern as the chat
@@ -2048,7 +2003,7 @@ function _rerenderCachedModels() {
           const _sp = (_serverByVal?.(target.serverKey || host) || (_es.servers || []).find(s => s.host === host) || {}).port;
           if (_sp) params.set('ssh_port', _sp);
         }
-        const res = await _fetchCookbookWithTimeout(`/api/hwfit/profiles?${params}`, {}, 30000);
+        const res = await fetchWithTimeout(`/api/hwfit/profiles?${params}`, {}, 30000);
         const data = await res.json();
         const ctxMax = Number(data && data.model_ctx_max) || 0;
         const weightsGb = Number(data && data.model_weights_gb) || 0;
@@ -2135,9 +2090,7 @@ function _rerenderCachedModels() {
 
       // Tighten the ctx slider's upper bound to the model's trained limit.
       // Asking llama.cpp for ctx > n_ctx_train overflows and, with a quantized
-      // KV cache, can crash the GPU (radv ErrorDeviceLost). The auto-profile
-      // chip row that used to also live here was removed — visual fit with
-      // the rest of the serve panel was off — but this clamp is essential.
+      // KV cache, can crash the GPU (radv ErrorDeviceLost).
       (async () => {
         try {
           const { ctxMax, weightsGb } = await _loadContextProfile();
@@ -2163,7 +2116,7 @@ function _rerenderCachedModels() {
             const _sp = (_es.servers || []).find(s => s.host === host)?.port;
             if (_sp) params.set('ssh_port', _sp);
           }
-          const res = await _fetchCookbookWithTimeout('/api/cookbook/gpus' + (params.toString() ? '?' + params : ''), {}, 10000);
+          const res = await fetchWithTimeout('/api/cookbook/gpus' + (params.toString() ? '?' + params : ''), {}, 10000);
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const data = await res.json();
           const gpus = Array.isArray(data) ? data : (data.gpus || []);
@@ -2175,8 +2128,8 @@ function _rerenderCachedModels() {
           const spillG = (g.gtt_used_mb || 0) / 1024;
           // Color: green < 85%, amber 85-97%, red > 97% or spilling.
           const spilling = spillG > 0.5 && !g.unified_memory;   // unified APUs always use GTT; not a spill
-          let color = 'var(--green, #50fa7b)';
-          if (pct >= 97 || spilling) color = 'var(--red, #ff5555)';
+          let color = 'var(--green)';
+          if (pct >= 97 || spilling) color = 'var(--red)';
           else if (pct >= 85) color = 'var(--orange, #ffb86c)';
           let txt = `${usedG.toFixed(1)} / ${totG.toFixed(1)} GB (${pct}%) · ${freeG.toFixed(1)} GB free`;
           if (spilling) {
@@ -2388,9 +2341,9 @@ function _rerenderCachedModels() {
           } else {
             // Healthy / ready → green so the user reads "good to go" at a
             // glance instead of scanning fg-muted for a state.
-            note.style.color = 'var(--green, #4caf50)';
-            note.style.borderColor = 'color-mix(in srgb, var(--green, #4caf50) 40%, transparent)';
-            note.style.background = 'color-mix(in srgb, var(--green, #4caf50) 8%, transparent)';
+            note.style.color = 'var(--green)';
+            note.style.borderColor = 'color-mix(in srgb, var(--green) 40%, transparent)';
+            note.style.background = 'color-mix(in srgb, var(--green) 8%, transparent)';
           }
         } catch (err) {
           if (panel._runtimeReadinessSeq !== seq) return;
@@ -2413,9 +2366,7 @@ function _rerenderCachedModels() {
         const p = modelSlots[slotIdx];
         if (!p) return;
         const cmd = p.cmd || '';
-        // Hoisted so the GPU/venv restore below can use it in BOTH branches —
-        // it used to be scoped to the else branch, throwing a ReferenceError when
-        // a preset had saved fields (which aborted GPU + env restoration).
+        // The GPU/venv restore below uses this in both branches.
         const _ex = (re) => { const m = cmd.match(re); return m ? m[1] : ''; };
         // Prefer saved field values; fall back to regex parsing of command string
         if (p.fields) {
@@ -2910,7 +2861,7 @@ function _rerenderCachedModels() {
         panel._closeProbePopup = _closeProbePopup;
 
         const _doKill = async (pid, sig, hostVal) => {
-          const res = await _fetchCookbookWithTimeout('/api/cookbook/kill-pid', {
+          const res = await fetchWithTimeout('/api/cookbook/kill-pid', {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ pid, signal: sig, host: hostVal || null }),
@@ -3018,7 +2969,7 @@ function _rerenderCachedModels() {
           const params = new URLSearchParams();
           if (remoteHost) params.set('host', remoteHost);
           const url = '/api/cookbook/gpus' + (params.toString() ? '?' + params.toString() : '');
-          const res = await _fetchCookbookWithTimeout(url, { credentials: 'same-origin' }, 10000);
+          const res = await fetchWithTimeout(url, { credentials: 'same-origin' }, 10000);
           let data;
           try { data = await res.json(); } catch (_) { data = {}; }
           if (!res.ok) {
@@ -3134,7 +3085,7 @@ function _rerenderCachedModels() {
                 // First pass: SIGTERM
                 const hostVal = panel._gpuProbe.host;
                 const results = await Promise.all(pids.map(p =>
-                  _fetchCookbookWithTimeout('/api/cookbook/kill-pid', {
+                  fetchWithTimeout('/api/cookbook/kill-pid', {
                     method: 'POST', credentials: 'same-origin',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ pid: p.pid, signal: 'TERM', host: hostVal || null }),
@@ -3158,7 +3109,7 @@ function _rerenderCachedModels() {
                 }
                 if (!await window.styledConfirm(`${survivors.length} process(es) survived SIGTERM:\n\n${survivors.map(p => p.pid + ' (' + p.name + ')').join(', ')}\n\nForce-kill with SIGKILL?`, { confirmText: 'SIGKILL', danger: true })) return;
                 const killResults = await Promise.all(survivors.map(p =>
-                  _fetchCookbookWithTimeout('/api/cookbook/kill-pid', {
+                  fetchWithTimeout('/api/cookbook/kill-pid', {
                     method: 'POST', credentials: 'same-origin',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ pid: p.pid, signal: 'KILL', host: hostVal || null }),
@@ -3459,8 +3410,7 @@ function _rerenderCachedModels() {
             && ((t.remoteHost || '') === _hostStr || (t.remoteServerKey || '') === _serverKeyStr)
             && (t.status === 'running' || t.status === 'ready' || t._serveReady)
           );
-          // Only block when the new model's port genuinely collides with
-          // a running serve. Different ports coexist fine (issue #4507).
+          // Only block when the new model's port collides with a running serve.
           if (_active.length) {
             const _newPort = _serveCmdPort(launchCmd);
             const _clashing = _newPort
@@ -3498,7 +3448,7 @@ function _rerenderCachedModels() {
                     if (_btn) {
                       _btn.click();
                     } else if (_runningMod._tmuxGracefulKill) {
-                      await _fetchCookbookWithTimeout('/api/shell/exec', {
+                      await fetchWithTimeout('/api/shell/exec', {
                         method: 'POST', credentials: 'same-origin',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ command: _runningMod._tmuxGracefulKill(t) }),
@@ -3558,7 +3508,7 @@ function _rerenderCachedModels() {
                 const _sp = (_serverByVal?.(launchTarget.serverKey || _gh) || {}).port;
                 if (_sp) _gp.set('ssh_port', _sp);
               }
-              const _gr = await _fetchCookbookWithTimeout('/api/cookbook/gpus' + (_gp.toString() ? '?' + _gp : ''), { credentials: 'same-origin' }, 10000);
+              const _gr = await fetchWithTimeout('/api/cookbook/gpus' + (_gp.toString() ? '?' + _gp : ''), { credentials: 'same-origin' }, 10000);
               if (_gr.ok) {
                 const _gd = await _gr.json();
                 _hwGpus = Array.isArray(_gd) ? _gd : (_gd.gpus || []);
@@ -3670,7 +3620,7 @@ function _rerenderCachedModels() {
               _probeParams.set('host', _probeHost);
               if (launchTarget.port) _probeParams.set('ssh_port', launchTarget.port);
             }
-            const _probeRes = await _fetchCookbookWithTimeout('/api/cookbook/gpus' + (_probeParams.toString() ? '?' + _probeParams : ''), { credentials: 'same-origin' }, 10000);
+            const _probeRes = await fetchWithTimeout('/api/cookbook/gpus' + (_probeParams.toString() ? '?' + _probeParams : ''), { credentials: 'same-origin' }, 10000);
             const _probeData = await _probeRes.json();
             const _probeGpus = Array.isArray(_probeData) ? _probeData : (_probeData.gpus || []);
             if (!_probeGpus.length) {
@@ -3706,7 +3656,7 @@ function _rerenderCachedModels() {
             const _cmd = _portHost
               ? `ssh -o ConnectTimeout=4 -o StrictHostKeyChecking=no ${_sshPrefix(launchTarget.port)}${_portHost} ${JSON.stringify(_checkInner)}`
               : _checkInner;
-            const _res = await _fetchCookbookWithTimeout('/api/shell/exec', {
+            const _res = await fetchWithTimeout('/api/shell/exec', {
               method: 'POST', credentials: 'same-origin',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ command: _cmd }),
@@ -3842,8 +3792,6 @@ function _rerenderCachedModels() {
   });
 }
 
-// ── Delete / retry cached model ──
-
 // Resolve the host the cached list was scanned from, mirroring
 // _fetchCachedModels — so a delete targets the SAME machine the model
 // actually lives on, not just the globally-selected serve host.
@@ -3966,7 +3914,7 @@ async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = nul
     itemEl.appendChild(ov);
   }
   try {
-    const res = await _fetchCookbookWithTimeout('/api/shell/exec', {
+    const res = await fetchWithTimeout('/api/shell/exec', {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command: cmd }),
@@ -4064,7 +4012,6 @@ function _retryCachedModel(repo, m) {
   _retryDownload((m?.name || repo).split('/').pop(), payload);
 }
 
-// ── Open the Serve panel for a specific repo, pre-filled ──
 //
 // Used by the running-task "Edit / relaunch" button. Writes the supplied
 // field values into the per-repo serve state so the panel's existing
@@ -4093,7 +4040,7 @@ export async function openServePanelForRepo(repo, fields) {
     serveTab.click();
   } else {
     // Already on the Serve tab — refresh the list so the card is present.
-    try { await _fetchCachedModels(); } catch {}
+    try { await _fetchCachedModels(); } catch (e) { console.warn('[cookbook] cached model refresh failed', e); }
   }
   // Poll for the model's card to render, then expand it. Cached-model
   // fetch is async and we don't get a direct completion hook from the
@@ -4143,8 +4090,6 @@ function _playCachedModelDomino(list) {
     list._serveModelDominoTimer = null;
   }, 950);
 }
-
-// ── Fetch cached models from server ──
 
 function _renderCachedModelsData(list, data, host) {
   // A scan rebuild replaces these cards. Cancel pending mobile long-presses
@@ -4351,7 +4296,7 @@ async function _fetchCachedModelsImpl(fresh = false, opts = {}) {
       if (tagContainer) tagContainer.innerHTML = '';
       return;
     }
-    const res = await _fetchCookbookWithTimeout(`/api/model/cached${params}`, { credentials: 'same-origin', signal: _requestController.signal }, 30000);
+    const res = await fetchWithTimeout(`/api/model/cached${params}`, { credentials: 'same-origin', signal: _requestController.signal }, 30000);
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       let msg = '';
@@ -4381,7 +4326,7 @@ async function _fetchCachedModelsImpl(fresh = false, opts = {}) {
     if (fetchId !== _cachedModelsFetchId) return;
     if (preserveRows) {
       list.querySelector('.cookbook-cached-scan-error')?.remove();
-      list.insertAdjacentHTML('beforeend', `<div class="cookbook-cached-scan-error" style="display:flex;align-items:center;justify-content:center;gap:8px;padding:7px 0;color:var(--color-warning,#f0ad4e);font-size:11px;"><span>Refresh failed: ${esc(e.message)}</span><button type="button" class="hwfit-gpu-btn cookbook-cached-scan-retry" style="height:24px;padding:2px 8px;">Retry</button></div>`);
+      list.insertAdjacentHTML('beforeend', `<div class="cookbook-cached-scan-error" style="display:flex;align-items:center;justify-content:center;gap:8px;padding:7px 0;color:var(--color-warning);font-size:11px;"><span>Refresh failed: ${esc(e.message)}</span><button type="button" class="hwfit-gpu-btn cookbook-cached-scan-retry" style="height:24px;padding:2px 8px;">Retry</button></div>`);
       list.querySelector('.cookbook-cached-scan-retry')?.addEventListener('click', () => {
         _fetchCachedModels(true);
       });
@@ -4433,8 +4378,6 @@ function _presetsForModel(presets, repo) {
     return pm === repo || pn === repo || pm.split('/').pop() === short || pn === short;
   });
 }
-
-// ── Init ──
 
 export function initServe(shared) {
   _envState = shared._envState;

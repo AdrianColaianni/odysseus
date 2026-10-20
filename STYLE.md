@@ -72,7 +72,7 @@ A comment says what the code cannot. Length follows the fact: most take one line
 
 ## 8. UI
 
-The visual contract in `CONTRIBUTING.md` applies to every change under `static/` and `frontend/`: reuse the existing CSS variables and classes, no Unicode emoji (inline SVG or plain text), `Fira Code` stays, dark theme is the default and light mode goes through the theme system. Run the app and look at the change. The rules below are about copy and structure.
+The visual contract in `CONTRIBUTING.md` applies to every change under `static/`: reuse the existing CSS variables and classes, no Unicode emoji (inline SVG or plain text), `Fira Code` stays, dark theme is the default and light mode goes through the theme system. Run the app and look at the change. The rules below are about copy and structure.
 
 - **One source for each fact.** Before adding a label, banner, bar, or sentence, find the element that already tells the user this; if one exists, add nothing. A state a banner names gets no matching row label. A single item gets no aggregate. A button that says "Resume" needs no sentence promising resume. Persistent tabs need no mirrored navigation buttons.
 - **Make sections distinct.** Use neutral surfaces and dividers to separate navigation, controls and content. Concentrate accent color in a few places; avoid broad accent-tinted backgrounds. Keep text readable and labels present so color is never the only cue.

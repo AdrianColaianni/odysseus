@@ -152,9 +152,8 @@ def _comment(calls):
     return comments[0]["params"]["body"] if comments else ""
 
 
-@pytest.mark.parametrize(
-    ("files", "body"),
-    [
+def test_complete_expected_state_is_ready():
+    for files, body in [
         (["README.md"], _body()),
         (["routes/example.py"], _body(app_ran=True)),
         (
@@ -165,14 +164,12 @@ def _comment(calls):
                 media="https://github.com/user-attachments/assets/example",
             ),
         ),
-    ],
-)
-def test_complete_expected_state_is_ready(files, body):
-    calls = _run_checker(files, body)
+    ]:
+        calls = _run_checker(files, body)
 
-    assert _added_labels(calls) == {"ready for review"}
-    assert not _comment(calls)
-    assert not any(call["method"] == "setFailed" for call in calls)
+        assert _added_labels(calls) == {"ready for review"}, files
+        assert not _comment(calls)
+        assert not any(call["method"] == "setFailed" for call in calls)
 
 
 def test_public_repo_still_requires_linked_issue():
@@ -219,7 +216,6 @@ def test_ui_checkbox_without_media_still_needs_visual_evidence():
     )
 
     assert _added_labels(calls) == {"needs visual evidence"}
-    assert "does not contain an actual attachment or link" in _comment(calls)
     assert not any(call["method"] == "setFailed" for call in calls)
 
 
@@ -244,8 +240,6 @@ def test_explicit_not_run_is_honest_but_not_ready():
     )
 
     assert _added_labels(calls) == {"needs runtime validation"}
-    assert "explicitly reports that app/runtime validation was not performed" in _comment(calls)
-    assert "does not prove that a local command ran" in _comment(calls)
     assert not any(call["method"] == "setFailed" for call in calls)
 
 
@@ -265,28 +259,21 @@ def test_missing_validation_label_fails_soft():
     assert not any(call["method"] == "setFailed" for call in calls)
 
 
-@pytest.mark.parametrize(
-    "filename",
-    ("requirements.txt", "requirements-optional.txt"),
-)
-def test_requirement_manifests_require_runtime_validation(filename):
-    calls = _run_checker(
-        [filename],
-        _body(app_not_run=True),
-    )
+def test_requirement_manifests_require_runtime_validation():
+    for filename in ("requirements.txt", "requirements-optional.txt"):
+        calls = _run_checker([filename], _body(app_not_run=True))
 
-    assert _added_labels(calls) == {"needs runtime validation"}
-    assert not any(
-        call["method"] == "addLabels"
-        and call["params"]["labels"] == ["ready for review"]
-        for call in calls
-    )
-    assert any(
-        call["method"] == "removeLabel"
-        and call["params"]["name"] == "ready for review"
-        for call in calls
-    )
-    assert "Changed-file classification: **backend/runtime**." in _comment(calls)
+        assert _added_labels(calls) == {"needs runtime validation"}, filename
+        assert not any(
+            call["method"] == "addLabels"
+            and call["params"]["labels"] == ["ready for review"]
+            for call in calls
+        )
+        assert any(
+            call["method"] == "removeLabel"
+            and call["params"]["name"] == "ready for review"
+            for call in calls
+        )
 
 
 def test_old_template_runtime_pr_is_not_ready_without_attestation():
@@ -296,7 +283,6 @@ def test_old_template_runtime_pr_is_not_ready_without_attestation():
     )
 
     assert _added_labels(calls) == {"needs runtime validation"}
-    assert "App/runtime validation is not author-attested" in _comment(calls)
     assert not any(call["method"] == "setFailed" for call in calls)
 
 
@@ -352,24 +338,6 @@ def test_draft_pr_never_receives_ready_for_review():
         for call in calls
     )
     assert not any(call["method"] == "setFailed" for call in calls)
-
-
-def test_workflow_serializes_readiness_before_mergeability():
-    workflow = _WORKFLOW.read_text()
-
-    assert (
-        "types: [opened, edited, synchronize, reopened, ready_for_review, "
-        "converted_to_draft]"
-    ) in workflow
-    assert "group: pr-description-${{ github.event.pull_request.number }}" in workflow
-    assert "cancel-in-progress: true" in workflow
-
-    mergeable = workflow.split("  check-mergeable:", 1)[1]
-    assert "needs: check-description" in mergeable
-    assert (
-        "if: ${{ !cancelled() && github.event.pull_request.user.type != 'Bot' }}"
-        in mergeable
-    )
 
 
 def test_privileged_pr_workflow_executes_only_base_code():

@@ -1,18 +1,10 @@
-"""Research-domain tool implementations.
-
-Extracted from tool_implementations.py as part of slice 1 (#4082/#4071).
-Holds the manage_research (library CRUD) and trigger_research (live job)
-tools.
-``src.tool_implementations`` re-exports these for backward compatibility.
-``_internal_headers`` and ``_INTERNAL_BASE`` still live in
-tool_implementations.py and are pulled back function-locally where needed.
-"""
+"""The manage_research (library CRUD) and trigger_research (live job) agent tools."""
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from src.constants import DEEP_RESEARCH_DIR
-from src.tools._common import _parse_tool_args
+from src.tools._common import _INTERNAL_BASE, _internal_headers, _parse_tool_args, parsed_tool_args
 
 
 async def do_manage_research(content: str, owner: Optional[str] = None) -> Dict:
@@ -106,17 +98,13 @@ async def do_manage_research(content: str, owner: Optional[str] = None) -> Dict:
     return {"output": f"Research library ({len(items)} item{'s' if len(items) != 1 else ''}):\n{rows}", "exit_code": 0}
 
 
-async def do_trigger_research(content: str, owner: Optional[str] = None, *, chat_session_id: Optional[str] = None) -> Dict:
+@parsed_tool_args
+async def do_trigger_research(args: dict, owner: Optional[str] = None, *, chat_session_id: Optional[str] = None) -> Dict:
     """Start a live deep-research job that appears in the Deep Research
     sidebar. Hits /api/research/start (the same path the sidebar's
     'Research' button uses) so the session is discoverable + streamable
     there, rather than creating a scheduled task that never surfaces."""
     import httpx
-    from src.tool_implementations import _internal_headers, _INTERNAL_BASE  # shared constants, still live in the facade
-    try:
-        args = _parse_tool_args(content)
-    except ValueError:
-        return {"error": "Invalid JSON arguments", "exit_code": 1}
     topic = args.get("topic", "") or args.get("query", "")
     if not topic:
         return {"error": "topic (or query) is required", "exit_code": 1}

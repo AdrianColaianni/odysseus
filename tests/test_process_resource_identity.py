@@ -16,19 +16,19 @@ def process():
     return ProcessResource("native:containment", "alice", "request", "thread", ProcessIdentity(4321, "boot:start", 4321), "leader", "job", "receipt")
 
 
-@pytest.mark.parametrize("verdict", [process_ownership.FOREIGN, process_ownership.GONE, process_ownership.UNVERIFIABLE])
-def test_stale_reused_or_unverifiable_identity_cannot_be_admitted(monkeypatch, verdict):
-    monkeypatch.setattr(process_ownership, "verify", lambda *a: verdict)
-    with pytest.raises(ResourceIdentityError):
-        process().validate()
+def test_stale_reused_or_unverifiable_identity_cannot_be_admitted(monkeypatch):
+    for verdict in [process_ownership.FOREIGN, process_ownership.GONE, process_ownership.UNVERIFIABLE]:
+        monkeypatch.setattr(process_ownership, "verify", lambda *a: verdict)
+        with pytest.raises(ResourceIdentityError):
+            process().validate()
 
 
-@pytest.mark.parametrize("field,value", [("pid", 0), ("pid", "4321"), ("pid", True), ("pgid", "4321"), ("start_token", None), ("start_token", ""), ("start_token", {})])
-def test_malformed_lifecycle_observations_fail_closed(field, value):
-    record = process().to_dict()
-    record["identity"][field] = value
-    with pytest.raises((ValueError, TypeError)):
-        ProcessResource.from_dict(record)
+def test_malformed_lifecycle_observations_fail_closed():
+    for field, value in [("pid", 0), ("pid", "4321"), ("pid", True), ("pgid", "4321"), ("start_token", None), ("start_token", ""), ("start_token", {})]:
+        record = process().to_dict()
+        record["identity"][field] = value
+        with pytest.raises((ValueError, TypeError)):
+            ProcessResource.from_dict(record)
 
 
 def test_no_duplicate_lifecycle_fields_and_strict_restore():

@@ -1,5 +1,6 @@
 const { test, expect } = require('@playwright/test');
 const {
+  addAdjustment,
   dragOnCanvas,
   encodedImagePixelDigest,
   editorState,
@@ -8,14 +9,6 @@ const {
   reopenDraft,
   waitForDraft,
 } = require('./helpers.js');
-
-async function addAdjustment(page, type) {
-  await page.locator('#ge-add-layer').click();
-  const menu = page.locator('.ge-add-layer-menu');
-  await expect(menu).toBeVisible();
-  await menu.locator(`[data-adjustment-type="${type}"]`).click();
-  await expect(page.locator('.ge-adj-popup')).toBeVisible();
-}
 
 test('Levels is a retained stack layer with clipping, masks, history, and persistence', async ({ page }) => {
   await openBlankEditor(page, { width: 360, height: 260 }, 'Adjustment layers E2E');

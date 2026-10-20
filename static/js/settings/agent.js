@@ -1,12 +1,9 @@
 // Agent settings panel.
-// Extracted verbatim from static/js/settings.js. Behaviour is unchanged: the
-// functions moved, their bodies did not. settings.js imports them and calls
-// them from the same places, so load order and init sequence are untouched.
 
 import { byId as el } from './dom.js';
-import { postSettings as _postSettings } from './api.js';
+import { postSettings as _postSettings, flashSaveError } from './api.js';
 
-export async function initAgentSettings() {
+export async function initAgentSettings(settingsLoad) {
   var toolsInput = el('set-agentMaxTools');
   var roundsInput = el('set-agentMaxRounds');
   var supInput = el('set-agentSupervisorLadder');
@@ -14,12 +11,11 @@ export async function initAgentSettings() {
   if (!toolsInput) return;
 
   try {
-    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    var settings = await res.json();
+    var settings = await settingsLoad;
     if (settings.agent_max_tool_calls) toolsInput.value = settings.agent_max_tool_calls;
     if (roundsInput && settings.agent_max_rounds) roundsInput.value = settings.agent_max_rounds;
     if (supInput) supInput.checked = !!settings.agent_supervisor_ladder;
-  } catch (e) {}
+  } catch (e) { console.warn('Failed to load agent settings', e); }
 
   // Clamp + coerce a raw input to an int in [lo, hi]; falls back to `dflt`
   // when blank/non-numeric. Mirrors the server-side validation.
@@ -43,7 +39,7 @@ export async function initAgentSettings() {
         (rounds != null ? ' · ' + rounds + ' steps/message' : '') +
         (supInput && supInput.checked ? ' · supervisor on' : '');
       msg.style.color = 'var(--fg)';
-    } catch (e) { msg.textContent = e.status === 403 ? 'Admin access is required to change these settings.' : 'Failed to save'; msg.style.color = 'var(--red)'; }
+    } catch (e) { flashSaveError(msg, e); }
   }
 
   toolsInput.addEventListener('change', save);

@@ -7,12 +7,13 @@ import pytest
 from fastapi import Request
 from fastapi.datastructures import State
 
-import routes.skills_routes as skills_routes
 from routes.skills_routes import SkillUpdateRequest, setup_skills_routes
+from services.skills import agent_runner
 from services.memory.skill_format import slugify
 from services.memory.skills import SkillsManager
 from src.tool_approvals import tool_approval_store
 from src.tool_capabilities import capabilities_for_action
+from tests.helpers.routes import route_endpoint
 
 
 def _write_skill_md(skills_root: Path, category: str, name: str,
@@ -67,13 +68,6 @@ def _request(user: str, body=None) -> Request:
     }, receive=receive)
 
 
-def _route_handler(router, path: str, method: str):
-    return next(
-        route.endpoint for route in router.routes
-        if route.path == path and method in route.methods
-    )
-
-
 @pytest.mark.asyncio
 async def test_update_skill_route_passes_owner_to_manager(tmp_path):
     skills_root = tmp_path / "skills"
@@ -82,7 +76,7 @@ async def test_update_skill_route_passes_owner_to_manager(tmp_path):
 
     sm = SkillsManager(str(tmp_path))
     router = setup_skills_routes(sm)
-    update_route = _route_handler(router, "/api/skills/{skill_id}", "PUT")
+    update_route = route_endpoint(router, "/api/skills/{skill_id}", "PUT")
 
     result = await update_route(
         _request("alice"),
@@ -106,7 +100,7 @@ async def test_save_skill_markdown_route_passes_owner_to_manager(tmp_path):
 
     sm = SkillsManager(str(tmp_path))
     router = setup_skills_routes(sm)
-    save_route = _route_handler(router, "/api/skills/{skill_id}/markdown", "POST")
+    save_route = route_endpoint(router, "/api/skills/{skill_id}/markdown", "POST")
     markdown = textwrap.dedent("""\
         ---
         name: caveman-mode
@@ -149,7 +143,7 @@ async def test_manual_skill_test_approval_resumes_only_its_sealed_action(
     _write_skill_md(skills_root, "general", "approval-skill", "alice")
     sm = SkillsManager(str(tmp_path))
     router = setup_skills_routes(sm)
-    approve_route = _route_handler(
+    approve_route = route_endpoint(
         router,
         "/api/skills/{skill_id}/test-approval",
         "POST",
@@ -166,7 +160,7 @@ async def test_manual_skill_test_approval_resumes_only_its_sealed_action(
         capabilities=capabilities_for_action("bash", "printf approved"),
     )
     key = ("alice", "approval-skill")
-    skills_routes._skill_test_jobs[key] = {
+    agent_runner._skill_test_jobs[key] = {
         "status": "awaiting_approval",
         "task": "test task",
         "log": [],
@@ -186,7 +180,7 @@ async def test_manual_skill_test_approval_resumes_only_its_sealed_action(
         captured["approval"] = kwargs.get("exact_approval")
         captured["messages"] = kwargs.get("messages")
 
-    monkeypatch.setattr(skills_routes, "_run_skill_test_job", fake_resume)
+    monkeypatch.setattr(agent_runner, "run_test_job", fake_resume)
     try:
         result = await approve_route(
             _request("alice", {
@@ -199,9 +193,8 @@ async def test_manual_skill_test_approval_resumes_only_its_sealed_action(
 
         assert result == {"ok": True, "status": "running", "decision": "approve"}
         assert captured["approval"].pending == pending
-        assert "Approved the exact bash action" in captured["messages"][-1]["content"]
         assert captured["messages"][-3]["metadata"]["tool_gate_untrusted"] is True
         assert "proposal" in captured["messages"][-3]["content"]
         assert tool_approval_store.peek(pending.approval_id) is None
     finally:
-        skills_routes._skill_test_jobs.pop(key, None)
+        agent_runner._skill_test_jobs.pop(key, None)

@@ -33,7 +33,7 @@ export async function loadPersonalDocs() {
   box.appendChild(wpEl);
 
   try {
-    const res = await fetch(`${API_BASE}/api/personal`, { credentials: 'same-origin' });
+    const res = await fetch(`${API_BASE}/api/personal`);
     const data = await res.json();
     const files = data.files || [];
 
@@ -92,7 +92,6 @@ async function _deleteFile(filepath, displayName) {
   try {
     const res = await fetch(`${API_BASE}/api/personal/file?filepath=${encodeURIComponent(filepath)}`, {
       method: 'DELETE',
-      credentials: 'same-origin'
     });
     if (!res.ok) throw new Error(await res.text());
     await loadPersonalDocs();
@@ -119,7 +118,6 @@ export async function uploadRagFiles(fileList) {
   try {
     const res = await fetch(`${API_BASE}/api/personal/upload`, {
       method: 'POST',
-      credentials: 'same-origin',
       body: fd
     });
 

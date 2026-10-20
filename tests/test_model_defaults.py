@@ -1,10 +1,9 @@
 """Tests for share_defaults_with_users setting"""
-import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from tests.helpers.import_state import preserve_import_state
-from tests.helpers.db_stubs import make_core_db_stub
+from tests.helpers.routes import route_endpoint
 
 with preserve_import_state("core.database", "src.database", "routes.model_routes", "routes.prefs_routes"):
     import routes.model_routes as model_routes
@@ -65,14 +64,6 @@ def _make_db_session(endpoints, user=None):
     return fake_session
 
 
-def _get_default_chat_route(router):
-    """Extract the /api/default-chat GET route from the router"""
-    for route in router.routes:
-        if getattr(route, "path", "") == "/api/default-chat" and "GET" in getattr(route, "methods", set()):
-            return route.endpoint
-    raise AssertionError("GET /api/default-chat route not found")
-
-
 def _make_request(user=None, auth_manager=None):
     """Create a fake request for testing"""
     return SimpleNamespace(
@@ -123,7 +114,7 @@ def _run_get_default_chat_test(monkeypatch, share_defaults_enabled, second_endpo
     monkeypatch.setattr(model_routes, "build_chat_url", lambda base: f"{base}/chat")
 
     router = model_routes.setup_model_routes(model_discovery=None)
-    get_default_chat = _get_default_chat_route(router)
+    get_default_chat = route_endpoint(router, "/api/default-chat", "GET")
     fake_request = _make_request(user="regular_user", auth_manager=fake_auth_manager)
 
     result = get_default_chat(fake_request)
@@ -193,7 +184,7 @@ def test_get_default_chat_does_not_read_legacy_fallbacks(monkeypatch):
     monkeypatch.setattr(model_routes, "build_chat_url", lambda base: f"{base}/chat")
 
     router = model_routes.setup_model_routes(model_discovery=None)
-    get_default_chat = _get_default_chat_route(router)
+    get_default_chat = route_endpoint(router, "/api/default-chat", "GET")
     fake_request = _make_request(user="regular_user", auth_manager=fake_auth_manager)
 
     test_data = get_default_chat(fake_request)

@@ -24,7 +24,6 @@ export function wireSliderUx({ registerDocClickAway }) {
   const container = state.container;
   if (!container) return;
 
-  // ── Floating bubble ──
   const sliderBubble = document.createElement('div');
   sliderBubble.className = 'ge-slider-bubble';
   sliderBubble.hidden = true;
@@ -133,7 +132,6 @@ export function wireSliderUx({ registerDocClickAway }) {
     hideSliderBubble();
   });
 
-  // ── Click value chip to type a number ──
   // Replaces the chip with a tiny inline input until blur/Enter,
   // then writes back to the slider and dispatches `input` so
   // previews react. Matches the legacy chip AND the pulled-out

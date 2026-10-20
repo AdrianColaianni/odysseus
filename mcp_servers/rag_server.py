@@ -1,10 +1,7 @@
-"""
-rag_server.py
-
-MCP server exposing RAG document management (list, add_directory, remove_directory).
-"""
+"""MCP server exposing RAG document management (list, add_directory, remove_directory)."""
 
 import asyncio
+import logging
 import os
 import sys
 from pathlib import Path
@@ -16,6 +13,7 @@ from mcp.types import Tool, TextContent
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 server = Server("rag")
+logger = logging.getLogger(__name__)
 
 _rag_manager = None
 _personal_docs_manager = None
@@ -32,15 +30,15 @@ def _ensure_init():
     try:
         from src.rag_singleton import get_rag_manager
         _rag_manager = get_rag_manager()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error("RAG manager init failed: %s", e)
 
     try:
         from src.constants import PERSONAL_DIR
         from src.personal_docs import PersonalDocsManager
         _personal_docs_manager = PersonalDocsManager(PERSONAL_DIR, _rag_manager)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error("Personal docs manager init failed: %s", e)
 
 
 @server.list_tools()
@@ -106,7 +104,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not directory:
             return [TextContent(type="text", text="Error: add_directory needs a directory path")]
         # Store an absolute path so indexed `source` metadata is absolute and
-        # remove_directory (which abspath-normalizes) can match it later (#1660).
+        # remove_directory (which abspath-normalizes) can match it later.
         directory = os.path.abspath(os.path.expanduser(directory))
         if not os.path.isdir(directory):
             return [TextContent(type="text", text=f"Error: Directory not found: {directory}")]
@@ -115,15 +113,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         try:
             result = _rag_manager.index_personal_documents(directory)
             indexed = result.get("indexed_count", 0) if isinstance(result, dict) else 0
-            # Record the directory so `list` and `remove_directory` can see it.
-            # Indexing was just done above, so pass index=False to avoid a second
-            # (ownerless) pass. Without this the directory was indexed but never
-            # tracked in indexed_directories, so it was invisible/unremovable.
+            # Record the directory so `list` and `remove_directory` can see it;
+            # index=False because indexing just ran.
             if _personal_docs_manager and hasattr(_personal_docs_manager, "add_directory"):
                 try:
                     _personal_docs_manager.add_directory(directory, index=False)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Could not track indexed directory %s: %s", directory, e)
             return [TextContent(type="text", text=f"Directory '{directory}' added to RAG index ({indexed} chunks indexed)")]
         except Exception as e:
             return [TextContent(type="text", text=f"Error: Failed to index directory: {e}")]

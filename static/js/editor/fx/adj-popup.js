@@ -34,7 +34,6 @@
  *   openFxPopup, openAdjPopup, editAdjLayer,
  *   closeFxPopup, closeFxMenu, closeAdjPopup,
  *   ensureFxDock, ensureAdjustments,
- *   syncFxPanelToActiveLayerIfPresent,
  *   minimiseAdjPopup,
  * }}
  */
@@ -110,12 +109,8 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel, g
       openAdjPopup(layer, layer.adjustment?.type || 'levels', anchorEl, layer.adjustment);
       return;
     }
-    // Toggle off ONLY if a menu for this layer is genuinely on-screen.
-    // `state` is a shared singleton that survives editor close/reopen,
-    // so a stale `fxMenuEl` from a previous session (whose detached
-    // element still carries a now-recycled `_layerId`) used to make
-    // this guard fire and silently swallow the first click. Verify the
-    // element is still in the document before treating it as "open".
+    // `state` survives editor close/reopen, so a detached `fxMenuEl` from a
+    // previous session can carry a recycled `_layerId`.
     if (state.fxMenuEl && document.body.contains(state.fxMenuEl) &&
         state.fxMenuEl._layerId === layer.id) { closeFxMenu(); return; }
     closeFxMenu();
@@ -1025,15 +1020,10 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel, g
     });
   }
 
-  // Legacy sidebar-FX panel sync — FX now lives in a per-layer popup;
-  // stubbed so any stale callers don't error.
-  function syncFxPanelToActiveLayerIfPresent() { /* no-op */ }
-
   return {
     openFxPopup, openAdjPopup, editAdjLayer,
     closeFxPopup, closeFxMenu, closeAdjPopup,
     ensureFxDock, ensureAdjustments,
-    syncFxPanelToActiveLayerIfPresent,
     minimiseAdjPopup,
   };
 }

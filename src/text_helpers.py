@@ -1,18 +1,8 @@
-"""Text-cleanup helpers shared across LLM-output paths.
-
-Single source of truth for `<think>`-tag stripping, Qwen-style "Thinking
-Process" blocks, and the soft "reasoning prose" heuristic that catches
-chain-of-thought leaks from models that don't tag their reasoning.
-
-Before this module, six different files (`email_routes.py`,
-`chat_helpers.py`, `note_routes.py`, `builtin_actions.py`, `research_utils.py`,
-`agent_loop.py`) each had their own variant of the same regex. They all
-broke in slightly different ways on the edges (unclosed `<think>`, nested
-tags, model emitting `<thinking>` instead of `<think>`).
-"""
+"""Text cleanup shared across LLM-output paths: `<think>` stripping, Qwen "Thinking Process" blocks, reasoning-prose leaks."""
 
 from __future__ import annotations
 
+import json
 import re
 
 _THINK_TAG_NAME = r"(?:think(?:ing)?|thought)"
@@ -189,12 +179,6 @@ def strip_think(text: str, *, prose: bool = False, prompt_echo: bool = True) -> 
     return out.strip()
 
 
-# Back-compat alias for the deep-research code path. Keeps existing imports
-# from `src.research_utils` working while delegating to the central impl.
-def strip_thinking(text: str) -> str:
-    return strip_think(text or "", prose=False, prompt_echo=True)
-
-
 _CLOSED_THINK_OPEN_RE = re.compile(r"<think(?:ing)?>", re.IGNORECASE)
 _CLOSED_THINK_CLOSE_RE = re.compile(r"</think(?:ing)?>", re.IGNORECASE)
 
@@ -207,3 +191,22 @@ def strip_closed_think_blocks(text: str) -> str:
     flood in model output stays O(n) instead of O(n^2).
     """
     return _sub_delimited(text or "", _CLOSED_THINK_OPEN_RE, _CLOSED_THINK_CLOSE_RE, lambda _inner: "")
+
+
+def extract_llm_json(text: str, opener: str = "{"):
+    """Parse the JSON object (or array, with ``opener="["``) in an LLM reply.
+
+    Tries the whole reply, then a fenced block, then the span from the first
+    opener to the last closer, each also with trailing commas dropped.
+    Returns None when nothing parses.
+    """
+    text = strip_think(text or "", prose=False, prompt_echo=True)
+    fence = re.search(r"```(?:json)?\s*\n?([\s\S]*?)```", text)
+    start, end = text.find(opener), text.rfind("}" if opener == "{" else "]")
+    for candidate in (text, fence.group(1) if fence else "", text[start:end + 1] if 0 <= start < end else ""):
+        for attempt in (candidate, re.sub(r",(\s*[}\]])", r"\1", candidate)):
+            try:
+                return json.loads(attempt)
+            except json.JSONDecodeError:
+                continue
+    return None

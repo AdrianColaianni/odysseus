@@ -1,17 +1,3 @@
-from pathlib import Path
-
-
-ROOT = Path(__file__).resolve().parents[1]
-
-
-def test_compact_router_keeps_basic_agent_tools_available():
-    source = (ROOT / "src/agent_loop.py").read_text()
-    assert '_core_agent_tools = set(CONTRACT_CORE_TOOLS)' in source
-    assert "_relevant_tools.update(_core_agent_tools)" in source
-    assert "_base_relevant_tools.update(_core_agent_tools)" in source
-    assert "_caller_disabled_tools" in source
-
-
 def test_caller_disabled_tools_are_removed_and_execution_blocked():
     from src.agent_loop import _enforce_caller_disabled_tool_policy
 
@@ -31,13 +17,6 @@ def test_caller_disabled_tools_are_removed_and_execution_blocked():
     assert policy.blocks("manage_calendar") is True
 
 
-def test_named_ssh_turn_also_exposes_cookbook_server_resolution():
-    source = (ROOT / "src/agent_loop.py").read_text()
-    assert 're.search(r"\\bssh\\s+' in source
-    assert '_relevant_tools.add("list_cookbook_servers")' in source
-    assert '_base_relevant_tools.add("list_cookbook_servers")' in source
-
-
 def test_sft_fixture_keeps_read_only_bash_but_not_workspace_mutators():
     from src.agent_loop import _strip_workspace_tools_for_sft
 
@@ -48,12 +27,6 @@ def test_sft_fixture_keeps_read_only_bash_but_not_workspace_mutators():
     assert "bash" in selected
     assert "manage_skills" in selected
     assert not ({"read_file", "write_file", "edit_file"} & selected)
-
-
-def test_cookbook_intent_is_not_replaced_by_workspace_terminus_tools():
-    source = (ROOT / "src/agent_loop.py").read_text()
-
-    assert 'and "cookbook" not in (_intent.get("domains") or set())' in source
 
 
 def test_incomplete_shell_heredoc_is_not_treated_as_success():

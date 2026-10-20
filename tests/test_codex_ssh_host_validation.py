@@ -14,14 +14,11 @@ from fastapi import APIRouter, HTTPException
 from starlette.requests import Request
 
 import routes.codex_routes as codex_routes
+from tests.helpers.routes import route_endpoint
 
 
 def _route_endpoint(path: str, method: str, router=None):
-    router = router or codex_routes.setup_codex_routes()
-    for route in router.routes:
-        if route.path == path and method in route.methods:
-            return route.endpoint
-    raise AssertionError(f"{method} {path} route not found")
+    return route_endpoint(router or codex_routes.setup_codex_routes(), path, method)
 
 
 def _launch_request() -> Request:

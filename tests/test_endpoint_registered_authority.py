@@ -1,5 +1,6 @@
 """Caller model URLs cannot exceed enabled, owner-visible registration."""
 
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import urlparse
@@ -11,9 +12,11 @@ import core.database as database
 import routes.assistant_routes as assistant_routes
 import routes.model_routes as model_routes
 import routes.skills_routes as skills_routes
+from services.skills import agent_runner
 import routes.task.task_routes as task_routes
 import src.endpoint_resolver as resolver
 from tests.helpers.database import disposable_database
+from tests.helpers.route_call import with_db
 
 
 LOCAL = "http://localhost:1234/v1"
@@ -56,6 +59,12 @@ REJECTED = [
     "not-a-url",
     "   ",
 ]
+# Route-level rejects only need to show each route defers to the shared check.
+ROUTE_REJECTED = [
+    "https://unregistered.example/v1",
+    "http://bob.example/v1",
+    "http://caller:secret@localhost:1234/v1",
+]
 
 
 def _request(body=None, owner="alice"):
@@ -68,14 +77,15 @@ def _request(body=None, owner="alice"):
 
 
 def _route(router, method, path):
-    return next(r.endpoint for r in router.routes if r.path == path and method in r.methods)
+    return next(with_db(r.endpoint) for r in router.routes if r.path == path and method in r.methods)
 
 
 @pytest.fixture
 def registered_db(tmp_path, monkeypatch):
     with disposable_database(tmp_path) as factory:
         for module in (database, task_routes, assistant_routes, model_routes, resolver):
-            monkeypatch.setattr(module, "SessionLocal", factory)
+            monkeypatch.setattr(module, "SessionLocal", factory, raising=False)
+            monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", factory)
         monkeypatch.setattr(resolver, "resolve_url", lambda url: url)
         with factory() as db:
             for endpoint_id, owner, url, enabled in [
@@ -105,33 +115,23 @@ def registered_db(tmp_path, monkeypatch):
         yield factory
 
 
-@pytest.mark.parametrize("endpoint_id, base, chat_url", PROVIDER_CASES)
-def test_model_catalog_chat_url_resolves_to_registered_endpoint(registered_db, endpoint_id, base, chat_url):
+def test_model_catalog_chat_url_resolves_to_registered_endpoint(registered_db):
     catalog = _route(model_routes.setup_model_routes(MagicMock()), "GET", "/api/models")(_request())
-    item = next(item for item in catalog["items"] if item["endpoint_id"] == endpoint_id)
-    assert item["url"] == chat_url == resolver.build_chat_url(base)
-    assert item["models"] == ["model"]
-    with registered_db() as db:
-        assert resolver.resolve_owner_registered_endpoint_url(db, item["url"], "alice") == base
-        endpoint = resolver.resolve_owner_registered_endpoint(db, item["url"], "alice")
-        assert endpoint.id == endpoint_id
-        assert resolver.resolve_endpoint_runtime(endpoint, owner="alice") == (base, "server-secret")
+    for endpoint_id, base, chat_url in PROVIDER_CASES:
+        item = next(item for item in catalog["items"] if item["endpoint_id"] == endpoint_id)
+        assert item["url"] == chat_url == resolver.build_chat_url(base)
+        assert item["models"] == ["model"]
+        with registered_db() as db:
+            assert resolver.resolve_owner_registered_endpoint_url(db, item["url"], "alice") == base
+            assert resolver.resolve_owner_registered_endpoint_url(db, base, "alice") == base
+            endpoint = resolver.resolve_owner_registered_endpoint(db, item["url"], "alice")
+            assert endpoint.id == endpoint_id
+            assert resolver.resolve_endpoint_runtime(endpoint, owner="alice") == (base, "server-secret")
 
 
-@pytest.mark.parametrize("endpoint_id, base, chat_url", PROVIDER_CASES)
-def test_registered_provider_base_remains_valid(registered_db, endpoint_id, base, chat_url):
-    with registered_db() as db:
-        assert resolver.resolve_owner_registered_endpoint_url(db, base, "alice") == base
-
-
-@pytest.mark.parametrize("endpoint_id, base, chat_url", PROVIDER_CASES)
-@pytest.mark.parametrize("change", [
-    "scheme", "host", "port", "zero_port", "userinfo", "query", "fragment",
-    "sibling", "descendant", "models", "completions", "responses", "nested_chat",
-])
-def test_registered_provider_chat_url_rejects_mutations(registered_db, endpoint_id, base, chat_url, change):
+def _mutations(base, chat_url):
     parsed = urlparse(chat_url)
-    mutations = {
+    return {
         "scheme": parsed._replace(scheme="https" if parsed.scheme == "http" else "http"),
         "host": parsed._replace(netloc="attacker.example"),
         "port": parsed._replace(netloc=f"{parsed.hostname}:{(parsed.port or 443) + 1}"),
@@ -146,78 +146,82 @@ def test_registered_provider_chat_url_rejects_mutations(registered_db, endpoint_
         "responses": parsed._replace(path=urlparse(base).path + "/responses"),
         "nested_chat": parsed._replace(path=parsed.path + "/chat/completions"),
     }
-    with registered_db() as db, pytest.raises(ValueError):
-        resolver.resolve_owner_registered_endpoint(db, mutations[change].geturl(), "alice")
 
 
-@pytest.mark.parametrize("endpoint_id, base, chat_url", PROVIDER_CASES)
-@pytest.mark.parametrize("state", ["disabled", "other_owner"])
-def test_registered_provider_chat_url_requires_enabled_owner_visibility(registered_db, endpoint_id, base, chat_url, state):
+def test_registered_provider_chat_url_rejects_mutations(registered_db):
     with registered_db() as db:
-        endpoint = db.get(database.ModelEndpoint, endpoint_id)
-        if state == "disabled":
-            endpoint.is_enabled = False
-        else:
-            endpoint.owner = "bob"
-        db.commit()
-        with pytest.raises(ValueError):
-            resolver.resolve_owner_registered_endpoint(db, chat_url, "alice")
+        for endpoint_id, base, chat_url in PROVIDER_CASES:
+            for change, mutated in _mutations(base, chat_url).items():
+                with pytest.raises(ValueError):
+                    resolver.resolve_owner_registered_endpoint(db, mutated.geturl(), "alice")
+                    pytest.fail(f"{endpoint_id} {change} accepted")
 
 
-@pytest.mark.parametrize("base, chat_url", [
-    ("https://api.openai.com/v1", "https://api.openai.com/v1/chat/completions"),
-    ("https://api.anthropic.com", "https://api.anthropic.com/v1/messages"),
-    ("https://ollama.com", "https://ollama.com/api/chat"),
-    ("http://192.168.1.5:11434/v1", "http://192.168.1.5:11434/v1/chat/completions"),
-])
-def test_registered_provider_alternate_base_shapes(tmp_path, monkeypatch, base, chat_url):
+def test_registered_provider_chat_url_requires_enabled_owner_visibility(registered_db):
+    with registered_db() as db:
+        for state in ("disabled", "other_owner"):
+            for endpoint_id, base, chat_url in PROVIDER_CASES:
+                endpoint = db.get(database.ModelEndpoint, endpoint_id)
+                endpoint.is_enabled = state != "disabled"
+                endpoint.owner = "bob" if state == "other_owner" else "alice"
+                db.commit()
+                with pytest.raises(ValueError):
+                    resolver.resolve_owner_registered_endpoint(db, chat_url, "alice")
+
+
+def test_registered_provider_alternate_base_shapes(tmp_path, monkeypatch):
     monkeypatch.setattr(resolver, "resolve_url", lambda url: url)
     with disposable_database(tmp_path) as factory, factory() as db:
-        db.add(database.ModelEndpoint(id="provider", name="Provider", owner="alice",
-                                      base_url=base, is_enabled=True, api_key="server-secret"))
-        db.commit()
-        assert resolver.build_chat_url(base) == chat_url
-        for url in (base, chat_url):
-            assert resolver.resolve_owner_registered_endpoint_url(db, url, "alice") == base
+        endpoint = database.ModelEndpoint(id="provider", name="Provider", owner="alice",
+                                          base_url="", is_enabled=True, api_key="server-secret")
+        db.add(endpoint)
+        for base, chat_url in (
+            ("https://api.openai.com/v1", "https://api.openai.com/v1/chat/completions"),
+            ("https://api.anthropic.com", "https://api.anthropic.com/v1/messages"),
+            ("https://ollama.com", "https://ollama.com/api/chat"),
+            ("http://192.168.1.5:11434/v1", "http://192.168.1.5:11434/v1/chat/completions"),
+        ):
+            endpoint.base_url = base
+            db.commit()
+            assert resolver.build_chat_url(base) == chat_url
+            for url in (base, chat_url):
+                assert resolver.resolve_owner_registered_endpoint_url(db, url, "alice") == base
 
 
-@pytest.mark.parametrize("url", REJECTED + ["", None, 42])
-def test_registered_endpoint_helper_rejects_invalid_or_invisible_url(registered_db, url):
-    with registered_db() as db, pytest.raises(ValueError):
-        resolver.resolve_owner_registered_endpoint_url(db, url, "alice")
-
-
-@pytest.mark.parametrize("url, canonical", [
-    ("HTTP://LOCALHOST:1234/v1/chat/completions/", LOCAL),
-    (LAN, LAN),
-    (SHARED + "/chat", SHARED),
-])
-def test_registered_endpoint_helper_preserves_local_lan_and_shared(registered_db, url, canonical):
+def test_registered_endpoint_helper_rejects_invalid_or_invisible_url(registered_db):
     with registered_db() as db:
-        assert resolver.resolve_owner_registered_endpoint_url(db, url, "alice") == canonical
+        for url in REJECTED + ["", None, 42]:
+            with pytest.raises(ValueError):
+                resolver.resolve_owner_registered_endpoint_url(db, url, "alice")
+                pytest.fail(f"accepted {url!r}")
+
+
+def test_registered_endpoint_helper_preserves_local_lan_and_shared(registered_db):
+    with registered_db() as db:
+        for url, canonical in (
+            ("HTTP://LOCALHOST:1234/v1/chat/completions/", LOCAL),
+            (LAN, LAN),
+            (SHARED + "/chat", SHARED),
+        ):
+            assert resolver.resolve_owner_registered_endpoint_url(db, url, "alice") == canonical
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("url", REJECTED)
-async def test_task_create_rejects_unregistered_url_before_persistence(registered_db, url):
-    create = _route(task_routes.setup_task_routes(MagicMock()), "POST", "/api/tasks")
-    with pytest.raises(HTTPException) as exc:
-        await create(_request(), task_routes.TaskCreate(
-            name="Rejected", prompt="Work", trigger_type="webhook", endpoint_url=url,
-        ))
-    assert exc.value.status_code == 400
+async def test_task_create_and_update_reject_unregistered_url_before_persistence(registered_db):
+    router = task_routes.setup_task_routes(MagicMock())
+    create = _route(router, "POST", "/api/tasks")
+    update = _route(router, "PUT", "/api/tasks/{task_id}")
+    for url in ROUTE_REJECTED:
+        with pytest.raises(HTTPException) as exc:
+            await create(_request(), task_routes.TaskCreate(
+                name="Rejected", prompt="Work", trigger_type="webhook", endpoint_url=url,
+            ))
+        assert exc.value.status_code == 400
+        with pytest.raises(HTTPException) as exc:
+            update(_request(), "task", task_routes.TaskUpdate(endpoint_url=url, name="Rejected"))
+        assert exc.value.status_code == 400
     with registered_db() as db:
         assert db.query(database.ScheduledTask).count() == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("url", REJECTED)
-async def test_task_update_rejects_unregistered_url_before_persistence(registered_db, url):
-    update = _route(task_routes.setup_task_routes(MagicMock()), "PUT", "/api/tasks/{task_id}")
-    with pytest.raises(HTTPException) as exc:
-        await update(_request(), "task", task_routes.TaskUpdate(endpoint_url=url, name="Rejected"))
-    assert exc.value.status_code == 400
-    with registered_db() as db:
         task = db.get(database.ScheduledTask, "task")
         assert task.endpoint_url == LOCAL
         assert task.name == "Existing task"
@@ -233,7 +237,7 @@ async def test_task_create_and_update_store_registered_canonical_url(registered_
         endpoint_url="HTTP://LOCALHOST:1234/v1/chat/completions/",
     ))
     assert result["endpoint_url"] == LOCAL
-    assert (await update(_request(), "task", task_routes.TaskUpdate(
+    assert (update(_request(), "task", task_routes.TaskUpdate(
         endpoint_url=LOCAL + "/chat/completions",
     )))["endpoint_url"] == LOCAL
     with registered_db() as db:
@@ -245,22 +249,22 @@ async def test_task_create_and_update_store_registered_canonical_url(registered_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("endpoint_id, base, chat_url", PROVIDER_CASES)
-async def test_task_create_and_edit_accept_catalog_chat_urls(registered_db, endpoint_id, base, chat_url):
+async def test_task_create_and_edit_accept_catalog_chat_urls(registered_db):
     catalog = _route(model_routes.setup_model_routes(MagicMock()), "GET", "/api/models")(_request())
-    url = next(item["url"] for item in catalog["items"] if item["endpoint_id"] == endpoint_id)
-    assert url == chat_url
     router = task_routes.setup_task_routes(MagicMock())
     create = _route(router, "POST", "/api/tasks")
     update = _route(router, "PUT", "/api/tasks/{task_id}")
-    result = await create(_request(), task_routes.TaskCreate(
-        name="Accepted", prompt="Work", trigger_type="webhook", endpoint_url=url,
-    ))
-    assert result["endpoint_url"] == base
-    assert (await update(_request(), "task", task_routes.TaskUpdate(endpoint_url=url)))["endpoint_url"] == base
-    with registered_db() as db:
-        assert db.get(database.ScheduledTask, result["id"]).endpoint_url == base
-        assert db.get(database.ScheduledTask, "task").endpoint_url == base
+    for endpoint_id, base, chat_url in PROVIDER_CASES:
+        url = next(item["url"] for item in catalog["items"] if item["endpoint_id"] == endpoint_id)
+        assert url == chat_url
+        result = await create(_request(), task_routes.TaskCreate(
+            name="Accepted", prompt="Work", trigger_type="webhook", endpoint_url=url,
+        ))
+        assert result["endpoint_url"] == base
+        assert (update(_request(), "task", task_routes.TaskUpdate(endpoint_url=url)))["endpoint_url"] == base
+        with registered_db() as db:
+            assert db.get(database.ScheduledTask, result["id"]).endpoint_url == base
+            assert db.get(database.ScheduledTask, "task").endpoint_url == base
 
 
 @pytest.mark.asyncio
@@ -272,24 +276,24 @@ async def test_task_empty_override_still_restores_default(registered_db):
         name="Default", prompt="Work", trigger_type="webhook", endpoint_url="",
     ))
     assert result["endpoint_url"] is None
-    assert (await update(_request(), "task", task_routes.TaskUpdate(endpoint_url="")))["endpoint_url"] is None
+    assert (update(_request(), "task", task_routes.TaskUpdate(endpoint_url="")))["endpoint_url"] is None
 
 
 @pytest.mark.asyncio
 async def test_task_update_keeps_task_owner_verification(registered_db):
     update = _route(task_routes.setup_task_routes(MagicMock()), "PUT", "/api/tasks/{task_id}")
     with pytest.raises(HTTPException) as exc:
-        await update(_request(owner="bob"), "task", task_routes.TaskUpdate(endpoint_url=LOCAL))
+        update(_request(owner="bob"), "task", task_routes.TaskUpdate(endpoint_url=LOCAL))
     assert exc.value.status_code == 403
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("url", REJECTED)
-async def test_assistant_settings_reject_unregistered_url(registered_db, url):
+async def test_assistant_settings_reject_unregistered_url(registered_db):
     update = _route(assistant_routes.setup_assistant_routes(MagicMock()), "PATCH", "/api/assistant/settings")
-    with pytest.raises(HTTPException) as exc:
-        await update(assistant_routes.AssistantSettingsUpdate(endpoint_url=url, name="Rejected"), _request())
-    assert exc.value.status_code == 400
+    for url in ROUTE_REJECTED:
+        with pytest.raises(HTTPException) as exc:
+            await update(assistant_routes.AssistantSettingsUpdate(endpoint_url=url, name="Rejected"), _request())
+        assert exc.value.status_code == 400
     with registered_db() as db:
         crew = db.get(database.CrewMember, "assistant")
         assert crew.endpoint_url == LOCAL
@@ -305,15 +309,15 @@ async def test_assistant_settings_accept_registered_local_endpoint(registered_db
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("endpoint_id, base, chat_url", PROVIDER_CASES)
-async def test_assistant_switch_accepts_catalog_chat_urls(registered_db, endpoint_id, base, chat_url):
+async def test_assistant_switch_accepts_catalog_chat_urls(registered_db):
     catalog = _route(model_routes.setup_model_routes(MagicMock()), "GET", "/api/models")(_request())
-    url = next(item["url"] for item in catalog["items"] if item["endpoint_id"] == endpoint_id)
-    assert url == chat_url
     update = _route(assistant_routes.setup_assistant_routes(MagicMock()), "PATCH", "/api/assistant/settings")
-    await update(assistant_routes.AssistantSettingsUpdate(endpoint_url=url), _request())
-    with registered_db() as db:
-        assert db.get(database.CrewMember, "assistant").endpoint_url == base
+    for endpoint_id, base, chat_url in PROVIDER_CASES:
+        url = next(item["url"] for item in catalog["items"] if item["endpoint_id"] == endpoint_id)
+        assert url == chat_url
+        await update(assistant_routes.AssistantSettingsUpdate(endpoint_url=url), _request())
+        with registered_db() as db:
+            assert db.get(database.CrewMember, "assistant").endpoint_url == base
 
 
 @pytest.fixture
@@ -326,52 +330,55 @@ def skill_test_route(registered_db, monkeypatch):
     probe = MagicMock(return_value=["model"])
     monkeypatch.setattr("src.llm_core.list_model_ids", probe)
     run = AsyncMock()
-    monkeypatch.setattr(skills_routes, "_run_skill_test_job", run)
+    monkeypatch.setattr(agent_runner, "run_test_job", run)
     test = _route(skills_routes.setup_skills_routes(manager), "POST", "/api/skills/{skill_id}/test")
     try:
         yield test, probe, run
     finally:
-        skills_routes._skill_test_jobs.pop(("alice", "skill"), None)
+        agent_runner._skill_test_jobs.pop(("alice", "skill"), None)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("url", REJECTED + [""])
-async def test_skill_test_rejects_raw_fallback_before_network_or_execution(skill_test_route, url):
+async def test_skill_test_rejects_raw_fallback_before_network_or_execution(skill_test_route):
     test, probe, run = skill_test_route
-    with pytest.raises(HTTPException) as exc:
-        await test(_request({"endpoint_url": url, "model": "model", "headers": {"Authorization": "attacker"}}), "skill")
-    assert exc.value.status_code == 400
+    for url in ROUTE_REJECTED + [""]:
+        with pytest.raises(HTTPException) as exc:
+            await test(_request({"endpoint_url": url, "model": "model", "headers": {"Authorization": "attacker"}}), "skill")
+        assert exc.value.status_code == 400
     probe.assert_not_called()
     run.assert_not_called()
-    assert ("alice", "skill") not in skills_routes._skill_test_jobs
+    assert ("alice", "skill") not in agent_runner._skill_test_jobs
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("server_key", ["server-secret", None])
-@pytest.mark.parametrize("endpoint_id, base, chat_url", PROVIDER_CASES)
-async def test_skill_test_uses_registered_runtime_credentials(skill_test_route, registered_db, server_key, endpoint_id, base, chat_url):
+async def test_skill_test_uses_registered_runtime_credentials(skill_test_route, registered_db):
     import asyncio
 
-    with registered_db() as db:
-        db.get(database.ModelEndpoint, endpoint_id).api_key = server_key
-        db.commit()
     test, probe, run = skill_test_route
     catalog = _route(model_routes.setup_model_routes(MagicMock()), "GET", "/api/models")(_request())
-    url = next(item["url"] for item in catalog["items"] if item["endpoint_id"] == endpoint_id)
-    assert url == chat_url
-    await test(_request({
-        "endpoint_url": url, "model": "model", "api_key": "attacker",
-        "headers": {"Authorization": "Bearer attacker", "x-api-key": "attacker", "Host": "169.254.169.254"},
-    }), "skill")
-    await asyncio.sleep(0)
-    headers = {"Authorization": "Bearer server-secret"} if server_key else {}
-    if endpoint_id == "anthropic":
-        headers = {"anthropic-version": "2023-06-01"}
-        if server_key:
-            headers["x-api-key"] = server_key
-    probe.assert_called_once_with(chat_url, headers=headers)
-    assert run.await_args.args[4:8] == (chat_url, "model", headers, "alice")
-    assert skills_routes._skill_test_jobs[("alice", "skill")]["_run"]["headers"] == headers
+    for server_key in ("server-secret", None):
+        for endpoint_id, base, chat_url in PROVIDER_CASES:
+            with registered_db() as db:
+                db.get(database.ModelEndpoint, endpoint_id).api_key = server_key
+                db.commit()
+            probe.reset_mock()
+            run.reset_mock()
+            agent_runner._skill_test_jobs.pop(("alice", "skill"), None)
+            url = next(item["url"] for item in catalog["items"] if item["endpoint_id"] == endpoint_id)
+            assert url == chat_url
+            await test(_request({
+                "endpoint_url": url, "model": "model", "api_key": "attacker",
+                "headers": {"Authorization": "Bearer attacker", "x-api-key": "attacker", "Host": "169.254.169.254"},
+            }), "skill")
+            await asyncio.sleep(0)
+            headers = {"Authorization": "Bearer server-secret"} if server_key else {}
+            if endpoint_id == "anthropic":
+                headers = {"anthropic-version": "2023-06-01"}
+                if server_key:
+                    headers["x-api-key"] = server_key
+            probe.assert_called_once_with(chat_url, headers=headers)
+            assert run.await_args.args[4:8] == (chat_url, "model", headers, "alice")
+            assert agent_runner._skill_test_jobs[("alice", "skill")]["_run"]["headers"] == headers
 
 
 @pytest.mark.asyncio

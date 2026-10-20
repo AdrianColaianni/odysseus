@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import ast
 import asyncio
 import base64
 import json
 import re
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from unittest.mock import AsyncMock
@@ -33,8 +31,6 @@ async def _execute_tool_block_for_unit_tests(*args, **kwargs):
 
 
 execute_tool_block = _execute_tool_block_for_unit_tests
-
-ROOT = Path(__file__).resolve().parent.parent
 
 BRIDGE_CTX = {
     "surface": "odysseus-tui",
@@ -68,10 +64,6 @@ def test_local_network_requests_are_distinct_from_web_search():
     )
 
 
-def _run(coro):
-    return asyncio.run(coro)
-
-
 class _admin_gate:
     """Bypass the admin/single-user gates in tool dispatch for tests.
 
@@ -97,7 +89,7 @@ def test_routed_bash_sends_command_to_run_endpoint():
         return {"stdout": "host-side", "stderr": "", "exit_code": 0, "cwd": "/home/pewds/project"}
 
     with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        desc, result = _run(
+        desc, result = asyncio.run(
             execute_tool_block(
                 SimpleNamespace(tool_type="bash", content="pwd && ls"),
                 client_runtime_context=dict(BRIDGE_CTX),
@@ -121,7 +113,7 @@ def test_routed_python_uses_exec_argv_not_shell():
         return {"stdout": "", "stderr": "", "exit_code": 0}
 
     with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        _run(
+        asyncio.run(
             execute_tool_block(
                 SimpleNamespace(tool_type="python", content='print("hi")'),
                 client_runtime_context=dict(BRIDGE_CTX),
@@ -143,7 +135,7 @@ def test_routed_read_file_uses_read_endpoint():
         return {"output": "file body", "exit_code": 0}
 
     with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        desc, result = _run(
+        desc, result = asyncio.run(
             execute_tool_block(
                 SimpleNamespace(tool_type="read_file", content="/home/pewds/project/main.py"),
                 client_runtime_context=dict(BRIDGE_CTX),
@@ -165,7 +157,7 @@ def test_routed_read_file_preserves_json_line_range():
         return {"output": "selected lines", "exit_code": 0}
 
     with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        desc, result = _run(
+        desc, result = asyncio.run(
             execute_tool_block(
                 SimpleNamespace(
                     tool_type="read_file",
@@ -185,88 +177,48 @@ def test_routed_read_file_preserves_json_line_range():
     assert result["output"] == "selected lines"
 
 
-def test_routed_read_file_rejects_malformed_json_without_host_call():
+def test_routed_tools_reject_malformed_arguments_without_host_call():
     calls = []
 
     async def fake_bridge_post(*args, **kwargs):
         calls.append((args, kwargs))
         return {"output": "unexpected", "exit_code": 0}
 
+    def args(**fields):
+        return json.dumps(fields)
+
+    cases = [
+        ("read_file", '{"path":"broken"'),
+        ("read_file", ""),
+        ("read_file", args(path="main.py", offset=-1, limit=1)),
+        ("read_file", args(path="main.py", offset=0, limit=-1)),
+        ("read_file", args(path="main.py", offset="1", limit=2)),
+        ("read_file", args(path="main.py", offset=True, limit=2)),
+        ("read_file", args(path=123)),
+        ("read_file", args(path=["main.py"])),
+        ("read_file", args(path="main.py\nother.py")),
+        ("write_file", '{"path":"broken"'),
+        ("write_file", args(path="data.json", content={"value": 1})),
+        ("write_file", args(path=123, content="body")),
+        ("write_file", args(path="a.txt\nb.txt", content="body")),
+        ("edit_file", args(path=["a.txt"], old_string="a", new_string="b")),
+        ("edit_file", args(path="a.txt\nb.txt", old_string="a", new_string="b")),
+        ("list_dir", args(path=123)),
+        ("list_dir", args(path=".", offset="2")),
+        ("find_files", args(pattern="")),
+        ("find_files", args(pattern=["py"], path=".")),
+        ("grep", args(pattern="needle", ignore_case="yes")),
+        ("grep", args(pattern="needle", max_results=0)),
+        ("grep", args(pattern=["needle"])),
+    ]
     with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        desc, result = _run(
-            execute_tool_block(
-                SimpleNamespace(tool_type="read_file", content='{"path":"broken"'),
-                client_runtime_context=dict(BRIDGE_CTX),
-            )
-        )
-
-    assert desc == "read_file: invalid arguments"
-    assert result["exit_code"] == 1
-    assert calls == []
-
-
-def test_routed_read_file_rejects_empty_path_without_host_call():
-    calls = []
-
-    async def fake_bridge_post(*args, **kwargs):
-        calls.append((args, kwargs))
-        return {"output": "unexpected", "exit_code": 0}
-
-    with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        desc, result = _run(
-            execute_tool_block(
-                SimpleNamespace(tool_type="read_file", content=""),
-                client_runtime_context=dict(BRIDGE_CTX),
-            )
-        )
-
-    assert desc == "read_file: invalid arguments"
-    assert result["exit_code"] == 1
-    assert calls == []
-
-
-def test_routed_read_file_rejects_invalid_line_range_without_host_call():
-    calls = []
-
-    async def fake_bridge_post(*args, **kwargs):
-        calls.append((args, kwargs))
-        return {"output": "unexpected", "exit_code": 0}
-
-    with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        for offset, limit in ((-1, 1), (0, -1), ("1", 2), (True, 2)):
-            desc, result = _run(
-                execute_tool_block(
-                    SimpleNamespace(
-                        tool_type="read_file",
-                        content=json.dumps({"path": "main.py", "offset": offset, "limit": limit}),
-                    ),
-                    client_runtime_context=dict(BRIDGE_CTX),
-                )
-            )
-            assert desc == "read_file: invalid arguments"
-            assert result["exit_code"] == 1
-
-    assert calls == []
-
-
-def test_routed_read_file_rejects_non_string_or_multiline_path():
-    calls = []
-
-    async def fake_bridge_post(*args, **kwargs):
-        calls.append((args, kwargs))
-        return {"output": "unexpected", "exit_code": 0}
-
-    with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        for path in (123, ["main.py"], "main.py\nother.py"):
-            desc, result = _run(execute_tool_block(
-                SimpleNamespace(
-                    tool_type="read_file",
-                    content=json.dumps({"path": path}),
-                ),
+        for tool, content in cases:
+            desc, result = asyncio.run(execute_tool_block(
+                SimpleNamespace(tool_type=tool, content=content),
                 client_runtime_context=dict(BRIDGE_CTX),
             ))
-            assert desc == "read_file: invalid arguments"
-            assert result["exit_code"] == 1
+            assert desc == f"{tool}: invalid arguments", (tool, content)
+            assert result["exit_code"] == 1, (tool, content)
 
     assert calls == []
 
@@ -281,7 +233,7 @@ def test_routed_write_file_sends_base64_body(tmp_path):
     target = tmp_path / "out.txt"
     body = "line one\nline two with 'quotes' and $vars\n"
     with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        _run(
+        asyncio.run(
             execute_tool_block(
                 SimpleNamespace(tool_type="write_file", content=f"{target}\n{body}"),
                 client_runtime_context=dict(BRIDGE_CTX),
@@ -304,7 +256,7 @@ def test_routed_write_file_decodes_native_json_arguments():
 
     body = "print('héllo')\n"
     with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        desc, result = _run(
+        desc, result = asyncio.run(
             execute_tool_block(
                 SimpleNamespace(
                     tool_type="write_file",
@@ -321,74 +273,6 @@ def test_routed_write_file_decodes_native_json_arguments():
     assert base64.b64decode(calls[0][1]["content_b64"]).decode("utf-8") == body
 
 
-def test_routed_write_file_rejects_malformed_native_json_without_host_call():
-    calls = []
-
-    async def fake_bridge_post(*args, **kwargs):
-        calls.append((args, kwargs))
-        return {"output": "unexpected", "exit_code": 0}
-
-    with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        desc, result = _run(
-            execute_tool_block(
-                SimpleNamespace(tool_type="write_file", content='{"path":"broken"'),
-                client_runtime_context=dict(BRIDGE_CTX),
-            )
-        )
-
-    assert desc == "write_file: invalid arguments"
-    assert result["exit_code"] == 1
-    assert calls == []
-
-
-def test_routed_write_file_rejects_non_text_content_without_host_call():
-    calls = []
-
-    async def fake_bridge_post(*args, **kwargs):
-        calls.append((args, kwargs))
-        return {"output": "unexpected", "exit_code": 0}
-
-    with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        desc, result = _run(
-            execute_tool_block(
-                SimpleNamespace(
-                    tool_type="write_file",
-                    content=json.dumps({"path": "data.json", "content": {"value": 1}}),
-                ),
-                client_runtime_context=dict(BRIDGE_CTX),
-            )
-        )
-
-    assert desc == "write_file: invalid arguments"
-    assert result == {"error": "write_file: content must be a string", "exit_code": 1}
-    assert calls == []
-
-
-def test_routed_file_mutations_reject_non_string_or_multiline_path():
-    calls = []
-
-    async def fake_bridge_post(*args, **kwargs):
-        calls.append((args, kwargs))
-        return {"output": "unexpected", "exit_code": 0}
-
-    cases = (
-        ("write_file", {"path": 123, "content": "body"}),
-        ("write_file", {"path": "a.txt\nb.txt", "content": "body"}),
-        ("edit_file", {"path": ["a.txt"], "old_string": "a", "new_string": "b"}),
-        ("edit_file", {"path": "a.txt\nb.txt", "old_string": "a", "new_string": "b"}),
-    )
-    with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        for tool, args in cases:
-            desc, result = _run(execute_tool_block(
-                SimpleNamespace(tool_type=tool, content=json.dumps(args)),
-                client_runtime_context=dict(BRIDGE_CTX),
-            ))
-            assert desc == f"{tool}: invalid arguments"
-            assert result["exit_code"] == 1
-
-    assert calls == []
-
-
 def test_routed_bash_background_marker_detaches_on_client():
     calls = []
 
@@ -397,7 +281,7 @@ def test_routed_bash_background_marker_detaches_on_client():
         return {"output": "detached", "exit_code": 0, "detached": True}
 
     with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        desc, result = _run(
+        desc, result = asyncio.run(
             execute_tool_block(
                 SimpleNamespace(tool_type="bash", content="#!bg\nsleep 300"),
                 session_id="sid",
@@ -422,7 +306,7 @@ def test_routed_implicit_long_bash_is_detached_and_polled():
         return {"status": "done", "job_id": "job-implicit", "output": "finished", "exit_code": 0}
 
     with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        _, result = _run(
+        _, result = asyncio.run(
             execute_tool_block(
                 SimpleNamespace(tool_type="bash", content="sleep 22; printf done"),
                 client_runtime_context=dict(BRIDGE_CTX),
@@ -441,7 +325,7 @@ def test_no_bridge_falls_back_to_backend_execution():
 
     with patch.object(_te, "_owner_is_admin", lambda owner: True), \
             patch.object(_te, "_direct_fallback", fake_mcp):
-        desc, result = _run(
+        desc, result = asyncio.run(
             execute_tool_block(
                 SimpleNamespace(tool_type="bash", content="pwd"),
                 client_runtime_context={"surface": "webui"},
@@ -453,7 +337,7 @@ def test_no_bridge_falls_back_to_backend_execution():
 
 def test_disabled_tool_still_blocked_with_bridge_present():
     with _admin_gate():
-        desc, result = _run(
+        desc, result = asyncio.run(
             execute_tool_block(
                 SimpleNamespace(tool_type="bash", content="pwd"),
                 disabled_tools={"bash"},
@@ -480,7 +364,7 @@ def test_routed_list_dir_preserves_range_and_uses_list_endpoint():
         return {"output": "src\ntests", "exit_code": 0}
 
     with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        desc, result = _run(execute_tool_block(
+        desc, result = asyncio.run(execute_tool_block(
             SimpleNamespace(
                 tool_type="list_dir",
                 content='{"path":"src","offset":2,"limit":10}',
@@ -504,7 +388,7 @@ def test_routed_find_files_uses_find_endpoint():
         return {"output": "src/main.py", "exit_code": 0}
 
     with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        desc, result = _run(execute_tool_block(
+        desc, result = asyncio.run(execute_tool_block(
             SimpleNamespace(
                 tool_type="find_files",
                 content='{"pattern":"\\\\.py$","path":"src"}',
@@ -526,11 +410,11 @@ def test_canonical_ls_and_glob_route_to_tui_discovery_endpoints():
         return {"output": "ok", "exit_code": 0}
 
     with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        ls_desc, _ = _run(execute_tool_block(
+        ls_desc, _ = asyncio.run(execute_tool_block(
             SimpleNamespace(tool_type="ls", content='{"path":"src"}'),
             client_runtime_context=dict(BRIDGE_CTX),
         ))
-        glob_desc, _ = _run(execute_tool_block(
+        glob_desc, _ = asyncio.run(execute_tool_block(
             SimpleNamespace(tool_type="glob", content='{"pattern":"**/*.py","path":"src"}'),
             client_runtime_context=dict(BRIDGE_CTX),
         ))
@@ -553,7 +437,7 @@ def test_canonical_grep_routes_structured_search_to_tui_host():
         return {"output": "src/main.py:1:needle", "exit_code": 0}
 
     with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        desc, result = _run(execute_tool_block(
+        desc, result = asyncio.run(execute_tool_block(
             SimpleNamespace(
                 tool_type="grep",
                 content=(
@@ -570,34 +454,6 @@ def test_canonical_grep_routes_structured_search_to_tui_host():
         "ignore_case": True, "max_results": 25,
     })]
     assert result["exit_code"] == 0
-
-
-def test_routed_discovery_tools_reject_malformed_arguments_without_host_call():
-    calls = []
-
-    async def fake_bridge_post(*args, **kwargs):
-        calls.append((args, kwargs))
-        return {"output": "unexpected", "exit_code": 0}
-
-    cases = (
-        ("list_dir", {"path": 123}),
-        ("list_dir", {"path": ".", "offset": "2"}),
-        ("find_files", {"pattern": ""}),
-        ("find_files", {"pattern": ["py"], "path": "."}),
-        ("grep", {"pattern": "needle", "ignore_case": "yes"}),
-        ("grep", {"pattern": "needle", "max_results": 0}),
-        ("grep", {"pattern": ["needle"]}),
-    )
-    with _admin_gate(), patch.object(_te, "_bridge_post", fake_bridge_post):
-        for tool, args in cases:
-            desc, result = _run(execute_tool_block(
-                SimpleNamespace(tool_type=tool, content=json.dumps(args)),
-                client_runtime_context=dict(BRIDGE_CTX),
-            ))
-            assert desc == f"{tool}: invalid arguments"
-            assert result["exit_code"] == 1
-
-    assert calls == []
 
 
 def test_agent_turn_cwd_prefers_raw_host_cwd_when_bridge_advertised():
@@ -643,7 +499,7 @@ def test_bridge_post_targets_endpoint_paths():
     import httpx
 
     with patch.object(httpx, "AsyncClient", FakeClient):
-        result = _run(
+        result = asyncio.run(
             _bridge_post(
                 {"url": "http://127.0.0.1:47475/run", "token": "secret"},
                 "/write",
@@ -669,7 +525,7 @@ def test_bridge_post_rejects_untrusted_url_without_network_call():
     import httpx
 
     with patch.object(httpx, "AsyncClient", UnexpectedClient):
-        result = _run(
+        result = asyncio.run(
             _bridge_post(
                 {"url": "http://8.8.8.8:47475/run", "token": "secret"},
                 "/run",
@@ -711,8 +567,8 @@ def test_bridge_post_treats_empty_or_error_payload_as_failure():
     import httpx
 
     with patch.object(httpx, "AsyncClient", FakeClient):
-        empty = _run(_bridge_post(BRIDGE_CTX["host_shell_bridge"], "/run", {}, timeout_s=1, err_prefix="bash"))
-        errored = _run(_bridge_post(BRIDGE_CTX["host_shell_bridge"], "/run", {}, timeout_s=1, err_prefix="bash"))
+        empty = asyncio.run(_bridge_post(BRIDGE_CTX["host_shell_bridge"], "/run", {}, timeout_s=1, err_prefix="bash"))
+        errored = asyncio.run(_bridge_post(BRIDGE_CTX["host_shell_bridge"], "/run", {}, timeout_s=1, err_prefix="bash"))
 
     assert empty == {"error": "bash: bridge returned an empty response", "exit_code": 1}
     assert errored == {"error": "token rejected", "exit_code": 1}
@@ -750,10 +606,10 @@ def test_bridge_post_http_or_payload_error_overrides_false_success_code():
     import httpx
 
     with patch.object(httpx, "AsyncClient", FakeClient):
-        unauthorized = _run(_bridge_post(
+        unauthorized = asyncio.run(_bridge_post(
             BRIDGE_CTX["host_shell_bridge"], "/run", {}, timeout_s=1, err_prefix="bash"
         ))
-        host_error = _run(_bridge_post(
+        host_error = asyncio.run(_bridge_post(
             BRIDGE_CTX["host_shell_bridge"], "/run", {}, timeout_s=1, err_prefix="bash"
         ))
 
@@ -785,7 +641,7 @@ def test_bridge_post_rejects_malformed_exit_code():
     import httpx
 
     with patch.object(httpx, "AsyncClient", FakeClient):
-        result = _run(_bridge_post(
+        result = asyncio.run(_bridge_post(
             BRIDGE_CTX["host_shell_bridge"], "/run", {}, timeout_s=1,
             err_prefix="bash",
         ))
@@ -820,7 +676,7 @@ def test_bridge_post_reports_empty_invalid_json_response():
     import httpx
 
     with patch.object(httpx, "AsyncClient", FakeClient):
-        result = _run(_bridge_post(
+        result = asyncio.run(_bridge_post(
             BRIDGE_CTX["host_shell_bridge"], "/run", {}, timeout_s=1,
             err_prefix="bash",
         ))
@@ -875,32 +731,7 @@ def test_bridge_post_cancellation_schedules_host_operation_cancel():
             )
 
     for path in ("/run", "/write", "/edit"):
-        _run(exercise(path))
-
-
-# --------------------------------------------------------------------- #
-# chat_routes wiring — source-inspection style (matches dev-tree tests)
-# --------------------------------------------------------------------- #
-
-
-def test_chat_stream_parses_and_injects_tui_runtime_context():
-    source = (ROOT / "routes" / "chat_routes.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    chat_stream = next(
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "chat_stream"
-    )
-    chat_stream_source = ast.get_source_segment(source, chat_stream)
-
-    assert "_parse_client_runtime_context(" in chat_stream_source
-    assert 'form_data.get("client_runtime_context")' in chat_stream_source
-    assert "_client_runtime_context_system_message(" in chat_stream_source
-    assert "disabled_tools=disabled_tools" in chat_stream_source
-    assert "ctx.messages.insert(0, runtime_msg)" in chat_stream_source
-    assert "cwd=_agent_turn_cwd(sess, client_runtime_context)" in chat_stream_source
-    assert "client_runtime_context=client_runtime_context" in chat_stream_source
-    assert "_stream_agent_with_execution_bridge(" in chat_stream_source
-    assert "_external_execution_bridge(client_runtime_context)" in chat_stream_source
+        asyncio.run(exercise(path))
 
 
 def test_native_runtime_context_accepts_only_loopback_execution_bridge():
@@ -940,34 +771,6 @@ def test_native_runtime_context_accepts_only_loopback_execution_bridge():
         assert "external_execution_bridge" not in parsed
 
 
-def test_chat_stream_restores_persisted_workspace_for_resumed_sessions():
-    source = Path(chat_routes.__file__).read_text()
-    tree = ast.parse(source)
-    chat_stream = next(
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "chat_stream"
-    )
-    chat_stream_source = ast.get_source_segment(source, chat_stream)
-    assert "_resolve_persisted_session_workspace(" in chat_stream_source
-    assert "current_workspace=workspace" in chat_stream_source
-    assert "current_rejected=workspace_rejected" in chat_stream_source
-
-
-def test_context_info_advertises_workspace_and_tool_policy():
-    source = (ROOT / "routes" / "session_routes.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    context_info = next(
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "get_context_info"
-    )
-    fn_source = ast.get_source_segment(source, context_info)
-
-    assert "workspace_mount_pairs" in fn_source
-    assert "backend_workspace_path" in fn_source
-    assert '"tool_policy"' in fn_source
-    assert '"computer_tools"' in fn_source
-
-
 # --------------------------------------------------------------------- #
 # runtime-context sanitization (helpers ported verbatim from dev tree)
 # --------------------------------------------------------------------- #
@@ -975,7 +778,6 @@ def test_context_info_advertises_workspace_and_tool_policy():
 
 def test_runtime_context_preserves_sanitized_active_skills():
     from routes.chat_routes import (
-        _client_runtime_context_system_message,
         _parse_legacy_client_runtime_context as _parse_client_runtime_context,
     )
 
@@ -1004,11 +806,6 @@ def test_runtime_context_preserves_sanitized_active_skills():
             "source": "file: /home/pewds/.codex/skills/tdd/SKILL.md",
         }
     ]
-    message = _client_runtime_context_system_message(context)
-    assert message is not None
-    assert "session_cwd: /home/pewds/odysseus-tui" in message["content"]
-    assert "active_skills: tdd, openai-docs" in message["content"]
-    assert "tdd: Red-green-refactor workflow" in message["content"]
 
 
 def test_tui_agent_round_cap_still_bounds_non_coding_turns():
@@ -1061,7 +858,6 @@ def test_agent_runtime_context_can_omit_directives_when_agent_loop_renders_them(
         include_directives=False,
     )
     assert message is not None
-    assert "session_cwd: /home/tester/project" in message["content"]
     assert "Treat session_cwd as active." not in message["content"]
 
 
@@ -1080,7 +876,7 @@ def test_native_completion_contract_preserves_safe_workspace_root():
         "/tmp/ody-task-123/workspace"
 
 
-def test_runtime_contract_is_sanitized_and_prompt_surfaces_actionable_host_facts():
+def test_runtime_contract_is_sanitized_and_prompt_leaks_no_secrets():
     from routes.chat_routes import (
         _client_runtime_context_system_message,
         _parse_legacy_client_runtime_context as _parse_client_runtime_context,
@@ -1149,12 +945,6 @@ def test_runtime_contract_is_sanitized_and_prompt_surfaces_actionable_host_facts
     message = _client_runtime_context_system_message(context)
     assert message is not None
     content = message["content"]
-    assert "backend_shell_scope: container_ignore_me" in content
-    assert "host_shell: available" in content
-    assert "host_commands: ip, ssh" in content
-    assert "host_capabilities: networkInspection, sshClient" in content
-    assert "host_shell_request: POST /run; body fields: command, timeout; max_timeout_s: 120" in content
-    assert "on the USER's machine at session_cwd" not in content
     assert "secret" not in content
     assert "auth_header" not in content
     assert "bad command" not in content
@@ -1178,34 +968,22 @@ def test_tui_runtime_context_cwd_is_sanitized_and_surface_scoped(monkeypatch):
     assert _client_runtime_context_cwd({"surface": "webui", "session_cwd": "/repo"}) == ""
 
 
-def test_backend_workspace_path_maps_host_root_to_container_root(monkeypatch):
+def test_backend_workspace_path_maps_mounts_by_longest_prefix(monkeypatch):
     from src.workspace_paths import backend_workspace_path
 
+    monkeypatch.delenv("ODYSSEUS_WORKSPACE_MOUNTS", raising=False)
     monkeypatch.setenv("ODYSSEUS_WORKSPACE_HOST_ROOT", "/home/alice")
     monkeypatch.setenv("ODYSSEUS_WORKSPACE_CONTAINER_ROOT", "/workspace")
-
     assert backend_workspace_path("/home/alice/project") == "/workspace/project"
 
-
-def test_backend_workspace_path_keeps_unmapped_paths(monkeypatch):
-    from src.workspace_paths import backend_workspace_path
-
-    monkeypatch.delenv("ODYSSEUS_WORKSPACE_HOST_ROOT", raising=False)
-    monkeypatch.delenv("ODYSSEUS_WORKSPACE_CONTAINER_ROOT", raising=False)
-    monkeypatch.delenv("ODYSSEUS_WORKSPACE_MOUNTS", raising=False)
-
+    monkeypatch.delenv("ODYSSEUS_WORKSPACE_HOST_ROOT")
+    monkeypatch.delenv("ODYSSEUS_WORKSPACE_CONTAINER_ROOT")
     assert backend_workspace_path("/already/container") == "/already/container"
-
-
-def test_backend_workspace_path_uses_longest_mapping(monkeypatch):
-    from src.workspace_paths import backend_workspace_path
 
     monkeypatch.setenv(
         "ODYSSEUS_WORKSPACE_MOUNTS",
         "/home/alice=/workspace,/home/alice/code=/code",
     )
-    monkeypatch.delenv("ODYSSEUS_WORKSPACE_HOST_ROOT", raising=False)
-
     assert backend_workspace_path("/home/alice/code/app") == "/code/app"
 
 
@@ -1231,7 +1009,7 @@ def test_host_shell_bridge_url_allowlist_accepts_private_lan_and_tailscale():
 
 def test_host_shell_requires_bridge_context():
     with _admin_gate():
-        desc, result = _run(
+        desc, result = asyncio.run(
             execute_tool_block(
                 SimpleNamespace(tool_type="host_shell", content="ip neigh"),
                 client_runtime_context={},

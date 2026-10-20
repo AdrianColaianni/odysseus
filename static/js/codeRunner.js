@@ -334,7 +334,6 @@ export async function runServer(code, panel, lang) {
   try {
     var res = await fetch('/api/shell/exec', {
       method: 'POST',
-      credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command: command }),
     });

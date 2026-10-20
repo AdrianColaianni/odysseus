@@ -30,7 +30,7 @@ def test_missing_builtin_presets_are_filled_in():
         "brainstorm": {"name": "Brainstorm", "temperature": 0.9,
                        "max_tokens": 4096, "system_prompt": "ideate"},
     })
-    pm = PresetManager(data_dir)
+    pm = PresetManager(os.path.join(data_dir, "presets.json"))
     for key in PresetManager.DEFAULT_PRESETS:
         assert key in pm.presets, f"built-in preset {key!r} should be present"
     # The fill is persisted so the next load is already complete.
@@ -60,7 +60,7 @@ def test_fill_does_not_clobber_user_edits():
         "user_templates": [{"id": "t1", "name": "Tmpl"}],
         # missing: reason
     })
-    pm = PresetManager(data_dir)
+    pm = PresetManager(os.path.join(data_dir, "presets.json"))
     # reason was filled...
     assert "reason" in pm.presets
     # ...but the user's edited custom + templates are untouched.
@@ -73,6 +73,6 @@ def test_complete_file_is_not_rewritten_needlessly():
     full = {k: dict(v) for k, v in PresetManager.DEFAULT_PRESETS.items()}
     full["custom"]["enabled"] = True  # a user edit that must survive
     data_dir = _write_presets(full)
-    pm = PresetManager(data_dir)
+    pm = PresetManager(os.path.join(data_dir, "presets.json"))
     assert pm.presets["custom"]["enabled"] is True
     assert set(PresetManager.DEFAULT_PRESETS) <= set(pm.presets)

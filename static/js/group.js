@@ -9,6 +9,7 @@ import { providerLogo } from './providers.js';
 import { PROMPT_TEMPLATES, getUserTemplates } from './presets.js?v=20260908personaname1';
 import { sortModelObjects } from './modelSort.js';
 import Storage from './storage.js';
+import { readSseData } from './util/sse.js';
 
 let API_BASE = '';
 let _active = false;
@@ -20,6 +21,29 @@ let _mode = 'round-robin';    // 'parallel' or 'round-robin'
 let _roundRobinIdx = 0;
 let _parentSessionId = null;
 const GROUP_STATE_KEY = 'odysseus-group-state';
+
+// Online models, one row per model id, from the models cache or /api/models.
+async function _loadGroupModels() {
+  let items = window.modelsModule?.getCachedItems?.() || [];
+  if (!items.length) {
+    try {
+      const res = await fetch(API_BASE + '/api/models');
+      items = (await res.json()).items || [];
+    } catch (e) { console.warn('[group] Failed to fetch models:', e); }
+  }
+  const result = [];
+  const seen = new Set();
+  items.forEach(item => {
+    if (item.offline) return;
+    (item.models || []).concat(item.models_extra || []).forEach((mid, i) => {
+      if (seen.has(mid)) return;
+      seen.add(mid);
+      const display = ((item.models_display || []).concat(item.models_extra_display || []))[i] || mid;
+      result.push({ mid, display: display.split('/').pop(), url: item.url, endpointId: item.endpoint_id, epName: item.endpoint_name || '' });
+    });
+  });
+  return sortModelObjects(result);
+}
 
 export function init(apiBase) {
   API_BASE = apiBase;
@@ -38,26 +62,7 @@ function _initGroupTab() {
   let _modelsCache = null;
 
   async function _getModels() {
-    if (_modelsCache) return _modelsCache;
-    let items = (window.modelsModule && window.modelsModule.getCachedItems) ? window.modelsModule.getCachedItems() : [];
-    if (!items || items.length === 0) {
-      try {
-        const res = await fetch(API_BASE + '/api/models', { credentials: 'same-origin' });
-        items = (await res.json()).items || [];
-      } catch (e) {}
-    }
-    const result = [];
-    const seen = new Set();
-    items.forEach(item => {
-      if (item.offline) return;
-      (item.models || []).concat(item.models_extra || []).forEach((mid, i) => {
-        if (seen.has(mid)) return;
-        seen.add(mid);
-        const display = ((item.models_display || []).concat(item.models_extra_display || []))[i] || mid;
-        result.push({ mid, display: display.split('/').pop(), url: item.url, endpointId: item.endpoint_id });
-      });
-    });
-    _modelsCache = sortModelObjects(result);
+    if (!_modelsCache) _modelsCache = await _loadGroupModels();
     return _modelsCache;
   }
 
@@ -180,7 +185,7 @@ function _initGroupTab() {
         })),
       };
       try {
-        const existing = await fetch(API_BASE + '/api/presets/groups', { credentials: 'same-origin' }).then(r => r.json());
+        const existing = await fetch(API_BASE + '/api/presets/groups').then(r => r.json());
         const groups = existing.groups || [];
         // Don't duplicate if same participants
         const sig = presetData.participants.map(p => p.modelId + ':' + (p.characterId || '')).sort().join(',');
@@ -188,12 +193,12 @@ function _initGroupTab() {
         if (!exists) {
           groups.push(presetData);
           await fetch(API_BASE + '/api/presets/groups', {
-            method: 'POST', credentials: 'same-origin',
+            method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ groups }),
           });
         }
-      } catch (e) {}
+      } catch (e) { console.warn('[group] Failed to save group preset:', e); }
     }
 
     uiModule.showToast('Group chat ready — ' + picked.length + ' participants');
@@ -264,7 +269,7 @@ function _initGroupTab() {
   // Load and render saved group presets
   async function _loadGroupPresets() {
     try {
-      const res = await fetch(API_BASE + '/api/presets/groups', { credentials: 'same-origin' });
+      const res = await fetch(API_BASE + '/api/presets/groups');
       const data = await res.json();
       const groups = data.groups || [];
       // Render presets above participant list
@@ -291,7 +296,7 @@ function _initGroupTab() {
           ev.stopPropagation();
           groups.splice(idx, 1);
           fetch(API_BASE + '/api/presets/groups', {
-            method: 'POST', credentials: 'same-origin',
+            method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ groups }),
           }).then(() => _loadGroupPresets());
@@ -319,7 +324,7 @@ function _initGroupTab() {
           if (await window.styledConfirm('Delete preset "' + (g.name || 'Group') + '"?', { confirmText: 'Delete', danger: true })) {
             groups.splice(idx, 1);
             fetch(API_BASE + '/api/presets/groups', {
-              method: 'POST', credentials: 'same-origin',
+              method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ groups }),
             }).then(() => _loadGroupPresets());
@@ -348,7 +353,7 @@ async function _getCharacterList() {
   // The endpoint returns a JSON array directly (not {templates:[...]}).
   // All user templates are personas by definition — no isCharacter filter needed.
   try {
-    const r = await fetch(API_BASE + '/api/presets/templates', { credentials: 'same-origin' });
+    const r = await fetch(API_BASE + '/api/presets/templates');
     const data = await r.json();
     const templates = Array.isArray(data) ? data : (data.templates || []);
 
@@ -357,7 +362,7 @@ async function _getCharacterList() {
         chars.push({ id: t.id, name: t.name, prompt: t.system_prompt || t.prompt || '' });
       }
     });
-  } catch (e) {}
+  } catch (e) { console.warn('[group] Failed to load prompt templates:', e); }
 
   // Also merge in-memory templates from presets.js — these may include
   // newly created characters whose async save-to-API hasn't completed yet.
@@ -450,28 +455,7 @@ export async function showModelPicker() {
     const selected = new Set();
     let _cachedModels = null;
     async function getAllModels() {
-      if (_cachedModels) return _cachedModels;
-      let items = (window.modelsModule && window.modelsModule.getCachedItems) ? window.modelsModule.getCachedItems() : [];
-      // Fallback: fetch from API if cache is empty
-      if (!items || items.length === 0) {
-        try {
-          const res = await fetch(API_BASE + '/api/models', { credentials: 'same-origin' });
-          const data = await res.json();
-          items = data.items || [];
-        } catch (e) { console.warn('[group] Failed to fetch models:', e); }
-      }
-      const result = [];
-      const seen = new Set();
-      items.forEach(item => {
-        if (item.offline) return;
-        (item.models || []).concat(item.models_extra || []).forEach((mid, i) => {
-          if (seen.has(mid)) return;
-          seen.add(mid);
-          const display = ((item.models_display || []).concat(item.models_extra_display || []))[i] || mid;
-          result.push({ mid, display: display.split('/').pop(), url: item.url, endpointId: item.endpoint_id, epName: item.endpoint_name || '' });
-        });
-      });
-      _cachedModels = sortModelObjects(result);
+      if (!_cachedModels) _cachedModels = await _loadGroupModels();
       return _cachedModels;
     }
 
@@ -604,15 +588,13 @@ export async function startGroup(models, parentSessionId) {
     pfd.append('model', models[0].mid);
     pfd.append('skip_validation', 'true');
     if (models[0].endpointId) pfd.append('endpoint_id', models[0].endpointId);
-    const pres = await fetch(`${API_BASE}/api/session`, { method: 'POST', body: pfd, credentials: 'same-origin' });
+    const pres = await fetch(`${API_BASE}/api/session`, { method: 'POST', body: pfd });
     const pdata = await pres.json();
     _parentSessionId = pdata.id;
     // Register as group session for sidebar icon
-    try {
-      const storedGroupSessions = Storage.getJSON('odysseus-group-sessions', []);
-      const gids = Array.isArray(storedGroupSessions) ? storedGroupSessions : [];
-      if (!gids.includes(_parentSessionId)) { gids.push(_parentSessionId); localStorage.setItem('odysseus-group-sessions', JSON.stringify(gids)); }
-    } catch (e) {}
+    const storedGroupSessions = Storage.getJSON('odysseus-group-sessions', []);
+    const gids = Array.isArray(storedGroupSessions) ? storedGroupSessions : [];
+    if (!gids.includes(_parentSessionId)) { gids.push(_parentSessionId); Storage.setJSON('odysseus-group-sessions', gids); }
   } catch (e) {
     console.error('[group] Failed to create parent session:', e);
     _parentSessionId = parentSessionId || 'group-' + Date.now();
@@ -627,7 +609,7 @@ export async function startGroup(models, parentSessionId) {
       fd.append('model', m.mid);
       fd.append('skip_validation', 'true');
       if (m.endpointId) fd.append('endpoint_id', m.endpointId);
-      const res = await fetch(`${API_BASE}/api/session`, { method: 'POST', body: fd, credentials: 'same-origin' });
+      const res = await fetch(`${API_BASE}/api/session`, { method: 'POST', body: fd });
       if (!res.ok) {
         console.error(`[group] Session creation failed for ${m.display}: HTTP ${res.status}`);
         _participantSessions.push(null);
@@ -664,7 +646,7 @@ export async function startGroup(models, parentSessionId) {
       }
 
       await fetch(`${API_BASE}/api/session/${data.id}/inject_messages`, {
-        method: 'POST', credentials: 'same-origin',
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: [{ role: 'system', content: sysPrompt }]}),
       }).catch(() => {});
@@ -714,7 +696,7 @@ export async function sendMessage(msg) {
   // Save user message to parent session for persistence
   if (_parentSessionId) {
     fetch(`${API_BASE}/api/session/${_parentSessionId}/inject_messages`, {
-      method: 'POST', credentials: 'same-origin',
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: [{ role: 'user', content: msg }] }),
     }).catch(() => {});
@@ -797,8 +779,7 @@ async function _sendRoundRobin(msg, box) {
         try {
           await fetch(`${API_BASE}/api/session/${_participantSessions[j]}/inject_messages`, {
             method: 'POST',
-            credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
+                  headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ messages: [{
               role: 'user',
               content: `[${m._groupName || m.display}]: ${response}`
@@ -824,8 +805,7 @@ async function _syncAllResponses(holders) {
       try {
         await fetch(`${API_BASE}/api/session/${_participantSessions[j]}/inject_messages`, {
           method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
+              headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ messages: [{
             role: 'user',
             content: `[${model._groupName || model.display}]: ${response}`
@@ -847,7 +827,6 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
   fd.append('session', sessionId);
 
   let accumulated = '';
-  let _buffer = '';
   let _firstToken = true;
   const bodyEl = holderEl.querySelector('.body');
 
@@ -855,88 +834,72 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
     const res = await fetch(`${API_BASE}/api/chat_stream`, {
       method: 'POST',
       body: fd,
-      credentials: 'same-origin',
       signal: abortCtrl.signal,
     });
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
+    for await (const data of readSseData(res)) {
+      if (data === '[DONE]') continue;
+      try {
+        const json = JSON.parse(data);
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      _buffer += decoder.decode(value, { stream: true });
-
-      // Process complete lines
-      const lines = _buffer.split('\n');
-      _buffer = lines.pop(); // keep incomplete last line
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        if (line === 'data: [DONE]') continue;
-
-        try {
-          const json = JSON.parse(line.slice(6));
-
-          // Text delta (OpenAI format)
-          if (json.choices?.[0]?.delta?.content) {
-            if (_firstToken) { _firstToken = false; if (holderEl._spinner) { holderEl._spinner.destroy(); delete holderEl._spinner; } bodyEl.innerHTML = ''; }
-            accumulated += json.choices[0].delta.content;
-            bodyEl.innerHTML = markdownModule.processWithThinking(
-              markdownModule.squashOutsideCode(accumulated)
-            );
-            uiModule.scrollHistory();
+        // Text delta (OpenAI format)
+        if (json.choices?.[0]?.delta?.content) {
+          if (_firstToken) { _firstToken = false; if (holderEl._spinner) { holderEl._spinner.destroy(); delete holderEl._spinner; } bodyEl.innerHTML = ''; }
+          accumulated += json.choices[0].delta.content;
+          bodyEl.innerHTML = markdownModule.processWithThinking(
+            markdownModule.squashOutsideCode(accumulated)
+          );
+          uiModule.scrollHistory();
+        }
+        // Text delta (Odysseus format)
+        else if (json.delta !== undefined) {
+          if (_firstToken) { _firstToken = false; if (holderEl._spinner) { holderEl._spinner.destroy(); delete holderEl._spinner; } bodyEl.innerHTML = ''; }
+          // Handle thinking tags from vLLM
+          let _d = json.delta;
+          if (json.thinking) {
+            if (!accumulated.includes('<think>')) _d = '<think>' + _d;
+          } else if (accumulated.includes('<think>') && !accumulated.includes('</think>')) {
+            _d = '</think>' + _d;
           }
-          // Text delta (Odysseus format)
-          else if (json.delta !== undefined) {
-            if (_firstToken) { _firstToken = false; if (holderEl._spinner) { holderEl._spinner.destroy(); delete holderEl._spinner; } bodyEl.innerHTML = ''; }
-            // Handle thinking tags from vLLM
-            let _d = json.delta;
-            if (json.thinking) {
-              if (!accumulated.includes('<think>')) _d = '<think>' + _d;
-            } else if (accumulated.includes('<think>') && !accumulated.includes('</think>')) {
-              _d = '</think>' + _d;
-            }
-            accumulated += _d;
-            bodyEl.innerHTML = markdownModule.processWithThinking(
-              markdownModule.squashOutsideCode(accumulated)
-            );
-            uiModule.scrollHistory();
+          accumulated += _d;
+          bodyEl.innerHTML = markdownModule.processWithThinking(
+            markdownModule.squashOutsideCode(accumulated)
+          );
+          uiModule.scrollHistory();
+        }
+        // Agent tool events
+        else if (json.type === 'tool_start') {
+          const toolDiv = document.createElement('div');
+          toolDiv.className = 'agent-tool-event';
+          toolDiv.style.cssText = 'font-size:11px;opacity:0.5;padding:2px 0;font-family:monospace;';
+          toolDiv.textContent = `⚙ ${json.tool || 'tool'}${json.command ? ': ' + json.command.substring(0, 60) : ''}`;
+          bodyEl.appendChild(toolDiv);
+        }
+        else if (json.type === 'tool_output') {
+          const outDiv = document.createElement('div');
+          outDiv.className = 'agent-tool-output';
+          outDiv.style.cssText = 'font-size:10px;opacity:0.4;padding:2px 0;font-family:monospace;max-height:60px;overflow:hidden;';
+          outDiv.textContent = (json.output || '').substring(0, 200);
+          bodyEl.appendChild(outDiv);
+        }
+        // Generated image
+        else if (json.type === 'generated_image' && json.url) {
+          const safeImageUrl = chatRenderer.safeDisplayImageSrc(json.url);
+          if (safeImageUrl) {
+            const img = document.createElement('img');
+            img.src = safeImageUrl;
+            img.style.cssText = 'max-width:100%;border-radius:8px;margin:8px 0;';
+            img.loading = 'lazy';
+            bodyEl.appendChild(img);
           }
-          // Agent tool events
-          else if (json.type === 'tool_start') {
-            const toolDiv = document.createElement('div');
-            toolDiv.className = 'agent-tool-event';
-            toolDiv.style.cssText = 'font-size:11px;opacity:0.5;padding:2px 0;font-family:monospace;';
-            toolDiv.textContent = `⚙ ${json.tool || 'tool'}${json.command ? ': ' + json.command.substring(0, 60) : ''}`;
-            bodyEl.appendChild(toolDiv);
-          }
-          else if (json.type === 'tool_output') {
-            const outDiv = document.createElement('div');
-            outDiv.className = 'agent-tool-output';
-            outDiv.style.cssText = 'font-size:10px;opacity:0.4;padding:2px 0;font-family:monospace;max-height:60px;overflow:hidden;';
-            outDiv.textContent = (json.output || '').substring(0, 200);
-            bodyEl.appendChild(outDiv);
-          }
-          // Generated image
-          else if (json.type === 'generated_image' && json.url) {
-            const safeImageUrl = chatRenderer.safeDisplayImageSrc(json.url);
-            if (safeImageUrl) {
-              const img = document.createElement('img');
-              img.src = safeImageUrl;
-              img.style.cssText = 'max-width:100%;border-radius:8px;margin:8px 0;';
-              img.loading = 'lazy';
-              bodyEl.appendChild(img);
-            }
-          }
-          // Error
-          else if (json.error) {
-            const errDiv = document.createElement('div');
-            errDiv.style.cssText = 'color:var(--color-error);font-style:italic;padding:4px 0;';
-            errDiv.textContent = `[Error: ${json.error}]`;
-            bodyEl.appendChild(errDiv);
-          }
-        } catch (e) { /* skip unparseable */ }
-      }
+        }
+        // Error
+        else if (json.error) {
+          const errDiv = document.createElement('div');
+          errDiv.style.cssText = 'color:var(--color-error);font-style:italic;padding:4px 0;';
+          errDiv.textContent = `[Error: ${json.error}]`;
+          bodyEl.appendChild(errDiv);
+        }
+      } catch (e) { console.warn('[group] Stream parse error:', e); }
     }
   } catch (e) {
     if (e.name === 'AbortError') return;
@@ -963,7 +926,7 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
   if (accumulated && _parentSessionId) {
     const gName = _models[modelIdx]._groupName || _models[modelIdx].display;
     fetch(`${API_BASE}/api/session/${_parentSessionId}/inject_messages`, {
-      method: 'POST', credentials: 'same-origin',
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: [{
         role: 'assistant', content: accumulated,
@@ -976,32 +939,26 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
 // ── State Persistence ────────────────────────────────
 
 function _saveState() {
-  try {
-    localStorage.setItem(GROUP_STATE_KEY, JSON.stringify({
-      active: _active,
-      mode: _mode,
-      models: _models,
-      participantSessions: _participantSessions,
-      parentSessionId: _parentSessionId,
-      roundRobinIdx: _roundRobinIdx,
-    }));
-  } catch (e) {}
+  Storage.setJSON(GROUP_STATE_KEY, {
+    active: _active,
+    mode: _mode,
+    models: _models,
+    participantSessions: _participantSessions,
+    parentSessionId: _parentSessionId,
+    roundRobinIdx: _roundRobinIdx,
+  });
 }
 
 export function restoreState(sessionId) {
-  try {
-    const s = JSON.parse(localStorage.getItem(GROUP_STATE_KEY) || 'null');
-    if (s && s.active && s.parentSessionId === sessionId) {
-      _active = true;
-      _mode = s.mode || 'parallel';
-      _models = s.models || [];
-      _participantSessions = s.participantSessions || [];
-      _parentSessionId = s.parentSessionId;
-      _roundRobinIdx = s.roundRobinIdx || 0;
-      return true;
-    }
-  } catch (e) {}
-  return false;
+  const s = Storage.getJSON(GROUP_STATE_KEY, null);
+  if (!s || !s.active || s.parentSessionId !== sessionId) return false;
+  _active = true;
+  _mode = s.mode || 'parallel';
+  _models = s.models || [];
+  _participantSessions = s.participantSessions || [];
+  _parentSessionId = s.parentSessionId;
+  _roundRobinIdx = s.roundRobinIdx || 0;
+  return true;
 }
 
 export function getModels() { return _models; }

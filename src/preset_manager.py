@@ -3,6 +3,8 @@ import json
 import logging
 from typing import Dict, Any
 
+from src.constants import PRESETS_FILE
+
 logger = logging.getLogger(__name__)
 
 class PresetManager:
@@ -65,8 +67,8 @@ Use precise language. Show causal relationships explicitly. Quantify uncertainty
         }
     }
     
-    def __init__(self, data_dir: str):
-        self.presets_file = os.path.join(data_dir, "presets.json")
+    def __init__(self, presets_file: str | None = None):
+        self.presets_file = presets_file or PRESETS_FILE
         self.presets = self.load()
     
     def load(self) -> Dict[str, Any]:

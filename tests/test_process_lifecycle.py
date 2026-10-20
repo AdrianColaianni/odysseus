@@ -4,7 +4,6 @@ These pin the rules every consumer — containment, the PTY shell, the Cookbook
 sweep, the browser lifecycle and kill_process_tree — inherits from one place.
 """
 
-import asyncio
 import errno
 import os
 import signal
@@ -171,12 +170,12 @@ def test_a_pid_without_a_token_is_never_owned_and_never_exited(monkeypatch):
     assert ident.owned() is False and ident.exited() is False
 
 
-@pytest.mark.parametrize("current,exited", [(None, True), ("other", True), ("mine", False)])
-def test_exited_means_gone_or_recycled(monkeypatch, current, exited):
-    monkeypatch.setattr(process_ownership, "start_token", lambda pid: current)
+def test_exited_means_gone_or_recycled(monkeypatch):
     monkeypatch.setattr(process_lifecycle, "is_zombie", lambda pid: False)
     ident = process_lifecycle.ProcessIdentity(pid=4242, start_token="mine")
-    assert ident.exited() is exited
+    for current, exited in [(None, True), ("other", True), ("mine", False)]:
+        monkeypatch.setattr(process_ownership, "start_token", lambda pid: current)
+        assert ident.exited() is exited, current
 
 
 @pytest.mark.skipif(not platform_compat.has_procfs(), reason="zombie state needs procfs")
@@ -331,15 +330,15 @@ def test_observe_of_a_gone_pid_reads_nothing(monkeypatch):
     assert process_lifecycle.observe(42, lambda pid: pytest.fail("read a gone pid")) is None
 
 
-@pytest.mark.parametrize("sequence", [
-    [process_ownership.InspectionUnavailable("stat")],
-    ["t1", process_ownership.InspectionUnavailable("stat")],
-])
-def test_observe_keeps_unidentifiable_facts_without_a_token(monkeypatch, sequence):
-    _tokens(monkeypatch, sequence)
-    seen = process_lifecycle.observe(42, lambda pid: "facts")
-    assert seen.identity.start_token is None and seen.facts == "facts"
-    assert seen.identity.verdict() == process_ownership.UNVERIFIABLE
+def test_observe_keeps_unidentifiable_facts_without_a_token(monkeypatch):
+    for sequence in (
+        [process_ownership.InspectionUnavailable("stat")],
+        ["t1", process_ownership.InspectionUnavailable("stat")],
+    ):
+        _tokens(monkeypatch, sequence)
+        seen = process_lifecycle.observe(42, lambda pid: "facts")
+        assert seen.identity.start_token is None and seen.facts == "facts"
+        assert seen.identity.verdict() == process_ownership.UNVERIFIABLE
 
 
 def test_bind_descendants_drops_a_pid_reparented_between_snapshots(monkeypatch):

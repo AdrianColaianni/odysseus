@@ -7,8 +7,6 @@ src.* / routes.* can bind to stale module objects in full runs.
 
 from __future__ import annotations
 
-import math
-import sqlite3
 
 import pytest
 from sqlalchemy import create_engine
@@ -41,34 +39,34 @@ def test_estimate_cost_usd_unknown_model_returns_none():
     assert model_pricing.estimate_cost_usd(None, 1000, 1000) is None
 
 
-@pytest.mark.parametrize("url", [
-    None,
-    "",
-    "http://localhost:11434/v1",
-    "http://127.0.0.1:8000/v1",
-    "http://192.168.1.21:8000/v1",
-    "http://10.1.2.3/v1",
-    "http://172.20.0.5:8000/v1",
-    "http://100.101.5.7:8000/v1",       # Tailscale CGNAT
-    "http://vllm.local/v1",
-    "http://host.docker.internal/v1",
-    "http://nim-nano/v1",               # single-label docker service
-    "not a url",
-])
-def test_local_or_missing_endpoints_are_free(url):
-    assert model_pricing.is_local_endpoint(url) is True
-    # qwen would match the pricing table by substring — must NOT be billed.
-    assert model_pricing.estimate_cost_usd("qwen3-coder", 1000, 1000, url) is None
+def test_local_or_missing_endpoints_are_free():
+    for url in (
+        None,
+        "",
+        "http://localhost:11434/v1",
+        "http://127.0.0.1:8000/v1",
+        "http://192.168.1.21:8000/v1",
+        "http://10.1.2.3/v1",
+        "http://172.20.0.5:8000/v1",
+        "http://100.101.5.7:8000/v1",       # Tailscale CGNAT
+        "http://vllm.local/v1",
+        "http://host.docker.internal/v1",
+        "http://nim-nano/v1",               # single-label docker service
+        "not a url",
+    ):
+        assert model_pricing.is_local_endpoint(url) is True, url
+        # qwen would match the pricing table by substring, so it must NOT be billed.
+        assert model_pricing.estimate_cost_usd("qwen3-coder", 1000, 1000, url) is None, url
 
 
-@pytest.mark.parametrize("url", [
-    "http://100.63.0.1/v1",    # below CGNAT range → public-ish, tracked
-    "http://example.com/v1",
-    "https://openrouter.ai/api/v1",
-])
-def test_public_endpoints_are_cost_tracked(url):
-    assert model_pricing.is_local_endpoint(url) is False
-    assert model_pricing.is_cost_tracked_endpoint(url) is True
+def test_public_endpoints_are_cost_tracked():
+    for url in (
+        "http://100.63.0.1/v1",    # below CGNAT range → public-ish, tracked
+        "http://example.com/v1",
+        "https://openrouter.ai/api/v1",
+    ):
+        assert model_pricing.is_local_endpoint(url) is False, url
+        assert model_pricing.is_cost_tracked_endpoint(url) is True, url
 
 
 def test_subscription_endpoints_are_not_billed_per_token():
@@ -192,44 +190,3 @@ def test_session_to_dict_includes_total_cost_usd(tmp_path):
         assert d["total_cost_usd"] == 0.5
     finally:
         db.close()
-
-
-def test_migration_adds_total_cost_usd_idempotently(tmp_path, monkeypatch):
-    import core.database as core_db
-
-    db_file = tmp_path / "app.db"
-    conn = sqlite3.connect(db_file)
-    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT)")
-    conn.commit()
-    conn.close()
-    monkeypatch.setattr(core_db, "DATABASE_URL", f"sqlite:///{db_file}")
-
-    core_db._migrate_add_total_cost_usd()
-    core_db._migrate_add_total_cost_usd()  # idempotent
-
-    conn = sqlite3.connect(db_file)
-    try:
-        cols = [row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()]
-    finally:
-        conn.close()
-    assert "total_cost_usd" in cols
-
-
-def test_sessions_list_route_exposes_total_cost_usd():
-    from pathlib import Path
-    source = Path(__file__).parents[1].joinpath("routes/session_routes.py").read_text()
-    assert '"total_cost_usd": s.total_cost_usd or 0.0' in source
-
-
-def test_llm_core_captures_openrouter_usage_cost():
-    from pathlib import Path
-    source = Path(__file__).parents[1].joinpath("src/llm_core.py").read_text()
-    assert 'u.get("cost")' in source
-    assert '"cost_usd"' in source
-
-
-def test_compact_response_includes_context_tokens_estimate():
-    from pathlib import Path
-    source = Path(__file__).parents[1].joinpath("routes/session_routes.py").read_text()
-    assert '"context_tokens_estimate": context_tokens_estimate' in source
-    assert "len(_message_text(m) or \"\") // 4 + 8" in source

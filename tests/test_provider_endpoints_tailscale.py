@@ -8,7 +8,6 @@ import json
 import socket
 import types
 
-import pytest
 
 from src import endpoint_resolver as er
 

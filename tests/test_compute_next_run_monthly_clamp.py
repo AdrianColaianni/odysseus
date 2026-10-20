@@ -8,24 +8,20 @@ fired in February, April, June, September or November.
 
 from datetime import datetime
 
-import pytest
 
 from src.task_scheduler import compute_next_run
 
 
-@pytest.mark.parametrize(
-    "day,after,expected",
-    [
+def test_monthly_clamps_to_last_day_of_current_short_month():
+    for day, after, expected in (
         (31, datetime(2026, 2, 15, 12, 0), datetime(2026, 2, 28, 9, 0)),
         (30, datetime(2026, 2, 1, 12, 0), datetime(2026, 2, 28, 9, 0)),
         (29, datetime(2026, 2, 1, 12, 0), datetime(2026, 2, 28, 9, 0)),
         (29, datetime(2028, 2, 1, 12, 0), datetime(2028, 2, 29, 9, 0)),
         (31, datetime(2026, 4, 1, 12, 0), datetime(2026, 4, 30, 9, 0)),
-    ],
-)
-def test_monthly_clamps_to_last_day_of_current_short_month(day, after, expected):
-    out = compute_next_run("monthly", "09:00", scheduled_day=day, after=after)
-    assert out == expected
+    ):
+        out = compute_next_run("monthly", "09:00", scheduled_day=day, after=after)
+        assert out == expected, (day, after)
 
 
 def test_monthly_clamped_slot_already_passed_rolls_to_next_month():

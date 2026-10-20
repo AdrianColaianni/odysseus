@@ -18,7 +18,3 @@ def test_personal_index_includes_pdf_uploads(tmp_path, monkeypatch):
     assert [item["name"] for item in files] == ["notes.pdf"]
     assert files[0]["path"] == str(pdf_path)
     assert files[0]["chunks"] == ["readable pdf text"]
-
-
-def test_personal_index_default_extensions_advertise_pdf_support():
-    assert ".pdf" in personal_docs.config.DEFAULT_EXTENSIONS

@@ -21,11 +21,12 @@ def test_research_json_path_allows_safe_ids(tmp_path, monkeypatch):
     assert path == (data_dir / "rp-abc123.json").resolve()
 
 
-@pytest.mark.parametrize("session_id", ["../escape", "..", "rp/test", "rp_test", "", None])
-def test_research_json_path_rejects_invalid_ids(tmp_path, monkeypatch, session_id):
-    monkeypatch.setattr(research_handler, "RESEARCH_DATA_DIR", tmp_path / "deep_research")
+def test_research_json_path_rejects_invalid_ids(tmp_path_factory, monkeypatch):
+    for session_id in ["../escape", "..", "rp/test", "rp_test", "", None]:
+        tmp_path = tmp_path_factory.mktemp("case")
+        monkeypatch.setattr(research_handler, "RESEARCH_DATA_DIR", tmp_path / "deep_research")
 
-    assert research_handler._research_json_path(session_id) is None
+        assert research_handler._research_json_path(session_id) is None
 
 
 def test_research_json_path_rejects_symlink_escape(tmp_path, monkeypatch):

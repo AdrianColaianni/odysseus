@@ -1,49 +1,3 @@
-/* 04-memory - part of the former static/style.css.
- *
- * The stylesheet is split by area, but the split is mechanical: rules were
- * moved verbatim and NOT regrouped. The numeric prefix is the load order, and
- * that order is what preserves the cascade. A rule sits in the file its
- * original position fell into, so an area's rules are not all in its file and
- * a file is not only that area's rules.
- *
- * Do not reorder the <link> tags in static/index.html, and do not move a rule
- * between files: with 1,151 redeclarations and 1,886 !important in this
- * cascade, either can change which declaration wins.
- *
- * static/index.html and the PRECACHE list in static/sw.js must agree on this
- * order. tests/test_static_stylesheet_manifest.py and
- * tests/test_css_computed_style_snapshot.py fail if that drifts.
- */
-.memory-scope-btn:hover:not(.active) {
-  background: color-mix(in srgb, var(--fg) 5%, transparent);
-}
-.memory-char-list {
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-  margin-bottom: 8px;
-}
-.memory-char-chip {
-  padding: 4px 10px;
-  font-size: 11px;
-  font-weight: 500;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: none;
-  color: var(--fg);
-  cursor: pointer;
-  transition: all 0.15s;
-  margin: 0;
-}
-.memory-char-chip.active {
-  background: color-mix(in srgb, var(--red) 12%, transparent);
-  border-color: var(--red);
-  color: var(--red);
-}
-.memory-char-chip:hover:not(.active) {
-  background: color-mix(in srgb, var(--fg) 6%, transparent);
-}
-
 /* Disabled state dims the form */
 #char-fields-wrap.disabled {
   opacity: 0.35;
@@ -225,10 +179,9 @@
   flex-direction: column;
   gap: 10px;
   overflow-y: auto;
-  /* overflow-y:auto makes the browser compute overflow-x to `auto` too, which
-     produced a stray horizontal scrollbar whenever a child was slightly too
-     wide (long unbroken memory text, or the skills two-column row). Clip X
-     explicitly — inner code blocks keep their own overflow-x:auto. */
+  /* overflow-y:auto makes the browser compute overflow-x as `auto` too,
+     which shows a stray horizontal scrollbar for slightly wide children.
+     Inner code blocks keep their own overflow-x:auto. */
   overflow-x: hidden;
   flex: 1;
   min-width: 0;
@@ -386,29 +339,6 @@ textarea.memory-add-input {
   border-color: var(--red);
 }
 
-.memory-add-btn {
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--fg);
-  font-size: 16px;
-  box-sizing: border-box;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.15s;
-  flex-shrink: 0;
-}
-
-.memory-add-btn:hover {
-  background: var(--panel);
-  border-color: var(--red);
-  color: var(--red);
-}
-
 .memory-toolbar {
   display: flex;
   flex-direction: column;
@@ -472,27 +402,6 @@ textarea.memory-add-input {
   border-color: transparent;
   background: none;
 }
-.memory-toolbar-toggle {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  height: 24px;
-  color: color-mix(in srgb, var(--fg) 60%, transparent);
-  cursor: pointer;
-  padding: 0 4px;
-  user-select: none;
-  transition: all 0.15s;
-}
-.memory-toolbar-toggle:hover {
-  color: var(--fg);
-}
-.memory-toolbar-toggle .admin-switch {
-  vertical-align: middle;
-}
-.memory-toolbar-toggle:has(input:not(:checked)) {
-  opacity: 0.7;
-}
 
 /* Bulk action bar */
 .memory-bulk-bar {
@@ -534,10 +443,10 @@ textarea.memory-add-input {
   text-align: left;
   transition: border-color 0.12s, background 0.12s;
 }
-.memory-sort-btn:hover { border-color: color-mix(in srgb, var(--accent, var(--red)) 50%, var(--border)); }
+.memory-sort-btn:hover { border-color: color-mix(in srgb, var(--red) 50%, var(--border)); }
 .memory-sort-btn:focus-visible {
   outline: none;
-  border-color: var(--accent, var(--red));
+  border-color: var(--red);
 }
 .memory-sort-current {
   display: inline-flex;
@@ -552,7 +461,7 @@ textarea.memory-add-input {
   justify-content: center;
   width: 13px;
   height: 13px;
-  color: var(--accent, var(--red));
+  color: var(--red);
   flex-shrink: 0;
 }
 .memory-sort-icon-cur svg { width: 13px; height: 13px; }
@@ -597,7 +506,7 @@ textarea.memory-add-input {
   justify-content: center;
   width: 14px;
   height: 14px;
-  color: var(--accent, var(--red));
+  color: var(--red);
   flex-shrink: 0;
 }
 .memory-sort-item-icon svg { width: 13px; height: 13px; }
@@ -664,7 +573,6 @@ textarea.memory-add-input {
    to the right; 8px of extra right padding seats it off the edge (matching
    the research bar's 8px nudge). */
 #doclib-chats-bulk #doclib-chats-bulk-archive,
-#doclib-bulk-bar #doclib-bulk-archive,
 #doclib-arc-bulk #doclib-arc-bulk-restore,
 #email-lib-bulk #email-lib-bulk-actions,
 #tasks-bulk-bar #tasks-bulk-delete,
@@ -886,9 +794,9 @@ textarea.memory-add-input {
   border-color: color-mix(in srgb, var(--green, #50fa7b) 35%, transparent);
 }
 .task-run-now-badge {
-  color: var(--accent, var(--red));
-  background: color-mix(in srgb, var(--accent, var(--red)) 16%, transparent);
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 34%, transparent);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 16%, transparent);
+  border-color: color-mix(in srgb, var(--red) 34%, transparent);
 }
 .task-card-run-btn {
   appearance: none;
@@ -914,8 +822,8 @@ textarea.memory-add-input {
   border-color: color-mix(in srgb, var(--green, #50fa7b) 55%, transparent);
 }
 .task-run-now-badge:hover {
-  background: color-mix(in srgb, var(--accent, var(--red)) 24%, transparent);
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 52%, transparent);
+  background: color-mix(in srgb, var(--red) 24%, transparent);
+  border-color: color-mix(in srgb, var(--red) 52%, transparent);
 }
 
 .task-builtin-badge {
@@ -923,9 +831,9 @@ textarea.memory-add-input {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.4px;
-  color: var(--accent, var(--red));
-  background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 40%, transparent);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 40%, transparent);
   padding: 1px 6px;
   border-radius: 8px;
   flex-shrink: 0;
@@ -1176,9 +1084,8 @@ textarea.memory-add-input {
   /* Email rows sit on a slightly different baseline (extra meta row /
      nav-arrows cluster), so pull the menu button back down 1px. */
   #email-lib-modal .memory-item-actions .memory-item-btn { transform: translateY(-2px); }
-  /* Base rule above hides .memory-item-actions until hover. Mobile has no
-     hover → the ⋮ button in cookbook serve / library cards was invisible
-     and effectively unclickable. Force-show on mobile. */
+  /* The base rule hides .memory-item-actions until hover, and mobile has
+     no hover, so force-show them there. */
   .memory-item-actions { opacity: 0.7 !important; }
   .memory-item-actions .memory-item-btn {
     width: 32px;
@@ -1203,7 +1110,7 @@ textarea.memory-add-input {
   line-height: 1.5;
 }
 .doclib-research-sources a {
-  color: var(--accent, var(--red));
+  color: var(--red);
   text-decoration: none;
 }
 .doclib-research-sources a:hover { text-decoration: underline; }
@@ -1240,18 +1147,6 @@ textarea.memory-add-input {
   justify-content: center;
 }
 .memory-item-btn.pin.active {
-  opacity: 1;
-}
-.memory-pin-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--fg);
-  opacity: 0.5;
-  transition: all 0.15s;
-}
-.memory-item-btn.pin.active .memory-pin-dot {
-  background: var(--red);
   opacity: 1;
 }
 .memory-pinned {
@@ -1354,40 +1249,12 @@ textarea.memory-add-input {
   transition: border-color 0.12s, background 0.12s;
 }
 .memory-sort-select:hover {
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 50%, var(--border));
+  border-color: color-mix(in srgb, var(--red) 50%, var(--border));
 }
 .memory-sort-select:focus {
   outline: none;
   border-color: var(--red);
 }
-
-/* Memory sort wrapper: positions the SVG icon over the left
-   edge of the native <select>, mirroring the email filter btn. */
-.memory-sort-wrap {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  flex-shrink: 0;
-  left: -2px;
-}
-.memory-sort-wrap .memory-sort-select {
-  padding-left: 26px;
-}
-.memory-sort-icon {
-  position: absolute;
-  left: 7px;
-  top: calc(50% + 1px);
-  transform: translateY(-50%);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 13px;
-  height: 13px;
-  color: var(--accent, var(--red));
-  pointer-events: none;
-  z-index: 1;
-}
-.memory-sort-icon svg { width: 13px; height: 13px; }
 
 .email-folder-picker {
   position: relative;
@@ -1403,7 +1270,7 @@ textarea.memory-add-input {
   justify-content: center;
   width: 13px;
   height: 13px;
-  color: var(--accent, var(--red));
+  color: var(--red);
   pointer-events: none;
   z-index: 1;
 }
@@ -1444,10 +1311,10 @@ textarea.memory-add-input {
   position: relative;
   top: -4px;
 }
-.email-filter-btn:hover { border-color: color-mix(in srgb, var(--accent, var(--red)) 50%, var(--border)); }
+.email-filter-btn:hover { border-color: color-mix(in srgb, var(--red) 50%, var(--border)); }
 .email-filter-btn:focus-visible {
   outline: none;
-  border-color: var(--accent, var(--red));
+  border-color: var(--red);
 }
 .email-filter-current {
   flex: 1;
@@ -1465,7 +1332,7 @@ textarea.memory-add-input {
   justify-content: center;
   width: 13px;
   height: 13px;
-  color: var(--accent, var(--red));
+  color: var(--red);
   flex-shrink: 0;
 }
 .email-filter-icon svg { width: 13px; height: 13px; }
@@ -1504,7 +1371,7 @@ textarea.memory-add-input {
 .email-filter-menu[hidden] { display: none; }
 .email-filter-menu-title {
   padding: 5px 9px 4px;
-  color: var(--fg-muted, var(--fg));
+  color: var(--fg);
   font-size: 10px;
   font-weight: 600;
   opacity: 0.65;
@@ -1549,7 +1416,7 @@ textarea.memory-add-input {
   justify-content: center;
   width: 14px;
   height: 14px;
-  color: var(--accent, var(--red));
+  color: var(--red);
   flex-shrink: 0;
 }
 .email-filter-item-icon svg { width: 13px; height: 13px; }
@@ -1574,7 +1441,7 @@ textarea.memory-add-input {
   padding: 2px 6px;
   border-radius: 4px;
   background: color-mix(in srgb, var(--fg) 8%, transparent);
-  color: var(--accent, var(--red));
+  color: var(--red);
   text-transform: lowercase;
 }
 
@@ -1599,8 +1466,8 @@ textarea.memory-add-input {
   color: var(--red);
 }
 .memory-cat-task {
-  background: color-mix(in srgb, #d19a66 15%, transparent);
-  color: #d19a66;
+  background: color-mix(in srgb, var(--accent-warm) 15%, transparent);
+  color: var(--accent-warm);
 }
 .memory-cat-pinned {
   background: color-mix(in srgb, var(--red) 15%, transparent);

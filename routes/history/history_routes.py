@@ -8,17 +8,15 @@ import re
 from typing import Dict, Any, Optional
 
 from fastapi import APIRouter, Request, HTTPException, Depends
+from sqlalchemy.orm import Session
 
 from core.models import ChatMessage
-from core.database import SessionLocal, ChatMessage as DbChatMessage, Session as DbSession
+from core.database import get_db, ChatMessage as DbChatMessage, Session as DbSession
 from src.auth_helpers import effective_user, require_chat_api_token_scope
 from src.topic_analyzer import analyze_topics
 from src.upload_handler import reserve_message_upload_references
 from src.tool_approval_scopes import sanitize_client_message_metadata
 from routes.session_routes import (
-    _message_role,
-    _message_text,
-    _reject_compact_during_active_run,
     _verify_session_owner,
 )
 from routes.chat_helpers import strip_tui_local_context
@@ -291,56 +289,53 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         return entry
 
     @router.get("/api/history/{session_id}")
-    async def get_session_history(
+    def get_session_history(
         request: Request,
         session_id: str,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
+        db: Session = Depends(get_db),
     ) -> Dict[str, Any]:
         _verify_session_owner(request, session_id)
         if limit is not None:
             page_limit = max(1, min(int(limit), 100))
-            db = SessionLocal()
-            try:
-                db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
-                if db_session is None:
-                    raise HTTPException(404, f"Session '{session_id}' not found")
+            db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if db_session is None:
+                raise HTTPException(404, f"Session '{session_id}' not found")
 
-                total = (
-                    db.query(DbChatMessage)
-                    .filter(DbChatMessage.session_id == session_id)
-                    .count()
-                )
-                page_offset = int(offset) if offset is not None else max(total - page_limit, 0)
-                page_offset = max(0, min(page_offset, total))
-                # Keep display pagination page-scoped. ``get_session`` is the
-                # full model-context hydration seam and must not be entered here.
-                rows = (
-                    db.query(DbChatMessage)
-                    .filter(DbChatMessage.session_id == session_id)
-                    .order_by(DbChatMessage.timestamp)
-                    .offset(page_offset)
-                    .limit(page_limit)
-                    .all()
-                )
-                history_dict = [
-                    entry for entry in (_db_history_entry(m) for m in rows)
-                    if not (entry.get("metadata") or {}).get("hidden")
-                ]
-                return {
-                    "history": history_dict,
-                    "model": db_session.model,
-                    "endpoint_url": db_session.endpoint_url,
-                    "endpoint_id": getattr(db_session, "endpoint_id", None),
-                    "name": db_session.name,
-                    "offset": page_offset,
-                    "limit": page_limit,
-                    "total": total,
-                    "has_more_before": page_offset > 0,
-                    "has_more_after": page_offset + len(rows) < total,
-                }
-            finally:
-                db.close()
+            total = (
+                db.query(DbChatMessage)
+                .filter(DbChatMessage.session_id == session_id)
+                .count()
+            )
+            page_offset = int(offset) if offset is not None else max(total - page_limit, 0)
+            page_offset = max(0, min(page_offset, total))
+            # Keep display pagination page-scoped. ``get_session`` is the
+            # full model-context hydration seam and must not be entered here.
+            rows = (
+                db.query(DbChatMessage)
+                .filter(DbChatMessage.session_id == session_id)
+                .order_by(DbChatMessage.timestamp)
+                .offset(page_offset)
+                .limit(page_limit)
+                .all()
+            )
+            history_dict = [
+                entry for entry in (_db_history_entry(m) for m in rows)
+                if not (entry.get("metadata") or {}).get("hidden")
+            ]
+            return {
+                "history": history_dict,
+                "model": db_session.model,
+                "endpoint_url": db_session.endpoint_url,
+                "endpoint_id": getattr(db_session, "endpoint_id", None),
+                "name": db_session.name,
+                "offset": page_offset,
+                "limit": page_limit,
+                "total": total,
+                "has_more_before": page_offset > 0,
+                "has_more_after": page_offset + len(rows) < total,
+            }
 
         try:
             session = session_manager.get_session(session_id)
@@ -368,12 +363,9 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     entry["metadata"] = msg["metadata"]
                 history_dict.append(entry)
 
-        # Fallback: load from DB if in-memory renders empty. Display only —
-        # get_session above is the hydration seam, so nothing here writes back
-        # into session.history — rebuilding it from raw rows would overwrite
-        # parsed multimodal content and the _db_id edit/delete keys it just set.
+        # Display-only DB fallback: writing back into session.history would
+        # overwrite the parsed content and _db_id keys get_session just set.
         if not history_dict:
-            db = SessionLocal()
             try:
                 db_messages = (
                     db.query(DbChatMessage)
@@ -388,8 +380,6 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 ]
             except Exception as e:
                 logger.error(f"DB fallback failed for {session_id}: {e}")
-            finally:
-                db.close()
 
         return {
             "history": history_dict,
@@ -400,7 +390,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         }
 
     @router.post("/api/session/{session_id}/truncate")
-    async def truncate_session(request: Request, session_id: str):
+    async def truncate_session(request: Request, session_id: str, db: Session = Depends(get_db)):
         _verify_session_owner(request, session_id)
         try:
             try:
@@ -409,11 +399,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 raise HTTPException(400, "Request body must be valid JSON")
             if not isinstance(body, dict):
                 raise HTTPException(400, "Request body must be a JSON object")
-            # Resolve before_msg_id / message_id alias with explicit presence checks.
-            # None (JSON null) and empty string are both treated as "not provided here"
-            # and fall through to the alias, preserving the original OR-chain semantics.
-            # Any other non-string value (False, 0, True, 123, list, …) is rejected
-            # immediately so falsy non-strings cannot bypass type validation.
+            # null and "" fall through to the message_id alias; any other non-string is rejected.
             raw_msg_id = body.get("before_msg_id") if "before_msg_id" in body else None
             if raw_msg_id is None or raw_msg_id == "":
                 raw_msg_id = body.get("message_id")
@@ -434,22 +420,17 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             if keep_count < 0:
                 raise HTTPException(400, "keep_count must be a non-negative integer")
             deleted_sft_pairs: list[dict[str, str]] = []
-            # keep_count is always >= 0 here; the block is unconditional.
-            db = SessionLocal()
-            try:
-                all_db_messages = db.query(DbChatMessage).filter(
-                    DbChatMessage.session_id == session_id
-                ).order_by(DbChatMessage.timestamp).all()
-                if before_msg_id:
-                    resolved_keep_count = _keep_count_before_message(all_db_messages, before_msg_id)
-                    if resolved_keep_count is None:
-                        raise HTTPException(404, "Message not found")
-                    keep_count = resolved_keep_count
-                for pos, row in enumerate(all_db_messages):
-                    row._will_delete_for_sft = pos >= keep_count
-                deleted_sft_pairs = _deleted_sft_pairs_from_db_rows(all_db_messages)
-            finally:
-                db.close()
+            all_db_messages = db.query(DbChatMessage).filter(
+                DbChatMessage.session_id == session_id
+            ).order_by(DbChatMessage.timestamp).all()
+            if before_msg_id:
+                resolved_keep_count = _keep_count_before_message(all_db_messages, before_msg_id)
+                if resolved_keep_count is None:
+                    raise HTTPException(404, "Message not found")
+                keep_count = resolved_keep_count
+            for pos, row in enumerate(all_db_messages):
+                row._will_delete_for_sft = pos >= keep_count
+            deleted_sft_pairs = _deleted_sft_pairs_from_db_rows(all_db_messages)
             result = session_manager.truncate_messages(session_id, keep_count)
             _remove_deleted_sft_trace_rows(
                 owner=effective_user(request),
@@ -484,7 +465,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(404, "Session not found")
 
     @router.post("/api/session/{session_id}/delete-messages")
-    async def delete_messages(request: Request, session_id: str):
+    async def delete_messages(request: Request, session_id: str, db: Session = Depends(get_db)):
         """Delete specific messages by DB ID (or legacy index)."""
         _verify_session_owner(request, session_id)
         try:
@@ -493,70 +474,55 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             indices = body.get("indices")  # legacy fallback
 
             session = session_manager.get_session(session_id)
-            db = SessionLocal()
-            try:
-                all_db_messages = db.query(DbChatMessage).filter(
-                    DbChatMessage.session_id == session_id
-                ).order_by(DbChatMessage.timestamp).all()
-                delete_id_set = set(msg_ids or [])
-                delete_index_set = set(indices or [])
-                for pos, row in enumerate(all_db_messages):
-                    row._will_delete_for_sft = (
-                        (bool(delete_id_set) and row.id in delete_id_set)
-                        or (not delete_id_set and bool(delete_index_set) and pos in delete_index_set)
-                    )
-                deleted_sft_pairs = _deleted_sft_pairs_from_db_rows(all_db_messages)
-
-                if msg_ids:
-                    # New ID-based delete
-                    deleted = 0
-                    for mid in msg_ids:
-                        db_msg = db.query(DbChatMessage).filter(
-                            DbChatMessage.id == mid,
-                            DbChatMessage.session_id == session_id,
-                        ).first()
-                        if db_msg:
-                            db.delete(db_msg)
-                            deleted += 1
-
-                    # Remove from in-memory history by matching _db_id
-                    def _get_db_id(m):
-                        meta = m.metadata if isinstance(m, ChatMessage) else (m.get('metadata') if isinstance(m, dict) else None)
-                        return meta.get('_db_id') if isinstance(meta, dict) else None
-                    session.history = [m for m in session.history if _get_db_id(m) not in msg_ids]
-                elif indices:
-                    # Legacy index-based delete
-                    indices = sorted(indices, reverse=True)
-                    db_messages = db.query(DbChatMessage).filter(
-                        DbChatMessage.session_id == session_id
-                    ).order_by(DbChatMessage.timestamp).all()
-
-                    deleted = 0
-                    for idx in indices:
-                        if 0 <= idx < len(db_messages):
-                            db.delete(db_messages[idx])
-                            deleted += 1
-                        if 0 <= idx < len(session.history):
-                            session.history.pop(idx)
-                else:
-                    return {"status": "ok", "deleted": 0}
-
-                session.message_count = len(session.history)
-                db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
-                if db_session:
-                    db_session.message_count = len(session.history)
-                    from datetime import datetime, timezone
-                    db_session.updated_at = datetime.now(timezone.utc)
-
-                db.commit()
-                _remove_deleted_sft_trace_rows(
-                    owner=effective_user(request),
-                    session_id=session_id,
-                    deleted_pairs=deleted_sft_pairs,
+            all_db_messages = db.query(DbChatMessage).filter(
+                DbChatMessage.session_id == session_id
+            ).order_by(DbChatMessage.timestamp).all()
+            delete_id_set = set(msg_ids or [])
+            delete_index_set = set(indices or [])
+            for pos, row in enumerate(all_db_messages):
+                row._will_delete_for_sft = (
+                    (bool(delete_id_set) and row.id in delete_id_set)
+                    or (not delete_id_set and bool(delete_index_set) and pos in delete_index_set)
                 )
-                return {"status": "ok", "deleted": deleted}
-            finally:
-                db.close()
+            deleted_sft_pairs = _deleted_sft_pairs_from_db_rows(all_db_messages)
+
+            if msg_ids:
+                deleted = 0
+                for db_msg in all_db_messages:
+                    if db_msg.id in delete_id_set:
+                        db.delete(db_msg)
+                        deleted += 1
+
+                def _get_db_id(m):
+                    meta = m.metadata if isinstance(m, ChatMessage) else (m.get('metadata') if isinstance(m, dict) else None)
+                    return meta.get('_db_id') if isinstance(meta, dict) else None
+                session.history = [m for m in session.history if _get_db_id(m) not in msg_ids]
+            elif indices:
+                indices = sorted(indices, reverse=True)
+                deleted = 0
+                for idx in indices:
+                    if 0 <= idx < len(all_db_messages):
+                        db.delete(all_db_messages[idx])
+                        deleted += 1
+                    if 0 <= idx < len(session.history):
+                        session.history.pop(idx)
+            else:
+                return {"status": "ok", "deleted": 0}
+
+            session.message_count = len(session.history)
+            db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if db_session:
+                db_session.message_count = len(session.history)
+                from datetime import datetime, timezone
+                db_session.updated_at = datetime.now(timezone.utc)
+
+            db.commit()
+            _remove_deleted_sft_trace_rows(
+                owner=effective_user(request),
+                session_id=session_id,
+                deleted_pairs=deleted_sft_pairs,
+            )
+            return {"status": "ok", "deleted": deleted}
         except KeyError:
             raise HTTPException(404, "Session not found")
         except Exception as e:
@@ -564,7 +530,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(500, str(e))
 
     @router.post("/api/session/{session_id}/edit-message")
-    async def edit_message(request: Request, session_id: str):
+    async def edit_message(request: Request, session_id: str, db: Session = Depends(get_db)):
         """Edit the content of a message by its database ID."""
         _verify_session_owner(request, session_id)
         try:
@@ -577,39 +543,35 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             _reserve_message_uploads(request, content)
 
             session = session_manager.get_session(session_id)
-            db = SessionLocal()
-            try:
-                db_msg = db.query(DbChatMessage).filter(
-                    DbChatMessage.id == msg_id,
-                    DbChatMessage.session_id == session_id,
-                ).first()
-                if not db_msg:
-                    raise HTTPException(404, "Message not found")
+            db_msg = db.query(DbChatMessage).filter(
+                DbChatMessage.id == msg_id,
+                DbChatMessage.session_id == session_id,
+            ).first()
+            if not db_msg:
+                raise HTTPException(404, "Message not found")
 
-                db_msg.content = content
-                meta = {}
-                if db_msg.meta_data:
-                    try: meta = json.loads(db_msg.meta_data)
-                    except (json.JSONDecodeError, ValueError): pass
-                meta['edited'] = True
-                db_msg.meta_data = json.dumps(meta)
+            db_msg.content = content
+            meta = {}
+            if db_msg.meta_data:
+                try: meta = json.loads(db_msg.meta_data)
+                except (json.JSONDecodeError, ValueError): pass
+            meta['edited'] = True
+            db_msg.meta_data = json.dumps(meta)
 
-                # Update in-memory history by matching _db_id
-                for hmsg in session.history:
-                    hmeta = hmsg.metadata if isinstance(hmsg, ChatMessage) else hmsg.get('metadata')
-                    if isinstance(hmeta, dict) and hmeta.get('_db_id') == msg_id:
-                        if isinstance(hmsg, ChatMessage):
-                            hmsg.content = content
-                            hmsg.metadata['edited'] = True
-                        elif isinstance(hmsg, dict):
-                            hmsg['content'] = content
-                            hmsg['metadata']['edited'] = True
-                        break
+            # Update in-memory history by matching _db_id
+            for hmsg in session.history:
+                hmeta = hmsg.metadata if isinstance(hmsg, ChatMessage) else hmsg.get('metadata')
+                if isinstance(hmeta, dict) and hmeta.get('_db_id') == msg_id:
+                    if isinstance(hmsg, ChatMessage):
+                        hmsg.content = content
+                        hmsg.metadata['edited'] = True
+                    elif isinstance(hmsg, dict):
+                        hmsg['content'] = content
+                        hmsg['metadata']['edited'] = True
+                    break
 
-                db.commit()
-                return {"status": "ok"}
-            finally:
-                db.close()
+            db.commit()
+            return {"status": "ok"}
         except KeyError:
             raise HTTPException(404, "Session not found")
         except HTTPException:
@@ -619,7 +581,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(500, str(e))
 
     @router.post("/api/session/{session_id}/mark-stopped")
-    async def mark_stopped(request: Request, session_id: str):
+    def mark_stopped(request: Request, session_id: str, db: Session = Depends(get_db)):
         """Mark the last assistant message as stopped by user."""
         _verify_session_owner(request, session_id)
         try:
@@ -641,30 +603,25 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                         if not msg['metadata'].get('model'):
                             msg['metadata']['model'] = session.model
                     break
-            # Also update in DB
-            db = SessionLocal()
-            try:
-                import json as _json
-                db_messages = (
-                    db.query(DbChatMessage)
-                    .filter(DbChatMessage.session_id == session_id, DbChatMessage.role == 'assistant')
-                    .order_by(DbChatMessage.timestamp.desc())
-                    .first()
-                )
-                if db_messages:
-                    meta = {}
-                    if db_messages.meta_data:
-                        try:
-                            meta = _json.loads(db_messages.meta_data)
-                        except (json.JSONDecodeError, ValueError):
-                            pass
-                    meta['stopped'] = True
-                    if not meta.get('model'):
-                        meta['model'] = session.model
-                    db_messages.meta_data = _json.dumps(meta)
-                    db.commit()
-            finally:
-                db.close()
+            import json as _json
+            db_messages = (
+                db.query(DbChatMessage)
+                .filter(DbChatMessage.session_id == session_id, DbChatMessage.role == 'assistant')
+                .order_by(DbChatMessage.timestamp.desc())
+                .first()
+            )
+            if db_messages:
+                meta = {}
+                if db_messages.meta_data:
+                    try:
+                        meta = _json.loads(db_messages.meta_data)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                meta['stopped'] = True
+                if not meta.get('model'):
+                    meta['model'] = session.model
+                db_messages.meta_data = _json.dumps(meta)
+                db.commit()
             session_manager.save_sessions()
             return {"status": "ok"}
         except KeyError:
@@ -674,7 +631,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(500, str(e))
 
     @router.post("/api/session/{session_id}/update-last-meta")
-    async def update_last_meta(request: Request, session_id: str):
+    async def update_last_meta(request: Request, session_id: str, db: Session = Depends(get_db)):
         """Merge metadata into the last assistant message (e.g. save variants)."""
         _verify_session_owner(request, session_id)
         try:
@@ -682,7 +639,6 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             meta_update = body.get("metadata", {})
             session = session_manager.get_session(session_id)
 
-            # Update in-memory
             for msg in reversed(session.history):
                 if (isinstance(msg, ChatMessage) and msg.role == 'assistant') or \
                    (isinstance(msg, dict) and msg.get('role') == 'assistant'):
@@ -696,26 +652,21 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                         msg['metadata'].update(meta_update)
                     break
 
-            # Update in DB
-            db = SessionLocal()
-            try:
-                import json as _json
-                db_msg = (
-                    db.query(DbChatMessage)
-                    .filter(DbChatMessage.session_id == session_id, DbChatMessage.role == 'assistant')
-                    .order_by(DbChatMessage.timestamp.desc())
-                    .first()
-                )
-                if db_msg:
-                    meta = {}
-                    if db_msg.meta_data:
-                        try: meta = _json.loads(db_msg.meta_data)
-                        except (json.JSONDecodeError, ValueError): pass
-                    meta.update(meta_update)
-                    db_msg.meta_data = _json.dumps(meta)
-                    db.commit()
-            finally:
-                db.close()
+            import json as _json
+            db_msg = (
+                db.query(DbChatMessage)
+                .filter(DbChatMessage.session_id == session_id, DbChatMessage.role == 'assistant')
+                .order_by(DbChatMessage.timestamp.desc())
+                .first()
+            )
+            if db_msg:
+                meta = {}
+                if db_msg.meta_data:
+                    try: meta = _json.loads(db_msg.meta_data)
+                    except (json.JSONDecodeError, ValueError): pass
+                meta.update(meta_update)
+                db_msg.meta_data = _json.dumps(meta)
+                db.commit()
             session_manager.save_sessions()
             return {"status": "ok"}
         except KeyError:
@@ -725,7 +676,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(500, str(e))
 
     @router.post("/api/session/{session_id}/merge-last-assistant")
-    async def merge_last_assistant(request: Request, session_id: str):
+    async def merge_last_assistant(request: Request, session_id: str, db: Session = Depends(get_db)):
         """Merge the last two assistant messages into one (for continue)."""
         _verify_session_owner(request, session_id)
         try:
@@ -781,35 +732,27 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             for ri in sorted(remove_indices, reverse=True):
                 session.history.pop(ri)
 
-            # Update DB
-            db = SessionLocal()
-            try:
-                import json as _json
-                db_messages = (
-                    db.query(DbChatMessage)
-                    .filter(DbChatMessage.session_id == session_id)
-                    .order_by(DbChatMessage.timestamp)
-                    .all()
-                )
-                # Find last two assistant messages in DB
-                ai_db = [(i, m) for i, m in enumerate(db_messages) if m.role == 'assistant']
-                if len(ai_db) >= 2:
-                    (db_idx1, db1), (db_idx2, db2) = ai_db[-2], ai_db[-1]
-                    if _has_immediate_continue_marker(db_messages, db_idx1, db_idx2):
-                        db1.content = merged_content
-                        db1.meta_data = _json.dumps(merged_meta)
+            import json as _json
+            db_messages = (
+                db.query(DbChatMessage)
+                .filter(DbChatMessage.session_id == session_id)
+                .order_by(DbChatMessage.timestamp)
+                .all()
+            )
+            # Find last two assistant messages in DB
+            ai_db = [(i, m) for i, m in enumerate(db_messages) if m.role == 'assistant']
+            if len(ai_db) >= 2:
+                (db_idx1, db1), (db_idx2, db2) = ai_db[-2], ai_db[-1]
+                if _has_immediate_continue_marker(db_messages, db_idx1, db_idx2):
+                    db1.content = merged_content
+                    db1.meta_data = _json.dumps(merged_meta)
 
-                        # Mirror the in-memory deletion: remove the second assistant
-                        # message and ONLY the "continue" user message between them
-                        # (not arbitrary tool/system/user rows). The old
-                        # range-delete destroyed every row between the two assistant
-                        # messages, desyncing the DB from the in-memory history.
-                        for _row in _merge_continue_rows_to_delete(db_messages, db1, db2):
-                            db.delete(_row)
+                    # Mirror the in-memory deletion: the second assistant message
+                    # and only the "continue" user message between them.
+                    for _row in _merge_continue_rows_to_delete(db_messages, db1, db2):
+                        db.delete(_row)
 
-                        db.commit()
-            finally:
-                db.close()
+                    db.commit()
             session_manager.save_sessions()
             return {"status": "ok", "merged": True}
         except KeyError:
@@ -826,10 +769,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             body = await request.json()
             keep_count = body.get("keep_count", 0)
 
-            # Get the source session. keep_count indexes into source.history,
-            # so this must go through get_session — reading the cache directly
-            # forks an empty transcript out of a metadata-only session after a
-            # restart (display pagination no longer hydrates it).
+            # keep_count indexes source.history, so hydrate through get_session.
             try:
                 source = session_manager.get_session(session_id)
             except KeyError:
@@ -837,7 +777,6 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             if not source:
                 raise HTTPException(404, "Session not found")
 
-            # Create new session
             new_id = str(uuid.uuid4())
             fork_name = f"\u2ADD {source.name}"
             new_session = session_manager.create_session(
@@ -853,11 +792,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             # Copy messages up to keep_count
             msgs_to_copy = source.history[:keep_count]
             for msg in msgs_to_copy:
-                # Copy the metadata dict. Sharing it would let the fork's
-                # persistence (add_message -> _persist_message stamps
-                # _db_id/timestamp onto the dict) mutate the SOURCE session's
-                # in-memory messages, corrupting their _db_id and breaking
-                # edit/delete-by-id on the original conversation.
+                # Copy the metadata: persisting the fork stamps _db_id onto it.
                 meta = dict(msg.metadata) if isinstance(msg.metadata, dict) else None
                 new_session.add_message(ChatMessage(msg.role, msg.content, meta))
             try:
@@ -949,7 +884,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(500, str(e))
 
     @router.post("/api/session/{session_id}/memory-extraction")
-    async def set_session_memory_extraction(request: Request, session_id: str) -> Dict[str, Any]:
+    async def set_session_memory_extraction(request: Request, session_id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
         """Toggle automatic memory extraction for one chat session."""
         _verify_session_owner(request, session_id)
         try:
@@ -965,7 +900,6 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(400, "Missing enabled")
         enabled = bool(body.get("enabled"))
 
-        db = SessionLocal()
         try:
             db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
             if not db_session:
@@ -980,11 +914,9 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             db.rollback()
             logger.error(f"Memory extraction toggle error {session_id}: {e}")
             raise HTTPException(500, "Failed to update memory extraction")
-        finally:
-            db.close()
 
     @router.post("/api/session/{session_id}/skill-injection")
-    async def set_session_skill_injection(request: Request, session_id: str) -> Dict[str, Any]:
+    async def set_session_skill_injection(request: Request, session_id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
         """Toggle skill injection for one chat session."""
         _verify_session_owner(request, session_id, session_manager)
         try:
@@ -1000,7 +932,6 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(400, "Missing enabled")
         enabled = bool(body.get("enabled"))
 
-        db = SessionLocal()
         try:
             db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
             if not db_session:
@@ -1019,11 +950,9 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             db.rollback()
             logger.error(f"Skill injection toggle error {session_id}: {e}")
             raise HTTPException(500, "Failed to update skill injection")
-        finally:
-            db.close()
 
     @router.post("/api/session/{session_id}/memory-injection")
-    async def set_session_memory_injection(request: Request, session_id: str) -> Dict[str, Any]:
+    async def set_session_memory_injection(request: Request, session_id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
         """Toggle saved-memory injection for one chat session."""
         _verify_session_owner(request, session_id, session_manager)
         try:
@@ -1039,7 +968,6 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(400, "Missing enabled")
         enabled = bool(body.get("enabled"))
 
-        db = SessionLocal()
         try:
             db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
             if not db_session:
@@ -1056,11 +984,9 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             db.rollback()
             logger.error(f"Memory injection toggle error {session_id}: {e}")
             raise HTTPException(500, "Failed to update memory injection")
-        finally:
-            db.close()
 
     @router.post("/api/session/{session_id}/generation-settings")
-    async def set_session_generation_settings(request: Request, session_id: str) -> Dict[str, Any]:
+    async def set_session_generation_settings(request: Request, session_id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
         _verify_session_owner(request, session_id, session_manager)
         try:
             session = session_manager.get_session(session_id)
@@ -1095,167 +1021,19 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         else:
             max_tokens = getattr(session, "max_tokens_override", None)
 
-        db = SessionLocal()
-        try:
-            row = db.query(DbSession).filter(DbSession.id == session_id).first()
-            if not row:
-                raise HTTPException(404, "Session not found")
-            row.thinking_mode, row.temperature_override, row.max_tokens_override = mode, temperature, max_tokens
-            db.commit()
-            session.thinking_mode, session.temperature_override, session.max_tokens_override = mode, temperature, max_tokens
-            resp_effort = mode[7:] if mode.startswith("effort:") else ("default" if mode in {"", "off"} else None)
-            return {
-                "status": "success",
-                "thinking_mode": mode,
-                "reasoning_effort": resp_effort,
-                "temperature_override": temperature,
-                "max_tokens_override": max_tokens,
-            }
-        finally:
-            db.close()
-
-    @router.post("/api/session/{session_id}/compact")
-    async def compact_session(request: Request, session_id: str):
-        """Manually trigger context compaction for a session."""
-        _verify_session_owner(request, session_id)
-        from src.auth_helpers import effective_user
-        owner = effective_user(request)
-        try:
-            session = session_manager.get_session(session_id)
-        except KeyError:
+        row = db.query(DbSession).filter(DbSession.id == session_id).first()
+        if not row:
             raise HTTPException(404, "Session not found")
-        _reject_compact_during_active_run(session_id)
-
-        try:
-            from src.model_context import estimate_tokens, get_context_length
-            from src.llm_core import llm_call_async
-            from src.endpoint_resolver import resolve_endpoint
-
-            if len(session.history) < 6:
-                return {"status": "ok", "message": "Not enough messages to compact"}
-
-            ctx_len = get_context_length(session.endpoint_url, session.model)
-            messages_before = session.get_context_messages()
-            used_before = estimate_tokens(messages_before)
-            pct_before = round((used_before / ctx_len) * 100, 1) if ctx_len else 0
-            msg_count_before = len(session.history)
-
-            # Keep only last 4 messages, summarize the rest
-            keep_count = 4
-            older = session.history[:-keep_count]
-            recent = session.history[-keep_count:]
-
-            # Build text to summarize
-            convo_text = "\n".join(
-                f"{_message_role(m).upper()}: "
-                f"{_message_text(m)[:2000]}"
-                for m in older
-            )
-
-            # Use utility model if available
-            from src.utility_effort import effort_for_call
-            util_url, util_model, util_headers = resolve_endpoint(
-                "utility",
-                fallback_url=getattr(session, "endpoint_url", None),
-                fallback_model=getattr(session, "model", None),
-                fallback_headers=getattr(session, "headers", None),
-                owner=owner or None,
-            )
-            compact_url = util_url or session.endpoint_url
-            compact_model = util_model or session.model
-            compact_headers = util_headers if util_url else session.headers
-
-            from src.context_compactor import SELF_SUMMARY_SYSTEM_PROMPT, normalize_compaction_summary
-            compaction_count = sum(1 for m in session.history if isinstance(m, ChatMessage) and "[Conversation summary" in (m.content or ""))
-            sys_prompt = SELF_SUMMARY_SYSTEM_PROMPT.replace("{count}", str(len(older))).replace("{n}", str(compaction_count + 1))
-            summary = await llm_call_async(
-                compact_url, compact_model,
-                [
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": convo_text},
-                ],
-                temperature=0.2, max_tokens=1024,
-                headers=compact_headers, timeout=30,
-                reasoning_effort=effort_for_call(compact_url, compact_model, owner, session),
-            )
-            summary = normalize_compaction_summary(summary)
-
-            # Replace session history: summary as system message + recent messages
-            # System message holds the full summary for AI context
-            system_summary = ChatMessage(
-                role="system",
-                content=f"[Conversation summary — {len(older)} earlier messages were compacted]\n\n{summary}",
-                metadata={"compacted": True, "hidden": True},
-            )
-            # Visible assistant message just shows stats
-            summary_msg = ChatMessage(
-                role="assistant",
-                content=f"**Conversation compacted** — {len(older)} messages summarized, {len(recent)} kept.",
-                metadata={"compacted": True, "messages_removed": len(older)},
-            )
-            new_history = [system_summary, summary_msg] + list(recent)
-            session.history = new_history
-            session.message_count = len(session.history)
-            logger.info(f"Compact: session {session_id} history now has {len(session.history)} messages (was {msg_count_before})")
-
-            # Update DB: delete old messages, insert summary
-            db = SessionLocal()
-            try:
-                db_msgs = db.query(DbChatMessage).filter(
-                    DbChatMessage.session_id == session_id
-                ).order_by(DbChatMessage.timestamp).all()
-
-                # Delete all but the last keep_count
-                for m in db_msgs[:-keep_count]:
-                    db.delete(m)
-
-                # Insert system summary (hidden, for AI context) and visible summary
-                import json as _json
-                import uuid
-                from datetime import datetime, timezone
-                now = datetime.now(timezone.utc)
-                db_sys_summary = DbChatMessage(
-                    id=str(uuid.uuid4()),
-                    session_id=session_id,
-                    role="system",
-                    content=system_summary.content,
-                    meta_data=_json.dumps(system_summary.metadata),
-                    timestamp=now,
-                )
-                db.add(db_sys_summary)
-                db_summary = DbChatMessage(
-                    id=str(uuid.uuid4()),
-                    session_id=session_id,
-                    role="assistant",
-                    content=summary_msg.content,
-                    meta_data=_json.dumps(summary_msg.metadata),
-                    timestamp=now,
-                )
-                db.add(db_summary)
-
-                # Update session record
-                db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
-                if db_session:
-                    db_session.message_count = len(session.history)
-                    db_session.updated_at = datetime.now(timezone.utc)
-                db.commit()
-            finally:
-                db.close()
-
-            session_manager.save_sessions()
-
-            used_after = estimate_tokens(session.get_context_messages())
-            pct_after = round((used_after / ctx_len) * 100, 1) if ctx_len else 0
-
-            return {
-                "status": "ok",
-                "message": f"Compacted: {msg_count_before} msgs → {len(session.history)} msgs ({pct_before}% → {pct_after}%)",
-                "before": pct_before,
-                "after": pct_after,
-            }
-
-        except Exception as e:
-            logger.error(f"Manual compact error {session_id}: {e}")
-            raise HTTPException(500, str(e))
+        row.thinking_mode, row.temperature_override, row.max_tokens_override = mode, temperature, max_tokens
+        db.commit()
+        session.thinking_mode, session.temperature_override, session.max_tokens_override = mode, temperature, max_tokens
+        resp_effort = mode[7:] if mode.startswith("effort:") else ("default" if mode in {"", "off"} else None)
+        return {
+            "status": "success",
+            "thinking_mode": mode,
+            "reasoning_effort": resp_effort,
+            "temperature_override": temperature,
+            "max_tokens_override": max_tokens,
+        }
 
     return router

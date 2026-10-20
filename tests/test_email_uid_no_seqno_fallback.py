@@ -17,8 +17,8 @@ This is distinct from #1874, which fixes the auto-spam poller's `_imap_move` in
 """
 import pytest
 
-from routes import email_routes
-from routes.email_routes import _store_email_flag, _move_email_message
+from routes.email import email_routes
+from routes.email.email_routes import _store_email_flag, _move_email_message
 
 
 class _FakeConn:

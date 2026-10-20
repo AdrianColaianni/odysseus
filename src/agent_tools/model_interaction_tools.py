@@ -251,21 +251,3 @@ async def list_models(content: str, session_id: Optional[str] = None, owner: Opt
     finally:
         db.close()
 
-
-# ---------------------------------------------------------------------------
-# Handler classes registered in TOOL_HANDLERS
-# ---------------------------------------------------------------------------
-
-class ChatWithModelTool:
-    async def execute(self, content: str, ctx: dict) -> Dict:
-        return await chat_with_model(content, ctx.get("session_id"), owner=ctx.get("owner"))
-
-
-class AskTeacherTool:
-    async def execute(self, content: str, ctx: dict) -> Dict:
-        return await ask_teacher(content, ctx.get("session_id"), owner=ctx.get("owner"))
-
-
-class ListModelsTool:
-    async def execute(self, content: str, ctx: dict) -> Dict:
-        return await list_models(content, ctx.get("session_id"), owner=ctx.get("owner"))

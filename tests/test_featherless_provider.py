@@ -1,9 +1,6 @@
 """Tests for Featherless provider detection, setup, lazy discovery, and catalog search."""
 
-import asyncio
 import json
-import shutil
-import subprocess
 import sys
 import time
 import types
@@ -16,6 +13,8 @@ import pytest
 from fastapi import HTTPException
 
 from tests.helpers.import_state import clear_fake_endpoint_resolver_modules, preserve_import_state
+from tests.helpers.node import run_node_module
+from tests.helpers.routes import route_endpoint
 
 with preserve_import_state("core.database", "src.database", "core.session_manager", "routes.model_routes"):
     clear_fake_endpoint_resolver_modules()
@@ -55,13 +54,6 @@ _ADMIN_JS = _REPO / "static" / "js" / "admin.js"
 _ROUTER = model_routes.setup_model_routes(model_discovery=None)
 _should_refresh_endpoint = _ROUTER._should_refresh_endpoint
 search_endpoint_catalog = _ROUTER._search_endpoint_catalog
-
-
-def _route_endpoint(router, path, method="GET"):
-    for route in router.routes:
-        if getattr(route, "path", "") == path and method in getattr(route, "methods", set()):
-            return route.endpoint
-    raise AssertionError(f"{method} {path} route not found")
 
 
 # ============================================================
@@ -243,7 +235,7 @@ class _FakeDb:
 
 
 def test_create_featherless_endpoint(monkeypatch):
-    create = _route_endpoint(_ROUTER, "/api/model-endpoints", "POST")
+    create = route_endpoint(_ROUTER, "/api/model-endpoints", "POST")
     added = []
     class FakeDb:
         def __init__(self):
@@ -298,7 +290,7 @@ def test_create_featherless_endpoint(monkeypatch):
 
 
 def test_list_featherless_endpoint(monkeypatch):
-    list_ep = _route_endpoint(_ROUTER, "/api/model-endpoints", "GET")
+    list_ep = route_endpoint(_ROUTER, "/api/model-endpoints", "GET")
     ep = SimpleNamespace(
         id="ep-fl",
         name="Featherless.ai",
@@ -590,77 +582,39 @@ async def test_featherless_catalog_search_error_handling(monkeypatch):
 # 6. Frontend JS Tests (Node)
 # ============================================================
 
-@pytest.mark.skipif(not shutil.which("node"), reason="node not on PATH")
-class TestFeatherlessFrontend:
-    def test_featherless_js_panel_and_helpers(self):
-        js = f"""
-          import fs from 'node:fs';
-          import {{ isChatgptSubscriptionEndpoint }} from '{(_REPO / 'static' / 'js' / 'chatgptSubscriptionUsage.js').as_posix()}';
-          const source = fs.readFileSync('{_ADMIN_JS.as_posix()}', 'utf8');
-          const fnStart = source.indexOf('function shouldDisplayEndpointBaseUrl');
-          const fnEnd = source.indexOf('// ChatGPT per-endpoint usage panel', fnStart);
-          const fnCode = source.slice(fnStart, fnEnd);
-          const fns = new Function('isChatgptSubscriptionEndpoint', 'esc',
-            fnCode + '; return {{ shouldDisplayEndpointBaseUrl, isFeatherlessEndpoint, renderFeatherlessPanel }};'
-          )(isChatgptSubscriptionEndpoint, x => String(x));
+def test_featherless_panel_is_detected_and_starts_in_pinned_mode():
+    js = f"""
+      import fs from 'node:fs';
+      import {{ isChatgptSubscriptionEndpoint }} from '{(_REPO / 'static' / 'js' / 'chatgptSubscriptionUsage.js').as_posix()}';
+      const source = fs.readFileSync('{_ADMIN_JS.as_posix()}', 'utf8');
+      const fnStart = source.indexOf('function shouldDisplayEndpointBaseUrl');
+      const fnEnd = source.indexOf('// ChatGPT per-endpoint usage panel', fnStart);
+      const fns = new Function('isChatgptSubscriptionEndpoint', 'esc',
+        source.slice(fnStart, fnEnd) + '; return {{ isFeatherlessEndpoint, renderFeatherlessPanel }};'
+      )(isChatgptSubscriptionEndpoint, x => String(x));
 
-          const ep = {{
-            id: 'fl-1',
-            base_url: 'https://api.featherless.ai/v1',
-            provider: 'featherless',
-            pinned_models: ['mistralai/Mistral-7B-Instruct-v0.2']
-          }};
-
-          const isFl = fns.isFeatherlessEndpoint(ep);
-          const showUrl = fns.shouldDisplayEndpointBaseUrl(ep);
-
-          // Test renderFeatherlessPanel DOM construction
-          const mockPanel = {{
-            dataset: {{}},
-            innerHTML: '',
-            querySelector: function(sel) {{
-              if (sel === '.featherless-search-input') return {{ addEventListener: () => {{}}, value: '' }};
-              if (sel === '.featherless-enabled-list') return {{ innerHTML: '', querySelectorAll: () => [] }};
-              if (sel === '.featherless-enabled-count') return {{ textContent: '' }};
-              if (sel === '.featherless-results-list') return {{ innerHTML: '', querySelectorAll: () => [] }};
-              if (sel === '.featherless-pagination') return {{ style: {{}} }};
-              if (sel === '.featherless-load-more') return {{ addEventListener: () => {{}} }};
-              if (sel === '.featherless-spinner-host') return {{ style: {{}} }};
-              return null;
-            }},
-            querySelectorAll: function() {{ return []; }}
-          }};
-
-          const mockRow = {{
-            querySelector: function() {{ return {{ textContent: '' }}; }}
-          }};
-
-          fns.renderFeatherlessPanel(mockPanel, ep, mockRow);
-
-          console.log(JSON.stringify({{
-            isFl,
-            showUrl,
-            pickerMode: mockPanel.dataset.pickerMode,
-            hasHeader: mockPanel.innerHTML.includes('Featherless Catalog'),
-            hasSearchBar: mockPanel.innerHTML.includes('featherless-search-bar'),
-            hasEnabledSection: mockPanel.innerHTML.includes('featherless-enabled-section'),
-            hasResultsSection: mockPanel.innerHTML.includes('featherless-results-section'),
-          }}));
-        """
-        proc = subprocess.run(
-            ["node", "--input-type=module"],
-            input=js,
-            capture_output=True,
-            text=True,
-            cwd=str(_REPO),
-            timeout=30,
-        )
-        assert proc.returncode == 0, proc.stderr
-        data = json.loads(proc.stdout.strip())
-        assert data["isFl"] is True
-        assert data["showUrl"] is False
-        assert data["pickerMode"] == "pinned"
-        assert data["hasHeader"] is True
-        assert data["hasSearchBar"] is True
-        assert data["hasEnabledSection"] is True
-        assert data["hasResultsSection"] is True
+      const ep = {{
+        id: 'fl-1',
+        base_url: 'https://api.featherless.ai/v1',
+        provider: 'featherless',
+        pinned_models: ['mistralai/Mistral-7B-Instruct-v0.2']
+      }};
+      const mockPanel = {{
+        dataset: {{}},
+        innerHTML: '',
+        querySelector: function(sel) {{
+          if (sel === '.featherless-search-input') return {{ addEventListener: () => {{}}, value: '' }};
+          if (sel === '.featherless-enabled-list') return {{ innerHTML: '', querySelectorAll: () => [] }};
+          if (sel === '.featherless-enabled-count') return {{ textContent: '' }};
+          if (sel === '.featherless-results-list') return {{ innerHTML: '', querySelectorAll: () => [] }};
+          if (sel === '.featherless-pagination') return {{ style: {{}} }};
+          if (sel === '.featherless-load-more') return {{ addEventListener: () => {{}} }};
+          if (sel === '.featherless-spinner-host') return {{ style: {{}} }};
+          return null;
+        }},
+        querySelectorAll: function() {{ return []; }}
+      }};
+      fns.renderFeatherlessPanel(mockPanel, ep, {{ querySelector: () => ({{ textContent: '' }}) }});
+      console.log(JSON.stringify({{ isFl: fns.isFeatherlessEndpoint(ep), pickerMode: mockPanel.dataset.pickerMode }}));
+    """
+    assert run_node_module(js) == {"isFl": True, "pickerMode": "pinned"}

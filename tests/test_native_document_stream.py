@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers.fake_llm_stream import sse_client
+
 
 def test_document_followup_does_not_shadow_tool_inventory():
     path = Path('routes/chat_routes.py')
@@ -26,34 +28,20 @@ async def test_native_document_arguments_stream_before_save(monkeypatch):
     content = '<svg xmlns="http://www.w3.org/2000/svg"><text>AI</text></svg>'
     raw = json.dumps({'title': 'logo.svg', 'language': 'svg', 'content': content})
     saved = []
-    rounds = iter([[
+    deltas = [
         {'tool_calls': [{'index': 0, 'id': 'create-logo', 'function': {
             'name': 'create_document' if index == 0 else '', 'arguments': raw[index:index + 8]}}]}
         for index in range(0, len(raw), 8)
-    ], [{'content': 'Created the logo.'}]])
-
-    class Response:
-        def __init__(self, deltas): self.deltas = deltas
-        async def __aenter__(self): return self
-        async def __aexit__(self, *args): pass
-        def raise_for_status(self): pass
-        async def aiter_lines(self):
-            for delta in self.deltas:
-                yield 'data: ' + json.dumps({'choices': [{'delta': delta}]})
-            yield 'data: [DONE]'
-
-    class Client:
-        def __init__(self, **kwargs): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *args): pass
-        def stream(self, *args, **kwargs): return Response(next(rounds))
+    ]
+    rounds = [[{'choices': [{'delta': delta}]} for delta in deltas],
+              {'choices': [{'delta': {'content': 'Created the logo.'}}]}]
 
     async def execute(block, **kwargs):
         saved.append(True)
         return 'create_document', {'doc_id': 'logo', 'title': 'logo.svg',
                                   'language': 'svg', 'content': content, 'version': 1}
 
-    monkeypatch.setattr(module.httpx, 'AsyncClient', Client)
+    monkeypatch.setattr(module.httpx, 'AsyncClient', sse_client(rounds))
     monkeypatch.setattr(module, 'execute_tool_block', execute)
     schemas = [s for s in FUNCTION_TOOL_SCHEMAS if s['function']['name'] == 'create_document']
     contract = resolve_full_inventory_contract(schemas=schemas, policy=ToolPolicy())

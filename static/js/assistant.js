@@ -5,7 +5,7 @@
 // singleton via /api/assistant/session and hands it to selectSession() so we
 // reuse the full existing chat render path.
 
-import uiModule from './ui.js?v=20260916largetoolscroll1';
+import uiModule, { esc } from './ui.js?v=20260916largetoolscroll1';
 import { selectSession } from './sessions.js';
 import { sortModelIds } from './modelSort.js';
 
@@ -15,7 +15,7 @@ let _cachedSettings = null;   // most recent GET /api/assistant/settings payload
 let _modalEl = null;
 
 async function _fetchJSON(url, opts = {}) {
-  const res = await fetch(url, { credentials: 'same-origin', ...opts });
+  const res = await fetch(url, opts);
   if (!res.ok) throw new Error(`${url} → ${res.status}`);
   return res.json();
 }
@@ -45,7 +45,6 @@ async function _getSettings(force = false) {
 async function _saveSettings(payload) {
   const res = await fetch(`${API}/settings`, {
     method: 'PATCH',
-    credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
@@ -67,7 +66,6 @@ async function _runCheckInNow(taskId) {
   try {
     await fetch(`${API}/run/${encodeURIComponent(taskId)}`, {
       method: 'POST',
-      credentials: 'same-origin',
     });
     uiModule.showToast('Check-in running…');
   } catch (e) {
@@ -112,12 +110,6 @@ function _ensureModalEl() {
   return modal;
 }
 
-function _esc(s) {
-  return (s || '').replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[c]));
-}
-
 // Tool groups for the tool selector UI
 const TOOL_GROUPS = {
   'Email': ['list_emails', 'read_email', 'download_attachment', 'send_email', 'reply_to_email', 'archive_email', 'delete_email', 'mark_email_read'],
@@ -141,20 +133,20 @@ function _renderSettingsBody(body, data, tzList) {
   const checkIns = data.check_ins || [];
   const enabledTools = new Set(crew.enabled_tools || []);
   const tzOptions = tzList.map((z) =>
-    `<option value="${_esc(z)}"${z === crew.timezone ? ' selected' : ''}>${_esc(z)}</option>`
+    `<option value="${esc(z)}"${z === crew.timezone ? ' selected' : ''}>${esc(z)}</option>`
   ).join('');
   const checkInsHTML = checkIns.map((c) => `
-    <div class="assistant-checkin-row" data-task-id="${_esc(c.id)}">
+    <div class="assistant-checkin-row" data-task-id="${esc(c.id)}">
       <div class="assistant-checkin-head">
         <input type="checkbox" class="assistant-checkin-enabled" ${c.enabled ? 'checked' : ''} title="Enable this check-in" />
-        <input type="text" class="assistant-checkin-name" value="${_esc(c.name)}" placeholder="Name" />
-        <input type="time" class="assistant-checkin-time" value="${_esc(c.scheduled_time || '')}" />
+        <input type="text" class="assistant-checkin-name" value="${esc(c.name)}" placeholder="Name" />
+        <input type="time" class="assistant-checkin-time" value="${esc(c.scheduled_time || '')}" />
         <button type="button" class="assistant-checkin-run" title="Run now">Run now</button>
       </div>
-      <textarea class="assistant-checkin-prompt" rows="3" placeholder="Prompt for this check-in">${_esc(c.prompt || '')}</textarea>
+      <textarea class="assistant-checkin-prompt" rows="3" placeholder="Prompt for this check-in">${esc(c.prompt || '')}</textarea>
       <div class="assistant-checkin-meta">
-        ${c.next_run ? `next run: ${_esc(c.next_run)}` : ''}
-        ${c.last_run ? ` · last run: ${_esc(c.last_run)}` : ''}
+        ${c.next_run ? `next run: ${esc(c.next_run)}` : ''}
+        ${c.last_run ? ` · last run: ${esc(c.last_run)}` : ''}
         ${typeof c.run_count === 'number' ? ` · ${c.run_count} runs` : ''}
       </div>
     </div>`).join('');
@@ -162,11 +154,11 @@ function _renderSettingsBody(body, data, tzList) {
   // Tool selector grouped by category
   let toolsHTML = '';
   for (const [group, tools] of Object.entries(TOOL_GROUPS)) {
-    toolsHTML += `<div class="assistant-tool-group"><span class="assistant-tool-group-label">${_esc(group)}</span>`;
+    toolsHTML += `<div class="assistant-tool-group"><span class="assistant-tool-group-label">${esc(group)}</span>`;
     for (const t of tools) {
       const checked = enabledTools.has(t) ? ' checked' : '';
       const label = t.replace(/_/g, ' ');
-      toolsHTML += `<label class="assistant-tool-item"><input type="checkbox" class="assistant-tool-cb" value="${_esc(t)}"${checked} /><span>${_esc(label)}</span></label>`;
+      toolsHTML += `<label class="assistant-tool-item"><input type="checkbox" class="assistant-tool-cb" value="${esc(t)}"${checked} /><span>${esc(label)}</span></label>`;
     }
     toolsHTML += '</div>';
   }
@@ -175,7 +167,7 @@ function _renderSettingsBody(body, data, tzList) {
     <div class="assistant-settings-form">
       <label class="assistant-field">
         <span>Name</span>
-        <input type="text" id="assistant-name" value="${_esc(crew.name)}" placeholder="Assistant" />
+        <input type="text" id="assistant-name" value="${esc(crew.name)}" placeholder="Assistant" />
       </label>
       <div class="assistant-field">
         <span style="display:flex;align-items:center;gap:8px;">Personality
@@ -183,7 +175,7 @@ function _renderSettingsBody(body, data, tzList) {
             <option value="">-- pick from persona --</option>
           </select>
         </span>
-        <textarea id="assistant-personality" rows="6" placeholder="Describe the assistant's personality, tone, and behavior...">${_esc(crew.personality || '')}</textarea>
+        <textarea id="assistant-personality" rows="6" placeholder="Describe the assistant's personality, tone, and behavior...">${esc(crew.personality || '')}</textarea>
       </div>
       <div class="assistant-field-row">
         <label class="assistant-field">
@@ -204,7 +196,7 @@ function _renderSettingsBody(body, data, tzList) {
         <label class="assistant-field" style="flex:1;">
           <span>Model</span>
           <select id="assistant-model" style="width:100%;">
-            <option value="${_esc(crew.model || '')}">${_esc(crew.model || '(default)')}</option>
+            <option value="${esc(crew.model || '')}">${esc(crew.model || '(default)')}</option>
           </select>
         </label>
       </div>
@@ -238,7 +230,7 @@ function _renderSettingsBody(body, data, tzList) {
       const url = ep.base_url || '';
       const name = ep.name || url;
       const sel = (crew.endpoint_url && url.includes(crew.endpoint_url.replace('/v1', '').replace(/\/$/, ''))) ? ' selected' : '';
-      epHTML += `<option value="${_esc(url)}"${sel}>${_esc(name)}</option>`;
+      epHTML += `<option value="${esc(url)}"${sel}>${esc(name)}</option>`;
     }
     epSelect.innerHTML = epHTML;
     // When endpoint changes, load its models
@@ -254,7 +246,7 @@ function _renderSettingsBody(body, data, tzList) {
         const modelIds = (models.models || models || []).map(m => typeof m === 'string' ? m : (m.id || m.name || '')).filter(Boolean);
         for (const mid of sortModelIds(modelIds)) {
           const sel = mid === crew.model ? ' selected' : '';
-          mHTML += `<option value="${_esc(mid)}"${sel}>${_esc(mid.split('/').pop())}</option>`;
+          mHTML += `<option value="${esc(mid)}"${sel}>${esc(mid.split('/').pop())}</option>`;
         }
         modelSelect.innerHTML = mHTML || '<option value="">(no models)</option>';
       } catch { modelSelect.innerHTML = '<option value="">(failed)</option>'; }
@@ -299,7 +291,7 @@ function _renderSettingsBody(body, data, tzList) {
           for (const p of allPresets) {
             if (!p.system_prompt) continue;
             const name = p.character_name || p.name || p._key || 'Unnamed';
-            opts += `<option value="preset:${_esc(p._key || p.name || '')}">${_esc(name)}</option>`;
+            opts += `<option value="preset:${esc(p._key || p.name || '')}">${esc(name)}</option>`;
           }
           opts += '</optgroup>';
         }
@@ -308,7 +300,7 @@ function _renderSettingsBody(body, data, tzList) {
           for (const t of allTemplates) {
             if (!t.system_prompt && !t.personality) continue;
             const name = t.character_name || t.name || 'Unnamed';
-            opts += `<option value="template:${_esc(t.id || t.name || '')}">${_esc(name)}</option>`;
+            opts += `<option value="template:${esc(t.id || t.name || '')}">${esc(name)}</option>`;
           }
           opts += '</optgroup>';
         }
@@ -380,7 +372,7 @@ function _renderSettingsBody(body, data, tzList) {
       const sid = _cachedSettings?.crew?.session_id;
       const _poll = setInterval(async () => {
         try {
-          const res = await fetch(`${API}/run-status/${encodeURIComponent(taskId)}`, { credentials: 'same-origin' });
+          const res = await fetch(`${API}/run-status/${encodeURIComponent(taskId)}`);
           if (!res.ok) return;
           const data = await res.json();
           if (data.status === 'done' || data.status === 'error') {

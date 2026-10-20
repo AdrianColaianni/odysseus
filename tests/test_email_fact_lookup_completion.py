@@ -1,7 +1,7 @@
 from email import message_from_string
 
 from mcp_servers.email_server import _extract_text as mcp_extract_text
-from routes.email_helpers import _extract_text as route_extract_text
+from routes.email.email_helpers import _extract_text as route_extract_text
 from src.agent_loop import (
     _email_fact_lookup_requested,
     _email_lookup_needs_post_synthesis,
@@ -75,8 +75,7 @@ def test_email_lookup_evidence_strips_html_and_is_bounded():
     assert len(evidence) < 230
 
 
-def test_read_email_tool_header_is_clickable_live_and_after_refresh():
-    for path in ("static/js/chat.js", "static/js/chatRenderer.js"):
-        source = open(path, encoding="utf-8").read()
-        assert "'Open this email'" in source
-        assert "_toolHeaderHashLinkHtml(" in source
+def test_read_email_tool_header_is_clickable():
+    source = open("static/js/chatRenderer.js", encoding="utf-8").read()
+    assert "'Open this email'" in source
+    assert "_toolHeaderHashLinkHtml(" in source

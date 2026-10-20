@@ -1,13 +1,18 @@
 """Shared device-flow route helper regressions."""
 
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from routes import device_flow
 
 
-def _client(monkeypatch, now_ref, start_flow, poll_flow):
+def _allow(request: Request):
+    return None
+
+
+def _client(monkeypatch, now_ref, start_flow, poll_flow, admin_gate=_allow):
+    monkeypatch.setattr(device_flow, "require_admin", admin_gate)
     store = device_flow.PendingDeviceFlowStore(time_func=lambda: now_ref[0])
     router = device_flow.create_device_flow_router(
         prefix="/api/test-device",
@@ -18,7 +23,6 @@ def _client(monkeypatch, now_ref, start_flow, poll_flow):
     )
     app = FastAPI()
     app.include_router(router)
-    monkeypatch.setattr(device_flow, "require_admin", lambda request: None)
     return TestClient(app)
 
 
@@ -127,12 +131,10 @@ def test_routes_are_admin_gated(monkeypatch):
     def poll(_request, _pending):
         return device_flow.DeviceFlowPoll.pending()
 
-    client = _client(monkeypatch, now, _start, poll)
-
-    def deny(_request):
+    def deny(request: Request):
         raise HTTPException(403, "admin required")
 
-    monkeypatch.setattr(device_flow, "require_admin", deny)
+    client = _client(monkeypatch, now, _start, poll, admin_gate=deny)
     assert client.post("/api/test-device/device/start").status_code == 403
     assert client.post("/api/test-device/device/poll", data={"poll_id": "missing"}).status_code == 403
     assert client.post("/api/test-device/device/cancel", data={"poll_id": "missing"}).status_code == 403

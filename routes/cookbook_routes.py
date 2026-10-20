@@ -17,7 +17,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, Depends
 
 from src.auth_helpers import require_user
-from src.constants import COOKBOOK_STATE_FILE
+from src.constants import COOKBOOK_SSH_DIR, COOKBOOK_STATE_FILE
 from pydantic import BaseModel
 
 from core.middleware import require_admin
@@ -53,11 +53,9 @@ from routes.cookbook_helpers import (
     _safe_env_prefix, _local_windows_bash_env_prefix, _local_tooling_path_export, _append_serve_preflight_exit_lines,
     _append_serve_exit_code_lines, _append_llama_cpp_linux_accel_build_lines, _cached_model_scan_script,
     load_stored_hf_token,
-    _append_vllm_linux_preflight_lines, _ollama_bind_from_cmd, _pip_install_fallback_chain,
+    _ollama_bind_from_cmd, _pip_install_fallback_chain,
     _pip_install_no_cache, _user_shell_path_bootstrap, _venv_safe_local_pip_install_cmd,
     _diagnose_serve_output, run_ssh_command_async,
-    _ollama_bind_from_cmd, _pip_install_fallback_chain, _pip_install_no_cache,
-    _user_shell_path_bootstrap, _venv_safe_local_pip_install_cmd,
     _append_pip_install_runner_lines, _pip_install_command_without_break_system_packages,
     _normalize_llama_cpp_python_cache_types,
     ModelDownloadRequest, ServeRequest,
@@ -466,175 +464,6 @@ def setup_cookbook_routes() -> APIRouter:
                     task["payload"].pop("hf_token", None)
         return state
 
-    def _diagnose_serve_output(text: str) -> dict | None:
-        """Server-side mirror of the Cookbook UI's common serve diagnoses.
-
-        The browser uses cookbook-diagnosis.js for clickable fixes. This gives
-        the agent/tool path the same structured signal so it can retry with an
-        adjusted command instead of guessing from raw tmux output.
-        """
-        if not text:
-            return None
-        tail = text[-6000:]
-        patterns = [
-            (
-                r"No available memory for the cache blocks|Available KV cache memory:.*-",
-                "No GPU memory left for KV cache after loading model.",
-                [
-                    {"label": "retry with GPU memory utilization 0.95", "op": "replace", "flag": "--gpu-memory-utilization", "value": "0.95"},
-                    {"label": "retry with context 2048", "op": "replace", "flag": "--max-model-len", "value": "2048"},
-                ],
-            ),
-            (
-                r"CUDA out of memory|torch\.cuda\.OutOfMemoryError|CUDA error: out of memory|warming up sampler|max_num_seqs.*gpu_memory_utilization",
-                "GPU ran out of memory during startup or warmup.",
-                [
-                    {"label": "retry with context 4096", "op": "replace", "flag": "--max-model-len", "value": "4096"},
-                    {"label": "retry with GPU memory utilization 0.80", "op": "replace", "flag": "--gpu-memory-utilization", "value": "0.80"},
-                    {"label": "retry with --enforce-eager", "op": "append", "arg": "--enforce-eager"},
-                ],
-            ),
-            (
-                r"not divisib|must be divisible|attention heads.*divisible",
-                "Tensor parallel size is incompatible with the model.",
-                [
-                    {"label": "retry with tensor parallel size 1", "op": "replace", "flag": "--tensor-parallel-size", "value": "1"},
-                    {"label": "retry with tensor parallel size 2", "op": "replace", "flag": "--tensor-parallel-size", "value": "2"},
-                ],
-            ),
-            (
-                r"KV cache.*too (small|large)|max_model_len.*exceeds|maximum.*context",
-                "Context length is too large for available GPU memory.",
-                [
-                    {"label": "retry with context 8192", "op": "replace", "flag": "--max-model-len", "value": "8192"},
-                    {"label": "retry with context 4096", "op": "replace", "flag": "--max-model-len", "value": "4096"},
-                ],
-            ),
-            (
-                r"enable-auto-tool-choice requires --tool-call-parser",
-                "Auto tool choice requires an explicit tool call parser.",
-                [{"label": "retry with Hermes tool parser", "op": "append", "arg": "--tool-call-parser hermes"}],
-            ),
-            (
-                r"Please pass.*trust.remote.code=True|contains custom code which must be executed to correctly load|does not recognize this architecture|model type.*but Transformers does not",
-                "Model requires custom code or newer model support.",
-                [{"label": "retry with --trust-remote-code", "op": "append", "arg": "--trust-remote-code"}],
-            ),
-            (
-                r"Either a revision or a version must be specified|transformers\.integrations\.hub_kernels|kernels/layer",
-                "vLLM/Transformers kernel package mismatch.",
-                [{"label": "update vLLM, Transformers, and kernels on this server", "op": "dependency", "package": "vllm transformers kernels"}],
-            ),
-            (
-                r"Address already in use|bind.*address.*in use",
-                "Port is already in use.",
-                [{"label": "retry on port 8001", "op": "replace", "flag": "--port", "value": "8001"}],
-            ),
-            (
-                r"No CUDA GPUs are available|no GPU.*found|CUDA_VISIBLE_DEVICES.*invalid",
-                "No GPUs are visible to the serve process.",
-                [{"label": "clear Cookbook GPU selection or choose available GPUs", "op": "settings", "field": "gpus", "value": ""}],
-            ),
-            (
-                r"Failed to infer device type|NVML Shared Library Not Found|No module named 'amdsmi'|platform is not available",
-                "vLLM could not find a supported GPU (CUDA or ROCm). "
-                "This machine may have integrated or unsupported graphics only.",
-                [
-                    {"label": "switch to llama.cpp (CPU/Metal, works without a discrete GPU)", "op": "manual"},
-                    {"label": "switch to Ollama (CPU/Metal, works without a discrete GPU)", "op": "manual"},
-                ],
-            ),
-            (
-                r"vllm.*command not found|No module named vllm|ERROR: vLLM is not installed",
-                "vLLM is not installed or not in PATH on this server.",
-                [{"label": "install vLLM in Cookbook Dependencies", "op": "dependency", "package": "vllm"}],
-            ),
-            (
-                r"sgl_kernel[\s\S]*(Python\.h|libnuma\.so\.1|common_ops|libnvrtc\.so)|"
-                r"(Python\.h|libnuma\.so\.1|common_ops|libnvrtc\.so)[\s\S]*sgl_kernel|"
-                r"Could not load any common_ops library|"
-                r"Please ensure sgl_kernel is properly installed",
-                "SGLang native kernel/runtime is missing or mismatched on this server.",
-                [
-                    {"label": "repair sglang-kernel in this Python environment", "op": "dependency", "package": "sglang-kernel"},
-                    {"label": "if libnvrtc is still missing, install the matching CUDA/NVRTC runtime on this host", "op": "manual"},
-                ],
-            ),
-            (
-                r"sglang.*command not found|No module named sglang|SGLang is not installed",
-                "SGLang is not installed or not in PATH on this server.",
-                [{"label": "install SGLang in Cookbook Dependencies", "op": "dependency", "package": "sglang[all]"}],
-            ),
-            (
-                r"No module named ['\"]?mlx_lm|mlx_lm.*command not found|MLX is not installed|MLX LM is not installed",
-                "MLX LM is not installed on this server.",
-                [{"label": "install mlx-lm in Cookbook Dependencies", "op": "dependency", "package": "mlx-lm"}],
-            ),
-            (
-                r"OmniGen2Pipeline|module diffusers has no attribute .*Pipeline|custom_pipeline=.*failed",
-                "This image model uses a custom Diffusers pipeline that the launch environment does not know yet.",
-                [{"label": "update Diffusers image dependencies", "op": "dependency", "package": "diffusers transformers accelerate"}],
-            ),
-            (
-                r"Unable to quantize model of type <class ['\"]mlx_lm\.models\.switch_layers\.QuantizedSwitchLinear['\"]>|QuantizedSwitchLinear",
-                "MLX-LM tried to quantize an already-quantized DeepSeek switch layer.",
-                [
-                    {"label": "relaunch from the cached local Hugging Face snapshot path on this Mac", "op": "manual"},
-                    {"label": "Odysseus now rewrites MLX repo-id launches to a cached snapshot when one exists", "op": "manual"},
-                ],
-            ),
-            # System build deps come BEFORE the generic llama.cpp catch-all
-            # so cmake / build-essential / git missing → a specific OS-package
-            # remediation instead of "install llama-cpp-python[server]" (which
-            # itself fails to compile when cmake is absent).
-            (
-                r"cmake: command not found|cmake.*not found.*[Cc]ould not",
-                "cmake is required to build llama.cpp from source but isn't installed on this server.",
-                [{"label": "install build deps for llama.cpp (apt: cmake build-essential git / pacman: cmake base-devel git / dnf: cmake gcc-c++ make git / brew: cmake git)", "op": "dependency", "package": "llama-cpp-python[server]"}],
-            ),
-            (
-                r"^(make|g\+\+|gcc): command not found|Could not find C\+\+ compiler",
-                "A C/C++ compiler (build-essential) is required to build llama.cpp from source.",
-                [{"label": "install build deps for llama.cpp on this server", "op": "dependency", "package": "llama-cpp-python[server]"}],
-            ),
-            (
-                r"^git: command not found",
-                "git is required to clone the llama.cpp source tree.",
-                [{"label": "install build deps for llama.cpp on this server", "op": "dependency", "package": "llama-cpp-python[server]"}],
-            ),
-            (
-                r"llama-server.*command not found|llama\.cpp.*not found|No module named.*llama_cpp|No module named 'starlette_context'",
-                "llama.cpp / llama-cpp-python dependencies are missing.",
-                [{"label": "install llama.cpp dependencies or llama-cpp-python[server]", "op": "dependency", "package": "llama-cpp-python[server]"}],
-            ),
-            (
-                r"No GGUF found on this host|no \.gguf file|No GGUF file found",
-                "No GGUF file found for this model on this host. The llama.cpp backend needs a .gguf file.",
-                [{"label": "download a GGUF build of this model (repo name usually ends in -GGUF, file like Q4_K_M.gguf)", "op": "manual"}],
-            ),
-            (
-                r"No module named 'torch'|No module named torch|No module named 'torchvision'|No module named torchvision|No module named 'diffusers'|No module named diffusers|No module named 'scipy'|No module named scipy|install scipy if you want to use beta sigmas|requires the Torchvision library",
-                "Diffusion serving requires PyTorch, Torchvision, Diffusers, Accelerate, and SciPy.",
-                [{"label": "install Diffusers image deps in Cookbook Dependencies", "op": "dependency", "package": "diffusers[torch] torchvision accelerate scipy python-multipart"}],
-            ),
-            (
-                r"403 Forbidden|401 Unauthorized|Access to model.*is restricted|gated repo|not in the authorized list|awaiting a review",
-                "Model access is gated or unauthorized.",
-                [{"label": "set HF token and request model access on HuggingFace", "op": "manual"}],
-            ),
-        ]
-        for pattern, message, suggestions in patterns:
-            if re.search(pattern, tail, re.I):
-                return {"message": message, "suggestions": suggestions}
-        if re.search(r"Traceback \(most recent call last\)", tail, re.I) and not re.search(
-            r"Application startup complete|GET /v1/|Uvicorn running on", tail, re.I
-        ):
-            return {
-                "message": "Python traceback detected during serve startup.",
-                "suggestions": [{"label": "inspect traceback and retry with adjusted backend/settings", "op": "manual"}],
-            }
-        return None
-
     def _state_for_client(state):
         """Return cookbook state without raw secrets for browser clients."""
         _strip_task_secrets(state)
@@ -668,9 +497,6 @@ def setup_cookbook_routes() -> APIRouter:
             env.pop("hfTokenConfigured", None)
             env.pop("hostPlatform", None)
         return state
-
-    def _load_stored_hf_token() -> str:
-        return load_stored_hf_token(state_path=_cookbook_state_path)
 
     def _normalize_minimax_m3_vllm_cmd(cmd: str) -> str:
         """Patch MiniMax M3 vLLM launches into the known-good local form.
@@ -832,18 +658,8 @@ def setup_cookbook_routes() -> APIRouter:
             set_flag("--cuda-graph-backend-decode", "disabled")
         return shlex.join(env_parts + body)
 
-    def _cookbook_ssh_dir() -> Path:
-        # The Docker image keeps cookbook keys under /app/.ssh; that path only
-        # exists inside the container. On Windows (and any non-container host)
-        # fall back to the user profile's ~/.ssh, which OpenSSH on Win10+ uses.
-        if not IS_WINDOWS:
-            app_ssh = Path("/app/.ssh")
-            if Path("/app").exists():
-                return app_ssh
-        return Path.home() / ".ssh"
-
     def _cookbook_ssh_key_path() -> Path:
-        return _cookbook_ssh_dir() / "id_ed25519"
+        return Path(COOKBOOK_SSH_DIR) / "id_ed25519"
 
     def _ssh_known_host_name(host: str) -> str:
         """Return the host part OpenSSH stores in known_hosts.
@@ -874,7 +690,7 @@ def setup_cookbook_routes() -> APIRouter:
         after OpenSSH reports a changed host key. It fixes container-local
         known_hosts drift without asking the user to run ssh-keygen manually.
         """
-        known_hosts = _cookbook_ssh_dir() / "known_hosts"
+        known_hosts = Path(COOKBOOK_SSH_DIR) / "known_hosts"
         known_hosts.parent.mkdir(parents=True, exist_ok=True)
         known_hosts.touch(mode=0o600, exist_ok=True)
         safe_chmod(known_hosts, 0o600)
@@ -975,7 +791,7 @@ def setup_cookbook_routes() -> APIRouter:
     @router.post("/api/cookbook/ssh-key")
     async def generate_cookbook_ssh_key(request: Request):
         require_admin(request)
-        ssh_dir = _cookbook_ssh_dir()
+        ssh_dir = Path(COOKBOOK_SSH_DIR)
         key_path = _cookbook_ssh_key_path()
         ssh_dir.mkdir(parents=True, exist_ok=True)
         # safe_chmod no-ops on Windows (~/.ssh is already ACL-restricted to the
@@ -1102,6 +918,38 @@ def setup_cookbook_routes() -> APIRouter:
                 )
         return {"pid": proc.pid, "log_path": str(log_path)}
 
+    async def _launch_runner(session_id: str, setup_cmd: str | None, bash_lines: list[str]) -> str | None:
+        """Start a download or serve runner; return the error text, or None on success.
+
+        A None `setup_cmd` means local Windows, where the bash lines run detached instead of in tmux.
+        """
+        if setup_cmd is None:
+            try:
+                _launch_local_detached(session_id, bash_lines)
+            except Exception as e:
+                logger.error(f"Local detached launch failed for {session_id}: {e}")
+                return str(e)
+            return None
+        proc = await asyncio.create_subprocess_shell(
+            setup_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.wait()
+        if proc.returncode != 0:
+            stderr = (await proc.stderr.read()).decode(errors="replace")
+            logger.error(f"Launch failed for {session_id} (rc={proc.returncode}): {stderr}")
+            return stderr
+        return None
+
+    def _log_started(request: Request, text: str, category: str) -> None:
+        try:
+            from src.assistant_log import log_to_assistant
+            from src.auth_helpers import get_current_user
+            log_to_assistant(get_current_user(request), text, category=category)
+        except Exception as e:
+            logger.warning(f"Assistant log failed ({category}): {e}")
+
     @router.post("/api/model/download")
     async def model_download(request: Request, req: ModelDownloadRequest):
         """Download a HuggingFace model in a tmux session.
@@ -1123,7 +971,7 @@ def setup_cookbook_routes() -> APIRouter:
         validate_remote_host(req.remote_host)
         req.ssh_port = validate_ssh_port(req.ssh_port)
         req.local_dir = _validate_local_dir(req.local_dir)
-        req.hf_token = "" if is_ollama_download else (req.hf_token or _load_stored_hf_token())
+        req.hf_token = "" if is_ollama_download else (req.hf_token or load_stored_hf_token())
         _validate_token(req.hf_token)
         if req.remote_host and not req.env_prefix:
             req.env_prefix = _server_env_prefix_for_download(req.remote_host)
@@ -1409,38 +1257,10 @@ def setup_cookbook_routes() -> APIRouter:
         logger.info(f"Model download: {req.repo_id} (backend={'ollama' if is_ollama_download else 'hf'}, include={req.include}, session={session_id}, remote={remote})")
         logger.info(f"Download setup_cmd: {setup_cmd}")
 
-        if setup_cmd is None:
-            # LOCAL Windows: launch the bash wrapper detached; no tmux setup_cmd.
-            try:
-                _launch_local_detached(session_id, lines)
-            except Exception as e:
-                logger.error(f"Local detached download launch failed: {e}")
-                return {"ok": False, "error": str(e), "session_id": session_id}
-        else:
-            proc = await asyncio.create_subprocess_shell(
-                setup_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.wait()
-
-            if proc.returncode != 0:
-                stderr = (await proc.stderr.read()).decode(errors="replace")
-                logger.error(f"Download failed (rc={proc.returncode}): {stderr}")
-                return {"ok": False, "error": stderr, "session_id": session_id}
-
-        # Log to assistant
-        try:
-            from src.assistant_log import log_to_assistant
-            from src.auth_helpers import get_current_user
-            owner = get_current_user(request)
-            log_to_assistant(
-                owner,
-                f"Started downloading {req.repo_id} to {remote or 'local'}",
-                category="Download",
-            )
-        except Exception:
-            pass
+        error = await _launch_runner(session_id, setup_cmd, lines)
+        if error is not None:
+            return {"ok": False, "error": error, "session_id": session_id}
+        _log_started(request, f"Started downloading {req.repo_id} to {remote or 'local'}", "Download")
 
         return {"ok": True, "session_id": session_id, "remote": remote or "local"}
 
@@ -1836,11 +1656,6 @@ def setup_cookbook_routes() -> APIRouter:
         #   1. explicit `--port N`  (vllm / sglang / llama-server)
         #   2. `OLLAMA_HOST=host:port`  (the way Ollama specifies its bind)
         #   3. fallback by backend (11434 ollama / 8080 llama.cpp)
-        # Previously the OLLAMA_HOST form was silently ignored and we
-        # registered every Ollama endpoint at 11434 — even if the user
-        # set OLLAMA_HOST=0.0.0.0:11435 to avoid colliding with an
-        # existing systemd Ollama, the registered endpoint pointed at
-        # the OLD port and showed as offline.
         port_match = re.search(r'--port\s+(\d+)', req.cmd)
         ollama_host_match = re.search(r'OLLAMA_HOST=[^\s]*?:(\d+)', req.cmd)
         if port_match:
@@ -2033,7 +1848,7 @@ def setup_cookbook_routes() -> APIRouter:
         req.ssh_port = validate_ssh_port(req.ssh_port)
         req.gpus = _validate_gpus(req.gpus)
         req.runtime_adapter = _normalize_runtime_adapter(req.runtime_adapter)
-        req.hf_token = req.hf_token or _load_stored_hf_token()
+        req.hf_token = req.hf_token or load_stored_hf_token()
         _validate_token(req.hf_token)
         # Cookbook emits two fixed Docker exec forms for its Ollama sidecars.
         # Keep Docker out of the general allowlist: only these parsed shapes may
@@ -2077,10 +1892,7 @@ def setup_cookbook_routes() -> APIRouter:
                 req.cmd += " --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu"
             # PEP-508-style package spec — letters, digits, `.-_` for the
             # name; `[` `]` for extras; `<>=!~,` for version specifiers.
-            # v2 review HIGH-14: tightened from the previous regex which
-            # also allowed spaces and `+`, both of which can be abused to
-            # introduce extra shell tokens once interpolated into the
-            # serve command. We now use `re.fullmatch` and drop space/`+`.
+            # No space or `+`: either would add shell tokens to the serve command.
             if not req.repo_id or not re.fullmatch(
                 r"[A-Za-z0-9][A-Za-z0-9._\-\[\]<>=!,~]{0,200}", req.repo_id
             ):
@@ -2823,24 +2635,9 @@ def setup_cookbook_routes() -> APIRouter:
             else:
                 setup_cmd = f"tmux set-option -g history-limit 100000 2>/dev/null; tmux new-session -d -s {session_id} {shlex.quote(str(runner_path))}"
 
-        if setup_cmd is None:
-            # LOCAL Windows: launch the bash runner detached; no tmux setup_cmd.
-            try:
-                _launch_local_detached(session_id, runner_lines)
-            except Exception as e:
-                logger.error(f"Local detached serve launch failed: {e}")
-                return {"ok": False, "error": str(e), "session_id": session_id}
-        else:
-            proc = await asyncio.create_subprocess_shell(
-                setup_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.wait()
-
-            if proc.returncode != 0:
-                stderr = (await proc.stderr.read()).decode(errors="replace")
-                return {"ok": False, "error": stderr, "session_id": session_id}
+        error = await _launch_runner(session_id, setup_cmd, runner_lines)
+        if error is not None:
+            return {"ok": False, "error": error, "session_id": session_id}
 
         # Auto-register a model endpoint so the served model shows up in the model
         # picker with no manual /setup step. Diffusion models get an image
@@ -2873,19 +2670,7 @@ def setup_cookbook_routes() -> APIRouter:
                 is_windows=is_windows,
             ))
 
-        # Log to assistant
-        try:
-            from src.assistant_log import log_to_assistant
-            from src.auth_helpers import get_current_user
-            owner = get_current_user(request)
-            short = req.repo_id.split("/")[-1] if "/" in req.repo_id else req.repo_id
-            log_to_assistant(
-                owner,
-                f"Started serving {short} on {remote or 'local'}",
-                category="Serve",
-            )
-        except Exception:
-            pass
+        _log_started(request, f"Started serving {req.repo_id.split('/')[-1]} on {remote or 'local'}", "Serve")
 
         return {"ok": True, "session_id": session_id, "remote": remote or "local",
                 "endpoint_id": endpoint_id}
@@ -3962,7 +3747,7 @@ def setup_cookbook_routes() -> APIRouter:
         url = f"https://huggingface.co/api/models/{repo_id}"
         try:
             headers = {}
-            token = _load_stored_hf_token()
+            token = load_stored_hf_token()
             if token:
                 headers["Authorization"] = f"Bearer {token}"
             async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:

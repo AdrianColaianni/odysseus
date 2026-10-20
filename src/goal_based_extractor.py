@@ -1,4 +1,3 @@
-# src/goal_based_extractor.py
 """
 Goal-based content extraction prompt inspired by Alibaba Tongyi DeepResearch.
 """

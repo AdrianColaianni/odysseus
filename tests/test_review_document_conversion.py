@@ -1,3 +1,4 @@
+import sys
 import asyncio
 from pathlib import Path
 import subprocess
@@ -7,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
+from tests.helpers.route_call import with_db
 
 
 @pytest.fixture
@@ -17,7 +19,8 @@ def conversion(monkeypatch, tmp_path):
     doc = SimpleNamespace(owner="alice", session_id=None, current_content='<!-- docx_source upload_id="' + 'a'*32 + '" -->')
     db = MagicMock()
     db.query.return_value.filter.return_value.first.return_value = doc
-    monkeypatch.setattr(routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(routes, "SessionLocal", lambda: db, raising=False)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", lambda: db)
     source = tmp_path / "original.docx"
     source.write_bytes(b"original-file")
     handler = MagicMock()
@@ -25,7 +28,7 @@ def conversion(monkeypatch, tmp_path):
     handler.resolve_upload.return_value = {"path": str(source)}
     monkeypatch.setattr("shutil.which", lambda executable: "/fake/soffice")
     router = routes.setup_document_routes(MagicMock(), handler)
-    endpoint = next(r.endpoint for r in router.routes if r.path.endswith("/convert-original/{target}"))
+    endpoint = next(with_db(r.endpoint) for r in router.routes if r.path.endswith("/convert-original/{target}"))
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(auth_manager=None)))
     return endpoint, request, doc, handler
 
@@ -104,7 +107,7 @@ async def test_docx_preview_runs_off_loop_and_checks_owner(monkeypatch, conversi
         return SimpleNamespace(value="<p>Preview</p>", messages=[])
     monkeypatch.setitem(sys.modules, "mammoth", SimpleNamespace(convert_to_html=render))
     router = routes.setup_document_routes(MagicMock(), handler)
-    endpoint = next(r.endpoint for r in router.routes if r.path.endswith("/render-docx"))
+    endpoint = next(with_db(r.endpoint) for r in router.routes if r.path.endswith("/render-docx"))
     assert (await endpoint("doc", request))["html"] == "<p>Preview</p>"
     doc.owner = "bob"
     with pytest.raises(HTTPException) as error:

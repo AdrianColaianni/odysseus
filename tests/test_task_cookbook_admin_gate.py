@@ -17,10 +17,12 @@ clear_fake_database_modules()
 
 import core.auth as core_auth
 import core.database as cdb
-import routes.task_routes as task_routes
+import routes.task.task_routes as task_routes
 from core.database import ScheduledTask
 from core.database import TaskRun
 from src.task_scheduler import TaskScheduler
+from tests.helpers.route_call import with_db
+from tests.helpers.routes import route_endpoint
 
 _REAL_DATABASE_ATTRS = {
     "Base": cdb.Base,
@@ -52,8 +54,10 @@ def task_db(monkeypatch, tmp_path):
     )
     cdb.Base.metadata.create_all(engine)
     testing_session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-    monkeypatch.setattr(task_routes, "SessionLocal", testing_session)
-    monkeypatch.setattr(cdb, "SessionLocal", testing_session)
+    monkeypatch.setattr(task_routes, "SessionLocal", testing_session, raising=False)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", testing_session)
+    monkeypatch.setattr(cdb, "SessionLocal", testing_session, raising=False)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", testing_session)
     return testing_session
 
 
@@ -93,10 +97,7 @@ def _req(user):
 
 def _endpoint(method, path):
     router = task_routes.setup_task_routes(MagicMock())
-    for route in router.routes:
-        if getattr(route, "path", None) == path and method in getattr(route, "methods", set()):
-            return route.endpoint
-    raise RuntimeError(f"{method} {path} not found")
+    return with_db(route_endpoint(router, path, method))
 
 
 def _cookbook_create_req():
@@ -213,12 +214,7 @@ async def test_non_admin_cannot_manually_run_existing_cookbook_serve_task(
     _seed_action_task(task_db, "alice-task", "alice", action="cookbook_serve")
     scheduler = SimpleNamespace(run_task_now=MagicMock())
     router = task_routes.setup_task_routes(scheduler)
-    for route in router.routes:
-        if getattr(route, "path", None) == "/api/tasks/{task_id}/run":
-            run_task = route.endpoint
-            break
-    else:
-        raise RuntimeError("POST /api/tasks/{task_id}/run not found")
+    run_task = with_db(route_endpoint(router, "/api/tasks/{task_id}/run", "POST"))
 
     with pytest.raises(HTTPException) as exc:
         await run_task(_req("alice"), "alice-task")

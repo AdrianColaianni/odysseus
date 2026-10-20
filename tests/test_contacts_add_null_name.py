@@ -10,15 +10,12 @@ import asyncio
 import pytest
 from starlette.requests import Request
 
-import routes.contacts_routes as cr
+import routes.contacts.contacts_routes as cr
+from tests.helpers.routes import route_endpoint
 
 
 def _add_handler():
-    router = cr.setup_contacts_routes()
-    for r in router.routes:
-        if getattr(r, "path", "").endswith("/add") and "POST" in getattr(r, "methods", set()):
-            return r.endpoint
-    raise AssertionError("add_contact route not found")
+    return route_endpoint(cr.setup_contacts_routes(), "/api/contacts/add", "POST")
 
 
 def _request():
@@ -41,7 +38,7 @@ def _stub_store(monkeypatch):
 
 def test_null_name_does_not_crash(_stub_store):
     handler = _add_handler()
-    result = asyncio.run(handler({"name": None, "email": "x@y.com"}, _request(), _admin="admin"))
+    result = asyncio.run(handler({"name": None, "email": "x@y.com"}, _request()))
     assert result["success"] is True
     # name fell back to the email local-part instead of crashing.
     assert _stub_store == [("x", "x@y.com", "", [])]
@@ -49,13 +46,13 @@ def test_null_name_does_not_crash(_stub_store):
 
 def test_null_email_does_not_crash(_stub_store):
     handler = _add_handler()
-    result = asyncio.run(handler({"name": "Bob", "email": None}, _request(), _admin="admin"))
+    result = asyncio.run(handler({"name": "Bob", "email": None}, _request()))
     assert result["success"] is True
     assert _stub_store == [("Bob", "", "", [])]
 
 
 def test_phone_only_contact_is_allowed(_stub_store):
     handler = _add_handler()
-    result = asyncio.run(handler({"name": "Bob", "email": None, "phone": "0805412 7841"}, _request(), _admin="admin"))
+    result = asyncio.run(handler({"name": "Bob", "email": None, "phone": "0805412 7841"}, _request()))
     assert result["success"] is True
     assert _stub_store == [("Bob", "", "", ["0805412 7841"])]

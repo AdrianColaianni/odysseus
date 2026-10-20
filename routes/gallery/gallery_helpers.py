@@ -1,8 +1,4 @@
-"""gallery_helpers.py — extracted helpers, models, and small utilities.
-
-Imported by gallery_routes.py."""
-
-"""Gallery routes — browsable library for photos and AI-generated images."""
+"""Gallery request schema, EXIF extraction and row helpers."""
 
 import logging
 from datetime import datetime
@@ -16,15 +12,11 @@ from src.auth_helpers import _auth_disabled
 logger = logging.getLogger(__name__)
 
 
-# ---- Request schemas ----
-
 class GalleryPatch(BaseModel):
     tags: Optional[str] = None
     favorite: Optional[bool] = None
     album_id: Optional[str] = None
 
-
-# ---- EXIF extraction ----
 
 def _extract_exif(content: bytes) -> dict:
     """Extract EXIF metadata from image bytes. Returns dict of fields."""
@@ -91,8 +83,6 @@ def _extract_exif(content: bytes) -> dict:
     return result
 
 
-# ---- Helpers ----
-
 def _image_to_dict(img: GalleryImage, session_name: str = None) -> Dict[str, Any]:
     return {
         "id": img.id,
@@ -135,11 +125,3 @@ def _owner_filter(q, user, model_cls=GalleryImage):
         return q
     return q.filter(False)
 
-
-
-def _human_size(nbytes):
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-        if abs(nbytes) < 1024:
-            return f"{nbytes:.1f} {unit}"
-        nbytes /= 1024
-    return f"{nbytes:.1f} PB"

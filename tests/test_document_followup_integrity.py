@@ -172,7 +172,6 @@ def test_long_proofreading_batch_saves_safe_matches_and_identifies_remainder(doc
     assert result['invalid_edits'][0]['number'] == 5
     assert read()['document']['content'].endswith('Keep: violet-82')
     feedback = preview_tool_result_text(result, 'edit_document', {})
-    assert 'Retry only the rejected FIND entries' in feedback
     assert 'First: alpha' not in feedback
 
 

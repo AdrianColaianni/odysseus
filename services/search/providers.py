@@ -11,7 +11,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from src.constants import SEARXNG_INSTANCE, REQUEST_TIMEOUT, WEB_FETCH_USER_AGENT
-from .analytics import RateLimitError, error_logger
+from .analytics import error_logger
 from .query import build_enhanced_query
 
 logger = logging.getLogger(__name__)
@@ -348,78 +348,72 @@ def searxng_search(query, max_results=10, *, search_params=None):
     return []
 
 
+def _fetch_json(name: str, method: str, url: str, **kwargs) -> Optional[dict]:
+    """Call a provider API. None on a network error, a 429 or a non-JSON body."""
+    try:
+        response = getattr(httpx, method)(url, timeout=REQUEST_TIMEOUT, **kwargs)
+    except httpx.RequestError as e:
+        error_logger.error(f"{name} search failed: {e}")
+        return None
+    if response.status_code == 429:
+        error_logger.error(f"{name} rate limit hit")
+        return None
+    response.raise_for_status()
+    try:
+        return response.json()
+    except json.JSONDecodeError as e:
+        error_logger.error(f"{name} returned invalid JSON: {e}")
+        return None
+
+
+def _result_rows(name: str, items: list, count: int, url_key: str,
+                 snippet_keys: tuple, age_key: Optional[str] = None) -> List[dict]:
+    results = []
+    for item in items[:count]:
+        url = item.get(url_key, "")
+        if not url:
+            continue
+        row = {
+            "title": item.get("title", ""),
+            "url": url,
+            "snippet": next((item[k] for k in snippet_keys if item.get(k)), ""),
+        }
+        if age_key:
+            row["age"] = item.get(age_key) or ""
+        results.append(row)
+    logger.info(f"{name} returned {len(results)} results")
+    return results
+
+
 # ── Brave ──
 
 def brave_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None) -> List[dict]:
     """Search using Brave API with key from admin settings or env var."""
     count = count if count is not None else _get_result_count()
-    api_key = _get_provider_key("brave") or os.environ.get("DATA_BRAVE_API_KEY") or ""
-    return _brave_search_impl(query, count, time_filter, search_config={"brave_api_key": api_key})
-
-
-def _brave_search_impl(query: str, count: int, time_filter: Optional[str] = None, search_config: dict = None) -> List[dict]:
-    """Core Brave API call. Returns a list of result dicts or an empty list on failure."""
-    enhanced_query = build_enhanced_query(query, time_filter)
-    config = search_config or {}
-
-    brave_api_key = config.get("brave_api_key")
-    if not brave_api_key:
-        brave_api_key = os.environ.get("DATA_BRAVE_API_KEY")
-
-    if not brave_api_key:
+    api_key = _get_provider_key("brave") or os.environ.get("DATA_BRAVE_API_KEY")
+    if not api_key:
         logger.warning("Brave API key not found, returning empty results for fallback")
         return []
 
-    headers = {"X-Subscription-Token": brave_api_key, "Accept": "application/json"}
+    enhanced_query = build_enhanced_query(query, time_filter)
     params = {
         "q": enhanced_query,
         "count": count,
         "safesearch": _safesearch_for("brave"),
     }
-    if time_filter:
-        time_map = {"day": "day", "week": "week", "month": "month", "year": "year"}
-        if time_filter in time_map:
-            params["freshness"] = time_map[time_filter]
+    if time_filter in ("day", "week", "month", "year"):
+        params["freshness"] = time_filter
 
     logger.info(f"Executing Brave search with query: {enhanced_query}")
-    try:
-        response = httpx.get(
-            "https://api.search.brave.com/res/v1/web/search",
-            headers=headers,
-            params=params,
-            timeout=REQUEST_TIMEOUT,
-        )
-        if response.status_code == 429:
-            raise RateLimitError("Brave rate limit hit")
-        response.raise_for_status()
-    except httpx.RequestError as e:
-        error_logger.error(f"NetworkError during Brave search: {e}")
+    data = _fetch_json(
+        "Brave", "get", "https://api.search.brave.com/res/v1/web/search",
+        headers={"X-Subscription-Token": api_key, "Accept": "application/json"},
+        params=params,
+    )
+    if data is None:
         return []
-    except RateLimitError as e:
-        error_logger.error(str(e))
-        return []
-
-    try:
-        data = response.json()
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse Brave API response: {e}")
-        return []
-
-    results = []
-    if "web" in data and "results" in data["web"]:
-        for item in data["web"]["results"][:count]:
-            url = item.get("url", "")
-            if not url:
-                continue
-            results.append({
-                "title": item.get("title", ""),
-                "url": url,
-                "snippet": item.get("description", "") or item.get("content", ""),
-                "age": item.get("date", "") if item.get("date") else "",
-            })
-
-    logger.info(f"Brave search returned {len(results)} results")
-    return results
+    return _result_rows("Brave", (data.get("web") or {}).get("results", []), count,
+                        "url", ("description", "content"), "date")
 
 
 # ── DuckDuckGo (free, no key) ──
@@ -557,41 +551,10 @@ def google_pse_search(query: str, count: Optional[int] = None, time_filter: Opti
         if time_filter in time_map:
             params["dateRestrict"] = time_map[time_filter]
 
-    try:
-        response = httpx.get(
-            "https://www.googleapis.com/customsearch/v1",
-            params=params,
-            timeout=REQUEST_TIMEOUT,
-        )
-        if response.status_code == 429:
-            raise RateLimitError("Google PSE rate limit hit")
-        response.raise_for_status()
-    except httpx.RequestError as e:
-        error_logger.error(f"Google PSE search failed: {e}")
+    data = _fetch_json("Google PSE", "get", "https://www.googleapis.com/customsearch/v1", params=params)
+    if data is None:
         return []
-    except RateLimitError as e:
-        error_logger.error(str(e))
-        return []
-
-    try:
-        data = response.json()
-    except json.JSONDecodeError as e:
-        error_logger.error(f"Google PSE returned invalid JSON: {e}")
-        return []
-
-    results = []
-    for item in data.get("items", [])[:count]:
-        url = item.get("link", "")
-        if not url:
-            continue
-        results.append({
-            "title": item.get("title", ""),
-            "url": url,
-            "snippet": item.get("snippet", ""),
-        })
-
-    logger.info(f"Google PSE returned {len(results)} results")
-    return results
+    return _result_rows("Google PSE", data.get("items", []), count, "link", ("snippet",))
 
 
 # ── Tavily ──
@@ -609,48 +572,18 @@ def tavily_search(query: str, count: Optional[int] = None, time_filter: Optional
         "max_results": count,
         "include_answer": False,
     }
-    if time_filter:
-        time_map = {"day": "day", "week": "week", "month": "month", "year": "year"}
-        if time_filter in time_map:
-            payload["days"] = {"day": 1, "week": 7, "month": 30, "year": 365}[time_filter]
+    days = {"day": 1, "week": 7, "month": 30, "year": 365}.get(time_filter)
+    if days:
+        payload["days"] = days
 
-    try:
-        response = httpx.post(
-            "https://api.tavily.com/search",
-            json=payload,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            timeout=REQUEST_TIMEOUT,
-        )
-        if response.status_code == 429:
-            raise RateLimitError("Tavily rate limit hit")
-        response.raise_for_status()
-    except httpx.RequestError as e:
-        error_logger.error(f"Tavily search failed: {e}")
+    data = _fetch_json(
+        "Tavily", "post", "https://api.tavily.com/search",
+        json=payload,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+    )
+    if data is None:
         return []
-    except RateLimitError as e:
-        error_logger.error(str(e))
-        return []
-
-    try:
-        data = response.json()
-    except json.JSONDecodeError as e:
-        error_logger.error(f"Tavily returned invalid JSON: {e}")
-        return []
-
-    results = []
-    for item in data.get("results", [])[:count]:
-        url = item.get("url", "")
-        if not url:
-            continue
-        results.append({
-            "title": item.get("title", ""),
-            "url": url,
-            "snippet": item.get("content", ""),
-            "age": item.get("published_date", ""),
-        })
-
-    logger.info(f"Tavily returned {len(results)} results")
-    return results
+    return _result_rows("Tavily", data.get("results", []), count, "url", ("content",), "published_date")
 
 
 # ── Serper.dev ──
@@ -675,40 +608,11 @@ def serper_search(query: str, count: Optional[int] = None, time_filter: Optional
         if time_filter in time_map:
             payload["tbs"] = time_map[time_filter]
 
-    try:
-        response = httpx.post(
-            "https://google.serper.dev/search",
-            json=payload,
-            headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-            timeout=REQUEST_TIMEOUT,
-        )
-        if response.status_code == 429:
-            raise RateLimitError("Serper rate limit hit")
-        response.raise_for_status()
-    except httpx.RequestError as e:
-        error_logger.error(f"Serper search failed: {e}")
+    data = _fetch_json(
+        "Serper", "post", "https://google.serper.dev/search",
+        json=payload,
+        headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+    )
+    if data is None:
         return []
-    except RateLimitError as e:
-        error_logger.error(str(e))
-        return []
-
-    try:
-        data = response.json()
-    except json.JSONDecodeError as e:
-        error_logger.error(f"Serper returned invalid JSON: {e}")
-        return []
-
-    results = []
-    for item in data.get("organic", [])[:count]:
-        url = item.get("link", "")
-        if not url:
-            continue
-        results.append({
-            "title": item.get("title", ""),
-            "url": url,
-            "snippet": item.get("snippet", ""),
-            "age": item.get("date", ""),
-        })
-
-    logger.info(f"Serper returned {len(results)} results")
-    return results
+    return _result_rows("Serper", data.get("organic", []), count, "link", ("snippet",), "date")

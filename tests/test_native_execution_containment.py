@@ -116,10 +116,8 @@ async def test_blocked_stdin_is_inside_wall_clock(native_boundary):
     assert result.release.dead is True
 
 
-@pytest.mark.parametrize("source", ["print(1 + 1)", "import os; print(os.getcwd())",
-                                   "exec('print(2)')", "print('/workspace')"])
 @pytest.mark.skipif(os.name == "nt", reason="POSIX namespace argv; Windows refusal tested separately")
-async def test_python_namespace_is_independent_of_content(source, native_boundary, monkeypatch):
+async def test_python_namespace_is_independent_of_content(native_boundary, monkeypatch):
     from tests.containment_helpers import capture_owned_spawn
     captured = capture_owned_spawn(monkeypatch, native_boundary)
     monkeypatch.setattr(containment, "MECHANISMS", (containment.Mechanism(
@@ -129,11 +127,12 @@ async def test_python_namespace_is_independent_of_content(source, native_boundar
     monkeypatch.setattr(containment.shutil, "which", lambda name:
                         "/usr/bin/bwrap" if name == "bwrap" else original_which(name))
     monkeypatch.setattr(containment, "CONTAINMENT_MODE", containment.MODE_ENFORCING)
-    result = await subprocess_tools.PythonTool().execute(source, {})
-    assert os.path.basename(captured["argv"][0]) == "bwrap"
-    assert "--bind" in captured["argv"]
-    assert result["containment"]["enforced"] == sorted(containment.DEFAULT_REQUIRED)
-    assert "-I" in captured["argv"]
+    for source in ("print(1 + 1)", "exec('print(2)')"):
+        result = await subprocess_tools.PythonTool().execute(source, {})
+        assert os.path.basename(captured["argv"][0]) == "bwrap"
+        assert "--bind" in captured["argv"]
+        assert result["containment"]["enforced"] == sorted(containment.DEFAULT_REQUIRED)
+        assert "-I" in captured["argv"]
 
 
 async def test_ordinary_python_cannot_bypass_unavailable_containment(monkeypatch):

@@ -1,24 +1,13 @@
-"""Contacts-domain tool implementations.
-
-Extracted from tool_implementations.py as part of slice 1 (#4082/#4071).
-Holds the resolve_contact and manage_contact (CardDAV CRUD) tools.
-``src.tool_implementations`` re-exports these for backward compatibility.
-``_INTERNAL_BASE`` still lives in tool_implementations.py and is pulled
-back function-locally where needed.
-"""
+"""The resolve_contact and manage_contact (CardDAV CRUD) agent tools."""
 from typing import Dict, Optional
 
-from src.tools._common import _parse_tool_args
+from src.tools._common import _INTERNAL_BASE, parsed_tool_args
 
 
-async def do_resolve_contact(content: str, owner: Optional[str] = None) -> Dict:
+@parsed_tool_args
+async def do_resolve_contact(args: dict, owner: Optional[str] = None) -> Dict:
     """Look up a contact by name. Searches: CardDAV -> email history -> memory."""
     import httpx
-    from src.tool_implementations import _INTERNAL_BASE  # shared constant, still lives in the facade
-    try:
-        args = _parse_tool_args(content)
-    except ValueError:
-        return {"error": "Invalid JSON arguments", "exit_code": 1}
     name = args.get("name", "")
     if not name:
         return {"error": "name is required", "exit_code": 1}
@@ -30,7 +19,7 @@ async def do_resolve_contact(content: str, owner: Optional[str] = None) -> Dict:
     # cookie and would 401 under require_user.
     try:
         import asyncio
-        from routes import contacts_routes as cc
+        from routes.contacts import contacts_routes as cc
         all_contacts = await asyncio.to_thread(cc._fetch_contacts, False, owner)
         q = name.lower()
         for c in (all_contacts or []):
@@ -77,19 +66,16 @@ async def do_resolve_contact(content: str, owner: Optional[str] = None) -> Dict:
     return {"output": "\n".join(lines), "exit_code": 0}
 
 
-async def do_manage_contact(content: str, owner: Optional[str] = None) -> Dict:
+@parsed_tool_args
+async def do_manage_contact(args: dict, owner: Optional[str] = None) -> Dict:
     """Add / update / delete / list CardDAV contacts. Calls the contacts
     helpers IN-PROCESS rather than over HTTP — a server-side httpx call to
     /api/contacts/* carries no session cookie and would be rejected by
     require_user (401), so the tool would see zero contacts even though
     the browser-side UI works fine."""
-    try:
-        args = _parse_tool_args(content)
-    except ValueError:
-        return {"error": "Invalid JSON arguments", "exit_code": 1}
     action = (args.get("action") or "").strip().lower()
     try:
-        from routes import contacts_routes as cc
+        from routes.contacts import contacts_routes as cc
     except Exception as e:
         return {"error": f"Contacts module unavailable: {e}", "exit_code": 1}
     # The contacts helpers are sync (httpx blocking calls to CardDAV) — run

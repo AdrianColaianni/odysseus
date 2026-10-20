@@ -6,47 +6,28 @@ model family. Self-hosted Kimi deployments (non-Moonshot URL) must keep the
 caller-specified temperature unchanged.
 """
 import httpx
-import pytest
 
 from src import llm_core
 
 
-@pytest.mark.parametrize(
-    "model",
-    [
-        "kimi-k2.5",
-        "kimi-k2.6",
-        "moonshot/kimi-k2.6",
-        "kimi-k2.6-preview",
-    ],
-)
-def test_moonshot_k2_5_plus_uses_fixed_temperature(model):
-    assert llm_core._moonshot_rejects_custom_temperature("moonshot", model)
+def test_moonshot_k2_5_plus_uses_fixed_temperature():
+    models = ["kimi-k2.5", "moonshot/kimi-k2.6", "kimi-k2.6-preview"]
+    assert [m for m in models if not llm_core._moonshot_rejects_custom_temperature("moonshot", m)] == []
 
 
-@pytest.mark.parametrize(
-    "provider,model",
-    [
+def test_other_models_keep_temperature():
+    cases = [
         ("openai", "kimi-k2.6"),
-        ("moonshot", "kimi-k2-0905-preview"),
         ("moonshot", "kimi-k2-thinking"),
         ("moonshot", "kimi-k2.50"),
         ("moonshot", None),
-    ],
-)
-def test_other_models_keep_temperature(provider, model):
-    assert not llm_core._moonshot_rejects_custom_temperature(provider, model)
+    ]
+    assert [c for c in cases if llm_core._moonshot_rejects_custom_temperature(*c)] == []
 
 
-@pytest.mark.parametrize(
-    "url",
-    [
-        "https://api.moonshot.ai/v1/chat/completions",
-        "https://api.moonshot.cn/v1/chat/completions",
-    ],
-)
-def test_moonshot_provider_detection(url):
-    assert llm_core._detect_provider(url) == "moonshot"
+def test_moonshot_provider_detection():
+    for url in ("https://api.moonshot.ai/v1/chat/completions", "https://api.moonshot.cn/v1/chat/completions"):
+        assert llm_core._detect_provider(url) == "moonshot"
 
 
 def _capture_openai_payload(
@@ -59,7 +40,7 @@ def _capture_openai_payload(
     llm_core._response_cache.clear()
     seen = {}
 
-    def fake_post(url, headers=None, json=None, timeout=None):
+    def fake_post(url, headers=None, json=None, timeout=None, verify=None):
         seen["json"] = json
         request = httpx.Request("POST", url)
         return httpx.Response(

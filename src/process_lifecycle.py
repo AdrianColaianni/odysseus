@@ -1,44 +1,15 @@
-"""Generic process lifecycle: identity, liveness, signalling, verified death.
+"""Process lifecycle mechanics: identity, liveness, signalling, verified death.
 
-Every runtime-owned subprocess in this tree ends the same way — something has
-to decide whether a process is still the one it started, signal it without
-hitting a bystander, escalate when it ignores the polite signal, and report
-death only when death was observed. Before this module that sequence was
-written out four times (containment's sync and async release, the PTY shell,
-the Cookbook survivor sweep) and a fifth time without identity at all (the
-browser tree kill), and the copies disagreed on what "dead" means and on
-whether the server's own process group is fair game.
+Owns pid + start-token identity, the TERM, verify, KILL, verify escalation and
+the termination receipt. Callers (containment, browser_lifecycle) own which
+processes belong to whom and pass ``gone()`` and ``send(sig)``.
 
-What lives here, and what deliberately does not
------------------------------------------------
-This module owns **mechanics**: process identity (pid + start token, never a
-pid alone), group and pidfd probes, signal delivery, the TERM → verify → KILL
-→ verify escalation, and the termination receipt. It owns no policy about
-*which* processes belong to whom:
-
-* :mod:`src.containment` decides what a grant contains — dimensions, the
-  bubblewrap boundary, the namespace init, the durable grant store.
-* :mod:`src.browser_lifecycle` decides which processes form a browser session
-  and which files and profiles that session owns.
-* Request authority and resource identity decide whether anything runs at all.
-* Effects/provenance consume :class:`TerminationOutcome` as evidence; they do
-  not kill.
-
-So the engines here take the caller's ``gone()`` and ``send(sig)`` rather than
-a pid: the caller knows whether "the tree" is a process group, a pidfd, a
-bubblewrap namespace init or a set of snapshot identities, and this module
-only guarantees the ordering, the waits, the re-verification point before
-escalation, and that the outcome is the observed one.
-
-Fail-closed rules, shared by every consumer
--------------------------------------------
-* A signal requires :data:`process_ownership.OWNED`. GONE, FOREIGN and
-  UNVERIFIABLE are reasons not to signal, and UNVERIFIABLE is never death.
-* A refused liveness probe (``EPERM``) is a live process, never a dead one.
-* The server's own process group is never probed as a child's and never
-  signalled: if ``setsid`` did not apply, ``killpg`` would take the server down.
-* An outcome reports ``dead=True`` only when death was observed after the last
-  signal, not when a signal was sent.
+Fail-closed rules:
+- Signal only :data:`process_ownership.OWNED`; UNVERIFIABLE is never death.
+- A probe refused with EPERM is a live process.
+- Never probe or signal the server's own process group: without ``setsid``,
+  ``killpg`` would take the server down.
+- ``dead=True`` only when death was observed after the last signal.
 """
 
 from __future__ import annotations

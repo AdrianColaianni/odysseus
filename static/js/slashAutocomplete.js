@@ -3,6 +3,7 @@
 // type. Reads COMMANDS from slashCommands.js — no command logic lives here.
 
 import { COMMANDS, LEGACY_ALIASES } from './slashCommands.js?v=20260921chatgptusage1';
+import { esc } from './ui.js?v=20260916largetoolscroll1';
 
 const POPUP_ID = 'slash-autocomplete';
 const MAX_VISIBLE = 14;
@@ -158,7 +159,7 @@ function _position(popup, textarea) {
 
 function _render(popup, items, selectedIdx, query) {
   if (!items.length) {
-    popup.innerHTML = `<div class="slash-ac-empty">No commands match <code>${_esc(query)}</code></div>`;
+    popup.innerHTML = `<div class="slash-ac-empty">No commands match <code>${esc(query)}</code></div>`;
     return;
   }
   // Group by category for the headers
@@ -167,14 +168,14 @@ function _render(popup, items, selectedIdx, query) {
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
     if (it.category !== lastCat) {
-      html += `<div class="slash-ac-cat">${_esc(it.category || 'Other')}</div>`;
+      html += `<div class="slash-ac-cat">${esc(it.category || 'Other')}</div>`;
       lastCat = it.category;
     }
     const sel = i === selectedIdx ? ' slash-ac-row-sel' : '';
-    const usage = it.usage && it.usage !== it.token ? ` <span class="slash-ac-usage">${_esc(it.usage)}</span>` : '';
-    html += `<div class="slash-ac-row${sel}" role="option" data-idx="${i}" data-token="${_esc(it.token)}">`
-         +    `<span class="slash-ac-token">${_esc(it.token)}</span>`
-         +    `<span class="slash-ac-help">${_esc(it.help)}</span>`
+    const usage = it.usage && it.usage !== it.token ? ` <span class="slash-ac-usage">${esc(it.usage)}</span>` : '';
+    html += `<div class="slash-ac-row${sel}" role="option" data-idx="${i}" data-token="${esc(it.token)}">`
+         +    `<span class="slash-ac-token">${esc(it.token)}</span>`
+         +    `<span class="slash-ac-help">${esc(it.help)}</span>`
          +    usage
          + `</div>`;
   }
@@ -182,10 +183,6 @@ function _render(popup, items, selectedIdx, query) {
   // Scroll selected into view
   const selEl = popup.querySelector('.slash-ac-row-sel');
   if (selEl) selEl.scrollIntoView({ block: 'nearest' });
-}
-
-function _esc(s) {
-  return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;' }[c]));
 }
 
 export function initSlashAutocomplete(textarea) {

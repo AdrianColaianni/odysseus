@@ -1,19 +1,3 @@
-/* 07-documents - part of the former static/style.css.
- *
- * The stylesheet is split by area, but the split is mechanical: rules were
- * moved verbatim and NOT regrouped. The numeric prefix is the load order, and
- * that order is what preserves the cascade. A rule sits in the file its
- * original position fell into, so an area's rules are not all in its file and
- * a file is not only that area's rules.
- *
- * Do not reorder the <link> tags in static/index.html, and do not move a rule
- * between files: with 1,151 redeclarations and 1,886 !important in this
- * cascade, either can change which declaration wins.
- *
- * static/index.html and the PRECACHE list in static/sw.js must agree on this
- * order. tests/test_static_stylesheet_manifest.py and
- * tests/test_css_computed_style_snapshot.py fail if that drifts.
- */
 .modal.modal-left-docked {
   align-items: stretch;
   justify-content: flex-start;
@@ -39,8 +23,7 @@
 .modal.modal-left-docked .email-reader-header {
   flex-direction: column;
   /* Stretch the meta to the full header width so the absolute
-     action cluster's right:0 lands at the right edge (was sizing
-     meta to chip content width and centering it). */
+     action cluster's right:0 lands at the right edge. */
   align-items: stretch;
   gap: 6px;
 }
@@ -88,25 +71,9 @@
 .modal.modal-left-docked .recipient-chip {
   max-width: 100%;
 }
-.archive-list {
-  margin-top: 8px;
-  border-top: 1px solid var(--border);
-  padding-top: 8px;
-}
 #archive-modal .memory-sort-select,
 #archive-modal .memory-toolbar-btn {
   height: 32px;
-}
-.archive-menu-btn {
-  position: relative;
-  top: 2px;
-}
-#archive-chips .doclib-chip {
-  height: 22px;
-  display: inline-flex;
-  align-items: center;
-  font-size: 10px;
-  padding: 0 8px;
 }
 /* Library tab panels — Chats / Archive / Research / Documents share the
    same toolbar dimensions so the sort dropdown + Select button line up
@@ -145,7 +112,7 @@
   width: max(100%, 154px);
 }
 .library-sort-picker .library-sort-item[aria-selected="true"] {
-  background: color-mix(in srgb, var(--accent, var(--red)) 13%, transparent);
+  background: color-mix(in srgb, var(--red) 13%, transparent);
 }
 #doclib-panel-chats #doclib-chats-tidy-btn,
 #doclib-panel-chats #doclib-chats-select-btn,
@@ -195,20 +162,6 @@
   background-repeat: no-repeat;
   background-position: 9px center;
   padding-left: 28px;
-}
-#doclib-panel-chats .doclib-chip {
-  height: 28px;
-}
-#doclib-panel-archive .doclib-chip {
-  height: 28px;
-}
-#doclib-panel-chats .doclib-chip,
-#doclib-panel-archive .doclib-chip {
-  display: inline-flex;
-  align-items: center;
-  font-size: 9px;
-  padding: 0 8px;
-  border-radius: 10px;
 }
 .doclib-grid:has(.doclib-card-expanded) > .doclib-card:not(.doclib-card-expanded) {
   display: none;
@@ -390,9 +343,9 @@
 /* Drag-and-drop visual hint for the email compose pane. Subtle accent
    outline + tinted overlay so it's obvious files will attach if dropped. */
 .doc-editor-pane.email-dragover {
-  outline: 2px dashed var(--accent, #2563eb);
+  outline: 2px dashed #2563eb;
   outline-offset: -8px;
-  background: color-mix(in srgb, var(--accent, #2563eb) 6%, transparent);
+  background: color-mix(in srgb, #2563eb 6%, transparent);
 }
 .doc-editor-pane.email-dragover::after {
   content: 'Drop to attach';
@@ -400,7 +353,7 @@
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  background: var(--accent, #2563eb);
+  background: #2563eb;
   color: #fff;
   padding: 8px 16px;
   border-radius: 6px;
@@ -419,13 +372,10 @@
   overflow: hidden;
   min-width: 320px;
   min-height: 240px;
-  /* When user resizes/drags so the window covers a side, force the inner
-     body to fill all the way to the bottom. The default max-height: 85vh
-     (set inline by _makeDraggable's exitFullscreen) and 80vh from the
-     opener both cap at the *viewport* — if the browser window then changes
-     size (e.g. OS aero-snap), the modal stays at the old height and
-     truncates rows. Drop the cap whenever an explicit width OR height has
-     been written inline by the resize handle / drag handler. */
+  /* Once the resize or drag handler writes an inline width or height,
+     drop the viewport-based max-height (85vh from _makeDraggable's
+     exitFullscreen, 80vh from the opener), so the body fills to the bottom
+     after the browser window changes size. */
 }
 .email-window-modal .modal-content[style*="width"],
 .email-window-modal .modal-content[style*="height"] {
@@ -435,7 +385,7 @@
   flex: 1 1 auto !important;
   min-height: 0 !important;
   /* Explicit basis of 0 makes the body grow to fill remaining space rather
-     than its content's intrinsic height (which was capping the thread). */
+     than cap at its content's intrinsic height. */
   flex-basis: 0 !important;
   max-height: none !important;
   overflow: auto !important;
@@ -529,9 +479,7 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
      file. 75dvh tall always so flex children (the expanded email reader)
      have a real height to grow into. */
   #email-lib-modal .modal-content {
-    max-height: 90dvh !important;
     max-height: 90vh !important;
-    height: 90dvh !important;
     height: 90vh !important;
   }
   /* Inner panes grow to fill the modal-content — without flex:1 on the
@@ -618,8 +566,8 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
     overflow-x: hidden !important;
     overscroll-behavior: auto;  /* chain to the modal at the scroll boundary */
   }
-  /* cookbook-body's flex:1 was needed when it owned scrolling — drop it
-     so the inner content drives modal-content's scroll height. */
+  /* No flex:1 on cookbook-body: the inner content drives modal-content's
+     scroll height. */
   #cookbook-modal .cookbook-body {
     flex: 0 0 auto !important;
     height: auto !important;
@@ -701,34 +649,6 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
   min-width: 0;
   flex: 1;
 }
-.doclib-card-ver {
-  padding: 1px 6px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--accent, var(--red)) 15%, transparent);
-  color: var(--accent, var(--red));
-  font-size: 9px;
-  flex-shrink: 0;
-  font-weight: 600;
-  letter-spacing: 0.3px;
-  min-width: 24px;
-  text-align: left;
-  box-sizing: border-box;
-}
-.doclib-card-ver-muted {
-  background: color-mix(in srgb, var(--fg) 6%, transparent);
-  color: color-mix(in srgb, var(--fg) 35%, transparent);
-}
-.doclib-card-lang {
-  padding: 1px 6px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-  color: var(--accent);
-  font-size: 9px;
-  text-align: left;
-  flex-shrink: 0;
-  min-width: 52px;
-  box-sizing: border-box;
-}
 .doclib-card-session {
   white-space: nowrap;
   overflow: hidden;
@@ -740,18 +660,6 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
   color: var(--fg-muted);
   flex-shrink: 0;
   text-align: left;
-}
-.doclib-card-time {
-  flex-shrink: 0;
-  opacity: 0.5;
-  font-size: 9px;
-  color: var(--fg-muted);
-  min-width: 50px;
-  text-align: left;
-}
-/* Footer — used by archive cards */
-.doclib-card-footer {
-  display: contents;
 }
 /* Preview — hidden by default, shown on expand */
 .doclib-card-preview {
@@ -803,10 +711,6 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
   display: flex;
   gap: 6px;
 }
-.doclib-action-hint-row {
-  display: flex;
-  gap: 6px;
-}
 /* Match the chat/research footer buttons exactly: flat, bordered,
    app font, accent on hover. */
 .doclib-card-action-btn {
@@ -837,8 +741,8 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
   }
 }
 .doclib-card-action-btn:hover {
-  border-color: var(--accent, var(--red));
-  color: var(--accent, var(--red));
+  border-color: var(--red);
+  color: var(--red);
 }
 .doclib-card-text-btn-danger {
   color: var(--color-danger, #e06c75);
@@ -862,17 +766,6 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
   left: 0 !important;
 }
 .doclib-expanded-mobile-more { display: none; }
-.doclib-btn-hint {
-  font-weight: normal;
-  opacity: 0.35;
-  font-size: 8px;
-  min-width: 58px;
-  padding: 0 8px;
-  box-sizing: border-box;
-}
-@media (max-width: 768px) {
-  .doclib-btn-hint { display: none !important; }
-}
 
 /* Chat row expand preview — matches the documents-tab expand style. */
 .doclib-card-chevron {
@@ -995,12 +888,12 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
   transition: border-color 0.15s, color 0.15s;
 }
 .doclib-chat-preview .task-completed-report-btn {
-  color: var(--accent, var(--red));
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 55%, var(--border));
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 55%, var(--border));
 }
 .doclib-chat-preview .doclib-chat-open-btn:hover {
-  border-color: var(--accent, var(--red));
-  color: var(--accent, var(--red));
+  border-color: var(--red);
+  color: var(--red);
 }
 .doclib-chat-preview-messages {
   margin-top: 6px;
@@ -1085,14 +978,14 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
   border: 1px solid var(--border);
 }
 .doclib-chat-restore-btn:hover {
-  color: var(--accent, var(--red));
-  border-color: var(--accent, var(--red));
+  color: var(--red);
+  border-color: var(--red);
 }
 .doclib-chat-archive-btn:hover,
 .doclib-chat-discuss-btn:hover,
 .doclib-chat-copy-btn:hover {
-  color: var(--accent, var(--red));
-  border-color: var(--accent, var(--red));
+  color: var(--red);
+  border-color: var(--red);
 }
 .doclib-chat-delete-btn {
   color: var(--color-danger, #e06c75);
@@ -1110,40 +1003,6 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
 /* Hide the "..." menu while the chat card is expanded — archive +
    delete live in the preview footer instead. */
 .doclib-chat-row.doclib-card-expanded ._chat-menu { display: none; }
-.doclib-chat-preview-actions.doclib-chat-preview-actions-top {
-  border-top: none;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 30%, transparent);
-  margin-top: 4px;
-  margin-bottom: 6px;
-  padding: 0 0 6px;
-  justify-content: flex-start;
-}
-.doclib-chat-preview-messages .doclib-chat-msg {
-  margin: 4px 0 10px;
-  padding-left: 8px;
-  border-left: 2px solid color-mix(in srgb, var(--border) 70%, transparent);
-}
-.doclib-chat-preview-messages .doclib-chat-msg.user {
-  border-left-color: color-mix(in srgb, var(--accent, var(--red)) 60%, transparent);
-}
-.doclib-chat-preview-messages .doclib-chat-msg-role {
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  opacity: 0.55;
-  margin-bottom: 2px;
-}
-.doclib-chat-preview-messages .doclib-chat-msg.user .doclib-chat-msg-role {
-  color: var(--accent, var(--red));
-  opacity: 0.85;
-}
-.doclib-chat-preview-messages .doclib-chat-msg-body {
-  white-space: pre-wrap;
-  word-break: break-word;
-  opacity: 0.85;
-  line-height: 1.45;
-}
 /* Chat-bubble preview — mirrors the real chat layout. User bubbles hug
    right with an accent tint; assistant bubbles hug left with a neutral
    panel tint and a small model tag at the top. */
@@ -1163,8 +1022,8 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
   background: color-mix(in srgb, var(--fg) 4%, transparent);
 }
 .doclib-chat-bubble-row.user .doclib-chat-bubble {
-  background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 30%, transparent);
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+  border-color: color-mix(in srgb, var(--red) 30%, transparent);
   border-bottom-right-radius: 4px;
 }
 .doclib-chat-bubble-row.assistant .doclib-chat-bubble {
@@ -1181,7 +1040,7 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
   padding: 1px 6px;
   border-radius: 6px;
   background: color-mix(in srgb, var(--fg) 8%, transparent);
-  color: var(--fg-muted, var(--fg));
+  color: var(--fg);
 }
 .doclib-chat-bubble-body { word-break: break-word; }
 .doclib-chat-bubble-body p { margin: 4px 0; }
@@ -1230,11 +1089,6 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
   background: color-mix(in srgb, var(--fg) 8%, transparent);
   border-color: color-mix(in srgb, var(--fg) 24%, transparent);
 }
-.cookbook-serve-title {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-}
 .cookbook-serve-title .doclib-card-collapse-chevron {
   display: inline-flex;
   margin-left: auto;
@@ -1251,7 +1105,6 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
   border: 1px solid var(--border);
   border-radius: 8px;
   display: flex;
-  flex-direction: column;
   overflow: hidden;
   animation: doclib-expand 0.2s ease-out;
 }

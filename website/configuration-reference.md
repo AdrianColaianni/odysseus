@@ -21,7 +21,7 @@ described as a switch that turns something off, the read rejects `0`, `false`,
 `no` and `off` and treats everything else as on. The `Default` column is the
 value the code falls back to when the variable is unset, quoted from the source.
 
-The source tree reads **117** `ODYSSEUS_*` variables: 81 an operator may want to set, and 36 that are internal - sentinels, fixture switches, capture hooks and development tooling. The internal ones are listed too, in their own section, so this page can be checked against the source mechanically.
+The source tree reads **102** `ODYSSEUS_*` variables: 66 an operator may want to set, and 36 that are internal - sentinels, fixture switches, capture hooks and development tooling. The internal ones are listed too, in their own section, so this page can be checked against the source mechanically.
 
 > This page is generated. Edit `scripts/generate_env_reference.py` and
 > re-run it; `tests/test_env_reference.py` enforces that the committed page
@@ -85,12 +85,10 @@ The source tree reads **117** `ODYSSEUS_*` variables: 81 an operator may want to
 |---|---|---|---|
 | `ODYSSEUS_BROWSER_EXECUTABLE` | `''` | `src/builtin_mcp.py` | Absolute path to the Chrome or Chromium binary. Empty searches the usual names, then lets Playwright MCP pick its own browser. |
 | `ODYSSEUS_BROWSER_ISOLATED` | `'1'` | `src/builtin_mcp.py` | Security-relevant. On by default, adding `--isolated` so each browser session starts clean. Set 0, false or no to keep a persistent profile. |
-| `ODYSSEUS_BROWSER_MCP_CACHE` | `os.path.join(base_dir, 'data', 'local', 'playwright-mcp-cache')` | `src/builtin_mcp.py` | Cache directory handed to the browser MCP server, so its npm download survives a container rebuild. |
+| `ODYSSEUS_BROWSER_MCP_CACHE` | `PLAYWRIGHT_MCP_CACHE_DIR` | `src/builtin_mcp.py` | Cache directory handed to the browser MCP server, so its npm download survives a container rebuild. |
 | `ODYSSEUS_BROWSER_MCP_CALL_TIMEOUT_S` | `'90'` | `src/mcp_manager.py` | Upper bound in seconds for one browser MCP tool call. A call that exceeds it fails without being retried. |
 | `ODYSSEUS_BROWSER_MCP_REQUIRE_CACHE` | `''` | `src/builtin_mcp.py` | Truthy refuses to start the browser MCP server unless its npm package is already in the npx cache, instead of installing it at startup. |
-| `ODYSSEUS_BROWSER_NAMESPACE` | `'odysseus-ui'` | `src/agent_tools/web_tools.py` | Namespace for the detached agent-browser daemon's pid files, so two runtimes on one machine do not terminate each other's browsers. |
 | `ODYSSEUS_BROWSER_NO_SANDBOX` | `'1'` | `src/builtin_mcp.py` | Security-relevant. On by default, adding `--no-sandbox` because the Docker image cannot use the Chromium sandbox. Set 0, false or no to keep it. |
-| `ODYSSEUS_BROWSER_SCREENSHOT_DIR` | *unset* | `src/agent_tools/web_tools.py` | Where private-browser screenshots are written. Falls back to the container path, then the system temp directory. |
 
 ### Container and workspace mounts
 
@@ -114,7 +112,6 @@ The source tree reads **117** `ODYSSEUS_*` variables: 81 an operator may want to
 |---|---|---|---|
 | `ODYSSEUS_ALLOW_PRIVATE_CALDAV` | `'0'` | `src/caldav_sync.py` | Security-relevant. Truthy lets CalDAV sync reach private and link-local addresses. Off by default; this is an SSRF guard. |
 | `ODYSSEUS_FALLBACK_OWNER` | `'owner@localhost'` | `routes/calendar_routes.py` | Owner address that single-user mode attributes an unauthenticated request to. Only reachable while single-user mode is on. |
-| `ODYSSEUS_SINGLE_USER` | `'1'` | `routes/calendar_routes.py` | Security-relevant. On by default. Set to 0 on a real multi-user install so unauthenticated calendar writes are rejected rather than absorbed. |
 
 ### Upload and media limits
 
@@ -123,23 +120,11 @@ The source tree reads **117** `ODYSSEUS_*` variables: 81 an operator may want to
 | `ODYSSEUS_CHAT_UPLOAD_MAX_BYTES` | `10 * 1024 * 1024` | `src/upload_limits.py` | Maximum bytes accepted for a chat attachment. |
 | `ODYSSEUS_EDITOR_DRAFT_MAX_BYTES` | `256 * 1024 * 1024` | `src/upload_limits.py` | Maximum bytes accepted for a saved editor draft. |
 | `ODYSSEUS_EMAIL_COMPOSE_UPLOAD_MAX_BYTES` | `25 * 1024 * 1024` | `src/upload_limits.py` | Maximum bytes accepted for an attachment added while composing mail. |
-| `ODYSSEUS_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES` | `25 * 1024 * 1024` | `src/upload_limits.py` (+1 more) | Maximum bytes accepted for an image handed to a gallery transform. |
-| `ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES` | `100 * 1024 * 1024` | `src/upload_limits.py` (+1 more) | Maximum bytes accepted for a gallery upload. |
+| `ODYSSEUS_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES` | `25 * 1024 * 1024` | `src/upload_limits.py` | Maximum bytes accepted for an image handed to a gallery transform. |
+| `ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES` | `100 * 1024 * 1024` | `src/upload_limits.py` | Maximum bytes accepted for a gallery upload. |
 | `ODYSSEUS_ICS_MAX_BYTES` | `10 * 1024 * 1024` | `src/upload_limits.py` | Maximum bytes accepted for an imported ICS file. |
-| `ODYSSEUS_MEDIA_FRAME_TIMEOUT` | `30` | `src/media_ingress.py` | Seconds allowed for extracting frames from a video before giving up. |
-| `ODYSSEUS_MEDIA_MAX_AUDIO_BYTES` | `32 * 1024 * 1024` | `src/media_ingress.py` | Largest source audio file the media pipeline will read. |
-| `ODYSSEUS_MEDIA_MAX_DIMENSION` | `1600` | `src/media_ingress.py` | Longest edge in pixels an image is resized down to before encoding. |
-| `ODYSSEUS_MEDIA_MAX_DOCUMENT_BYTES` | `32 * 1024 * 1024` | `src/media_ingress.py` | Largest source document the media pipeline will read. |
-| `ODYSSEUS_MEDIA_MAX_DOCUMENT_CHARS` | `24000` | `src/media_ingress.py` | How many characters of an ingested document are inlined into the turn. |
-| `ODYSSEUS_MEDIA_MAX_ENCODED_BYTES` | `24 * 1024 * 1024` | `src/media_ingress.py` | Budget for the encoded payload handed to the model, counted cumulatively across one turn's attachments rather than per file. |
-| `ODYSSEUS_MEDIA_MAX_FILES` | `4` | `src/media_ingress.py` | How many local media files one agent turn may ingest. |
-| `ODYSSEUS_MEDIA_MAX_IMAGE_BYTES` | `12 * 1024 * 1024` | `src/media_ingress.py` | Largest source image the media pipeline will read. |
-| `ODYSSEUS_MEDIA_MAX_PIXELS` | `40000000` | `src/media_ingress.py` | Total pixel budget for a source image, as a decompression-bomb guard. |
-| `ODYSSEUS_MEDIA_MAX_VIDEO_BYTES` | `128 * 1024 * 1024` | `src/media_ingress.py` | Largest source video the media pipeline will read. |
-| `ODYSSEUS_MEDIA_MAX_VIDEO_FRAMES` | `8` | `src/media_ingress.py` | How many frames are sampled from a video. |
-| `ODYSSEUS_MEDIA_PROBE_TIMEOUT` | `15` | `src/media_ingress.py` | Seconds allowed for probing a video's metadata before giving up. |
-| `ODYSSEUS_MEMORY_IMPORT_MAX_BYTES` | `10 * 1024 * 1024` | `src/upload_limits.py` (+1 more) | Maximum bytes accepted for a memory import file. |
-| `ODYSSEUS_PERSONAL_UPLOAD_MAX_BYTES` | `25 * 1024 * 1024` | `src/upload_limits.py` (+1 more) | Maximum bytes accepted for a personal-documents upload. |
+| `ODYSSEUS_MEMORY_IMPORT_MAX_BYTES` | `10 * 1024 * 1024` | `src/upload_limits.py` | Maximum bytes accepted for a memory import file. |
+| `ODYSSEUS_PERSONAL_UPLOAD_MAX_BYTES` | `25 * 1024 * 1024` | `src/upload_limits.py` | Maximum bytes accepted for a personal-documents upload. |
 | `ODYSSEUS_STT_MAX_AUDIO_BYTES` | `25 * 1024 * 1024` | `src/upload_limits.py` | Maximum bytes accepted for an audio file submitted for transcription. |
 
 ### Search
@@ -177,8 +162,8 @@ The source tree reads **117** `ODYSSEUS_*` variables: 81 an operator may want to
 
 | Variable | Default | Read in | What it does |
 |---|---|---|---|
-| `ODYSSEUS_API_TOKEN` | `''` | `integrations/claude/skills/odysseus/scripts/odysseus_api.py` (+1 more) | API token those scripts authenticate with. Both this and the URL are required; the scripts name whichever is missing. |
-| `ODYSSEUS_URL` | `''` | `integrations/claude/skills/odysseus/scripts/odysseus_api.py` (+1 more) | Base URL of the Odysseus instance the bundled integration scripts call. |
+| `ODYSSEUS_API_TOKEN` | `''` | `integrations/codex/scripts/odysseus_api.py` | API token those scripts authenticate with. Both this and the URL are required; the scripts name whichever is missing. |
+| `ODYSSEUS_URL` | `''` | `integrations/codex/scripts/odysseus_api.py` | Base URL of the Odysseus instance the bundled integration scripts call. |
 
 ## Internal and development-only variables
 
@@ -199,7 +184,7 @@ Listed for completeness. Setting one of these on a real install is either a no-o
 |---|---|---|---|
 | `ODYSSEUS_CAPTURE_MODEL_REQUESTS` | `''` | `src/agent_loop.py` | Truthy writes model-request snapshots for local debugging. The marker file `/tmp/odysseus_capture_model_requests` enables the same thing. |
 | `ODYSSEUS_EXPOSE_RAW_BROWSER_MCP` | `''` | `src/agent_loop.py` | Truthy stops hiding the raw Playwright MCP tools from agent prompts when the private-browser tool is available. |
-| `ODYSSEUS_TOOL_CONTRACT_ROOT` | `str(Path(__file__).resolve().parents[1] / 'scripts')` | `src/clean_agent_preview.py` (+1 more) | Directory holding the tool-contract scripts the clean-agent preview loads. The default resolves to the bundled scripts directory relative to the installed/source tree. |
+| `ODYSSEUS_TOOL_CONTRACT_ROOT` | `str(Path(__file__).resolve().parents[1] / 'scripts')` | `scripts/test_clean_tool_loop.py` | Directory holding the tool-contract script the clean tool-loop diagnostic loads. The default resolves to the bundled scripts directory relative to the installed/source tree. |
 
 ### Email
 
@@ -224,7 +209,7 @@ Listed for completeness. Setting one of these on a real install is either a no-o
 | `ODYSSEUS_ORGANIZER_CASES` | *unset* | `tests/tools/organizer_smoke.py` | Comma-separated organizer smoke case names to run. Unset runs every case. |
 | `ODYSSEUS_ORGANIZER_TRACE` | *unset* | `tests/tools/organizer_smoke.py` | Any non-empty value prints each provider request the organizer smoke tool sends. |
 | `ODYSSEUS_ORGANIZER_TRACE_MESSAGES` | *unset* | `tests/tools/organizer_smoke.py` | With organizer tracing on, any non-empty value also prints the request messages. |
-| `ODYSSEUS_QA_PASSWORD` | *unset* | `scripts/odysseus_related_flow_audit.py` (+6 more) | Account password passed to the related-flow audit script when authenticating. |
+| `ODYSSEUS_QA_PASSWORD` | *unset* | `scripts/odysseus_related_flow_audit.py` (+5 more) | Account password passed to the related-flow audit script when authenticating. |
 | `ODYSSEUS_QA_TEACHER_ATTEMPTS` | `'3'` | `scripts/odysseus_conversation_qa.py` | Retry budget for the conversation-QA teacher model call. Clamped to 1-3. |
 | `ODYSSEUS_QA_TEACHER_TIMEOUT` | `'120'` | `scripts/odysseus_conversation_qa.py` | Timeout in seconds for that call. Clamped to 15-120. |
 | `ODYSSEUS_RUNTIME_REVISION` | `''` | `routes/chat_helpers.py` (+1 more) | Revision string stamped into each captured SFT trace record, so a trace can be tied back to the build that produced it. |
@@ -258,14 +243,13 @@ reads three ways, because no single pattern covers the codebase:
 - Calls to env-reader helpers - any function that forwards one of its own
   parameters to an environment read. This is detected rather than hardcoded, so a
   new helper needs no change here. It is what finds the upload caps in
-  `src/upload_limits.py` and the media-ingress overrides in
-  `src/media_ingress.py`.
+  `src/upload_limits.py`.
 - A regex sweep of the raw file text, for reads the AST cannot see.
   `routes/cookbook_helpers.py` builds an Ollama probe script as a list of source
   lines, so one read lives inside a string literal.
 
 The three passes are not redundancy. A line-based grep for a direct
-`os.environ.get("ODYSSEUS_...` call finds 87 of the 117 variables on this
+`os.environ.get("ODYSSEUS_...` call finds 81 of the 102 variables on this
 page. What it misses is reads through an env-reader helper, reads whose call
 spans more than one line, reads whose variable name is held in a module
 constant, and reads through a mapping passed in as an argument - which is the

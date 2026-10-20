@@ -1,31 +1,9 @@
 """Browser coverage for editable, undoable Rich Text image captions."""
 
 import json
-import subprocess
-from pathlib import Path
 
-from tests.helpers.stylesheets import app_css
 from tests.helpers.stylesheets import stylesheet_link_tags
-from tests.helpers.document_source import document_source, function_body
-
-
-ROOT = Path(__file__).resolve().parents[1]
-DOC_JS = document_source()
-STYLE = app_css()
-
-
-def test_image_caption_uses_semantic_figure_and_structured_export_paths():
-    caption = function_body("_editRichImageCaption")
-    converter = function_body("_docxFigureBlocks")
-
-    assert "function _promptImageCaption" in DOC_JS
-    assert "function _replaceRichImageFigure" in DOC_JS
-    assert "document.createElement('figure')" in caption
-    assert "captionElement.textContent = caption" in caption
-    assert "replacement = replacementImage" in caption
-    assert "_docxImageAlignment(image, docx)" in converter
-    assert "caption.childNodes" in converter
-    assert "figure.richtext-image .richtext-image-caption" in STYLE
+from tests.helpers.node import run_node_module
 
 
 def test_mobile_image_caption_survives_resize_history_and_empty_removal():
@@ -115,15 +93,7 @@ def test_mobile_image_caption_survives_resize_history_and_empty_removal():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
 
     assert data["added"]["figure"] is True
     assert data["added"]["caption"] == "Quarterly revenue", json.dumps(data, indent=2)

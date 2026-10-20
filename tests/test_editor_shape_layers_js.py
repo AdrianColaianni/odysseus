@@ -1,7 +1,7 @@
 import json
-import subprocess
 import textwrap
 from pathlib import Path
+from tests.helpers.node import run_node_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,14 +39,7 @@ def run_node(body: str):
         {body}
         """
     )
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
+    return run_node_module(script)
 
 
 def test_shape_renderer_keeps_editable_metadata_and_builds_cache():
@@ -102,22 +95,3 @@ def test_shape_gradient_is_rendered_without_losing_editable_metadata():
     assert result["shape"]["fillType"] == "linear-gradient"
     assert result["shape"]["gradientAngle"] == 35
     assert result["stops"][-1] == [1, "#0000ff"]
-
-
-def test_shape_tool_is_retained_across_editor_subsystems():
-    editor = (ROOT / "static/js/galleryEditor.js").read_text(encoding="utf-8")
-    toolbar = (ROOT / "static/js/editor/build/toolbar.js").read_text(encoding="utf-8")
-    controls = (ROOT / "static/js/editor/build/controls.js").read_text(encoding="utf-8")
-    codec = (ROOT / "static/js/editor/document-codec.js").read_text(encoding="utf-8")
-    geometry = (ROOT / "static/js/editor/document-geometry.js").read_text(encoding="utf-8")
-    transform = (ROOT / "static/js/editor/tools/transform-session.js").read_text(encoding="utf-8")
-    service_worker = (ROOT / "static/sw.js").read_text(encoding="utf-8")
-
-    assert "{ id: 'shape', label: 'Shape'" in toolbar
-    assert 'id="ge-shape-section"' in controls
-    assert "if (state.tool === 'shape') return _beginShape(e);" in editor
-    assert "shape: cloneDocumentValue(layer.shape, null)" in codec
-    assert "scaleShapeLayer(layer, scaleX, scaleY)" in geometry
-    assert "renderShapeLayer(layer)" in transform
-    assert "/static/js/editor/shape-layer.js" in service_worker
-    assert "/static/js/editor/text-edit-overlay.js" in service_worker

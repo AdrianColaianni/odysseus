@@ -1,32 +1,23 @@
-"""Config/integration admin agent tools (TOOL_HANDLERS).
-
-Moved verbatim from tool_implementations.py as part of the tool-registry
-migration (#3629, the `admin_tools.py` bullet): manage_endpoints / manage_mcp /
+"""Config/integration admin agent tools: manage_endpoints / manage_mcp /
 manage_webhooks / manage_tokens / manage_settings, plus manage_mcp's
-command-allowlist guard. Each impl keeps its `do_*(content, owner)` shape;
-ADMIN_TOOL_HANDLERS wraps them into registry `execute(content, ctx)` adapters
-via one factory.
-"""
+command-allowlist guard."""
 import json
 import os
 import re
 import logging
 from typing import Optional, Dict
 
-from src.tool_utils import get_mcp_manager, _parse_tool_args
+from src.tool_utils import get_mcp_manager
+from src.tools._common import parsed_tool_args
 from src.tool_security import BUILTIN_EMAIL_TOOLS
 
 logger = logging.getLogger(__name__)
 
 
-async def do_manage_endpoints(content: str, owner: Optional[str] = None) -> Dict:
+@parsed_tool_args
+async def do_manage_endpoints(args: dict, owner: Optional[str] = None) -> Dict:
     """Manage model endpoints: list, add, delete, enable, disable."""
     from core.database import SessionLocal, ModelEndpoint
-    try:
-        args = _parse_tool_args(content)
-    except ValueError:
-        return {"error": "Invalid JSON arguments", "exit_code": 1}
-
     action = args.get("action", "list")
     db = SessionLocal()
     try:
@@ -215,13 +206,9 @@ def _validate_mcp_command(command, args, env) -> Optional[str]:
     return None
 
 
-async def do_manage_mcp(content: str, owner: Optional[str] = None) -> Dict:
+@parsed_tool_args
+async def do_manage_mcp(args: dict, owner: Optional[str] = None) -> Dict:
     """Manage MCP servers: list, add, delete, enable, disable, reconnect."""
-    try:
-        args = _parse_tool_args(content)
-    except ValueError:
-        return {"error": "Invalid JSON arguments", "exit_code": 1}
-
     action = args.get("action", "list")
 
     if action == "list":
@@ -370,14 +357,10 @@ async def do_manage_mcp(content: str, owner: Optional[str] = None) -> Dict:
 # Webhook management tool
 # ---------------------------------------------------------------------------
 
-async def do_manage_webhooks(content: str, owner: Optional[str] = None) -> Dict:
+@parsed_tool_args
+async def do_manage_webhooks(args: dict, owner: Optional[str] = None) -> Dict:
     """Manage webhooks: list, add, delete, enable, disable, test."""
     from core.database import SessionLocal
-    try:
-        args = _parse_tool_args(content)
-    except ValueError:
-        return {"error": "Invalid JSON arguments", "exit_code": 1}
-
     action = args.get("action", "list")
     db = SessionLocal()
     try:
@@ -442,14 +425,10 @@ async def do_manage_webhooks(content: str, owner: Optional[str] = None) -> Dict:
 # API token management tool
 # ---------------------------------------------------------------------------
 
-async def do_manage_tokens(content: str, owner: Optional[str] = None) -> Dict:
+@parsed_tool_args
+async def do_manage_tokens(args: dict, owner: Optional[str] = None) -> Dict:
     """Manage API tokens: list, create, delete."""
     from core.database import SessionLocal, ApiToken
-    try:
-        args = _parse_tool_args(content)
-    except ValueError:
-        return {"error": "Invalid JSON arguments", "exit_code": 1}
-
     action = args.get("action", "list")
     db = SessionLocal()
     try:
@@ -495,13 +474,9 @@ async def do_manage_tokens(content: str, owner: Optional[str] = None) -> Dict:
 # Settings/preferences management tool
 # ---------------------------------------------------------------------------
 
-async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
+@parsed_tool_args
+async def do_manage_settings(args: dict, owner: Optional[str] = None) -> Dict:
     """Manage user settings and preferences."""
-    try:
-        args = _parse_tool_args(content)
-    except ValueError:
-        return {"error": "Invalid JSON arguments", "exit_code": 1}
-
     action = args.get("action", "list")
 
     from core.database import SessionLocal
@@ -784,13 +759,6 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
         db.close()
 
 
-# ---------------------------------------------------------------------------
-# API call tool
-# ---------------------------------------------------------------------------
-
-
-
-# ── registry adapters ────────────────────────────────────────────────────────
 def _owner_adapter(fn):
     """Wrap a do_*(content, owner) impl as a registry execute(content, ctx)."""
     async def _execute(content: str, ctx: dict) -> dict:

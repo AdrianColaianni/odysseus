@@ -7,28 +7,17 @@ never before a formula or a ```mermaid fence actually shows up, and math still
 renders once the library lands.
 """
 
-import json
 import re
-import shutil
-import subprocess
 import textwrap
 from pathlib import Path
 
-import pytest
-from tests.helpers.document_source import document_source
+from tests.helpers.node import run_node_module
 
 _REPO = Path(__file__).resolve().parent.parent
-_HAS_NODE = shutil.which("node") is not None
 
 MERMAID_SRC = "/static/lib/mermaid.min.js"
 KATEX_SRC = "/static/lib/katex/katex.min.js"
 KATEX_CSS = "/static/lib/katex/katex.min.css"
-
-
-@pytest.fixture(scope="module")
-def node_available():
-    if not _HAS_NODE:
-        pytest.skip("node binary not on PATH")
 
 
 def _katex_fonts_block(sw_source: str) -> str:
@@ -145,21 +134,11 @@ const emit = (value) => console.log(JSON.stringify(value));
 """
 
 
-def _run_node(body: str, timeout: int = 20):
-    script = _HARNESS + textwrap.dedent(body)
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=_REPO,
-        capture_output=True,
-        timeout=timeout,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise AssertionError(f"node failed:\nSTDERR:\n{result.stderr}\nSTDOUT:\n{result.stdout}")
-    return json.loads(result.stdout.splitlines()[-1])
+def _run_node(body: str):
+    return run_node_module(_HARNESS + textwrap.dedent(body))
 
 
-def test_ensure_mermaid_shares_one_load_between_concurrent_callers(node_available):
+def test_ensure_mermaid_shares_one_load_between_concurrent_callers():
     """Two callers before the library lands must not trigger two fetches."""
     out = _run_node(
         """
@@ -192,7 +171,7 @@ def test_ensure_mermaid_shares_one_load_between_concurrent_callers(node_availabl
     assert out["initializeCalls"] == 1
 
 
-def test_ensure_mermaid_retries_after_a_failed_load(node_available):
+def test_ensure_mermaid_retries_after_a_failed_load():
     """A blocked first fetch must not poison every later diagram."""
     out = _run_node(
         """
@@ -215,7 +194,7 @@ def test_ensure_mermaid_retries_after_a_failed_load(node_available):
     assert out["differentPromise"] is True
 
 
-def test_render_mermaid_does_not_fetch_when_no_diagram_is_present(node_available):
+def test_render_mermaid_does_not_fetch_when_no_diagram_is_present():
     """The whole point of the lazy load: no fence, no 3.5 MB download."""
     out = _run_node(
         """
@@ -227,7 +206,7 @@ def test_render_mermaid_does_not_fetch_when_no_diagram_is_present(node_available
     assert out["scriptCount"] == 0
 
 
-def test_render_mermaid_fetches_once_a_diagram_is_present(node_available):
+def test_render_mermaid_fetches_once_a_diagram_is_present():
     out = _run_node(
         """
         const node = makeEl('pre');
@@ -252,7 +231,7 @@ def test_render_mermaid_fetches_once_a_diagram_is_present(node_available):
     assert out["ranWith"] == 1
 
 
-def test_ensure_katex_loads_script_and_stylesheet_once(node_available):
+def test_ensure_katex_loads_script_and_stylesheet_once():
     out = _run_node(
         """
         const p1 = mod.ensureKatex();
@@ -274,7 +253,7 @@ def test_ensure_katex_loads_script_and_stylesheet_once(node_available):
     assert out["linkHrefs"] == [KATEX_CSS]
 
 
-def test_md_to_html_defers_math_when_katex_is_not_loaded_yet(node_available):
+def test_md_to_html_defers_math_when_katex_is_not_loaded_yet():
     """Without KaTeX the source is banked verbatim, not dropped or mangled."""
     out = _run_node(
         """
@@ -292,7 +271,7 @@ def test_md_to_html_defers_math_when_katex_is_not_loaded_yet(node_available):
     assert out["scriptCount"] == 0
 
 
-def test_deferred_math_schedules_a_katex_load(node_available):
+def test_deferred_math_schedules_a_katex_load():
     """Deferring is only safe if the follow-up actually fires.
 
     An earlier version scheduled this on requestAnimationFrame, which never runs
@@ -311,7 +290,7 @@ def test_deferred_math_schedules_a_katex_load(node_available):
     assert out["scriptSrcs"] == [KATEX_SRC]
 
 
-def test_entity_math_reaches_katex_as_characters_not_entities(node_available):
+def test_entity_math_reaches_katex_as_characters_not_entities():
     """"$a &lt; b$" and "$a < b$" must typeset the same, with no parse error.
 
     mdToHtml escapes the source before the math pass, so a typed "<" arrives at
@@ -342,7 +321,7 @@ def test_entity_math_reaches_katex_as_characters_not_entities(node_available):
     assert 'class="katex"' in out["entity"]
 
 
-def test_deferred_entity_math_banks_the_decoded_source(node_available):
+def test_deferred_entity_math_banks_the_decoded_source():
     """The placeholder has to hold the same source the inline path would use.
 
     renderMath() feeds the span's textContent straight to KaTeX, so an entity
@@ -363,7 +342,7 @@ def test_deferred_entity_math_banks_the_decoded_source(node_available):
     assert "a &lt; b</span>" in out["entity"]
 
 
-def test_detached_container_math_typesets_with_the_real_renderer(node_available):
+def test_detached_container_math_typesets_with_the_real_renderer():
     """The PDF export renders into a container it never attaches to the page.
 
     mdToHtml defers math to a document-scoped flush, which cannot reach a
@@ -400,20 +379,8 @@ def test_detached_container_math_typesets_with_the_real_renderer(node_available)
     assert "ody-math-pending" not in out["written"]
 
 
-def test_pdf_export_typesets_its_container_before_print():
-    """Ordering in a call site, so pin the call site. No node needed."""
-    source = document_source()
-    match = re.search(r"\n  async function exportAsPdf\(\) \{(.*?)\n  \}\n", source, re.S)
-    assert match, "exportAsPdf not found"
-    body = match.group(1)
 
-    render = "await markdownModule.renderMath(container);"
-    assert render in body, "the export never typesets its detached container"
-    assert body.index("container.innerHTML = html;") < body.index(render)
-    assert body.index(render) < body.index("frame.contentWindow.print()")
-
-
-def test_md_to_html_renders_inline_once_katex_is_loaded(node_available):
+def test_md_to_html_renders_inline_once_katex_is_loaded():
     """After the first load mdToHtml goes back to typesetting synchronously."""
     out = _run_node(
         """
@@ -429,7 +396,7 @@ def test_md_to_html_renders_inline_once_katex_is_loaded(node_available):
     assert "ody-math-pending" not in out["html"]
 
 
-def test_render_math_typesets_deferred_placeholders(node_available):
+def test_render_math_typesets_deferred_placeholders():
     out = _run_node(
         """
         const el = makeEl('span');
@@ -456,7 +423,7 @@ def test_render_math_typesets_deferred_placeholders(node_available):
     assert out["written"] == '<span class="katex" data-display="false">x^2</span>'
 
 
-def test_render_math_does_not_fetch_without_placeholders(node_available):
+def test_render_math_does_not_fetch_without_placeholders():
     out = _run_node(
         """
         await mod.renderMath(makeContainer({}));

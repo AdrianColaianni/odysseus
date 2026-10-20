@@ -12,7 +12,7 @@ from src.agent_runtime.remote_resources import (
     active_backend_operation, bind_backend_operation, bind_backend_for_operation,
     configuration_incarnation, endpoint_identity, integration_resource, seal_backends,
 )
-from src.agent_runtime.resources import ExternalResource, NativeBackendResource, ResourceIdentityError
+from src.agent_runtime.resources import ExternalResource, NativeBackendResource
 from src.mcp_manager import McpManager
 from src.tool_approvals import ToolApprovalStore
 from src.tool_capabilities import ToolRunSecurityContext, capabilities_for_action
@@ -58,17 +58,17 @@ def connect(manager, server="alpha", tools=("read", "write"), url="https://examp
     return session
 
 
-@pytest.mark.parametrize("kind", ["availability", "selection", "model_name", "legacy"])
-async def test_remote_availability_does_not_create_resource_authority(manager, kind):
-    session = connect(manager)
-    authority = grant("mcp__alpha__read", resources=()) if kind != "model_name" else grant()
-    if kind == "legacy":
-        snapshot = grant("mcp__alpha__read").to_dict()
-        snapshot["version"] = 2
-        authority = RequestAuthority.from_dict(snapshot)
-    _, result = await dispatch(authority, "mcp__alpha__read")
-    assert result["exit_code"] == 1
-    session.call_tool.assert_not_awaited()
+async def test_remote_availability_does_not_create_resource_authority(manager):
+    for kind in ["availability", "selection", "model_name", "legacy"]:
+        session = connect(manager)
+        authority = grant("mcp__alpha__read", resources=()) if kind != "model_name" else grant()
+        if kind == "legacy":
+            snapshot = grant("mcp__alpha__read").to_dict()
+            snapshot["version"] = 2
+            authority = RequestAuthority.from_dict(snapshot)
+        _, result = await dispatch(authority, "mcp__alpha__read")
+        assert result["exit_code"] == 1
+        session.call_tool.assert_not_awaited()
 
 
 async def test_qualified_mcp_binds_exact_tool_and_backend(manager):
@@ -82,47 +82,47 @@ async def test_qualified_mcp_binds_exact_tool_and_backend(manager):
     assert active_backend_operation() is None
 
 
-@pytest.mark.parametrize("change", ["session", "endpoint", "path", "query", "discovery"])
-async def test_remote_identity_changes_invalidate_admission_and_exact_approval(manager, change):
-    old = connect(manager)
-    authority = grant("mcp__alpha__read")
-    exact = approval(authority, "mcp__alpha__read", '{"resource":"one"}')
-    assert exact.pending.backend_operation is not None
-    if change == "session":
-        new = connect(manager)
-    elif change == "discovery":
-        manager._tools["alpha"] = [{"name": "write"}]
-    else:
-        url = {"endpoint": "https://other.test/mcp", "path": "https://example.test/other",
-               "query": "https://example.test/mcp?token=OTHER"}[change]
-        manager._resource_endpoints["alpha"] = (endpoint_identity(url), configuration_incarnation(url))
-    for extra in ({}, {"exact_approval": exact, "security_context": ToolRunSecurityContext(external_untrusted_context_seen=True)}):
-        _, result = await dispatch(authority, "mcp__alpha__read", '{"resource":"one"}', **extra)
-        assert result["failure_kind"] == "resource_identity_denied"
-    old.call_tool.assert_not_awaited()
-    if change == "session":
-        new.call_tool.assert_not_awaited()
-    assert not exact._claimed
+async def test_remote_identity_changes_invalidate_admission_and_exact_approval(manager):
+    for change in ["session", "endpoint", "path", "query", "discovery"]:
+        old = connect(manager)
+        authority = grant("mcp__alpha__read")
+        exact = approval(authority, "mcp__alpha__read", '{"resource":"one"}')
+        assert exact.pending.backend_operation is not None
+        if change == "session":
+            new = connect(manager)
+        elif change == "discovery":
+            manager._tools["alpha"] = [{"name": "write"}]
+        else:
+            url = {"endpoint": "https://other.test/mcp", "path": "https://example.test/other",
+                   "query": "https://example.test/mcp?token=OTHER"}[change]
+            manager._resource_endpoints["alpha"] = (endpoint_identity(url), configuration_incarnation(url))
+        for extra in ({}, {"exact_approval": exact, "security_context": ToolRunSecurityContext(external_untrusted_context_seen=True)}):
+            _, result = await dispatch(authority, "mcp__alpha__read", '{"resource":"one"}', **extra)
+            assert result["failure_kind"] == "resource_identity_denied"
+        old.call_tool.assert_not_awaited()
+        if change == "session":
+            new.call_tool.assert_not_awaited()
+        assert not exact._claimed
 
 
-@pytest.mark.parametrize("change", ["tool", "selector", "request", "owner", "session"])
-async def test_remote_approval_is_bound_to_operation_and_request(manager, change):
-    session = connect(manager)
-    authority = grant("mcp__alpha__read", "mcp__alpha__write")
-    exact = approval(authority, "mcp__alpha__read", '{"record":"one"}')
-    tool, content = "mcp__alpha__read", '{"record":"one"}'
-    if change == "tool":
-        tool = "mcp__alpha__write"
-    elif change == "selector":
-        content = '{"record":"two"}'
-    else:
-        authority = replace(authority, **{"request": {"request_id": "other"}, "owner": {"owner": "bob"},
-                                         "session": {"session_id": "other"}}[change])
-    _, result = await dispatch(authority, tool, content, exact_approval=exact,
-        security_context=ToolRunSecurityContext(external_untrusted_context_seen=True))
-    assert result["exit_code"] == 1
-    session.call_tool.assert_not_awaited()
-    assert not exact._claimed
+async def test_remote_approval_is_bound_to_operation_and_request(manager):
+    for change in ["tool", "selector", "request", "owner", "session"]:
+        session = connect(manager)
+        authority = grant("mcp__alpha__read", "mcp__alpha__write")
+        exact = approval(authority, "mcp__alpha__read", '{"record":"one"}')
+        tool, content = "mcp__alpha__read", '{"record":"one"}'
+        if change == "tool":
+            tool = "mcp__alpha__write"
+        elif change == "selector":
+            content = '{"record":"two"}'
+        else:
+            authority = replace(authority, **{"request": {"request_id": "other"}, "owner": {"owner": "bob"},
+                                             "session": {"session_id": "other"}}[change])
+        _, result = await dispatch(authority, tool, content, exact_approval=exact,
+            security_context=ToolRunSecurityContext(external_untrusted_context_seen=True))
+        assert result["exit_code"] == 1
+        session.call_tool.assert_not_awaited()
+        assert not exact._claimed
 
 
 async def test_legacy_exact_remote_approval_is_one_use_and_does_not_mint_backend_scope(manager):
@@ -182,13 +182,13 @@ async def test_mcp_revalidates_at_transport_and_never_retries_bound_calls(manage
     reconnect.assert_not_awaited()
 
 
-@pytest.mark.parametrize("owner", ["", "bob"])
-async def test_builtin_memory_backend_requires_its_configured_owner(manager, owner):
-    manager._resource_owners["memory"] = owner
-    session = connect(manager, server="memory")
-    _, result = await dispatch(grant("mcp__memory__read"), "mcp__memory__read")
-    assert result["failure_kind"] == "resource_identity_denied"
-    session.call_tool.assert_not_awaited()
+async def test_builtin_memory_backend_requires_its_configured_owner(manager):
+    for owner in ["", "bob"]:
+        manager._resource_owners["memory"] = owner
+        session = connect(manager, server="memory")
+        _, result = await dispatch(grant("mcp__memory__read"), "mcp__memory__read")
+        assert result["failure_kind"] == "resource_identity_denied"
+        session.call_tool.assert_not_awaited()
 
 
 async def test_native_filesystem_cannot_be_redirected_through_mcp(manager, tmp_path):
@@ -203,54 +203,54 @@ async def test_native_filesystem_cannot_be_redirected_through_mcp(manager, tmp_p
     session.call_tool.assert_not_awaited()
 
 
-@pytest.mark.parametrize("change", ["alias", "endpoint", "secret_path"])
-async def test_integration_alias_and_configuration_cannot_retarget_approval(monkeypatch, change):
+async def test_integration_alias_and_configuration_cannot_retarget_approval(monkeypatch):
     from src import integrations
-    rows = [{"id": "one", "name": "service", "base_url": "https://service.test/SECRET", "enabled": True}]
-    monkeypatch.setattr(integrations, "load_integrations", lambda: rows)
-    authority = grant("api_call", resources=(integration_resource(rows[0]),))
-    exact = approval(authority, "api_call", '{"integration":"service","path":"/record/one"}')
-    assert exact.pending.backend_operation.resource.server_id == "one"
-    assert "SECRET" not in json.dumps(authority.to_dict())
-    if change == "alias":
-        rows[:] = [{**rows[0], "id": "two"}]
-    else:
-        rows[0]["base_url"] = "https://other.test/SECRET" if change == "endpoint" else "https://service.test/OTHER"
-    from src import tool_execution as execution
-    handler = AsyncMock()
-    monkeypatch.setattr(execution, "_execute_tool_block_impl", handler)
-    _, result = await dispatch(authority, "api_call", exact.pending.content, exact_approval=exact,
-        security_context=ToolRunSecurityContext(external_untrusted_context_seen=True))
-    assert result["failure_kind"] == "resource_identity_denied"
-    handler.assert_not_awaited()
+    for change in ["alias", "endpoint", "secret_path"]:
+        rows = [{"id": "one", "name": "service", "base_url": "https://service.test/SECRET", "enabled": True}]
+        monkeypatch.setattr(integrations, "load_integrations", lambda: rows)
+        authority = grant("api_call", resources=(integration_resource(rows[0]),))
+        exact = approval(authority, "api_call", '{"integration":"service","path":"/record/one"}')
+        assert exact.pending.backend_operation.resource.server_id == "one"
+        assert "SECRET" not in json.dumps(authority.to_dict())
+        if change == "alias":
+            rows[:] = [{**rows[0], "id": "two"}]
+        else:
+            rows[0]["base_url"] = "https://other.test/SECRET" if change == "endpoint" else "https://service.test/OTHER"
+        from src import tool_execution as execution
+        handler = AsyncMock()
+        monkeypatch.setattr(execution, "_execute_tool_block_impl", handler)
+        _, result = await dispatch(authority, "api_call", exact.pending.content, exact_approval=exact,
+            security_context=ToolRunSecurityContext(external_untrusted_context_seen=True))
+        assert result["failure_kind"] == "resource_identity_denied"
+        handler.assert_not_awaited()
 
 
-@pytest.mark.parametrize("error", [None, RuntimeError, asyncio.CancelledError])
-async def test_scoped_bridge_context_restores_and_replacement_is_ungranted(monkeypatch, error):
+async def test_scoped_bridge_context_restores_and_replacement_is_ungranted(monkeypatch):
     from src import tool_execution as execution
-    seen = []
-    async def route(*args):
-        seen.append(active_backend_operation().resource)
-        if error:
-            raise error("stop")
-        return "bridge", {"exit_code": 0}
-    bridge = execution.AgentExecutionBridge(route, frozenset({"host_shell"}), name="test")
-    monkeypatch.setattr(execution, "_owner_is_admin", lambda owner: True)
-    with execution.bind_execution_bridge(bridge):
-        authority = grant("host_shell")
-        parent_bound = bind_backend_for_operation(authority, ExactOperation.normalize("host_shell", "parent"))
-        with bind_backend_operation(parent_bound):
-            if error is asyncio.CancelledError:
-                with pytest.raises(error):
+    for error in [None, RuntimeError, asyncio.CancelledError]:
+        seen = []
+        async def route(*args):
+            seen.append(active_backend_operation().resource)
+            if error:
+                raise error("stop")
+            return "bridge", {"exit_code": 0}
+        bridge = execution.AgentExecutionBridge(route, frozenset({"host_shell"}), name="test")
+        monkeypatch.setattr(execution, "_owner_is_admin", lambda owner: True)
+        with execution.bind_execution_bridge(bridge):
+            authority = grant("host_shell")
+            parent_bound = bind_backend_for_operation(authority, ExactOperation.normalize("host_shell", "parent"))
+            with bind_backend_operation(parent_bound):
+                if error is asyncio.CancelledError:
+                    with pytest.raises(error):
+                        await dispatch(authority, "host_shell", "pwd")
+                else:
                     await dispatch(authority, "host_shell", "pwd")
-            else:
-                await dispatch(authority, "host_shell", "pwd")
-            assert active_backend_operation() is parent_bound
-        assert active_backend_operation() is None
-    assert seen[0].external and not seen[0].contained
-    with execution.bind_execution_bridge(replace(bridge)):
-        _, denied = await dispatch(authority, "host_shell", "pwd")
-    assert denied["failure_kind"] == "resource_identity_denied"
+                assert active_backend_operation() is parent_bound
+            assert active_backend_operation() is None
+        assert seen[0].external and not seen[0].contained
+        with execution.bind_execution_bridge(replace(bridge)):
+            _, denied = await dispatch(authority, "host_shell", "pwd")
+        assert denied["failure_kind"] == "resource_identity_denied"
 
 
 async def test_tui_endpoint_is_registered_only_at_trusted_admission(monkeypatch):
@@ -269,28 +269,28 @@ async def test_tui_endpoint_is_registered_only_at_trusted_admission(monkeypatch)
     assert denied["failure_kind"] == "resource_identity_denied"
 
 
-@pytest.mark.parametrize("change", [None, "url", "token"])
-async def test_http_bridge_factory_and_admission_share_config_identity(monkeypatch, change):
+async def test_http_bridge_factory_and_admission_share_config_identity(monkeypatch):
     from src import tool_execution as execution
     from routes.chat_routes import _external_execution_bridge
-    context = {"external_execution_bridge": {"url": "http://127.0.0.1:17654/execute",
-        "token": "SECRET_TOKEN", "supported_tools": ["host_shell"]}}
-    authority = grant("host_shell", resources=seal_backends(["host_shell"], context=context, owner="alice"))
-    if change:
-        context["external_execution_bridge"][change] = "http://127.0.0.1:17655/execute" if change == "url" else "OTHER_TOKEN"
-    bridge = _external_execution_bridge(context)
-    route = AsyncMock(return_value=("bridge", {"exit_code": 0}))
-    bridge = replace(bridge, route_tool=route)
-    monkeypatch.setattr(execution, "_owner_is_admin", lambda owner: True)
-    with execution.bind_execution_bridge(bridge):
-        _, result = await dispatch(authority, "host_shell", "pwd", client_runtime_context=context)
-    if change:
-        assert result["failure_kind"] == "resource_identity_denied"
-        route.assert_not_awaited()
-    else:
-        assert result["exit_code"] == 0
-        route.assert_awaited_once()
-    assert "SECRET_TOKEN" not in json.dumps(authority.to_dict())
+    for change in [None, "url", "token"]:
+        context = {"external_execution_bridge": {"url": "http://127.0.0.1:17654/execute",
+            "token": "SECRET_TOKEN", "supported_tools": ["host_shell"]}}
+        authority = grant("host_shell", resources=seal_backends(["host_shell"], context=context, owner="alice"))
+        if change:
+            context["external_execution_bridge"][change] = "http://127.0.0.1:17655/execute" if change == "url" else "OTHER_TOKEN"
+        bridge = _external_execution_bridge(context)
+        route = AsyncMock(return_value=("bridge", {"exit_code": 0}))
+        bridge = replace(bridge, route_tool=route)
+        monkeypatch.setattr(execution, "_owner_is_admin", lambda owner: True)
+        with execution.bind_execution_bridge(bridge):
+            _, result = await dispatch(authority, "host_shell", "pwd", client_runtime_context=context)
+        if change:
+            assert result["failure_kind"] == "resource_identity_denied"
+            route.assert_not_awaited()
+        else:
+            assert result["exit_code"] == 0
+            route.assert_awaited_once()
+        assert "SECRET_TOKEN" not in json.dumps(authority.to_dict())
 
 
 async def test_backend_alias_cannot_retarget_a_legacy_tool_after_approval(manager, monkeypatch):
@@ -339,12 +339,12 @@ async def test_external_bash_marker_cannot_switch_to_local_background_execution(
     launch.assert_not_called()
 
 
-@pytest.mark.parametrize("alias", ["host_shell_bridge", "hostShellBridge"])
-def test_host_shell_bridge_aliases_resolve_to_one_external_identity(alias):
-    context = {"surface": "odysseus-tui", alias: {"url": "http://127.0.0.1:17654/run", "token": "TOKEN"}}
-    resources = seal_backends(["host_shell"], context=context, owner="alice")
-    assert len(resources) == 1 and isinstance(resources[0], ExternalResource)
-    assert resources[0].external and not resources[0].contained
+def test_host_shell_bridge_aliases_resolve_to_one_external_identity():
+    for alias in ["host_shell_bridge", "hostShellBridge"]:
+        context = {"surface": "odysseus-tui", alias: {"url": "http://127.0.0.1:17654/run", "token": "TOKEN"}}
+        resources = seal_backends(["host_shell"], context=context, owner="alice")
+        assert len(resources) == 1 and isinstance(resources[0], ExternalResource)
+        assert resources[0].external and not resources[0].contained
 
 
 async def test_host_shell_cannot_reconstruct_an_unsealed_external_backend(monkeypatch):

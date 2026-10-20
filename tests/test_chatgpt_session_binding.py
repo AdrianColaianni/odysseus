@@ -152,11 +152,12 @@ def test_migration_is_additive_idempotent_and_repairs_missing_index(tmp_path, mo
         db.execute(text("CREATE TABLE sessions (id VARCHAR PRIMARY KEY, model VARCHAR)"))
         db.execute(text("INSERT INTO sessions VALUES ('legacy', 'gpt-5.5')"))
     monkeypatch.setattr(cdb, "engine", engine)
-    cdb._migrate_add_session_endpoint_id_column()
-    cdb._migrate_add_session_endpoint_id_column()
+    row = next(r for r in cdb._MIGRATIONS if isinstance(r, tuple) and r[:2] == ("sessions", "endpoint_id"))
+    cdb._add_column(*row)
+    cdb._add_column(*row)
     with engine.begin() as db:
         assert db.execute(text("SELECT model, endpoint_id FROM sessions")).one() == ("gpt-5.5", None)
         db.execute(text("DROP INDEX ix_sessions_endpoint_id"))
-    cdb._migrate_add_session_endpoint_id_column()
+    cdb._add_column(*row)
     assert [idx["name"] for idx in inspect(engine).get_indexes("sessions")] == ["ix_sessions_endpoint_id"]
     engine.dispose()

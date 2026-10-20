@@ -147,10 +147,6 @@ def labels_conflict(a: str, b: str) -> bool:
     return bool(a) and bool(b) and a.casefold() == b.casefold()
 
 
-KNOWN_CODEX_REASONING_LEVELS = [
-    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent"
-]
-
 STANDARD_CODEX_REASONING_LEVELS = [
     "low", "medium", "high", "xhigh", "max", "ultra"
 ]

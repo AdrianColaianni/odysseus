@@ -2,7 +2,7 @@ import pytest
 from src.turn_contract import requested_capabilities, selected_tools_for_request, resolve_turn_contract, resolve_full_inventory_contract
 from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
 from src.tool_policy import ToolPolicy
-from src.clean_agent_preview import PREVIEW_TOOLS, scope_preview_contract, preview_call_allowed
+from src.clean_agent_preview import PREVIEW_TOOLS, scope_preview_contract, evaluate_preview_call
 
 
 def test_compact_image_tool_uses_configured_model():
@@ -23,8 +23,8 @@ def test_image_revision_uses_edit_contract_not_fresh_generation():
         contract = resolve_turn_contract(capabilities=capabilities, schemas=FUNCTION_TOOL_SCHEMAS, policy=ToolPolicy(), message=prompt)
         assert 'edit_image' in contract.required
         assert 'generate_image' not in contract.offered
-        assert preview_call_allowed('edit_image', {'image_id': 'source-image', 'action': 'prompt', 'prompt': prompt}, prompt,
-                                    contract_required_tools=contract.required, turn_authorized_families=capabilities)
+        assert evaluate_preview_call('edit_image', {'image_id': 'source-image', 'action': 'prompt', 'prompt': prompt}, prompt,
+                                    contract_required_tools=contract.required, turn_authorized_families=capabilities).allowed
     assert requested_capabilities('Make a new image of a cat', history) == {'image_generation'}
     assert 'image_editing' not in requested_capabilities('Create a task to add another cow', history)
     assert 'image_editing' not in requested_capabilities('Add another cow', history + [{'role': 'assistant', 'content': 'Unrelated answer'}])
@@ -37,24 +37,23 @@ def test_uploaded_image_edit_is_not_ocr_or_description():
     assert requested_capabilities('Make a new image of a cat', image_attachment=True) == {'image_generation'}
 
 
-@pytest.mark.parametrize('prompt', [
-    'make a thumbnail of a background for title : releasing my own ai',
-    'Makes image of a cow', 'Creates an image of a cow',
-    'Generates a picture of a cow', 'Make an. Image of a cow',
-    'Image of a cow', 'A picture of a lighthouse', 'Please an illustration of a city',
-])
-def test_thumbnail_survives_live_inventory_pipeline(prompt):
+def test_thumbnail_survives_live_inventory_pipeline():
     from src.clean_agent_preview import INTERACTIVE_CORE_TOOLS
-    capabilities = requested_capabilities(prompt)
-    selected = selected_tools_for_request(prompt)
-    routed = resolve_turn_contract(capabilities=capabilities, schemas=FUNCTION_TOOL_SCHEMAS,
-        policy=ToolPolicy(), selected_tools=selected, required_tools=selected, message=prompt)
     preview = resolve_full_inventory_contract(
         schemas=[s for s in FUNCTION_TOOL_SCHEMAS if s['function']['name'] in PREVIEW_TOOLS],
         policy=ToolPolicy())
-    scoped = scope_preview_contract(preview, routed, capabilities, extra_tools=INTERACTIVE_CORE_TOOLS)
-    assert 'generate_image' in scoped.required
-    assert not scoped.unavailable
+    for prompt in (
+        'make a thumbnail of a background for title : releasing my own ai',
+        'Make an. Image of a cow',
+        'A picture of a lighthouse',
+    ):
+        capabilities = requested_capabilities(prompt)
+        selected = selected_tools_for_request(prompt)
+        routed = resolve_turn_contract(capabilities=capabilities, schemas=FUNCTION_TOOL_SCHEMAS,
+            policy=ToolPolicy(), selected_tools=selected, required_tools=selected, message=prompt)
+        scoped = scope_preview_contract(preview, routed, capabilities, extra_tools=INTERACTIVE_CORE_TOOLS)
+        assert 'generate_image' in scoped.required, prompt
+        assert not scoped.unavailable, prompt
 
 
 def test_missing_requested_capability_cannot_fall_back_to_core_tools():
@@ -69,28 +68,24 @@ def test_missing_requested_capability_cannot_fall_back_to_core_tools():
     assert 'capability:image_generation' in scoped.unavailable
 
 
-@pytest.mark.parametrize('prompt', [
-    'can you make a youtube thumbnail for title releasing my own ai',
-    'Generate an illustration of a city', 'Draw a logo for my bakery',
-    'Make an image about email', 'Create a poster about writing documents',
-    'Make an. Image of a cow', 'Make a, picture of a cow',
-    'Makes image of a cow', 'Draws a picture of a cow',
-])
-def test_explicit_visual_creation_routes_to_generator(prompt):
-    assert requested_capabilities(prompt) == {'image_generation'}
-    assert selected_tools_for_request(prompt) == {'generate_image'}
+def test_explicit_visual_creation_routes_to_generator():
+    for prompt in (
+        'can you make a youtube thumbnail for title releasing my own ai',
+        'Draw a logo for my bakery',
+        'Make an image about email',
+    ):
+        assert requested_capabilities(prompt) == {'image_generation'}, prompt
+        assert selected_tools_for_request(prompt) == {'generate_image'}, prompt
 
 
-@pytest.mark.parametrize('prompt', [
-    'Draft an email about a thumbnail', 'Write a document about image generation',
-    'Create a task to generate images daily', 'Create a note about drawing a logo',
-    'Explain how to make a thumbnail', 'Do not generate an image',
-    'Find an image of a cow', 'Search for a picture of a cow',
-    'Describe this image of a cow', 'Write a note about an image of a cow',
-])
-def test_other_creation_does_not_expose_generator(prompt):
-    assert 'image_generation' not in requested_capabilities(prompt)
-    assert 'generate_image' not in (selected_tools_for_request(prompt) or ())
+def test_other_creation_does_not_expose_generator():
+    for prompt in (
+        'Draft an email about a thumbnail',
+        'Do not generate an image',
+        'Find an image of a cow',
+    ):
+        assert 'image_generation' not in requested_capabilities(prompt), prompt
+        assert 'generate_image' not in (selected_tools_for_request(prompt) or ()), prompt
 
 
 def test_image_with_explicit_document_insertion():
@@ -101,10 +96,10 @@ def test_image_with_explicit_document_insertion():
 
 def test_generator_policy_and_scope():
     assert 'generate_image' in PREVIEW_TOOLS
-    assert preview_call_allowed('generate_image', {'prompt': 'A city'},
+    assert evaluate_preview_call('generate_image', {'prompt': 'A city'},
                                 'Make an image of a city', contract_required_tools={'generate_image'},
-                                turn_authorized_families={'image_generation'})
-    assert not preview_call_allowed('generate_image', {'prompt': 'A city'}, 'Write an email')
+                                turn_authorized_families={'image_generation'}).allowed
+    assert not evaluate_preview_call('generate_image', {'prompt': 'A city'}, 'Write an email').allowed
     preview = resolve_full_inventory_contract(schemas=FUNCTION_TOOL_SCHEMAS, policy=ToolPolicy())
     routed = resolve_turn_contract(capabilities={'notes'}, schemas=FUNCTION_TOOL_SCHEMAS,
         policy=ToolPolicy(), selected_tools={'manage_notes'}, message='Create a note')

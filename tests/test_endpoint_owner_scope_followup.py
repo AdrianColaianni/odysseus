@@ -1,10 +1,11 @@
 """Regression tests for endpoint owner scoping in secondary model routes."""
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+
+from tests.helpers.database import disposable_database
 
 
 def _compare_request(user="alice", is_admin=False):
@@ -19,7 +20,7 @@ def _compare_request(user="alice", is_admin=False):
 
 
 def _compare_start_route(session_manager):
-    from routes.compare_routes import setup_compare_routes
+    from routes.compare.compare_routes import setup_compare_routes
 
     router = setup_compare_routes(session_manager)
     # setup_compare_routes registers on a module-global router, so each call
@@ -54,7 +55,7 @@ class _SessionStore:
 
 
 def test_compare_start_rejects_unregistered_endpoint_for_non_admin(monkeypatch):
-    import routes.compare_routes as cr
+    import routes.compare.compare_routes as cr
 
     monkeypatch.setattr(cr, "SessionLocal", lambda: _FakeDB())
     # Nothing visible to the caller matches the supplied URL → raw, unregistered.
@@ -81,7 +82,7 @@ def test_compare_start_allows_owned_registered_endpoint_for_non_admin(monkeypatc
     # resolves endpoints by URL (no endpoint_id), so a caller comparing a
     # registered endpoint they own has to be allowed — only truly raw,
     # unregistered URLs are rejected.
-    import routes.compare_routes as cr
+    import routes.compare.compare_routes as cr
 
     monkeypatch.setattr(cr, "SessionLocal", lambda: _FakeDB())
     owned = SimpleNamespace(id=7, api_key="sk-secret", base_url="http://127.0.0.1:8000/v1")
@@ -116,7 +117,7 @@ def test_compare_start_rejects_another_users_private_endpoint(monkeypatch):
     # match from the owner-scoped lookup (owner_filter drops bob's private row),
     # so compare treats it exactly like a raw unregistered URL → 403. She can
     # neither bind a session to his endpoint nor copy his key.
-    import routes.compare_routes as cr
+    import routes.compare.compare_routes as cr
 
     monkeypatch.setattr(cr, "SessionLocal", lambda: _FakeDB())
 
@@ -158,7 +159,7 @@ def test_compare_start_rejects_before_creating_any_session_on_mixed_endpoints(mo
     # nothing created — no half-built [CMP] session for A, and therefore none of
     # A's Authorization header left behind. Fails on the old interleaved loop
     # that created A's session before reaching (and rejecting) B.
-    import routes.compare_routes as cr
+    import routes.compare.compare_routes as cr
     from src.endpoint_resolver import normalize_base
 
     monkeypatch.setattr(cr, "SessionLocal", lambda: _FakeDB())
@@ -199,7 +200,7 @@ def test_compare_start_binds_session_to_registered_endpoint_url(monkeypatch):
     # never the raw caller-supplied string. Mint the owned row with a base URL
     # that differs from the messy raw input so a regression to `endpoint_url=
     # endpoint` would surface here.
-    import routes.compare_routes as cr
+    import routes.compare.compare_routes as cr
     from src.endpoint_resolver import build_chat_url, normalize_base
 
     monkeypatch.setattr(cr, "SessionLocal", lambda: _FakeDB())
@@ -238,7 +239,7 @@ def test_compare_start_admin_raw_endpoint_carries_no_borrowed_key(monkeypatch):
     # matches no registered endpoint. It is allowed (the reject helper is a
     # no-op for admins), the session keeps the raw URL, and — because nothing
     # matched — no key/headers are inherited from any endpoint row.
-    import routes.compare_routes as cr
+    import routes.compare.compare_routes as cr
 
     monkeypatch.setattr(cr, "SessionLocal", lambda: _FakeDB())
     monkeypatch.setattr(cr, "_owned_endpoint_by_url", lambda *a, **k: None)
@@ -275,7 +276,7 @@ def test_compare_start_prefers_endpoint_id_over_url(monkeypatch):
     # api_keys (e.g. two accounts on one provider). A base_url-only match returns
     # whichever row sorts first, so it can copy the WRONG key. Passing the
     # explicit id must pin the intended endpoint and copy ITS key.
-    import routes.compare_routes as cr
+    import routes.compare.compare_routes as cr
     from src.endpoint_resolver import build_chat_url, build_headers, normalize_base
 
     monkeypatch.setattr(cr, "SessionLocal", lambda: _FakeDB())
@@ -322,7 +323,7 @@ def test_compare_start_prefers_endpoint_id_over_url(monkeypatch):
 def test_compare_start_rejects_unowned_endpoint_id(monkeypatch):
     # An id the caller can't see (wrong owner / deleted) must 404 and must NOT
     # silently fall back to a same-URL row with a different key.
-    import routes.compare_routes as cr
+    import routes.compare.compare_routes as cr
 
     monkeypatch.setattr(cr, "SessionLocal", lambda: _FakeDB())
     # A same-URL row exists and would resolve, but the governing id is invisible.
@@ -357,58 +358,26 @@ def test_compare_start_rejects_unowned_endpoint_id(monkeypatch):
     assert created == {}
 
 
-def test_compare_endpoint_key_lookup_is_owner_scoped():
-    body = Path("routes/compare/compare_routes.py").read_text(encoding="utf-8")
-    start_body = body.split("def start_comparison", 1)[1].split("# Store comparison record", 1)[0]
-    helper_body = body.split("def _owned_endpoint_by_url", 1)[1].split("class RecordVoteRequest", 1)[0]
-    id_helper_body = body.split("def _owned_endpoint_by_id", 1)[1].split("class RecordVoteRequest", 1)[0]
+def test_endpoint_lookups_hide_another_users_private_endpoint(tmp_path):
+    from core.database import ModelEndpoint
+    import routes.compare.compare_routes as cr
+    import routes.gallery.gallery_routes as gallery
+    import routes.research.research_routes as research
 
-    assert "_reject_raw_endpoint_url_for_non_admin" in start_body
-    assert "_owned_endpoint_by_url(db, base, user)" in start_body
-    # Credentials prefer an explicit endpoint id (pins the exact key) and only
-    # fall back to URL matching for legacy / admin raw-URL callers.
-    assert "_owned_endpoint_by_id(db, eid, user)" in start_body
-    # The session binds to the resolved endpoint's stored base URL, not the raw
-    # caller-supplied string (the reviewer's remaining compare blocker).
-    assert "build_chat_url(normalize_base(ep.base_url))" in start_body
-    assert "owner_filter(q, ModelEndpoint, owner)" in helper_body
-    # The id lookup is owner-scoped the same way the URL lookup is.
-    assert "owner_filter(q, ModelEndpoint, owner)" in id_helper_body
-
-
-def test_gallery_image_endpoint_lookups_are_owner_scoped():
-    body = Path("routes/gallery/gallery_routes.py").read_text(encoding="utf-8")
-    helper_body = body.split("def _visible_image_endpoint_query", 1)[1].split(
-        "def _first_visible_image_endpoint", 1
-    )[0]
-
-    assert "owner_filter(q, ModelEndpoint, owner)" in helper_body
-    assert body.count("_first_visible_image_endpoint(db, user)") >= 4
-    assert body.count("_visible_image_endpoint_for_base(db,") >= 2
-    assert "def _current_user_is_admin" in body
-    assert body.count('raise HTTPException(403, "Choose a registered image endpoint")') == 2
-    for marker in (
-        "async def gallery_ai_upscale",
-        "async def gallery_style_transfer",
-        "async def inpaint_proxy",
-        "async def harmonize_image",
-    ):
-        section = body.split(marker, 1)[1].split("@router.", 1)[0]
-        assert "user = require_privilege(request, \"can_generate_images\")" in section
-        assert (
-            "_first_visible_image_endpoint(db, user)" in section
-            or "_visible_image_endpoint_for_base(db," in section
-        )
-
-
-def test_research_endpoint_resolution_passes_owner():
-    body = Path("routes/research/research_routes.py").read_text(encoding="utf-8")
-
-    assert "def _resolve_research_endpoint(sess, owner:" in body
-    assert 'resolve_endpoint("research", owner=user)' in body
-    assert 'resolve_endpoint("utility", owner=user)' in body
-    assert 'resolve_endpoint("default", owner=user)' in body
-    assert 'resolve_endpoint("chat", owner=user)' in body
-    helper_body = body.split("def _owned_enabled_endpoint", 1)[1].split("def setup_research_routes", 1)[0]
-    assert "owner_filter(q, ModelEndpoint, owner)" in helper_body
-    assert body.count("_owned_enabled_endpoint(db, user") >= 2
+    url = "http://10.0.0.5:9000/v1"
+    with disposable_database(tmp_path) as factory:
+        db = factory()
+        db.add(ModelEndpoint(id="bob-ep", name="b", base_url=url, owner="bob", model_type="image"))
+        db.commit()
+        try:
+            for owner, visible in (("alice", False), ("bob", True)):
+                found = [
+                    cr._owned_endpoint_by_url(db, url, owner),
+                    cr._owned_endpoint_by_id(db, "bob-ep", owner),
+                    research._owned_enabled_endpoint(db, owner, "bob-ep"),
+                    gallery._visible_image_endpoint_for_base(db, url, owner),
+                    gallery._first_visible_image_endpoint(db, owner),
+                ]
+                assert [ep is not None for ep in found] == [visible] * 5, owner
+        finally:
+            db.close()

@@ -4,18 +4,11 @@
 empty host to imaplib — `imaplib.IMAP4("", 993)` silently dials localhost:993
 and surfaces a confusing "[Errno 111] Connection refused" on every inbox poll.
 """
-import os
-import tempfile
-from pathlib import Path
 
 import pytest
 
-_tmp_data = Path(tempfile.mkdtemp(prefix="odysseus-email-send-only-test-"))
-os.environ.setdefault("DATA_DIR", str(_tmp_data))
-os.environ.setdefault("DATABASE_URL", f"sqlite:///{_tmp_data / 'app.db'}")
-
-import routes.email_helpers as helpers
-from routes.email_helpers import EmailNotConfiguredError, _imap_connect
+import routes.email.email_helpers as helpers
+from routes.email.email_helpers import EmailNotConfiguredError, _imap_connect
 
 
 _SEND_ONLY_CFG = {

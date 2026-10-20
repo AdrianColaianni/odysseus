@@ -5,6 +5,7 @@ If event persistence then failed, the event rolled back but a new ``Personal``
 calendar remained (``calendar_count=1``, ``event_count=0``).
 """
 
+import sys
 import json
 import threading
 from contextlib import contextmanager
@@ -30,6 +31,7 @@ from routes.calendar_routes import (  # noqa: E402
     _default_calendar_id,
     _ensure_default_calendar,
 )
+from tests.helpers.route_call import with_db
 
 
 class _RejectEventCommit(Session):
@@ -55,8 +57,10 @@ def session_factory(tmp_path, monkeypatch):
         autocommit=False,
         class_=_RejectEventCommit,
     )
-    monkeypatch.setattr(cdb, "SessionLocal", factory)
-    monkeypatch.setattr(calendar_routes, "SessionLocal", factory)
+    monkeypatch.setattr(cdb, "SessionLocal", factory, raising=False)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", factory)
+    monkeypatch.setattr(calendar_routes, "SessionLocal", factory, raising=False)
+    monkeypatch.setattr(sys.modules["core.database"], "SessionLocal", factory)
     try:
         yield factory
     finally:
@@ -71,7 +75,7 @@ def _endpoint(method, suffix):
     router = calendar_routes.setup_calendar_routes()
     for route in router.routes:
         if route.path.endswith(suffix) and method in route.methods:
-            return route.endpoint
+            return with_db(route.endpoint)
     raise RuntimeError(f"{method} *{suffix} not found")
 
 
@@ -150,7 +154,7 @@ async def test_tool_event_validation_failure_rolls_back_new_default_calendar(
 async def test_route_list_calendars_persists_lazy_default(session_factory):
     list_calendars = _endpoint("GET", "/calendars")
 
-    result = await list_calendars(_request())
+    result = list_calendars(_request())
 
     assert [calendar["name"] for calendar in result["calendars"]] == ["Personal"]
     assert _counts(session_factory) == (1, 0)

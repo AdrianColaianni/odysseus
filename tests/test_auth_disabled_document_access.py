@@ -30,10 +30,12 @@ from tests.helpers.import_state import clear_fake_database_modules
 clear_fake_database_modules()
 
 import core.database as cdb
-import routes.document_routes as droutes
+import routes.document.document_routes as droutes
 from core.database import Document
 from core.database import Session as DbSession
-from routes.document_helpers import _verify_doc_owner, _owner_session_filter
+from routes.document.document_helpers import _verify_doc_owner, _owner_session_filter
+from tests.helpers.route_call import with_db
+from tests.helpers.routes import route_endpoint
 
 _TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _ENGINE = create_engine(
@@ -56,16 +58,19 @@ def _req(user=None):
 def _endpoint(method, path):
     """Resolve a route endpoint from the document router."""
     router = droutes.setup_document_routes(MagicMock(), None)
-    for route in router.routes:
-        if getattr(route, "path", None) == path and method in getattr(route, "methods", set()):
-            return route.endpoint
-    raise RuntimeError(f"{method} {path} not found")
+    return with_db(route_endpoint(router, path, method))
 
 
 def _bind_test_db():
-    previous = droutes.SessionLocal
-    droutes.SessionLocal = _TS
+    import core.database as cdb
+    previous = (droutes.SessionLocal, cdb.SessionLocal)
+    droutes.SessionLocal = cdb.SessionLocal = _TS
     return previous
+
+
+def _restore_test_db(previous):
+    import core.database as cdb
+    droutes.SessionLocal, cdb.SessionLocal = previous
 
 
 def _seed(owner="alice"):
@@ -108,11 +113,11 @@ async def test_list_documents_allows_none_user_when_auth_disabled(monkeypatch):
         session_id, doc_id = _seed()
 
         # Must succeed — this is the bug fix.
-        rows = await list_docs(_req(None), session_id)
+        rows = list_docs(_req(None), session_id)
         ids = [row["id"] for row in rows]
         assert doc_id in ids, "own doc must be visible in auth-disabled mode"
     finally:
-        droutes.SessionLocal = previous
+        _restore_test_db(previous)
 
 
 @pytest.mark.asyncio
@@ -125,10 +130,10 @@ async def test_get_document_allows_none_user_when_auth_disabled(monkeypatch):
         _session_id, doc_id = _seed()
 
         # Must succeed — _verify_doc_owner bypasses when auth is disabled.
-        result = await get_doc(_req(None), doc_id)
+        result = get_doc(_req(None), doc_id)
         assert result["id"] == doc_id
     finally:
-        droutes.SessionLocal = previous
+        _restore_test_db(previous)
 
 
 def test_verify_doc_owner_allows_none_user_when_auth_disabled(monkeypatch):
@@ -172,11 +177,11 @@ async def test_list_documents_rejects_none_user_when_auth_enabled(monkeypatch):
         session_id, _doc_id = _seed()
 
         with pytest.raises(HTTPException) as exc:
-            await list_docs(_req(None), session_id)
+            list_docs(_req(None), session_id)
 
         assert exc.value.status_code == 403
     finally:
-        droutes.SessionLocal = previous
+        _restore_test_db(previous)
 
 
 @pytest.mark.asyncio
@@ -189,11 +194,11 @@ async def test_get_document_rejects_none_user_when_auth_enabled(monkeypatch):
         _session_id, doc_id = _seed()
 
         with pytest.raises(HTTPException) as exc:
-            await get_doc(_req(None), doc_id)
+            get_doc(_req(None), doc_id)
 
         assert exc.value.status_code == 403
     finally:
-        droutes.SessionLocal = previous
+        _restore_test_db(previous)
 
 
 def test_verify_doc_owner_rejects_none_user_when_auth_enabled(monkeypatch):
@@ -240,11 +245,11 @@ async def test_get_document_rejects_wrong_owner(monkeypatch):
         _session_id, doc_id = _seed(owner="alice")
 
         with pytest.raises(HTTPException) as exc:
-            await get_doc(_req("bob"), doc_id)
+            get_doc(_req("bob"), doc_id)
 
         assert exc.value.status_code == 404
     finally:
-        droutes.SessionLocal = previous
+        _restore_test_db(previous)
 
 
 @pytest.mark.asyncio
@@ -272,9 +277,9 @@ async def test_list_documents_hides_wrong_owner_docs(monkeypatch):
         finally:
             db.close()
 
-        rows = await list_docs(_req("alice"), alice_session)
+        rows = list_docs(_req("alice"), alice_session)
         ids = [row["id"] for row in rows]
         assert alice_doc in ids
         assert bob_doc not in ids, "wrong-owner docs must be hidden"
     finally:
-        droutes.SessionLocal = previous
+        _restore_test_db(previous)

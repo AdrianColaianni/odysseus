@@ -1,7 +1,7 @@
 import json
-import subprocess
 import textwrap
 from pathlib import Path
+from tests.helpers.node import run_node_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,14 +33,7 @@ def run_node(body: str):
         {body}
         """
     )
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
+    return run_node_module(script)
 
 
 def test_export_settings_are_bounded_and_jpeg_forces_matte():
@@ -79,14 +72,3 @@ def test_png_preserves_transparency_and_webp_uses_quality():
     assert result["encoded"]["extension"] == "webp"
     assert result["encoded"]["settings"]["quality"] == 0.73
     assert result["meta"] == {"mime": "image/webp", "quality": 0.73}
-
-
-def test_export_dialog_is_wired_to_save_menu_and_offline_graph():
-    editor = (ROOT / "static/js/galleryEditor.js").read_text(encoding="utf-8")
-    topbar = (ROOT / "static/js/editor/build/topbar.js").read_text(encoding="utf-8")
-    service_worker = (ROOT / "static/sw.js").read_text(encoding="utf-8")
-
-    assert "_openExportDialog({" in editor
-    assert "_encodeExportCanvas(source, settings)" in editor
-    assert "Export image..." in topbar
-    assert "/static/js/editor/export-dialog.js" in service_worker

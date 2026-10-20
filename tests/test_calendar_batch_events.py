@@ -9,24 +9,22 @@ import uuid
 import pytest
 
 from tests.helpers.import_state import clear_fake_database_modules
-from tests.helpers.sqlite_db import make_temp_sqlite
+from tests.helpers.database import disposable_database
 
 clear_fake_database_modules()
 
 import core.database as cdb
 from core.database import CalendarEvent
 
-_TS, _ENGINE, _TMPDB = make_temp_sqlite(cdb.Base.metadata)
-
-
 @pytest.fixture(autouse=True)
-def _bind_temp_db(monkeypatch):
+def _bind_temp_db(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "core.database", cdb)
     parent = sys.modules.get("core")
     if parent is not None:
         monkeypatch.setattr(parent, "database", cdb, raising=False)
-    monkeypatch.setattr(cdb, "SessionLocal", _TS)
-    yield
+    with disposable_database(tmp_path) as factory:
+        monkeypatch.setattr(cdb, "SessionLocal", factory)
+        yield
 
 
 async def test_batch_events_with_datetime_objects():
@@ -53,7 +51,7 @@ async def test_batch_events_with_datetime_objects():
     assert "Created 2 event(s)" in res.get("response", "")
 
     # Verify events exist in DB
-    db = _TS()
+    db = cdb.SessionLocal()
     events = db.query(CalendarEvent).filter(CalendarEvent.summary == "Morning Gym").all()
     assert len(events) == 2
     db.close()
@@ -117,7 +115,7 @@ async def test_batch_events_partial_failure():
     assert res.get("failed_count") == 1
 
     # Verify only valid events were created
-    db = _TS()
+    db = cdb.SessionLocal()
     events = db.query(CalendarEvent).filter(
         CalendarEvent.summary.in_(["Valid Event 1", "Valid Event 2"])
     ).all()

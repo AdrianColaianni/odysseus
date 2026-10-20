@@ -279,12 +279,8 @@ class UploadHandler:
         self.max_upload_size = get_chat_upload_max_bytes()
         self.max_concurrent_uploads = 3
         self.cleanup_days = 30
-        # Per-IP per-minute cap. save_upload() counts EACH file, and the chat
-        # composer lets a user attach up to MAX_FILES (10, static/js/fileHandler.js)
-        # in one batch — so this must comfortably exceed 10, or a single 6+ file
-        # attach is rejected mid-batch (issue #1346: "5 work, 6 fail"). Burst abuse
-        # is separately bounded by max_concurrent_uploads. Headroom for a few full
-        # batches per minute.
+        # Per-IP per-minute cap, counted per file: must stay well above MAX_FILES
+        # in static/js/fileHandler.js so one full batch is never cut off.
         self.upload_rate_limit = 60  # max 60 file-uploads per minute per IP
         self.upload_rate_window = 60  # 60 seconds
         

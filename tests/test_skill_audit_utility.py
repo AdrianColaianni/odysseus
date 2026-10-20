@@ -1,10 +1,7 @@
-from routes.skills_routes import _audit_utility_blocker
-from routes.skills_routes import _audit_finalize_status
-from routes.skills_routes import _finalize_audit_batch
-from routes.skills_routes import _audit_one_skill
-from routes.skills_routes import _skill_audit_jobs
-from routes.skills_routes import run_scheduled_skill_audit
-from routes.skills_routes import _skill_baseline_task, _skill_test_task
+from services.skills.audit_workflow import _skill_audit_jobs, run_scheduled_skill_audit
+from services.skills.dependencies import default_dependencies
+from services.skills.prompts import _skill_baseline_task, _skill_test_task
+from services.skills.publication import utility_blocker as _audit_utility_blocker
 
 
 def test_audit_arms_receive_the_same_task_text():
@@ -54,12 +51,12 @@ def test_inconclusive_audit_preserves_existing_approval(monkeypatch):
             self.row.update(fields)
 
     monkeypatch.setattr(
-        "routes.skills_routes._audit_auto_publish_policy",
+        "services.skills.publication.auto_publish_policy",
         lambda owner: (True, 0.8),
     )
     fake = FakeSkills()
 
-    status = _audit_finalize_status(
+    status = default_dependencies().finalize_status(
         fake,
         "release-checklist",
         "alice",
@@ -90,12 +87,12 @@ def test_batch_finalizer_does_not_demote_inconclusive_skill(monkeypatch):
             self.updated.append((name, fields, owner))
 
     monkeypatch.setattr(
-        "routes.skills_routes._audit_auto_publish_policy",
+        "services.skills.publication.auto_publish_policy",
         lambda owner: (True, 0.8),
     )
     fake = FakeSkills()
 
-    _finalize_audit_batch(
+    default_dependencies().finalize_batch(
         fake,
         [{"skill": "release-checklist", "result": "inconclusive"}],
         "alice",
@@ -131,15 +128,15 @@ def test_task_audit_resolves_the_owners_model_settings(monkeypatch):
         assert endpoint_url is None
         return "http://example.test", "audit-model", None, None
 
-    async def fake_run(key, skills_manager, names, url, model, headers, teacher, owner, workload="foreground"):
+    async def fake_run(key, skills_manager, names, url, model, headers, teacher, owner, workload="foreground", deps=None):
         seen["workload"] = workload
         job = _skill_audit_jobs[key]
         job["done"] = 1
         job["results"] = [{"skill": names[0], "result": "pass"}]
 
     monkeypatch.setattr(skills_module, "SkillsManager", lambda data_dir: FakeSkills())
-    monkeypatch.setattr("routes.skills_routes._resolve_audit_models", fake_resolve)
-    monkeypatch.setattr("routes.skills_routes._run_audit_all_job", fake_run)
+    monkeypatch.setattr("services.skills.model_selection.resolve_audit_models", fake_resolve)
+    monkeypatch.setattr("services.skills.audit_workflow.run_audit_batch", fake_run)
     monkeypatch.setattr(llm_core, "seconds_since_model_activity", lambda url, model: None)
 
     try:
@@ -253,13 +250,13 @@ def test_audit_skips_obvious_duplicate_before_llm_work(monkeypatch):
     async def fail_run(*args, **kwargs):
         raise AssertionError("duplicate cleanup should run before skill/baseline tests")
 
-    monkeypatch.setattr("routes.skills_routes._eval_skill_necessity", fail_necessity)
-    monkeypatch.setattr("routes.skills_routes._run_skill_audit_arm", fail_run)
+    monkeypatch.setattr("services.skills.evaluation.evaluate_necessity", fail_necessity)
+    monkeypatch.setattr("services.skills.agent_runner.run_audit_arm", fail_run)
 
     import asyncio
 
     result = asyncio.run(
-        _audit_one_skill(
+        default_dependencies().audit_one(
             FakeSkills(),
             {"name": "weather-check-1"},
             "http://example.test",
@@ -339,15 +336,15 @@ def test_audit_persists_saved_turn_estimate_from_baseline_comparison(monkeypatch
             "saved_tool_calls": 1,
         }
 
-    monkeypatch.setattr("routes.skills_routes._eval_skill_necessity", fake_necessity)
-    monkeypatch.setattr("routes.skills_routes._run_skill_audit_arm", fake_arm)
-    monkeypatch.setattr("routes.skills_routes._eval_skill_run", fake_eval)
+    monkeypatch.setattr("services.skills.evaluation.evaluate_necessity", fake_necessity)
+    monkeypatch.setattr("services.skills.agent_runner.run_audit_arm", fake_arm)
+    monkeypatch.setattr("services.skills.evaluation.evaluate_run", fake_eval)
 
     import asyncio
 
     fake = FakeSkills()
     result = asyncio.run(
-        _audit_one_skill(
+        default_dependencies().audit_one(
             fake,
             fake.row,
             "http://example.test",
@@ -379,17 +376,17 @@ def test_scheduled_skill_audit_marks_model_work_as_background(monkeypatch):
         return "http://127.0.0.1:11434/v1", "model", None, None
 
     async def fake_run(key, skills_manager, names, url, model, headers, teacher,
-                       owner, workload="foreground"):
+                       owner, workload="foreground", deps=None):
         captured["workload"] = workload
         job = _skill_audit_jobs[key]
         job["status"] = "done"
 
-    monkeypatch.setattr("routes.skills_routes._resolve_audit_models", fake_resolve)
-    monkeypatch.setattr("routes.skills_routes._run_audit_all_job", fake_run)
+    monkeypatch.setattr("services.skills.model_selection.resolve_audit_models", fake_resolve)
+    monkeypatch.setattr("services.skills.audit_workflow.run_audit_batch", fake_run)
 
     try:
         result = __import__("asyncio").run(
-            run_scheduled_skill_audit(FakeSkills(), owner="owner", max_skills=1)
+            run_scheduled_skill_audit(FakeSkills(), owner="owner", max_skills=1, deps=default_dependencies())
         )
     finally:
         _skill_audit_jobs.pop(("owner",), None)
@@ -452,13 +449,13 @@ def test_background_audit_propagates_workload_to_every_model_phase(monkeypatch):
             "saved_tool_calls": 0,
         }
 
-    monkeypatch.setattr("routes.skills_routes._eval_skill_necessity", fake_necessity)
-    monkeypatch.setattr("routes.skills_routes._run_skill_audit_arm", fake_arm)
-    monkeypatch.setattr("routes.skills_routes._eval_skill_run", fake_eval)
+    monkeypatch.setattr("services.skills.evaluation.evaluate_necessity", fake_necessity)
+    monkeypatch.setattr("services.skills.agent_runner.run_audit_arm", fake_arm)
+    monkeypatch.setattr("services.skills.evaluation.evaluate_run", fake_eval)
 
     fake = FakeSkills()
     result = __import__("asyncio").run(
-        _audit_one_skill(
+        default_dependencies().audit_one(
             fake,
             fake.row,
             "http://127.0.0.1:11434/v1",

@@ -1,18 +1,8 @@
-"""Detached agent-run manager.
+"""Detached agent runs: keep a chat stream running after the SSE client disconnects.
 
-Keeps an agent/chat stream running server-side after the SSE client disconnects
-(tab close, navigate away, refresh). The streaming generator is drained by a
-background asyncio task into a per-session replay buffer; SSE clients SUBSCRIBE
-to that buffer (replay everything so far, then live). Closing the SSE only drops
-the subscriber — the drain task keeps going.
-
-The wrapped generator already persists the assistant message to the session on
-completion, so reopening the session shows the finished result even if nobody
-was connected when it finished. Reconnecting mid-run replays the buffer + streams
-live (pick up where it is).
-
-Durability scope: in-memory, survives as long as the server process runs (tab
-close / navigation / refresh). It does NOT survive a server restart.
+A background task drains the stream into a per-session replay buffer; SSE
+clients subscribe (replay, then live). In memory only, so a server restart
+loses runs in flight.
 """
 import asyncio
 import json
@@ -100,12 +90,6 @@ def is_active(session_id: str) -> bool:
 def get_status(session_id: str) -> Optional[str]:
     r = _RUNS.get(session_id)
     return r.status if r else None
-
-
-def get_run_id(session_id: str) -> Optional[str]:
-    """Return the opaque identity of the current detached run, if present."""
-    r = _RUNS.get(session_id)
-    return r.run_id if r else None
 
 
 def get_active_run(session_id: str) -> Optional[_Run]:

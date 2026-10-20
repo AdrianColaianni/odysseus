@@ -50,12 +50,6 @@ mcp<2
 pyotp
 qrcode[pil]
 croniter
-pytest
-pytest-asyncio
-# starlette.testclient prefers httpx2 since Starlette 1.2.0 and warns on every
-# TestClient import when only classic httpx is present. Runtime code keeps
-# using `httpx` above; this is test-client only.
-httpx2
 # DATABASE_URL defaults to sqlite (core/database.py), but when pointed at an
 # external Postgres, SQLAlchemy's postgresql dialect imports psycopg2 inside
 # create_engine() and raises ModuleNotFoundError if missing. -binary avoids

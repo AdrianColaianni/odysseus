@@ -12,14 +12,12 @@ import { drawCheckerboard as _drawCheckerboard } from './editor/checkerboard.js'
 import { dilateMask as _dilateMask, applyInpaintFeather as _applyInpaintFeather } from './editor/mask-utils.js';
 import {
   lassoOffsetPoints as _lassoOffsetPointsImpl,
-  getLassoPath as _getLassoPathImpl,
   buildLassoMask as _buildLassoMaskImpl,
 } from './editor/tools/lasso-mask.js';
 import { floodFillMask as _floodFillMask } from './editor/tools/flood-fill.js';
 import { drawHistogram as _drawHistogram } from './editor/fx/histogram.js';
 import {
   applyAdjustment as _applyAdjToCanvas,
-  renderLayerPixelAdjustments as _renderLayerPixelAdjustmentsImpl,
   renderLayerWithAdjLayers as _renderLayerWithAdjLayers,
 } from './editor/fx/pixel-pass.js';
 import {
@@ -29,7 +27,6 @@ import {
 import {
   layerHasAdjustments as _layerHasAdjustments,
   layerNeedsPixelPass as _layerNeedsPixelPass,
-  adjustmentsKey as _adjustmentsKey,
   defaultAdjParams as _defaultAdjParams,
   adjLayerLabel as _adjLayerLabel,
   ADJ_ICONS as _ADJ_ICONS,
@@ -52,14 +49,12 @@ import {
   cursorForHandle as _cursorForHandle,
 } from './editor/snap.js';
 import {
-  layerUnionAlpha as _layerUnionAlphaImpl,
   seamMask as _seamMaskImpl,
   layerBodyMask as _layerBodyMaskImpl,
 } from './editor/harmonize-masks.js';
 import {
   gaussianBlur as _gaussianBlur,
   zoomBlur as _zoomBlur,
-  motionBlur as _motionBlur,
 } from './editor/filters/blur.js';
 import { edgeFeather as _edgeFeather } from './editor/filters/edge-feather.js';
 import { createRenderGeneration as _createRenderGeneration } from './editor/render-cancellation.js';
@@ -116,6 +111,8 @@ import {
   renderShapeLayer as _renderShapeLayer,
 } from './editor/shape-layer.js';
 import {
+  copyCanvas,
+  makeCanvas,
   createPlacedData as _createPlacedData,
   rasterizePlacedLayer as _rasterizePlacedLayer,
   renderPlacedLayer as _renderPlacedLayer,
@@ -158,9 +155,8 @@ import { createTransformDragTool } from './editor/tools/transform-drag.js';
 import { createStrokeTool } from './editor/tools/stroke.js';
 import { createLayerPanelRenderer } from './editor/layer-panel.js';
 import {
-  syncOverlay as _syncTransformOverlayImpl,
   drawHandles as _drawTransformHandlesImpl,
-  getHandleAt as _getTransformHandleImpl,
+  getHandleAt as _getTransformHandle,
   containsFramePoint as _containsTransformFramePoint,
 } from './editor/tools/transform-handles.js';
 import { createCanvasTransforms } from './editor/canvas-transforms.js';
@@ -191,30 +187,18 @@ import { createPrecisionGuides } from './editor/precision-guides.js';
 import { wireViewMenu } from './editor/wire-view-menu.js';
 
 const API_BASE = window.location.origin;
-// ── State ──
 // Transform-overlay canvas — sits over the main canvas with extra margin
 // so resize / rotation handles render OUTSIDE the image edges. Pointer
 // events disabled; the main canvas still handles all input.
 const _TRANSFORM_OVERLAY_MARGIN = 60; // screen-space px of slack on each side
-// Thin wrappers around the transform-handles impls — the refactor
-// imported them under *Impl aliases but several call sites still use
-// the bare names. Without these, _startTransform threw a ReferenceError
-// before opening the popup, so Transform showed no handles / no popup.
 function _drawTransformHandles() { _drawTransformHandlesImpl(_TRANSFORM_OVERLAY_MARGIN); }
-function _getTransformHandle(x, y, options) { return _getTransformHandleImpl(x, y, options); }
-function _syncTransformOverlay() { _syncTransformOverlayImpl(_TRANSFORM_OVERLAY_MARGIN); }
 function _computeTransformSnap(frame, center) {
   const selectedIds = new Set(state.selectedLayerIds || []);
   return _computeTransformSnapImpl(frame, center, {
     zoom: state.zoom,
     canvasW: state.imgWidth,
     canvasH: state.imgHeight,
-    otherLayers: state.layers.filter(layer => !selectedIds.has(layer.id)).map(layer => ({
-      visible: layer.visible,
-      id: layer.id,
-      canvas: layer.canvas,
-      offset: state.layerOffsets.get(layer.id) || { x: 0, y: 0 },
-    })),
+    otherLayers: _layerAlphaSources(selectedIds),
     verticalGuides: state.guides?.vertical || [],
     horizontalGuides: state.guides?.horizontal || [],
     snapToGrid: !!state.snapToGrid,
@@ -237,7 +221,7 @@ let _renderSavedSelectionsMenu = null;
 
 function _cancelSamQuery(showToast = true) {
   if (!_samAbortController) return false;
-  try { _samAbortController.abort(); } catch {}
+  _samAbortController.abort();
   if (showToast && uiModule) uiModule.showToast('SAM query cancelled');
   return true;
 }
@@ -249,6 +233,7 @@ function _galleryEditMounted() {
 if (!window.__galleryEditEscHardGuardInstalled) {
   window.__galleryEditEscHardGuardInstalled = true;
   window.addEventListener('keydown', (e) => {
+    const swallow = () => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); };
     if (_activeFilterPrompt) {
       _activeFilterPrompt.handleKey(e);
       return;
@@ -266,9 +251,7 @@ if (!window.__galleryEditEscHardGuardInstalled) {
     const isSamCancel = !!_samAbortController
       && (e.key === 'Escape' || ((e.ctrlKey || e.metaKey) && String(e.key || '').toLowerCase() === 'c'));
     if (isSamCancel) {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
+      swallow();
       _cancelSamQuery();
       return;
     }
@@ -277,17 +260,13 @@ if (!window.__galleryEditEscHardGuardInstalled) {
     // before the gallery-level guard can consume it for the whole editor.
     const quickEdit = e.target?.closest?.('#ge-ai-command');
     if (quickEdit && !quickEdit.classList.contains('ge-ai-command-collapsed')) {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
+      swallow();
       quickEdit.dispatchEvent(new CustomEvent('ge-ai-command-close'));
       return;
     }
     const renameInput = e.target?.closest?.('.ge-layer-name-input');
     if (renameInput) {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
+      swallow();
       renameInput.dataset.cancelRename = 'true';
       renameInput.blur();
       return;
@@ -296,67 +275,49 @@ if (!window.__galleryEditEscHardGuardInstalled) {
     // it without completing the pending openEditor() promise.
     const sizePrompt = e.target?.closest?.('#ge-canvas-size-overlay');
     if (sizePrompt) {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
+      swallow();
       sizePrompt._cancelCanvasSize?.();
       return;
     }
     // Window capture runs before Gallery's document-level Escape guard. Handle
     // the transform here so no surrounding modal can swallow the cancellation.
     if (state.transformActive) {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
+      swallow();
       _cancelTransform();
       return;
     }
     if (state.cropRect || state.cropping || state.cropMoving) {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
+      swallow();
       _cancelCrop('escape');
       return;
     }
     if (state.marqueeActive || state.selectionMoving) {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
+      swallow();
       _marqueeTool.cancel('escape');
       return;
     }
     if (state.lassoActive || state.lassoPoints.length) {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
+      swallow();
       _lassoTool.cancel();
       return;
     }
     if (state.gradientActive) {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
+      swallow();
       _gradientTool.cancel();
       return;
     }
     if (state.drawing) {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
+      swallow();
       _strokeTool.cancel();
       return;
     }
     if (_shapeDraft) {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
+      swallow();
       _cancelShapeDraft();
       return;
     }
     if (window.__galleryEditLive || _galleryEditMounted()) {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
+      swallow();
     }
   }, true);
 }
@@ -401,9 +362,6 @@ function _registerDocClickAway(handler) {
 // Resolved per-stroke at pointerdown: state.inpaintEraseMode XOR (Ctrl+Alt).
 // Most-recent inpaint result layer id — the post-generation Feather
 // slider edits this layer's alpha edge live.
-
-// _dilateMask + _applyInpaintFeather live in editor/mask-utils.js
-// — see import at top of file.
 
 // Eraser settings
 // Edge softness, 0..100. 0 = hard pixel edge; higher values blur the
@@ -466,22 +424,16 @@ function _deriveBusyLabel(layerName) {
   return _BUSY_LABELS[String(layerName).toLowerCase()] || 'Processing…';
 }
 
-// AI-tool runner — sharpen / harmonize / upscale / style / bg-remove
-// all flatten the doc, POST a PNG to a server endpoint, and drop the
-// result back as a new layer. Full implementation in editor/ai-tool-
-// runner.js; instantiated lazily (so it can reference function decls
-// that haven't hoisted at module load time? — actually all named
-// function decls hoist, so we instantiate at module top).
 const _applyImageTool = createApplyImageTool({
-  flatten: () => flatten(),
+  flatten,
   saveState: _saveState,
   createLayer,
   composite,
-  renderLayerPanel: () => _renderLayerPanel(),
-  deriveBusyLabel: (name) => _deriveBusyLabel(name),
-  getSelectedAIEndpoint: (type) => _getSelectedAIEndpoint(type),
-  openCookbookForDependency: (pkg) => _openCookbookForDependency(pkg),
-  openCookbookForImg2img: () => _openCookbookForImg2img(),
+  renderLayerPanel: _renderLayerPanel,
+  deriveBusyLabel: _deriveBusyLabel,
+  getSelectedAIEndpoint: _getSelectedAIEndpoint,
+  openCookbookForDependency: _openCookbookForDependency,
+  openCookbookForImg2img: _openCookbookForImg2img,
   spinnerModule,
   uiModule,
 });
@@ -491,16 +443,6 @@ function _setAiCommandStatus(text, kind = '') {
   if (!el) return;
   el.textContent = text || '';
   el.dataset.kind = kind || '';
-}
-
-function _escapeAiCommandText(value) {
-  return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;',
-  }[ch]));
 }
 
 function _clickToolButton(toolId) {
@@ -673,9 +615,9 @@ function _wireAiCommandBox() {
     suggestions.hidden = false;
     suggestions.innerHTML = suggestionItems.map((item, idx) => `
       <button type="button" class="ge-ai-command-suggestion${idx === suggestionIndex ? ' active' : ''}" data-ai-command-suggestion="${idx}">
-        <span class="ge-ai-command-suggestion-kind">${_escapeAiCommandText(item.kind || 'Edit')}</span>
-        <span class="ge-ai-command-suggestion-main">${_escapeAiCommandText(item.label)}</span>
-        <span class="ge-ai-command-suggestion-hint">${_escapeAiCommandText(item.hint || item.insert)}</span>
+        <span class="ge-ai-command-suggestion-kind">${uiModule.esc(item.kind || 'Edit')}</span>
+        <span class="ge-ai-command-suggestion-main">${uiModule.esc(item.label)}</span>
+        <span class="ge-ai-command-suggestion-hint">${uiModule.esc(item.hint || item.insert)}</span>
       </button>
     `).join('');
   };
@@ -759,27 +701,27 @@ function _wireAiCommandBox() {
     setBusy(true);
     try {
       if (/\brotate\b.*\b180\b|\bupside\s*down\b/.test(p)) {
-        _rotateAllLayers(180);
+        _canvasTransforms.rotateAll(180);
         requestAnimationFrame(() => _setAiCommandStatus('Rotated 180.', 'done'));
         return;
       }
       if (/\brotate\b.*\b(left|ccw|counter)\b|\bturn\s+left\b/.test(p)) {
-        _rotateAllLayers(270);
+        _canvasTransforms.rotateAll(270);
         requestAnimationFrame(() => _setAiCommandStatus('Rotated left.', 'done'));
         return;
       }
       if (/\brotate\b|\bturn\s+right\b|\bclockwise\b/.test(p)) {
-        _rotateAllLayers(90);
+        _canvasTransforms.rotateAll(90);
         requestAnimationFrame(() => _setAiCommandStatus('Rotated 90.', 'done'));
         return;
       }
       if (/\bflip\b.*\b(vertical|v)\b|\bmirror\b.*\b(vertical|v)\b/.test(p)) {
-        _flipAllLayers('v');
+        _canvasTransforms.flipAll('v');
         _setAiCommandStatus('Flipped vertical.', 'done');
         return;
       }
       if (/\bflip\b|\bmirror\b/.test(p)) {
-        _flipAllLayers('h');
+        _canvasTransforms.flipAll('h');
         _setAiCommandStatus('Flipped horizontal.', 'done');
         return;
       }
@@ -849,13 +791,9 @@ function _wireAiCommandBox() {
 
 // Layer offsets for move tool
 
-// ── Layer class ──
-
 
 function createLayer(name, width, height) {
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
+  const canvas = makeCanvas(width, height);
   const layer = {
     id: 'layer-' + (state.nextLayerId++),
     name,
@@ -904,12 +842,6 @@ function createLayer(name, width, height) {
   return layer;
 }
 
-// _layerFilterString + _fxFilterToSlider live in editor/fx/filter-string.js
-// — see import at top.
-
-// _layerHasAdjustments lives in editor/layer-helpers.js — see import at top.
-
-// ── Mask sub-layers ──
 // Resolves to the parent layer that should own masks for the current
 // edit. The "active" parent is whichever layer the user has selected,
 // excluding mask-sublayer entries themselves.
@@ -955,9 +887,7 @@ function _ensureActiveMaskLayer() {
     if (mask) parent.activeMaskId = mask.id;
   }
   if (mask) return mask;
-  const c = document.createElement('canvas');
-  c.width = state.imgWidth;
-  c.height = state.imgHeight;
+  const c = makeCanvas(state.imgWidth, state.imgHeight);
   mask = {
     id: 'mask-' + (state.nextLayerId++),
     name: 'Mask ' + (parent.masks.length + 1),
@@ -971,15 +901,6 @@ function _ensureActiveMaskLayer() {
   return mask;
 }
 
-// True if any visible layer in the doc carries a mask sub-layer; drives
-// the "red overlay" pass in composite().
-function _hasAnyMasks() {
-  for (const l of state.layers) {
-    if (l.masks && l.masks.length) return true;
-  }
-  return false;
-}
-
 // Union of every VISIBLE mask sub-layer across the whole document,
 // returned as a fresh image-sized canvas with white = masked area.
 // Used by inpaint Generate/Remove so the AI sees the combined region
@@ -989,45 +910,20 @@ function _buildMergedMaskCanvas() {
   return _buildMergedMaskCanvasImpl(state.layers, state.imgWidth, state.imgHeight);
 }
 
-// True if the layer needs the (slower) per-pixel LUT pass — i.e. Levels
-// or Color Balance are non-identity. Brightness/Contrast/Saturation/Hue
-// alone can stay on the fast CSS-filter path.
-// _layerNeedsPixelPass + _adjustmentsKey live in editor/layer-helpers.js.
-
-// Per-pixel Levels + Color Balance. Renders the layer.canvas into a
-// cached canvas (layer._adjCache) with the LUT-style transforms applied.
-// CSS-filter adjustments (B/C/S/H) are still applied at composite() on
-// top of this cache.
-// Pixel-pass adjustment math lives in editor/fx/pixel-pass.js. This
-// wrapper forwards the layer + a fresh adjustments-cache key so
-// existing callers stay unchanged.
-function _renderLayerPixelAdjustments(layer) {
-  return _renderLayerPixelAdjustmentsImpl(layer, _adjustmentsKey(layer.adjustments));
-}
 // Layer FX popup — floating window bound to a specific layer. Sliders
 // edit that layer's adjustments and live-update composite(). The popup
 // stays open across clicks elsewhere unless dismissed via its × button.
 
-// FX / adjustment-popup machinery — full implementation in
-// editor/fx/adj-popup.js. Wrappers preserve the legacy names that
-// every layer-row FX button, panel-row click, and undo/redo path
-// already references.
 const _adjPopupSystem = createAdjPopupSystem({
   composite,
   saveState: _saveState,
-  renderLayerPanel: () => _renderLayerPanel(),
-  getAdjustmentSource: layer => _adjustmentSourceCanvas(layer),
+  renderLayerPanel: _renderLayerPanel,
+  getAdjustmentSource: _adjustmentSourceCanvas,
 });
-const _closeFxPopup                     = _adjPopupSystem.closeFxPopup;
-const _ensureAdjustments                = _adjPopupSystem.ensureAdjustments;
-const _ensureFxDock                     = _adjPopupSystem.ensureFxDock;
-const _closeFxMenu                      = _adjPopupSystem.closeFxMenu;
-const _openFxPopup                      = _adjPopupSystem.openFxPopup;
-const _openAdjPopup                     = _adjPopupSystem.openAdjPopup;
-const _editAdjLayer                     = _adjPopupSystem.editAdjLayer;
-const _closeAdjPopup                    = _adjPopupSystem.closeAdjPopup;
-const _minimiseAdjPopup                 = _adjPopupSystem.minimiseAdjPopup;
-const _syncFxPanelToActiveLayerIfPresent = _adjPopupSystem.syncFxPanelToActiveLayerIfPresent;
+const {
+  closeFxMenu: _closeFxMenu, openFxPopup: _openFxPopup, openAdjPopup: _openAdjPopup,
+  editAdjLayer: _editAdjLayer, closeAdjPopup: _closeAdjPopup,
+} = _adjPopupSystem;
 
 function _pickLayerAtEvent(e) {
   const point = _canvasCoords(e, state.mainCanvas);
@@ -1079,9 +975,7 @@ function _addAdjustmentLayer(type, anchorEl) {
 }
 
 function _adjustmentSourceCanvas(layer) {
-  const canvas = document.createElement('canvas');
-  canvas.width = state.imgWidth;
-  canvas.height = state.imgHeight;
+  const canvas = makeCanvas(state.imgWidth, state.imgHeight);
   const index = state.layers.findIndex(item => item.id === layer?.id);
   if (index <= 0) return canvas;
   const layers = state.layers.slice(0, index);
@@ -1107,56 +1001,6 @@ function _adjustmentSourceCanvas(layer) {
   return canvas;
 }
 
-// Flood-fill enclosed regions of the inpaint mask. After the user
-// draws a closed shape (circle, lasso, whatever), the interior is
-// alpha=0 surrounded by white mask. We mark all alpha=0 pixels
-// reachable from the canvas edges as "outside"; anything still alpha=0
-// after that pass is enclosed and gets filled with white.
-function _fillEnclosedMaskRegions() {
-  if (!state.maskCanvas || !state.maskCtx) return;
-  const w = state.maskCanvas.width, h = state.maskCanvas.height;
-  if (w * h > 4096 * 4096) return; // safety cap
-  const img = state.maskCtx.getImageData(0, 0, w, h);
-  const d = img.data;
-  // visited bitmap — 0 = unvisited, 1 = reached from edge (outside),
-  // 2 = mask (alpha>0). After BFS, alpha=0 pixels with visited[i]=0
-  // are enclosed.
-  const visited = new Uint8Array(w * h);
-  const stack = [];
-  // Pre-mark all mask pixels as visited=2 so we don't cross them.
-  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
-    if (d[i + 3] > 0) visited[j] = 2;
-  }
-  // Seed flood from every edge pixel that's empty.
-  const seed = (x, y) => {
-    const k = y * w + x;
-    if (visited[k] === 0) { visited[k] = 1; stack.push(k); }
-  };
-  for (let x = 0; x < w; x++) { seed(x, 0); seed(x, h - 1); }
-  for (let y = 0; y < h; y++) { seed(0, y); seed(w - 1, y); }
-  // BFS — 4-connected.
-  while (stack.length) {
-    const k = stack.pop();
-    const x = k % w, y = (k - x) / w;
-    if (x > 0)     { const n = k - 1; if (visited[n] === 0) { visited[n] = 1; stack.push(n); } }
-    if (x < w - 1) { const n = k + 1; if (visited[n] === 0) { visited[n] = 1; stack.push(n); } }
-    if (y > 0)     { const n = k - w; if (visited[n] === 0) { visited[n] = 1; stack.push(n); } }
-    if (y < h - 1) { const n = k + w; if (visited[n] === 0) { visited[n] = 1; stack.push(n); } }
-  }
-  // Anything still visited=0 → enclosed empty region. Fill white.
-  let filled = false;
-  for (let j = 0, i = 0; j < visited.length; j++, i += 4) {
-    if (visited[j] === 0) {
-      d[i] = 255; d[i + 1] = 255; d[i + 2] = 255; d[i + 3] = 255;
-      filled = true;
-    }
-  }
-  if (filled) state.maskCtx.putImageData(img, 0, 0);
-}
-
-// True if a layer has no opaque pixels — used to tag the row in the
-// layer panel as "(empty)" so the user can tell at a glance which
-// layers carry actual content.
 // Lightweight loading overlay anchored to the canvas area. Used for
 // blocking operations (rotation on big images, etc.) so the user gets
 // feedback while the main thread is busy. The actual heavy call should
@@ -1181,28 +1025,14 @@ function _hideCanvasLoading() {
   if (overlay) overlay.style.display = 'none';
 }
 
-// Cheap "is this mask canvas blank?" check. Used to suffix "(empty)" on
-// mask sub-layer rows in the panel so the user can tell at a glance
-// which masks have actually been painted on.
-// _isMaskCanvasEmpty lives in editor/layer-helpers.js.
-
-// Document-wide rotate / flip — implementations in
-// editor/canvas-transforms.js. Wrappers preserve the legacy names that
-// the topbar Image menu and shortcuts already wire to.
 const _canvasTransforms = createCanvasTransforms({
   saveState: _saveState,
   composite,
-  fitZoom: () => _fitZoom(),
-  showCanvasLoading: (label) => _showCanvasLoading(label),
-  hideCanvasLoading: () => _hideCanvasLoading(),
-  renderLayerPanel: () => _renderLayerPanel(),
+  fitZoom: _fitZoom,
+  showCanvasLoading: _showCanvasLoading,
+  hideCanvasLoading: _hideCanvasLoading,
+  renderLayerPanel: _renderLayerPanel,
 });
-function _rotateAllLayers(deg) { return _canvasTransforms.rotateAll(deg); }
-function _flipAllLayers(axis)  { return _canvasTransforms.flipAll(axis); }
-
-// _isLayerEmpty lives in editor/layer-helpers.js.
-
-// ── Composite ──
 
 function _renderLayerOutput(layer, shouldContinue = () => true) {
   return _renderWithLayerMasks(
@@ -1292,18 +1122,10 @@ function _selectionMaskAsDocument({ materializeLasso = false } = {}) {
   return null;
 }
 
-function _cloneSelectionCanvas(source) {
-  if (!source) return null;
-  const canvas = document.createElement('canvas');
-  canvas.width = source.width;
-  canvas.height = source.height;
-  canvas.getContext('2d').drawImage(source, 0, 0);
-  return canvas;
-}
 
 function _activateSelectionCanvas(source, selectionSource = 'saved') {
   if (!source) return false;
-  state.wandMask = _cloneSelectionCanvas(source);
+  state.wandMask = copyCanvas(source);
   state.wandLayerId = state.activeLayerId;
   state.wandMaskSpace = 'document';
   state.selectionSource = selectionSource;
@@ -1320,7 +1142,7 @@ function _deselectSelection({ saveHistory = true, remember = true } = {}) {
   const selection = _selectionMaskAsDocument({ materializeLasso: true });
   if (!selection) return false;
   if (saveHistory) _saveState('Deselect');
-  if (remember) state.lastSelection = { canvas: _cloneSelectionCanvas(selection) };
+  if (remember) state.lastSelection = { canvas: copyCanvas(selection) };
   state.wandMask = null;
   state.wandLayerId = null;
   state.wandMaskSpace = 'layer';
@@ -1359,12 +1181,12 @@ function _saveNamedSelection(name) {
   const existing = (state.savedSelections || []).find(item => item.name.toLowerCase() === cleanName.toLowerCase());
   if (existing) {
     existing.name = cleanName;
-    existing.canvas = _cloneSelectionCanvas(mask);
+    existing.canvas = copyCanvas(mask);
   } else {
     state.savedSelections.push({
       id: `selection-${state.nextSavedSelectionId++}`,
       name: cleanName,
-      canvas: _cloneSelectionCanvas(mask),
+      canvas: copyCanvas(mask),
     });
   }
   _schedulePersist();
@@ -1393,7 +1215,7 @@ function _deleteNamedSelection(id) {
 async function _refineSelection() {
   const current = _selectionMaskAsDocument({ materializeLasso: true });
   if (!current) return false;
-  const original = _cloneSelectionCanvas(current);
+  const original = copyCanvas(current);
   let preview = original;
   const renderPreview = values => {
     preview = _refineSelectionMask(original, values);
@@ -1547,10 +1369,7 @@ function _finishComposite(render, documentCanvas) {
     ctx.drawImage(inspectedMask.canvas, maskOffset.x, maskOffset.y);
     ctx.restore();
   }
-  // Show mask overlay as red tint whenever a mask sub-layer is present
-  // on the active parent (was previously gated on inpaint-tool only; now
-  // masks are first-class layer entities, so users see them in any tool).
-  // Mask canvas has white pixels — we tint them red for visibility.
+  // Masks are first-class layers, so their red tint shows in every tool.
   if (state.maskVisible && !inspectedMask) {
     // Build a SINGLE merged mask canvas from every visible mask
     // sub-layer (union of alpha — `lighter` keeps max alpha per pixel,
@@ -1663,7 +1482,7 @@ function composite() {
 
 function _toggleCompare() {
   if (!state.compareBaselineCanvas) {
-    uiModule?.showToast?.('Compare is available after the document finishes loading');
+    uiModule.showToast('Compare is available after the document finishes loading');
     return;
   }
   state.compareActive = !state.compareActive;
@@ -1720,9 +1539,10 @@ function _drawCropOverlay() {
   state.mainCtx.setLineDash([]);
 }
 
-// _drawCheckerboard lives in editor/checkerboard.js — see import at top.
-
-// ── History ──
+// getImageData throws on a 0-sized canvas; one broken layer must not take down the snapshot.
+function _imageDataOf(ctx, canvas) {
+  try { return ctx.getImageData(0, 0, canvas.width, canvas.height); } catch { return null; }
+}
 
 function _snapshotState() {
   let wand = null;
@@ -1759,8 +1579,7 @@ function _snapshotState() {
       activeMaskId: group.activeMaskId || null,
       effects: (group.effects || []).map(effect => _cloneDocumentValue(_normalizeEffect(effect), null)),
       masks: (group.masks || []).map(mask => {
-        let imageData = null;
-        try { imageData = mask.ctx.getImageData(0, 0, mask.canvas.width, mask.canvas.height); } catch {}
+        const imageData = _imageDataOf(mask.ctx, mask.canvas);
         return {
           id: mask.id,
           name: mask.name,
@@ -1777,16 +1596,13 @@ function _snapshotState() {
     nextLayerId: state.nextLayerId,
     wand,
     savedSelections: (state.savedSelections || []).map(selection => {
-      let imageData = null;
-      try { imageData = selection.canvas.getContext('2d').getImageData(0, 0, selection.canvas.width, selection.canvas.height); } catch {}
+      const imageData = _imageDataOf(selection.canvas.getContext('2d'), selection.canvas);
       return { id: selection.id, name: selection.name, w: selection.canvas.width, h: selection.canvas.height, imageData };
     }),
     lastSelection: (() => {
       const canvas = state.lastSelection?.canvas;
       if (!canvas) return null;
-      let imageData = null;
-      try { imageData = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height); } catch {}
-      return { w: canvas.width, h: canvas.height, imageData };
+      return { w: canvas.width, h: canvas.height, imageData: _imageDataOf(canvas.getContext('2d'), canvas) };
     })(),
     nextSavedSelectionId: state.nextSavedSelectionId,
     lassoPoints: (state.lassoPoints || []).map(point => ({ ...point })),
@@ -1796,27 +1612,13 @@ function _snapshotState() {
       horizontal: [...(state.guides?.horizontal || [])],
     },
     layers: state.layers.map(l => {
-      // getImageData throws on a 0-sized canvas — guard so a single
-      // broken layer/mask can't take down the whole snapshot (which
-      // would silently break undo/redo for brush strokes etc.).
-      let imageData = null;
-      try {
-        if (l.canvas.width > 0 && l.canvas.height > 0) {
-          imageData = l.ctx.getImageData(0, 0, l.canvas.width, l.canvas.height);
-        }
-      } catch (_) { /* keep imageData=null, restore will skip */ }
+      const imageData = _imageDataOf(l.ctx, l.canvas);
       let placed = null;
       if (l.kind === 'placed' && l.placed?.sourceCanvas) {
-        let sourceImageData = null;
-        try {
-          sourceImageData = l.placed.sourceCanvas.getContext('2d').getImageData(
-            0, 0, l.placed.sourceCanvas.width, l.placed.sourceCanvas.height,
-          );
-        } catch {}
         placed = {
           sourceW: l.placed.sourceCanvas.width,
           sourceH: l.placed.sourceCanvas.height,
-          sourceImageData,
+          sourceImageData: _imageDataOf(l.placed.sourceCanvas.getContext('2d'), l.placed.sourceCanvas),
           sourceName: l.placed.sourceName || 'Placed image',
           matrix: Array.isArray(l.placed.matrix) ? [...l.placed.matrix] : [1, 0, 0, 1, 0, 0],
         };
@@ -1834,8 +1636,7 @@ function _snapshotState() {
           const normalized = _normalizeEffect(effect);
           const mask = effect?.mask;
           if (!mask?.canvas) return normalized;
-          let imageData = null;
-          try { imageData = mask.ctx.getImageData(0, 0, mask.canvas.width, mask.canvas.height); } catch {}
+          const imageData = _imageDataOf(mask.ctx, mask.canvas);
           return {
             ...normalized,
             mask: {
@@ -1857,20 +1658,12 @@ function _snapshotState() {
           try { return JSON.parse(JSON.stringify(l.adjustments || {})); }
           catch (e) { console.error('[gallery] adjustments not serializable, dropping from snapshot:', e); return {}; }
         })(),
-        // Deep-clone defensively — a non-serializable / circular value here
-        // would throw out of the whole snapshot (and historically aborted
-        // every mutating op). Fall back to [] rather than blow up.
+        // A circular value here would throw out of the whole snapshot.
         adjLayers: (() => {
           try { return l.adjLayers ? JSON.parse(JSON.stringify(l.adjLayers)) : []; }
           catch (e) { console.error('[gallery] adjLayers not serializable, dropping from snapshot:', e); return []; }
         })(),
         masks: (l.masks || []).map(m => {
-          let mImageData = null;
-          try {
-            if (m.canvas.width > 0 && m.canvas.height > 0) {
-              mImageData = m.ctx.getImageData(0, 0, m.canvas.width, m.canvas.height);
-            }
-          } catch (_) {}
           return {
             id: m.id,
             name: m.name,
@@ -1881,7 +1674,7 @@ function _snapshotState() {
             offset: { x: Number(m.offset?.x) || 0, y: Number(m.offset?.y) || 0 },
             canvasW: m.canvas.width,
             canvasH: m.canvas.height,
-            imageData: mImageData,
+            imageData: _imageDataOf(m.ctx, m.canvas),
           };
         }),
         activeMaskId: l.activeMaskId || null,
@@ -1915,7 +1708,6 @@ function _saveState(label) {
   try { _refreshHistoryPanelIfOpen(); } catch (e) { console.error('[gallery] refreshHistoryPanel:', e); }
 }
 
-// ────────── Persistent edit drafts (server-backed) ──────────
 // The previous implementation keyed drafts by gallery image-id in
 // localStorage; that meant blank-canvas sessions silently lost work and
 // drafts couldn't roam between devices. We now hold a server-side draft
@@ -1972,10 +1764,6 @@ function _schedulePersist() {
   // when no server draft exists; subsequent edits can stay debounced.
   const delay = state.draftId ? PERSIST_DEBOUNCE_MS : 0;
   state.persistTimer = setTimeout(() => { state.persistTimer = null; _persistDraft(); }, delay);
-}
-
-function _buildDraftPayload() {
-  return _serializeEditorDocument(state);
 }
 
 function _serializationSnapshot(source, canvasProxy) {
@@ -2083,20 +1871,10 @@ async function _buildDraftPayloadAsync() {
   return _replaceSerializationTokens(payload, replacements);
 }
 
-function _buildThumbnail() {
-  return _buildThumbnailFromSource(
-    state.documentRenderReady && state.documentCompositeCanvas
-      ? state.documentCompositeCanvas
-      : flatten(),
-  );
-}
-
 function _buildThumbnailFromSource(source) {
   try {
     const scale = Math.min(1, THUMB_MAX / Math.max(source.width, source.height));
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(source.width * scale));
-    canvas.height = Math.max(1, Math.round(source.height * scale));
+    const canvas = makeCanvas(Math.max(1, Math.round(source.width * scale)), Math.max(1, Math.round(source.height * scale)));
     canvas.getContext('2d').drawImage(source, 0, 0, canvas.width, canvas.height);
     return canvas.toDataURL('image/jpeg', 0.6);
   } catch {
@@ -2395,9 +2173,7 @@ async function _restoreDraft(draft) {
     }
     layer.placed = null;
     if (layer.kind === 'placed' && s.placed) {
-      const sourceCanvas = document.createElement('canvas');
-      sourceCanvas.width = s.placed.sourceWidth;
-      sourceCanvas.height = s.placed.sourceHeight;
+      const sourceCanvas = makeCanvas(s.placed.sourceWidth, s.placed.sourceHeight);
       layer.placed = {
         sourceCanvas,
         sourceWidth: s.placed.sourceWidth,
@@ -2419,9 +2195,7 @@ async function _restoreDraft(draft) {
     layer.adjLayers = _cloneDocumentValue(s.adjLayers, []);
     layer.masks = [];
     for (const ms of Array.isArray(s.masks) ? s.masks : []) {
-      const canvas = document.createElement('canvas');
-      canvas.width = ms.canvasW || state.imgWidth;
-      canvas.height = ms.canvasH || state.imgHeight;
+      const canvas = makeCanvas(ms.canvasW || state.imgWidth, ms.canvasH || state.imgHeight);
       const ctx = canvas.getContext('2d');
       const mask = {
         id: ms.id || `mask-${state.nextLayerId++}`,
@@ -2461,9 +2235,7 @@ async function _restoreDraft(draft) {
       masks: [],
     };
     for (const savedMask of source.masks || []) {
-      const canvas = document.createElement('canvas');
-      canvas.width = savedMask.canvasW || state.imgWidth;
-      canvas.height = savedMask.canvasH || state.imgHeight;
+      const canvas = makeCanvas(savedMask.canvasW || state.imgWidth, savedMask.canvasH || state.imgHeight);
       const ctx = canvas.getContext('2d');
       const mask = {
         id: savedMask.id || `mask-${state.nextLayerId++}`,
@@ -2485,9 +2257,7 @@ async function _restoreDraft(draft) {
   });
 
   state.savedSelections = (data.savedSelections || []).map(source => {
-    const canvas = document.createElement('canvas');
-    canvas.width = source.canvasW || state.imgWidth;
-    canvas.height = source.canvasH || state.imgHeight;
+    const canvas = makeCanvas(source.canvasW || state.imgWidth, source.canvasH || state.imgHeight);
     const selection = { id: source.id, name: source.name || 'Selection', canvas };
     decodes.push(decodeInto(source.dataUrl, canvas, canvas.getContext('2d'), {
       type: 'saved-selection', id: source.id,
@@ -2609,11 +2379,8 @@ function _restoreState(snap) {
     }
   }
   const layerStates = snap.layers || snap;
-  // Rebuild the state.layers array from the snapshot order. This lets Ctrl+Z
-  // restore deleted layers (previously the loop only updated existing
-  // ones and silently dropped any layer the snapshot still knew about).
-  // Layers absent from the snapshot are dropped — that's the desired
-  // behavior for undoing an "+Add" or a paste.
+  // Rebuild from the snapshot order so Ctrl+Z restores deleted layers and
+  // drops layers the snapshot lacks (undoing an "+Add" or a paste).
   const _existingById = new Map(state.layers.map(l => [l.id, l]));
   const _rebuilt = [];
   for (const s of layerStates) {
@@ -2621,9 +2388,7 @@ function _restoreState(snap) {
     if (!layer) {
       // Layer was deleted (or merged away). Recreate it from the
       // snapshot's ImageData so Ctrl+Z brings it back.
-      const c = document.createElement('canvas');
-      c.width = s.canvasW || state.imgWidth;
-      c.height = s.canvasH || state.imgHeight;
+      const c = makeCanvas(s.canvasW || state.imgWidth, s.canvasH || state.imgHeight);
       layer = { id: s.id, name: s.name, canvas: c, ctx: c.getContext('2d'),
                 visible: true, opacity: 1, locked: false,
                 locks: { pixels: false, transparency: false, position: false } };
@@ -2652,9 +2417,7 @@ function _restoreState(snap) {
     try { if (s.imageData) layer.ctx.putImageData(s.imageData, 0, 0); } catch (_) {}
     state.layerOffsets.set(layer.id, { ...s.offset });
     if (layer.kind === 'placed' && s.placed?.sourceImageData) {
-      const sourceCanvas = document.createElement('canvas');
-      sourceCanvas.width = s.placed.sourceW;
-      sourceCanvas.height = s.placed.sourceH;
+      const sourceCanvas = makeCanvas(s.placed.sourceW, s.placed.sourceH);
       sourceCanvas.getContext('2d').putImageData(s.placed.sourceImageData, 0, 0);
       layer.placed = _createPlacedData(sourceCanvas, s.placed.matrix, s.placed.sourceName);
       const rendered = _renderPlacedLayer(layer);
@@ -2672,9 +2435,7 @@ function _restoreState(snap) {
     // snapshot's imageData. We don't reuse old mask canvases (snapshot
     // dims might differ after a transform) so a fresh canvas is safer.
     layer.masks = (s.masks || []).map(ms => {
-      const mc = document.createElement('canvas');
-      mc.width = ms.canvasW || state.imgWidth;
-      mc.height = ms.canvasH || state.imgHeight;
+      const mc = makeCanvas(ms.canvasW || state.imgWidth, ms.canvasH || state.imgHeight);
       const mctx = mc.getContext('2d');
       try { if (ms.imageData) mctx.putImageData(ms.imageData, 0, 0); } catch {}
       return {
@@ -2706,9 +2467,7 @@ function _restoreState(snap) {
     ...group,
     effects: Array.isArray(group.effects) ? group.effects.map(effect => _normalizeEffect(effect)) : [],
     masks: (group.masks || []).map(mask => {
-      const canvas = document.createElement('canvas');
-      canvas.width = mask.canvasW || state.imgWidth;
-      canvas.height = mask.canvasH || state.imgHeight;
+      const canvas = makeCanvas(mask.canvasW || state.imgWidth, mask.canvasH || state.imgHeight);
       const ctx = canvas.getContext('2d');
       try { if (mask.imageData) ctx.putImageData(mask.imageData, 0, 0); } catch {}
       return { ...mask, mode: 'group', space: 'document', canvas, ctx };
@@ -2735,9 +2494,7 @@ function _restoreState(snap) {
   }
   // Restore wand selection (or clear it if the snapshot had none).
   if (snap.wand && snap.wand.imageData) {
-    const mc = document.createElement('canvas');
-    mc.width = snap.wand.w;
-    mc.height = snap.wand.h;
+    const mc = makeCanvas(snap.wand.w, snap.wand.h);
     mc.getContext('2d').putImageData(snap.wand.imageData, 0, 0);
     state.wandMask = mc;
     state.wandLayerId = snap.wand.layerId;
@@ -2752,16 +2509,12 @@ function _restoreState(snap) {
     state.wandLastSeed = null;
   }
   state.savedSelections = (snap.savedSelections || []).map(saved => {
-    const canvas = document.createElement('canvas');
-    canvas.width = saved.w || state.imgWidth;
-    canvas.height = saved.h || state.imgHeight;
+    const canvas = makeCanvas(saved.w || state.imgWidth, saved.h || state.imgHeight);
     try { if (saved.imageData) canvas.getContext('2d').putImageData(saved.imageData, 0, 0); } catch {}
     return { id: saved.id, name: saved.name, canvas };
   });
   if (snap.lastSelection?.imageData) {
-    const canvas = document.createElement('canvas');
-    canvas.width = snap.lastSelection.w || state.imgWidth;
-    canvas.height = snap.lastSelection.h || state.imgHeight;
+    const canvas = makeCanvas(snap.lastSelection.w || state.imgWidth, snap.lastSelection.h || state.imgHeight);
     canvas.getContext('2d').putImageData(snap.lastSelection.imageData, 0, 0);
     state.lastSelection = { canvas };
   } else state.lastSelection = null;
@@ -2809,24 +2562,8 @@ function redo() {
   _refreshHistoryPanelIfOpen();
 }
 
-// Jump to any state in the labeled history. Negative offsets go back
-// (into state.undoStack), positive go forward (into state.redoStack). 0 = current.
-// Used by the history panel.
-// History panel — full implementation in editor/history-panel.js.
-// Wrappers preserve the legacy names that the topbar History button
-// + undo/redo paths already reference.
 const _historyPanel = createHistoryPanel({ undo, redo });
-const _jumpToHistory             = _historyPanel.jumpToHistory;
-const _toggleHistoryPanel        = _historyPanel.toggleHistoryPanel;
-const _refreshHistoryPanelIfOpen = _historyPanel.refreshHistoryPanelIfOpen;
-
-// _relTime lives in editor/layer-helpers.js.
-
-// ── Canvas event helpers ──
-
-// _canvasCoords lives in editor/canvas-coords.js — see import at top.
-
-// ── Drawing ──
+const { toggleHistoryPanel: _toggleHistoryPanel, refreshHistoryPanelIfOpen: _refreshHistoryPanelIfOpen } = _historyPanel;
 
 let _rasterizePromptPending = false;
 const _pixelPaintTools = new Set(['brush', 'eraser', 'clone', 'heal', 'smudge', 'dodge', 'burn', 'gradient']);
@@ -2887,9 +2624,8 @@ function _beginDraw(e) {
   // Transform-tool drag (handle grab or move-fallback) — handler in
   // editor/tools/transform-drag.js.
   if (_transformDragTool.tryBegin(e)) return;
-  // Magic wand is selection-only — works even on locked layers because
+  // Magic wand is selection-only: it works even on locked layers because
   // it doesn't mutate the layer until an action (Erase/Copy) is taken.
-  // Full implementation in editor/tools/wand.js.
   if (state.tool === 'wand') return _wandTool.click(e);
   if (state.tool === 'sam') return _runSamSelection(e);
   if (state.tool === 'text') return _placeText(e);
@@ -2911,9 +2647,7 @@ function _beginDraw(e) {
   if (state.tool === 'move') return _beginMove(e);
   if (state.tool === 'crop') return _beginCrop(e);
   if (state.tool === 'lasso') return _beginLasso(e);
-  // Clone-stamp — source pick + stroke start. Full implementation in
-  // editor/tools/clone.js; per-sample stamping continues through the
-  // shared `_strokeTo` pipeline below.
+  // Per-sample stamping continues through the shared `_strokeTo` pipeline.
   if (state.tool === 'clone' || state.tool === 'heal') return _cloneTool.begin(e);
   // Brush / Eraser / Inpaint share a stroke pipeline — handler in
   // editor/tools/stroke.js. Returns true for those tools, false
@@ -2968,39 +2702,13 @@ function _endDraw(e) {
   _strokeTool.tryEnd(e);
 }
 
-// Floating popup that appears after an inpaint stroke so the user can
-// type a prompt and Generate without diverting to the side panel. The
-// popup re-uses the existing #ge-inpaint-prompt and #ge-inpaint-run
-// elements by reparenting them into a positioned wrapper, so all the
-// existing handlers (Enter to submit, generate-button click) still fire.
-// Inpaint-stroke prompt popup feature was removed — the user types in
-// the side panel and hits Generate there. Helpers _showInpaintPrompt /
-// _dismissInpaintPrompt and their dismiss-handlers were dead code and
-// have been deleted.
-
-// Clone Stamp painter — stamps circular samples from the source
-// snapshot at every interpolated point between the last brush position
-// and the current one, so a drag produces a continuous clone. The
-// sample offset is fixed at stroke-start (Photoshop "aligned" mode):
-// `sample = source + (cursor − strokeStart)`.
-// Stroke pipeline — paints one segment last→current onto the active
-// layer (or active mask sub-layer). Full implementation in
-// editor/stroke-pipeline.js.
 const _strokePipeline = createStrokePipeline({
-  // Use the fallback-capable parent resolver so the stroke pipeline
-  // and _getActiveMaskLayer() agree on which layer is active. Plain
-  // activeLayer() returns null when activeLayerId is stale, which made
-  // strokeTo bail even though a mask had been created on the fallback
-  // parent — the "inpaint draws nothing" bug.
+  // Plain activeLayer() is null when activeLayerId is stale; fall back like _getActiveMaskLayer() does.
   activeLayer: () => activeLayer() || _activeParentLayer(),
-  getActiveMaskLayer: () => _getStrokeTargetMask(),
+  getActiveMaskLayer: _getStrokeTargetMask,
   composite,
 });
-const _beginStroke = _strokePipeline.beginStroke;
-const _strokeTo = _strokePipeline.strokeTo;
-const _endStroke = _strokePipeline.endStroke;
-
-// ── Brush cursor overlay ──
+const { beginStroke: _beginStroke, strokeTo: _strokeTo, endStroke: _endStroke } = _strokePipeline;
 
 
 function _updateBrushCursor(e) {
@@ -3063,12 +2771,6 @@ function _updateBrushCursor(e) {
   }
 }
 
-// ── Move tool ──
-
-// Move tool — full implementation lives in editor/tools/move.js. Wrap
-// `_beginMove` / `_continueMove` / `_endMove` to the factory output so
-// the existing dispatcher (_beginDraw / _continueDraw / _endDraw) keeps
-// working without changes.
 const _layerGeometry = createLayerGeometryController({ activeLayer, saveState: _saveState, composite });
 const _moveTool = createMoveTool({
   activeLayer,
@@ -3079,23 +2781,14 @@ const _moveTool = createMoveTool({
     if (state.transformActive) _drawTransformHandles();
   },
 });
-const _beginMove    = _moveTool.begin;
-const _continueMove = _moveTool.drag;
-const _endMove      = _moveTool.end;
+const { begin: _beginMove, drag: _continueMove, end: _endMove } = _moveTool;
 
-// ── Crop tool ──
-
-// Crop tool — full implementation in editor/tools/crop.js. Wire
-// `_beginCrop` / `_continueCrop` / `_endCrop` to the factory output so
-// the existing dispatcher keeps working without changes.
 const _cropTool = createCropTool({
   composite,
-  showCropApply: () => _showCropApply(),
-  snapFrame: (frame, center) => _computeTransformSnap(frame, center),
+  showCropApply: _showCropApply,
+  snapFrame: _computeTransformSnap,
 });
-const _beginCrop    = _cropTool.begin;
-const _continueCrop = _cropTool.drag;
-const _endCrop      = _cropTool.end;
+const { begin: _beginCrop, drag: _continueCrop, end: _endCrop } = _cropTool;
 function _cancelCrop(reason = 'cancel') {
   if (!state.cropRect && !state.cropping && !state.cropMoving) return false;
   _cropTool.cancel(reason);
@@ -3650,34 +3343,26 @@ function _cancelShapeDraft() {
   return true;
 }
 
-// ── Free Transform (Ctrl+Alt+T) ──
-
-// Transform session — full implementation in
-// editor/tools/transform-session.js. Wrappers preserve the legacy
-// names that the dispatcher / toolbar / shortcuts already reference.
 const _transformSession = createTransformSession({
   activeLayer,
   saveState: _saveState,
   composite,
-  fitZoom: () => _fitZoom(),
-  drawTransformHandles: () => _drawTransformHandles(),
-  showCanvasLoading: (label) => _showCanvasLoading(label),
-  hideCanvasLoading: () => _hideCanvasLoading(),
+  fitZoom: _fitZoom,
+  drawTransformHandles: _drawTransformHandles,
+  showCanvasLoading: _showCanvasLoading,
+  hideCanvasLoading: _hideCanvasLoading,
   undo,
   uiModule,
   syncGeometryControls: () => _layerGeometry.sync(),
   getDocumentSelection: () => _selectionMaskAsDocument({ materializeLasso: true }),
-  syncSelectionUi: () => _syncToolClearIndicators(),
-  schedulePersist: () => _schedulePersist(),
+  syncSelectionUi: _syncToolClearIndicators,
+  schedulePersist: _schedulePersist,
 });
-const _startTransform      = _transformSession.startTransform;
-const _startSelectionTransform = _transformSession.startSelectionTransform;
-const _openTransformPopup  = _transformSession.openTransformPopup;
-const _closeTransformPopup = _transformSession.closeTransformPopup;
-const _reapplyTransform    = _transformSession.reapplyTransform;
-const _nudgeTransform      = _transformSession.nudgeTransform;
-const _confirmTransform    = _transformSession.confirmTransform;
-const _cancelTransform     = _transformSession.cancelTransform;
+const {
+  startTransform: _startTransform, startSelectionTransform: _startSelectionTransform,
+  reapplyTransform: _reapplyTransform, nudgeTransform: _nudgeTransform,
+  confirmTransform: _confirmTransform, cancelTransform: _cancelTransform,
+} = _transformSession;
 window.__galleryEditorHandleEscape = () => {
   const sizePrompt = document.getElementById('ge-canvas-size-overlay');
   if (sizePrompt && getComputedStyle(sizePrompt).display !== 'none') {
@@ -3711,21 +3396,15 @@ window.__galleryEditorHandleEscape = () => {
   return false;
 };
 
-// ── Lasso tool ──
-
-// Lasso tool — full implementation in editor/tools/lasso.js.
 const _lassoTool = createLassoTool({
   activeLayer,
   saveState: _saveState,
-  commitSelectionMask: (mask, layer, mode, source, offset) => _commitSelectionMask(mask, layer, mode, source, offset),
+  commitSelectionMask: _commitSelectionMask,
   composite,
-  drawLassoOverlay: () => _drawLassoOverlay(),
-  syncToolClearIndicators: () => _syncToolClearIndicators(),
+  drawLassoOverlay: _drawLassoOverlay,
+  syncToolClearIndicators: _syncToolClearIndicators,
 });
-const _beginLasso    = _lassoTool.begin;
-const _continueLasso = _lassoTool.drag;
-const _endLasso      = _lassoTool.end;
-const _cancelLasso   = _lassoTool.cancel;
+const { begin: _beginLasso, drag: _continueLasso, end: _endLasso, cancel: _cancelLasso } = _lassoTool;
 const _penTool = createPenSelectionTool({
   activeLayer, saveState: _saveState, composite,
   commitSelectionMask: _commitSelectionMask,
@@ -3757,9 +3436,9 @@ const _marqueeTool = createMarqueeTool({
   saveState: _saveState,
   composite,
   drawOverlay: _drawMarqueeOverlay,
-  syncSelectionUi: () => _syncToolClearIndicators(),
+  syncSelectionUi: _syncToolClearIndicators,
   ensureDocumentSelection: () => _selectionMaskAsDocument({ materializeLasso: true }),
-  snapFrame: (frame, center) => _computeTransformSnap(frame, center),
+  snapFrame: _computeTransformSnap,
 });
 
 // Magic wand — selection-only click handler in editor/tools/wand.js.
@@ -3767,7 +3446,7 @@ const _wandTool = createWandTool({
   activeLayer,
   saveState: _saveState,
   composite,
-  wandHits: (x, y) => _wandHits(x, y),
+  wandHits: _wandHits,
   runMagicWand: (x, y, mode) => _runMagicWand(x, y, mode),
   deselectSelection: () => _deselectSelection(),
 });
@@ -3790,7 +3469,7 @@ const _cloneTool = createCloneTool({
   activeLayer,
   saveState: _saveState,
   beginStroke: (sample, tool) => _beginStroke(sample, tool),
-  showToast: (msg) => { if (uiModule) uiModule.showToast(msg); },
+  showToast: (msg) => uiModule.showToast(msg),
   onSourceChanged: _syncCloneSourceUi,
   getSampleCanvas: ({ layer, mode }) => mode === 'composite'
     ? state.documentCompositeCanvas
@@ -3859,7 +3538,7 @@ const _eyedropperTool = createEyedropperTool({
       }
     }
   },
-  showToast: (msg) => uiModule?.showToast(msg),
+  showToast: (msg) => uiModule.showToast(msg),
 });
 
 const _gradientTool = createGradientTool({
@@ -3867,7 +3546,7 @@ const _gradientTool = createGradientTool({
   saveState: _saveState,
   composite,
   schedulePersist: _schedulePersist,
-  renderLayerPanel: () => _renderLayerPanel(),
+  renderLayerPanel: _renderLayerPanel,
   getSettings: () => ({
     start: document.getElementById('ge-gradient-start')?.value || state.gradientStart,
     mid: document.getElementById('ge-gradient-mid')?.value || state.gradientMid,
@@ -3889,12 +3568,12 @@ const _gradientTool = createGradientTool({
 // `tryBegin/tryContinue/tryEnd` and short-circuits when they return true.
 const _transformDragTool = createTransformDragTool({
   composite,
-  drawTransformHandles: () => _drawTransformHandles(),
+  drawTransformHandles: _drawTransformHandles,
   reapplyTransform: () => _reapplyTransform(),
-  getTransformHandle: (x, y, options) => _getTransformHandle(x, y, options),
+  getTransformHandle: _getTransformHandle,
   cursorForHandle: _cursorForHandle,
   pointInTransformFrame: (x, y) => _containsTransformFramePoint(x, y),
-  snapTransformFrame: (frame, center) => _computeTransformSnap(frame, center),
+  snapTransformFrame: _computeTransformSnap,
 });
 
 // Shared stroke pipeline (brush / eraser / inpaint) in
@@ -3907,13 +3586,13 @@ const _strokeTool = createStrokeTool({
   strokeTo: (sample) => _strokeTo(sample),
   endStroke: (sample) => _endStroke(sample),
   composite,
-  getActiveMaskLayer: () => _getStrokeTargetMask(),
-  activeParentLayer: () => _activeParentLayer(),
-  ensureActiveMaskLayer: () => _ensureActiveMaskLayer(),
+  getActiveMaskLayer: _getStrokeTargetMask,
+  activeParentLayer: _activeParentLayer,
+  ensureActiveMaskLayer: _ensureActiveMaskLayer,
   createLayer,
-  renderLayerPanel: () => _renderLayerPanel(),
-  syncToolClearIndicators: () => _syncToolClearIndicators(),
-  showToast: (message) => uiModule?.showToast(message),
+  renderLayerPanel: _renderLayerPanel,
+  syncToolClearIndicators: _syncToolClearIndicators,
+  showToast: (message) => uiModule.showToast(message),
 });
 
 // Compute the outward-normal offset of the lasso polygon by `grow`
@@ -3964,21 +3643,9 @@ function _drawLassoOverlay() {
   state.mainCtx.fill();
 }
 
-function _getLassoPath(ctx) {
-  _getLassoPathImpl(ctx, state.lassoPoints);
-}
-
-/**
- * Build a feathered selection mask from the current lasso polygon.
- * Implementation lives in editor/tools/lasso-mask.js — this wrapper
- * forwards the current `state.lassoPoints` so existing callers keep
- * working unchanged.
- */
 function _buildLassoMask(w, h, offX, offY, feather, grow) {
   return _buildLassoMaskImpl(state.lassoPoints, w, h, offX, offY, feather, grow);
 }
-
-// ── Magic Wand ──
 
 // Click-fill from (cx, cy) on the active layer. Builds a binary mask of
 // all pixels reachable from the seed whose RGB distance is within
@@ -4102,7 +3769,6 @@ function _runMagicWand(cx, cy, mode = 'replace', opts = {}) {
   const src = activeMask
     ? sourceCtx.getImageData(0, 0, w, h).data
     : _getWandSource(layer).data;
-  // Pixel-level flood fill lives in editor/tools/flood-fill.js.
   // Returns a mask canvas at (w × h) with white where the fill landed.
   const mask = _floodFillMask(src, w, h, lx, ly, state.wandTolerance);
   if (!mask) return;
@@ -4117,7 +3783,7 @@ function _runMagicWand(cx, cy, mode = 'replace', opts = {}) {
 async function _runSamSelection(e) {
   const layer = activeLayer();
   if (!layer) {
-    if (uiModule) uiModule.showToast('Select a layer');
+    uiModule.showToast('Select a layer');
     return;
   }
   const coords = _canvasCoords(e, state.mainCanvas);
@@ -4151,13 +3817,13 @@ async function _runSamSelection(e) {
 async function _runSamTextSelection() {
   const layer = activeLayer();
   if (!layer) {
-    if (uiModule) uiModule.showToast('Select a layer');
+    uiModule.showToast('Select a layer');
     return;
   }
   const input = document.getElementById('ge-sam-query');
   const text = (input?.value || '').trim();
   if (!text) {
-    if (uiModule) uiModule.showToast('Type an object to find');
+    uiModule.showToast('Type an object to find');
     input?.focus();
     return;
   }
@@ -4211,9 +3877,7 @@ async function _requestAndApplySamMask(layer, payload, mode, seedPoint, opts = {
     img.onerror = () => reject(new Error('Failed to decode mask'));
     img.src = 'data:image/png;base64,' + data.mask;
   });
-  const mask = document.createElement('canvas');
-  mask.width = layer.canvas.width;
-  mask.height = layer.canvas.height;
+  const mask = makeCanvas(layer.canvas.width, layer.canvas.height);
   const mctx = mask.getContext('2d');
   mctx.drawImage(img, 0, 0, mask.width, mask.height);
   const maskData = mctx.getImageData(0, 0, mask.width, mask.height);
@@ -4261,32 +3925,6 @@ function _showWandLoading() {
   };
 }
 
-// Draw the wand selection as a translucent red overlay, mirroring the
-// inpaint-mask visual so users know what's selected.
-function _drawWandOverlay() {
-  if (!state.wandMask || !state.mainCtx) return;
-  const layer = state.layers.find(l => l.id === state.wandLayerId);
-  if (!layer) return;
-  const off = state.wandMaskSpace === 'document'
-    ? { x: 0, y: 0 }
-    : (state.layerOffsets.get(layer.id) || { x: 0, y: 0 });
-  // Tint the white mask red, draw at the layer's offset on the main canvas.
-  const tint = document.createElement('canvas');
-  tint.width = state.wandMask.width;
-  tint.height = state.wandMask.height;
-  const tc = tint.getContext('2d');
-  tc.drawImage(state.wandMask, 0, 0);
-  tc.globalCompositeOperation = 'source-in';
-  tc.fillStyle = 'rgba(255, 60, 60, 1)';
-  tc.fillRect(0, 0, tint.width, tint.height);
-  state.mainCtx.save();
-  state.mainCtx.globalAlpha = 0.4;
-  state.mainCtx.drawImage(tint, off.x, off.y);
-  state.mainCtx.globalAlpha = 1;
-  state.mainCtx.restore();
-}
-
-function _wandClear() { _deselectSelection(); }
 
 // Hover thumbnail — generated by downscaling the layer's canvas into a
 // small floating panel. Lives in document.body so panel `overflow:
@@ -4308,8 +3946,7 @@ function _showLayerThumb(rowEl, layer) {
   const scale = Math.min(SIZE / lw, SIZE / lh);
   const tw = Math.max(1, Math.round(lw * scale));
   const th = Math.max(1, Math.round(lh * scale));
-  const c = document.createElement('canvas');
-  c.width = tw; c.height = th;
+  const c = makeCanvas(tw, th);
   c.setAttribute('role', 'img');
   c.setAttribute('aria-label', `${layer.name || 'Layer'} preview`);
   // Checker bg so transparency reads
@@ -4341,8 +3978,7 @@ function _loadLayerAlphaAsSelection(layer) {
   const rendered = _renderLayerOutput(layer) || layer.canvas;
   const w = rendered.width, h = rendered.height;
   const src = rendered.getContext('2d').getImageData(0, 0, w, h).data;
-  const mask = document.createElement('canvas');
-  mask.width = w; mask.height = h;
+  const mask = makeCanvas(w, h);
   const mctx = mask.getContext('2d');
   const mdata = mctx.createImageData(w, h);
   for (let i = 0; i < w * h; i++) {
@@ -4357,7 +3993,7 @@ function _loadLayerAlphaAsSelection(layer) {
   _saveState();
   _commitSelectionMask(mask, layer, 'replace', 'wand');
   _activateSelectionCanvas(state.wandMask, 'wand');
-  if (uiModule) uiModule.showToast('Layer pixels selected');
+  uiModule.showToast('Layer pixels selected');
 }
 
 function _loadMaskAsSelection(layer, mask) {
@@ -4379,7 +4015,7 @@ function _loadMaskAsSelection(layer, mask) {
   );
   _saveState(`Load mask "${mask.name || 'Mask'}" as selection`);
   _activateSelectionCanvas(documentMask, 'mask');
-  uiModule?.showToast('Mask loaded as selection');
+  uiModule.showToast('Mask loaded as selection');
 }
 
 // Invert the active selection: lasso (point list — turn into a polygon
@@ -4398,7 +4034,7 @@ function _invertSelection() {
     }
     ctx.putImageData(data, 0, 0);
     composite();
-    if (uiModule) uiModule.showToast('Selection inverted');
+    uiModule.showToast('Selection inverted');
     return true;
   }
   if (state.lassoPoints.length >= 3 && !state.lassoActive) {
@@ -4406,8 +4042,7 @@ function _invertSelection() {
     // Easiest: convert lasso to wand mask, then invert.
     _saveState();
     const w = state.imgWidth, h = state.imgHeight;
-    const c = document.createElement('canvas');
-    c.width = w; c.height = h;
+    const c = makeCanvas(w, h);
     const cctx = c.getContext('2d');
     cctx.fillStyle = '#fff';
     cctx.fillRect(0, 0, w, h);
@@ -4425,7 +4060,7 @@ function _invertSelection() {
     state.lassoPoints = [];
     state.lassoActive = false;
     composite();
-    if (uiModule) uiModule.showToast('Selection inverted (converted to wand)');
+    uiModule.showToast('Selection inverted (converted to wand)');
     return true;
   }
   return false;
@@ -4463,8 +4098,7 @@ function _wandToMask() {
     state.imgHeight,
   );
   if (wGrow !== 0) {
-    const c = document.createElement('canvas');
-    c.width = state.wandMask.width; c.height = state.wandMask.height;
+    const c = makeCanvas(state.wandMask.width, state.wandMask.height);
     const bctx = c.getContext('2d');
     bctx.filter = `blur(${Math.abs(wGrow)}px)`;
     bctx.drawImage(state.wandMask, 0, 0);
@@ -4481,8 +4115,7 @@ function _wandToMask() {
     refinedWand = c;
   }
   if (wFeather > 0) {
-    const c = document.createElement('canvas');
-    c.width = refinedWand.width; c.height = refinedWand.height;
+    const c = makeCanvas(refinedWand.width, refinedWand.height);
     const fctx = c.getContext('2d');
     fctx.filter = `blur(${wFeather}px)`;
     fctx.drawImage(refinedWand, 0, 0);
@@ -4493,9 +4126,7 @@ function _wandToMask() {
   // layer's offset. OR-like merge: any painted pixel in the wand mask
   // is added to the inpaint mask (max alpha wins). Matches the lasso
   // path's semantics.
-  const tmp = document.createElement('canvas');
-  tmp.width = state.maskCanvas.width;
-  tmp.height = state.maskCanvas.height;
+  const tmp = makeCanvas(state.maskCanvas.width, state.maskCanvas.height);
   const tctx = tmp.getContext('2d');
   tctx.drawImage(refinedWand, 0, 0);
   const incoming = tctx.getImageData(0, 0, tmp.width, tmp.height);
@@ -4522,14 +4153,14 @@ function _wandToMask() {
   state.maskVisible = true;
   composite();
   _renderLayerPanel();
-  if (uiModule) uiModule.showToast('Selection added to mask');
+  uiModule.showToast('Selection added to mask');
 }
 
 function _autoMatchLastInpaintLayer() {
   const layer = state.layers.find(l => l.id === state.lastInpaintLayerId);
   const src = layer?.inpaintSource;
   if (!layer || !src?.base || !src?.mask) {
-    if (uiModule) uiModule.showToast('Run inpaint first');
+    uiModule.showToast('Run inpaint first');
     return;
   }
   const w = state.imgWidth;
@@ -4540,7 +4171,7 @@ function _autoMatchLastInpaintLayer() {
     resultData = layer.canvas.getContext('2d').getImageData(0, 0, w, h).data;
     maskData = src.mask.getContext('2d').getImageData(0, 0, w, h).data;
   } catch (err) {
-    if (uiModule) uiModule.showToast('Auto match failed: cannot read pixels');
+    uiModule.showToast('Auto match failed: cannot read pixels');
     return;
   }
 
@@ -4578,7 +4209,7 @@ function _autoMatchLastInpaintLayer() {
     }
   }
   if (inside.n < 20 || outside.n < 20) {
-    if (uiModule) uiModule.showToast('Auto match needs a larger mask edge');
+    uiModule.showToast('Auto match needs a larger mask edge');
     return;
   }
   for (const b of [inside, outside]) {
@@ -4615,7 +4246,7 @@ function _autoMatchLastInpaintLayer() {
   _saveState('Auto match inpaint color');
   composite();
   _renderLayerPanel();
-  if (uiModule) uiModule.showToast('Auto matched color');
+  uiModule.showToast('Auto matched color');
 }
 
 // Reveal/hide the small "X" badge on the Lasso, Wand, and SAM tool buttons
@@ -4637,8 +4268,7 @@ function _syncToolClearIndicators() {
   document.querySelectorAll('.ge-layer-mask-btn').forEach(b => {
     b.classList.toggle('from-selection', hasSel);
   });
-  // Fill action now lives in the Image menu — enable when there's
-  // something fillable (selection or active mask).
+  // The Image menu's Fill needs a selection or an active mask.
   const fillItem = document.getElementById('ge-image-action-fill');
   if (fillItem) {
     fillItem.disabled = !(hasSel || hasMaskTarget);
@@ -4667,24 +4297,13 @@ function _syncToolClearIndicators() {
   if (lassoBtn) lassoBtn.classList.toggle('has-selection', lassoHasSel);
   if (wandBtn)  wandBtn.classList.toggle('has-selection', !!state.wandMask && state.selectionSource === 'wand');
   if (samBtn)   samBtn.classList.toggle('has-selection', !!state.wandMask && state.selectionSource === 'sam');
-  // Inpaint no longer carries a clear-X badge; masks live as sub-layers
-  // in the layer panel and are deleted from there.
   if (inpaintBtn) inpaintBtn.classList.remove('has-selection');
-}
-
-function _hasMaskPixels() {
-  if (!state.maskCanvas || !state.maskCtx) return false;
-  try {
-    const d = state.maskCtx.getImageData(0, 0, state.maskCanvas.width, state.maskCanvas.height).data;
-    for (let i = 3; i < d.length; i += 4) if (d[i] > 0) return true;
-  } catch (_) {}
-  return false;
 }
 
 async function _canMutateLayerPixels(layer, action = 'editing pixels') {
   if (!layer) return false;
   if (layer.kind === 'adjustment') {
-    uiModule?.showToast(`Select a pixel layer or mask before ${action}`);
+    uiModule.showToast(`Select a pixel layer or mask before ${action}`);
     return false;
   }
   if (!['placed', 'text', 'shape'].includes(layer.kind)) return true;
@@ -4712,12 +4331,12 @@ async function _preparePixelTarget(action, { erase = false } = {}) {
   const ownerLocked = group && mask?.mode === 'group'
     ? group.locked || _groupAncestors(state, group).some(item => item.locked)
     : _isLayerEffectivelyLocked(state, parent);
-  if (!parent && !mask) { uiModule?.showToast('Select a layer or mask first'); return null; }
+  if (!parent && !mask) { uiModule.showToast('Select a layer or mask first'); return null; }
   if (ownerLocked || mask?.locked || (!mask && _isLayerPixelLocked(state, parent))) {
-    uiModule?.showToast('Unlock the selected layer or mask first'); return null;
+    uiModule.showToast('Unlock the selected layer or mask first'); return null;
   }
   if (!mask && erase && _isLayerTransparencyLocked(state, parent)) {
-    uiModule?.showToast('Unlock transparent pixels before erasing'); return null;
+    uiModule.showToast('Unlock transparent pixels before erasing'); return null;
   }
   if (!mask && !await _canMutateLayerPixels(parent, action)) return null;
   if (activeLayer() !== parent || _getActiveMaskLayer() !== mask) return null;
@@ -4756,9 +4375,9 @@ async function _copyPixelsToClipboard({ cut = false } = {}) {
   canvas.toBlob(blob => {
     if (blob && navigator.clipboard?.write && typeof ClipboardItem !== 'undefined') {
       navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
-        .then(() => uiModule?.showToast(cut ? 'Cut to clipboard' : 'Copied to clipboard'))
-        .catch(() => uiModule?.showToast(cut ? 'Cut (editor only)' : 'Copied (editor only)'));
-    } else uiModule?.showToast(cut ? 'Cut (editor only)' : 'Copied (editor only)');
+        .then(() => uiModule.showToast(cut ? 'Cut to clipboard' : 'Copied to clipboard'))
+        .catch(() => uiModule.showToast(cut ? 'Cut (editor only)' : 'Copied (editor only)'));
+    } else uiModule.showToast(cut ? 'Cut (editor only)' : 'Copied (editor only)');
   }, 'image/png');
 }
 
@@ -4782,7 +4401,7 @@ async function _wandDeleteSelection({ saveHistory = true, message = 'Selection d
   layer.ctx.restore();
   _deselectSelection({ saveHistory: false, remember: false });
   _renderLayerPanel();
-  uiModule?.showToast(message);
+  uiModule.showToast(message);
 }
 
 function _wandCopyToNewLayer({ saveHistory = true, activate = true, announce = true } = {}) {
@@ -4852,8 +4471,6 @@ function _lassoToMask() {
   _renderLayerPanel();
   uiModule.showToast('Selection added to mask');
 }
-
-// ── Edge feather ──
 
 // Themed slider modal for filter parameters. Builds a single in-line
 // overlay anchored to the canvas-area's centre. `params` is an array
@@ -4929,7 +4546,7 @@ function _filterSliderPrompt(title, params, onPreview, onCancel) {
       const current = isCurrent();
       if (result === null || !current) onCancel?.();
       observer.disconnect();
-      try { overlay.remove(); } catch {}
+      overlay.remove();
       if (_activeFilterPrompt === prompt) _activeFilterPrompt = null;
       if (current && previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
       resolve(current ? result : null);
@@ -4966,8 +4583,7 @@ async function _applyLiveBlur({ title, params, label, renderer }) {
   const layer = await _preparePixelTarget('applying a pixel filter');
   if (!layer) return;
   const w = layer.canvas.width, h = layer.canvas.height;
-  const snap = document.createElement('canvas');
-  snap.width = w; snap.height = h;
+  const snap = makeCanvas(w, h);
   snap.getContext('2d').drawImage(layer.canvas, 0, 0);
   const session = state.editorSessionToken;
   const isCurrent = () => state.editorOpen && state.editorSessionToken === session
@@ -4994,7 +4610,7 @@ async function _applyLiveBlur({ title, params, label, renderer }) {
   renderer(snap, result, layer.ctx);
   composite();
   _renderLayerPanel();
-  if (uiModule) uiModule.showToast(label + ' applied');
+  uiModule.showToast(label + ' applied');
 }
 
 function _applyGaussianBlur() {
@@ -5011,7 +4627,7 @@ async function _addRetainedGaussianBlur(presetName = null) {
     ? (state.layerGroups || []).find(group => group.id === state.activeGroupId)
     : activeLayer();
   if (!layer || layer.kind === 'adjustment') {
-    uiModule?.showToast?.('Select an image layer or group first');
+    uiModule.showToast('Select an image layer or group first');
     return;
   }
   const preset = _effectPreset(presetName);
@@ -5033,7 +4649,7 @@ async function _addRetainedGaussianBlur(presetName = null) {
   _schedulePersist();
   _renderLayerPanel();
   composite();
-  uiModule?.showToast?.('Retained Gaussian Blur added');
+  uiModule.showToast('Retained Gaussian Blur added');
 }
 
 async function _addRetainedEffect(type, presetName = null) {
@@ -5042,7 +4658,7 @@ async function _addRetainedEffect(type, presetName = null) {
     ? (state.layerGroups || []).find(group => group.id === state.activeGroupId)
     : activeLayer();
   if (!layer || layer.kind === 'adjustment') {
-    uiModule?.showToast?.('Select an image layer or group first');
+    uiModule.showToast('Select an image layer or group first');
     return;
   }
   if (LAYER_STYLES[type]) return _configureLayerStyle(layer, type);
@@ -5111,11 +4727,11 @@ async function _addRetainedEffect(type, presetName = null) {
   _schedulePersist();
   _renderLayerPanel();
   composite();
-  uiModule?.showToast?.(`${type === 'color-overlay' ? 'Color Overlay' : 'Drop Shadow'} added`);
+  uiModule.showToast(`${type === 'color-overlay' ? 'Color Overlay' : 'Drop Shadow'} added`);
 }
 
 async function _configureLayerStyle(layer, type, existing = null) {
-  if (_isLayerEffectivelyLocked(state, layer)) { uiModule?.showToast('Unlock the layer first'); return; }
+  if (_isLayerEffectivelyLocked(state, layer)) { uiModule.showToast('Unlock the layer first'); return; }
   const session = state.editorSessionToken;
   const initial = styleParams(type, existing?.params);
   const controls = LAYER_STYLES[type].controls.map(control => ({ ...control, value: initial[control.key] }));
@@ -5183,7 +4799,7 @@ async function _editRetainedGradient(layer, effect) {
   composite();
   _schedulePersist();
   _renderLayerPanel();
-  uiModule?.showToast?.('Gradient updated');
+  uiModule.showToast('Gradient updated');
 }
 
 async function _editRetainedEffect(layer, effect) {
@@ -5244,14 +4860,14 @@ async function _editRetainedEffect(layer, effect) {
   composite();
   _schedulePersist();
   _renderLayerPanel();
-  uiModule?.showToast?.(`${_effectLabel(type)} updated`);
+  uiModule.showToast(`${_effectLabel(type)} updated`);
 }
 
 function _addEffectMask(layer, effect) {
   if (!layer || !effect) return;
   const selection = _selectionMaskAsDocument({ materializeLasso: true });
   if (!selection) {
-    uiModule?.showToast?.('Create a selection before adding an effect mask');
+    uiModule.showToast('Create a selection before adding an effect mask');
     return;
   }
   const layerOffset = state.layerOffsets.get(layer.id) || { x: 0, y: 0 };
@@ -5273,7 +4889,7 @@ function _addEffectMask(layer, effect) {
   _schedulePersist();
   composite();
   _renderLayerPanel();
-  uiModule?.showToast?.(`${_effectLabel(effect.type)} mask added from selection`);
+  uiModule.showToast(`${_effectLabel(effect.type)} mask added from selection`);
 }
 
 async function _rasterizeEffects(layer) {
@@ -5289,7 +4905,7 @@ async function _rasterizeEffects(layer) {
     baked = _renderEffects(base, layer.effects);
   } catch (error) {
     _hideCanvasLoading();
-    uiModule?.showToast?.(`Could not rasterize effects: ${error.message || error}`);
+    uiModule.showToast(`Could not rasterize effects: ${error.message || error}`);
     return;
   }
   _hideCanvasLoading();
@@ -5306,7 +4922,7 @@ async function _rasterizeEffects(layer) {
   composite();
   _schedulePersist();
   _renderLayerPanel();
-  uiModule?.showToast?.('Effects rasterized');
+  uiModule.showToast('Effects rasterized');
 }
 
 function _applyZoomBlur() {
@@ -5315,18 +4931,6 @@ function _applyZoomBlur() {
     label: 'Zoom Blur',
     params: [{ key: 'strength', label: 'Strength', min: 1, max: 50, step: 1, value: 15 }],
     renderer: _zoomBlur,
-  });
-}
-
-function _applyMotionBlur() {
-  _applyLiveBlur({
-    title: 'Motion Blur',
-    label: 'Motion Blur',
-    params: [
-      { key: 'length', label: 'Length', min: 1, max: 200, step: 1, value: 20, suffix: 'px' },
-      { key: 'angle', label: 'Angle', min: -180, max: 180, step: 1, value: 0, suffix: '°' },
-    ],
-    renderer: _motionBlur,
   });
 }
 
@@ -5340,8 +4944,6 @@ async function _applyEdgeFeather(layer, width, hardDelete) {
   layer.ctx.putImageData(imgData, 0, 0);
   return true;
 }
-
-// ── Zoom ──
 
 function _fitZoom() {
   const fit = _getFitZoom();
@@ -5399,7 +5001,7 @@ function _buildQuickMaskBar() {
 function _setQuickMaskActive(active) {
   const next = !!active;
   if (next && !_selectionMaskAsDocument({ materializeLasso: true })) {
-    uiModule?.showToast('Make a selection before using Quick Mask');
+    uiModule.showToast('Make a selection before using Quick Mask');
     return false;
   }
   state.quickMaskActive = next;
@@ -5575,15 +5177,37 @@ function _wireInpaintPopoverWindow() {
   });
 }
 
-// ── Build DOM ──
+// Right-panel sections shown only while one of their tools is active.
+const _TOOL_SECTIONS = {
+  'ge-brush-controls': ['brush', 'eraser', 'clone', 'heal', 'smudge', 'dodge', 'burn'],
+  'ge-pen-section': ['pen'],
+  'ge-text-section': ['text'],
+  'ge-shape-section': ['shape'],
+  'ge-gradient-section': ['gradient'],
+  'ge-layer-geometry-section': ['move', 'transform'],
+  'ge-brush-section': ['brush', 'smudge', 'dodge', 'burn'],
+  'ge-smudge-strength-row': ['smudge'],
+  'ge-clone-section': ['clone', 'heal'],
+  'ge-eyedropper-section': ['eyedropper'],
+  'ge-lasso-section': ['lasso'],
+  'ge-marquee-section': ['marquee'],
+  'ge-wand-section': ['wand'],
+  'ge-sam-section': ['sam'],
+  'ge-eraser-section': ['eraser'],
+  'ge-sharpen-section': ['sharpen'],
+  'ge-rembg-section': ['rembg'],
+  'ge-import-section': ['import'],
+  'ge-harmonize-section': ['harmonize'],
+  'ge-upscale-section': ['upscale'],
+  'ge-style-section': ['style'],
+};
 
 function _buildEditor(container) {
   document.querySelectorAll('body > #ge-save-menu').forEach(el => el.remove());
   container.innerHTML = '';
   container.className = 'gallery-editor';
 
-  // Toolbar (left) — DOM construction lives in editor/build/toolbar.js;
-  // the big tool-switch handler stays here so it can touch module state.
+  // The tool-switch handler stays here so it can touch module state.
   let canvasNavigation = null;
   const { toolbar, toolKeyMap: _toolKeyMap } = _buildToolbar({
     currentTool: state.tool,
@@ -5593,7 +5217,7 @@ function _buildEditor(container) {
         state.lassoActive = false;
         composite();
       } else if (which === 'marquee' || which === 'wand') {
-        _wandClear();
+        _deselectSelection();
       } else if (which === 'sam') {
         _openSamPrompt();
         return;
@@ -5642,42 +5266,25 @@ function _buildEditor(container) {
       toolbarEl.querySelectorAll('.ge-tool-btn').forEach(b => b.classList.toggle('active', b.dataset.tool === state.tool));
       // Activate drag-resize handles when picking the Resize tool
       if (toolId === 'transform' && !state.transformActive) _startTransform();
-      // Show/hide brush controls. Brush, Eraser AND Clone use the
-      // shared size+color row; Inpaint has its OWN size slider.
-      const brushControls = document.getElementById('ge-brush-controls');
-      const needsBrush = ['brush', 'eraser', 'clone', 'heal', 'smudge', 'dodge', 'burn'].includes(toolId);
-      if (brushControls) brushControls.style.display = needsBrush ? '' : 'none';
-      const textSection = document.getElementById('ge-text-section');
-      const penSection = document.getElementById('ge-pen-section');
-      if (penSection) penSection.style.display = toolId === 'pen' ? '' : 'none';
-      if (textSection) textSection.style.display = toolId === 'text' ? '' : 'none';
+      for (const [id, tools] of Object.entries(_TOOL_SECTIONS)) {
+        const section = document.getElementById(id);
+        if (section) section.style.display = tools.includes(toolId) ? '' : 'none';
+      }
       if (toolId === 'text') _syncTextControls();
-      const shapeSection = document.getElementById('ge-shape-section');
-      if (shapeSection) shapeSection.style.display = toolId === 'shape' ? '' : 'none';
       if (toolId === 'shape') _syncShapeControls();
-      const gradientSection = document.getElementById('ge-gradient-section');
-      if (gradientSection) gradientSection.style.display = toolId === 'gradient' ? '' : 'none';
-      const geometrySection = document.getElementById('ge-layer-geometry-section');
-      if (geometrySection) geometrySection.style.display = ['move', 'transform'].includes(toolId) ? '' : 'none';
       if (['move', 'transform'].includes(toolId)) _layerGeometry.sync();
       // Eraser and Clone don't care about color — hide the color row.
       const colorRow = document.getElementById('ge-color-row');
       if (colorRow) colorRow.style.display = ['eraser', 'clone', 'heal', 'smudge', 'dodge', 'burn'].includes(toolId) ? 'none' : '';
       const colorLabel = colorRow?.querySelector('label');
       if (colorLabel) colorLabel.textContent = 'Color';
-      const sizeLabelEl = brushControls?.querySelector('.ge-size-slider')?.parentElement?.querySelector('label');
+      const sizeLabelEl = document.getElementById('ge-brush-controls')?.querySelector('.ge-size-slider')?.parentElement?.querySelector('label');
       if (sizeLabelEl && sizeLabelEl.firstChild && sizeLabelEl.firstChild.nodeType === Node.TEXT_NODE) {
         sizeLabelEl.firstChild.nodeValue = (toolId === 'eraser') ? 'Brush Size ' : 'Size ';
       }
-      // Per-tool stroke-modifier sections (opacity / flow / softness).
-      const brushSection = document.getElementById('ge-brush-section');
-      if (brushSection) brushSection.style.display = ['brush', 'smudge', 'dodge', 'burn'].includes(toolId) ? '' : 'none';
-      const brushTitle = brushSection?.querySelector('.ge-section-title > span');
+      const brushTitle = document.querySelector('#ge-brush-section .ge-section-title > span');
       if (brushTitle) brushTitle.textContent = toolId === 'smudge' ? 'Smudge' : 'Brush';
-      const smudgeStrengthRow = document.getElementById('ge-smudge-strength-row');
-      if (smudgeStrengthRow) smudgeStrengthRow.style.display = toolId === 'smudge' ? '' : 'none';
       const cloneSection = document.getElementById('ge-clone-section');
-      if (cloneSection) cloneSection.style.display = ['clone', 'heal'].includes(toolId) ? '' : 'none';
       const cloneTitle = cloneSection?.querySelector('.ge-section-title > span');
       if (cloneTitle) cloneTitle.textContent = toolId === 'heal' ? 'Healing' : 'Clone';
       const cloneHelp = cloneSection?.querySelector('.ge-section-help');
@@ -5696,16 +5303,6 @@ function _buildEditor(container) {
         if (cloneHintDesktop) cloneHintDesktop.textContent = 'Alt-click';
         if (cloneHintMobile) cloneHintMobile.textContent = 'Double-tap';
       }
-      const eyedropperSection = document.getElementById('ge-eyedropper-section');
-      if (eyedropperSection) eyedropperSection.style.display = toolId === 'eyedropper' ? '' : 'none';
-      const lassoSection = document.getElementById('ge-lasso-section');
-      if (lassoSection) lassoSection.style.display = state.tool === 'lasso' ? '' : 'none';
-      const marqueeSection = document.getElementById('ge-marquee-section');
-      if (marqueeSection) marqueeSection.style.display = state.tool === 'marquee' ? '' : 'none';
-      const wandSection = document.getElementById('ge-wand-section');
-      if (wandSection) wandSection.style.display = state.tool === 'wand' ? '' : 'none';
-      const samSection = document.getElementById('ge-sam-section');
-      if (samSection) samSection.style.display = state.tool === 'sam' ? '' : 'none';
       const inpaintSection = document.getElementById('ge-inpaint-section');
       if (inpaintSection) {
         if (state.tool === 'inpaint') {
@@ -5778,24 +5375,7 @@ function _buildEditor(container) {
           }
         }
       }
-      const eraserSection = document.getElementById('ge-eraser-section');
-      if (eraserSection) eraserSection.style.display = state.tool === 'eraser' ? '' : 'none';
-      const sharpenSection = document.getElementById('ge-sharpen-section');
-      if (sharpenSection) sharpenSection.style.display = state.tool === 'sharpen' ? '' : 'none';
-      const rembgSection = document.getElementById('ge-rembg-section');
-      if (rembgSection) {
-        const show = state.tool === 'rembg';
-        rembgSection.style.display = show ? '' : 'none';
-        if (show) _checkRembgInstalled();
-      }
-      const importSection = document.getElementById('ge-import-section');
-      if (importSection) importSection.style.display = state.tool === 'import' ? '' : 'none';
-      const harmonizeSection = document.getElementById('ge-harmonize-section');
-      if (harmonizeSection) harmonizeSection.style.display = state.tool === 'harmonize' ? '' : 'none';
-      const upscaleSection = document.getElementById('ge-upscale-section');
-      if (upscaleSection) upscaleSection.style.display = state.tool === 'upscale' ? '' : 'none';
-      const styleSection = document.getElementById('ge-style-section');
-      if (styleSection) styleSection.style.display = state.tool === 'style' ? '' : 'none';
+      if (state.tool === 'rembg' && document.getElementById('ge-rembg-section')) _checkRembgInstalled();
       // Toggle cursor — hide native cursor for tools that draw via our
       // own circle overlay (brush/eraser/inpaint/lasso); for other tools
       // pick a cursor that matches the tool's affordance.
@@ -5818,8 +5398,6 @@ function _buildEditor(container) {
       composite();
     },
   });
-  // Top bar — static DOM lives in editor/build/topbar.js; all click
-  // handlers below wire to the IDs baked into the markup.
   const topBar = _buildTopbar();
   container.appendChild(topBar);
 
@@ -5864,7 +5442,7 @@ function _buildEditor(container) {
       _syncTextControls();
       _schedulePersist();
     },
-    onCancel: () => undo(),
+    onCancel: undo,
   });
 
   state.selectionOverlay = document.createElement('canvas');
@@ -5875,7 +5453,7 @@ function _buildEditor(container) {
   // Transform overlay — separate canvas positioned over the main canvas
   // with extra margin so the resize/rotation handles can render OUTSIDE
   // the image bounds. Sized + zoomed in sync with the main canvas via
-  // _syncTransformOverlay(). The overlay is pointer-events:none so it
+  // _drawTransformHandles(). The overlay is pointer-events:none so it
   // doesn't intercept clicks; hit-testing still happens in image coords.
   state.transformOverlay = document.createElement('canvas');
   state.transformOverlay.className = 'ge-transform-overlay';
@@ -5914,12 +5492,12 @@ function _buildEditor(container) {
       else if (state.cropRect || state.cropping || state.cropMoving) _cancelCrop('pointercancel');
       else if (_shapeDraft) _cancelShapeDraft();
     },
-    updateBrushCursor: (e) => _updateBrushCursor(e),
+    updateBrushCursor: _updateBrushCursor,
     updateEyedropperPreview: (e, leaving = false) => {
       if (leaving) return _eyedropperTool.clearPreview();
       if (e) _eyedropperTool.preview(e);
     },
-    syncZoomControls: () => _syncZoomControls(),
+    syncZoomControls: _syncZoomControls,
     onViewportChange: () => _precisionGuides?.redrawRulers(),
   });
 
@@ -5936,13 +5514,8 @@ function _buildEditor(container) {
   container.appendChild(_buildZoomFooter());
   _wireInpaintPopoverWindow();
 
-  // Slider UX (expand-while-using, floating bubble, click-to-type) —
-  // full implementation in editor/slider-ux.js.
   wireSliderUx({ registerDocClickAway: _registerDocClickAway });
 
-  // Shortcuts cheatsheet popover — full implementation in
-  // editor/shortcuts-popover.js. (Dead `_makeShortcutsDraggable`
-  // helper for the old centered-modal version was dropped.)
   const _shortcutsPopover = createShortcutsPopover();
   const _toggleShortcuts = _shortcutsPopover.toggleShortcuts;
   document.getElementById('ge-shortcuts-btn')?.addEventListener('click', () => _toggleShortcuts());
@@ -6073,7 +5646,7 @@ function _buildEditor(container) {
     state.cloneSourceOffsetX = 0;
     state.cloneSourceOffsetY = 0;
     _syncCloneSourceUi();
-    uiModule?.showToast?.('Sampled source cleared');
+    uiModule.showToast('Sampled source cleared');
   });
   const cloneSampleMode = controls.querySelector('#ge-clone-sample-mode');
   if (cloneSampleMode) {
@@ -6087,7 +5660,7 @@ function _buildEditor(container) {
       state.cloneSourceOffsetX = 0;
       state.cloneSourceOffsetY = 0;
       _syncCloneSourceUi();
-      uiModule?.showToast?.('Sample source cleared');
+      uiModule.showToast('Sample source cleared');
     });
   }
   _syncCloneSourceUi();
@@ -6136,18 +5709,15 @@ function _buildEditor(container) {
   }
   _wireBrushSlider(controls.querySelector('.ge-size-slider'));
   _wireBrushSlider(document.getElementById('ge-inpaint-brush-slider'));
-  // Topbar wiring (undo/redo/history, Save dropdown, zoom buttons,
-  // Export/Download/Project, Edge popup, cross-dropdown coordination) —
-  // full implementation in editor/wire-topbar.js.
   wireTopbar({
     undo, redo,
     toggleHistoryPanel: _toggleHistoryPanel,
     toggleCompare: _toggleCompare,
-    fitZoom: () => _fitZoom(),
+    fitZoom: _fitZoom,
     applyZoom: () => _applyZoom(),
     exportToGallery, downloadPNG,
-    saveProject: () => _saveProject(),
-    loadProjectPrompt: () => _loadProjectPrompt(),
+    saveProject: _saveProject,
+    loadProjectPrompt: _loadProjectPrompt,
     activeLayer,
     saveState: _saveState,
     applyEdgeFeather: _applyEdgeFeather,
@@ -6181,8 +5751,7 @@ function _buildEditor(container) {
     const off = layer.offset;
     const w = layer.canvas.width;
     const h = layer.canvas.height;
-    const stencil = document.createElement('canvas');
-    stencil.width = w; stencil.height = h;
+    const stencil = makeCanvas(w, h);
     const sctx = stencil.getContext('2d');
     if (selection) {
       sctx.drawImage(_selectionMaskForLayer(
@@ -6207,7 +5776,7 @@ function _buildEditor(container) {
     layer.ctx.restore();
     composite();
     _renderLayerPanel();
-    if (uiModule) uiModule.showToast('Filled');
+    uiModule.showToast('Filled');
     _schedulePersist();
   }
   document.getElementById('ge-layer-fill')?.addEventListener('click', () => _doFillSelection());
@@ -6219,7 +5788,7 @@ function _buildEditor(container) {
   wireAIModelSelectors({
     container,
     apiBase: API_BASE,
-    openCookbookForImg2img: () => _openCookbookForImg2img(),
+    openCookbookForImg2img: _openCookbookForImg2img,
   });
 
   document.getElementById('ge-save').addEventListener('click', async () => {
@@ -6257,7 +5826,7 @@ function _buildEditor(container) {
         throw new Error(`HTTP ${resp.status}${detail ? `: ${detail}` : ''}`);
       }
       const totalMs = Math.round(performance.now() - t0);
-      if (uiModule) uiModule.showToast(`Saved over original (${(blob.size / 1024 / 1024).toFixed(1)}MB · ${(totalMs / 1000).toFixed(1)}s)`, 4000);
+      uiModule.showToast(`Saved over original (${(blob.size / 1024 / 1024).toFixed(1)}MB · ${(totalMs / 1000).toFixed(1)}s)`, 4000);
       window.dispatchEvent(new CustomEvent('gallery-refresh'));
       savedOk = true;
     } catch (e) {
@@ -6269,7 +5838,7 @@ function _buildEditor(container) {
       } else {
         msg += sizeMB;
       }
-      if (uiModule) uiModule.showToast('Failed to save: ' + msg, 6000);
+      uiModule.showToast('Failed to save: ' + msg, 6000);
     } finally {
       endBusy();
       if (savedOk) {
@@ -6281,29 +5850,24 @@ function _buildEditor(container) {
     }
   });
 
-  // Topbar overflow + canvas-size badge — full implementation in
-  // editor/wire-topbar-overflow.js.
   wireTopbarOverflow({ container, registerDocClickAway: _registerDocClickAway });
 
-  // Topbar dropdown menus (Image, Filter, Resize) + the resize-canvas
-  // helpers — full implementation in editor/wire-topbar-menus.js. The
-  // returned `_resizeCustomPrompt` is consumed by the keyboard
-  // shortcuts module (Ctrl+Shift+T).
+  // `_resizeCustomPrompt` is consumed by the keyboard shortcuts module (Ctrl+Shift+T).
   const { resizeCustomPrompt: _resizeCustomPrompt, renderSelectionMenu } = wireTopbarMenus({
     closeOtherTopbarMenus: _closeOtherTopbarMenus,
     registerDocClickAway: _registerDocClickAway,
     saveState: _saveState,
     composite,
-    fitZoom: () => _fitZoom(),
-    renderLayerPanel: () => _renderLayerPanel(),
-    promptCanvasSize: (opts) => _promptCanvasSize(opts),
+    fitZoom: _fitZoom,
+    renderLayerPanel: _renderLayerPanel,
+    promptCanvasSize: _promptCanvasSize,
     doFillSelection: () => _doFillSelection(),
-    rotateAllLayers: (deg) => _rotateAllLayers(deg),
-    flipAllLayers: (axis) => _flipAllLayers(axis),
-    applyGaussianBlur: () => _applyGaussianBlur(),
-    applyZoomBlur: () => _applyZoomBlur(),
-    addRetainedGaussianBlur: (presetName) => _addRetainedGaussianBlur(presetName),
-    addRetainedEffect: (type, presetName) => _addRetainedEffect(type, presetName),
+    rotateAllLayers: _canvasTransforms.rotateAll,
+    flipAllLayers: _canvasTransforms.flipAll,
+    applyGaussianBlur: _applyGaussianBlur,
+    applyZoomBlur: _applyZoomBlur,
+    addRetainedGaussianBlur: _addRetainedGaussianBlur,
+    addRetainedEffect: _addRetainedEffect,
     selectAll: _selectAllSelection,
     deselectSelection: () => _deselectSelection(),
     reselectSelection: _reselectSelection,
@@ -6317,38 +5881,31 @@ function _buildEditor(container) {
   });
   _renderSavedSelectionsMenu = renderSelectionMenu;
 
-  // Inpaint side-panel controls (Feather/Strength previews, post-gen
-  // edge tuner, mask vis/invert/clear, paint-erase toggle, mask tint
-  // pickers) — full implementation in editor/wire-inpaint-controls.js.
   wireInpaintControls({
     composite,
     applyInpaintFeather: _applyInpaintFeather,
     autoMatchInpaint: _autoMatchLastInpaintLayer,
-    syncToolClearIndicators: () => _syncToolClearIndicators(),
+    syncToolClearIndicators: _syncToolClearIndicators,
     attachColorPicker,
     uiModule,
   });
 
-  // AI inpaint (Generate / Remove / Outpaint) — full implementation
-  // in editor/ai-inpaint.js.
   wireInpaintButtons({
     renderLayer: (layer) => _renderLayerOutput(layer),
-    buildMergedMaskCanvas: () => _buildMergedMaskCanvas(),
+    buildMergedMaskCanvas: _buildMergedMaskCanvas,
     dilateMask: _dilateMask,
     applyInpaintFeather: _applyInpaintFeather,
-    getSelectedAIEndpoint: (type) => _getSelectedAIEndpoint(type),
-    ensureActiveMaskLayer: () => _ensureActiveMaskLayer(),
+    getSelectedAIEndpoint: _getSelectedAIEndpoint,
+    ensureActiveMaskLayer: _ensureActiveMaskLayer,
     saveState: _saveState,
     createLayer,
     composite,
     flatten,
-    renderLayerPanel: () => _renderLayerPanel(),
+    renderLayerPanel: _renderLayerPanel,
     spinnerModule,
     uiModule,
   });
 
-  // Per-tool Opacity / Flow / Softness sliders (Eraser / Brush /
-  // Clone) — full implementation in editor/stroke-tool-sliders.js.
   wireStrokeToolSliders({
     onPresetApplied: () => {
       _brushSizeSync(null);
@@ -6366,31 +5923,25 @@ function _buildEditor(container) {
     },
   });
 
-  // Sharpen + Bg Remove + edge cleanup — full implementation in
-  // editor/ai-rembg.js. Returns the selection-hint-mask builder so
-  // the wand-rembg button (in the wand controls section) can reuse it.
+  // The wand-rembg button reuses the selection-hint-mask builder.
   const { buildSelectionHintMask: _buildSelectionHintMask } = wireRembgAndSharpen({
     applyImageTool: _applyImageTool,
-    openCookbookForDependency: (pkg) => _openCookbookForDependency(pkg),
+    openCookbookForDependency: _openCookbookForDependency,
     composite,
-    renderLayerPanel: () => _renderLayerPanel(),
+    renderLayerPanel: _renderLayerPanel,
     uiModule,
   });
 
-  // Image import (topbar / panel File / Clipboard / Gallery picker) —
-  // full implementation in editor/wire-import.js. Returns the shared
-  // handleImportedImage sink so drag-drop wires through the same path.
+  // Drag-drop wires through the same handleImportedImage sink.
   const { handleImportedImage: _handleImportedImage } = wireImport({
     container,
     saveState: _saveState,
     createLayer,
     composite,
-    renderLayerPanel: () => _renderLayerPanel(),
+    renderLayerPanel: _renderLayerPanel,
     uiModule,
   });
 
-  // Harmonize / Canvas Upscale / AI Upscale / Style Transfer +
-  // Add-Empty-Layer — full implementation in editor/ai-tools-misc.js.
   const { addEmptyLayer: _addEmptyLayer } = wireAIToolsMisc({
     apiBase: API_BASE,
     buildLayerBodyMask: _buildLayerBodyMask,
@@ -6398,28 +5949,26 @@ function _buildEditor(container) {
     applyImageTool: _applyImageTool,
     flatten,
     saveState: _saveState,
-    fitZoom: () => _fitZoom(),
+    fitZoom: _fitZoom,
     composite,
     createLayer,
-    renderLayerPanel: () => _renderLayerPanel(),
+    renderLayerPanel: _renderLayerPanel,
     spinnerModule,
     uiModule,
-    openAdjustmentLayer: (type, anchor) => _addAdjustmentLayer(type, anchor),
+    openAdjustmentLayer: _addAdjustmentLayer,
   });
   // (Merge dropdown removed — Merge Down / Merge All / Flatten Copy
   // are now three inline icon buttons in the layers header next to
   // + Add. Their individual click handlers below already bind by id.)
 
-  // Lasso + Magic Wand panel controls — full implementation in
-  // editor/wire-selection-controls.js.
   wireSelectionControls({
     composite,
     invertSelection: _invertSelection,
     lassoDeleteSelection: _lassoDeleteSelection,
     lassoCopyToLayer: _lassoCopyToLayer,
     lassoToMask: _lassoToMask,
-    runMagicWand: (x, y, mode, opts) => _runMagicWand(x, y, mode, opts),
-    wandClear: _wandClear,
+    runMagicWand: _runMagicWand,
+    wandClear: () => _deselectSelection(),
     wandDeleteSelection: _wandDeleteSelection,
     wandCopyToNewLayer: _wandCopyToNewLayer,
     wandToMask: _wandToMask,
@@ -6435,7 +5984,7 @@ function _buildEditor(container) {
       _runSamTextSelection();
     }
   });
-  document.getElementById('ge-sam-clear')?.addEventListener('click', () => _wandClear());
+  document.getElementById('ge-sam-clear')?.addEventListener('click', () => _deselectSelection());
   document.getElementById('ge-sam-mask')?.addEventListener('click', () => _wandToMask());
   document.getElementById('ge-sam-vis')?.addEventListener('click', () => {
     state.wandMaskVisible = !state.wandMaskVisible;
@@ -6456,7 +6005,7 @@ function _buildEditor(container) {
   wireMergeButtons({
     saveState: _saveState,
     createLayer,
-    renderLayerPanel: () => _renderLayerPanel(),
+    renderLayerPanel: _renderLayerPanel,
     composite,
     renderLayer: (layer) => _renderLayerOutput(layer),
     flatten,
@@ -6529,8 +6078,6 @@ function _buildEditor(container) {
     e.stopImmediatePropagation();
   }, true);
 
-  // Keyboard shortcuts — full implementation in
-  // editor/keyboard-shortcuts.js.
   wireKeyboardShortcuts({
     fillSelection: _doFillSelection,
     copyPixelsToClipboard: _copyPixelsToClipboard,
@@ -6565,20 +6112,16 @@ function _buildEditor(container) {
   });
   container.setAttribute('tabindex', '0');
 
-  // Paste + drag-and-drop image import — full implementation in
-  // editor/clipboard-and-drop.js.
   wireClipboardAndDrop({
     container,
     saveState: _saveState,
     createLayer,
-    renderLayerPanel: () => _renderLayerPanel(),
+    renderLayerPanel: _renderLayerPanel,
     composite,
     handleImportedImage: (img, sourceName) => _handleImportedImage(img, sourceName),
     uiModule,
   });
 }
-
-// ── Layer panel rendering ──
 
 function _replacePlacedLayerFromFile(layer) {
   if (layer?.kind !== 'placed') return;
@@ -6592,9 +6135,7 @@ function _replacePlacedLayerFromFile(layer) {
     const image = new Image();
     image.onload = () => {
       try {
-        const source = document.createElement('canvas');
-        source.width = image.naturalWidth || image.width;
-        source.height = image.naturalHeight || image.height;
+        const source = makeCanvas(image.naturalWidth || image.width, image.naturalHeight || image.height);
         source.getContext('2d').drawImage(image, 0, 0);
         _saveState(`Replace source for "${layer.name}"`);
         const rendered = _replacePlacedSource(layer, source, file.name || 'Placed image');
@@ -6603,16 +6144,16 @@ function _replacePlacedLayerFromFile(layer) {
         composite();
         _renderLayerPanel();
         _schedulePersist();
-        uiModule?.showToast('Placed image replaced');
+        uiModule.showToast('Placed image replaced');
       } catch (error) {
-        uiModule?.showToast(error?.message || 'Could not replace placed image');
+        uiModule.showToast(error?.message || 'Could not replace placed image');
       } finally {
         URL.revokeObjectURL(url);
       }
     };
     image.onerror = () => {
       URL.revokeObjectURL(url);
-      uiModule?.showToast('Could not read replacement image');
+      uiModule.showToast('Could not read replacement image');
     };
     image.src = url;
   }, { once: true });
@@ -6626,12 +6167,9 @@ function _rasterizePlacedLayerCommand(layer) {
   composite();
   _renderLayerPanel();
   _schedulePersist();
-  uiModule?.showToast('Placed layer rasterized');
+  uiModule.showToast('Placed layer rasterized');
 }
 
-// Layer-panel renderer — implementation in editor/layer-panel.js.
-// Wrap to the legacy name so the dozens of `_renderLayerPanel()` call
-// sites scattered across the file keep working unchanged.
 const _layerPanelRenderer = createLayerPanelRenderer({
   openLayerStyles: (layer, anchor) => openLayerStyleMenu(anchor, type => {
     state.activeGroupId = null;
@@ -6640,25 +6178,24 @@ const _layerPanelRenderer = createLayerPanelRenderer({
   }),
   composite,
   saveState: _saveState,
-  showLayerThumb: (row, layer) => _showLayerThumb(row, layer),
-  hideLayerThumb: () => _hideLayerThumb(),
-  loadLayerAlphaAsSelection: (layer) => _loadLayerAlphaAsSelection(layer),
-  loadMaskAsSelection: (layer, mask) => _loadMaskAsSelection(layer, mask),
+  showLayerThumb: _showLayerThumb,
+  hideLayerThumb: _hideLayerThumb,
+  loadLayerAlphaAsSelection: _loadLayerAlphaAsSelection,
+  loadMaskAsSelection: _loadMaskAsSelection,
   getDocumentSelection: () => _selectionMaskAsDocument({ materializeLasso: true }),
   openFxPopup: (layer, anchor) => _openFxPopup(layer, anchor),
   editAdjLayer: (layer, adj, anchor) => _editAdjLayer(layer, adj, anchor),
-  editRetainedEffect: (layer, effect, anchor) => _editRetainedEffect(layer, effect, anchor),
-  addEffectMask: (layer, effect) => _addEffectMask(layer, effect),
-  rasterizeEffects: (layer) => _rasterizeEffects(layer),
+  editRetainedEffect: _editRetainedEffect,
+  addEffectMask: _addEffectMask,
+  rasterizeEffects: _rasterizeEffects,
   createLayer,
   renderLayer: (layer) => _renderLayerOutput(layer),
-  replacePlacedLayer: (layer) => _replacePlacedLayerFromFile(layer),
-  rasterizePlacedLayer: (layer) => _rasterizePlacedLayerCommand(layer),
-  lassoToMask: () => _lassoToMask(),
-  wandToMask: () => _wandToMask(),
-  getActiveMaskLayer: () => _getActiveMaskLayer(),
+  replacePlacedLayer: _replacePlacedLayerFromFile,
+  rasterizePlacedLayer: _rasterizePlacedLayerCommand,
+  lassoToMask: _lassoToMask,
+  wandToMask: _wandToMask,
+  getActiveMaskLayer: _getActiveMaskLayer,
   onSelectLayer: () => { _syncTextControls(); _syncShapeControls(); _layerGeometry.sync(); },
-  syncFxPanelToActiveLayerIfPresent: () => _syncFxPanelToActiveLayerIfPresent(),
   dragSortModule,
   uiModule,
 });
@@ -6681,36 +6218,23 @@ function _revealLayerPanel() {
   });
 }
 
-// ── Flatten / Export ──
-
 function flatten() {
-  const out = document.createElement('canvas');
-  out.width = state.imgWidth;
-  out.height = state.imgHeight;
+  const out = makeCanvas(state.imgWidth, state.imgHeight);
   const ctx = out.getContext('2d');
   _drawDocumentLayers(ctx);
   return out;
 }
 
-// Build the union of all "foreground" visible-layer alphas (binary).
-// "Background" = the BOTTOMMOST visible layer (Harmonize's colour-match
-// reference). Everything visible ABOVE it = foreground that goes into
-// the body mask. Independent of the `isBase` flag, so reordering layers
-// (or hiding the original photo after a bg-remove) doesn't break the
-// semantics.
-// Harmonize-pipeline mask builders live in editor/harmonize-masks.js.
-// Thin wrappers translate module state into the pure helpers.
-function _harmonizeLayerList() {
-  return state.layers.map(l => ({
+function _layerAlphaSources(excludeIds = null) {
+  return state.layers.filter(l => !excludeIds?.has(l.id)).map(l => ({
     visible: l.visible,
     id: l.id,
     canvas: l.canvas,
     offset: state.layerOffsets.get(l.id) || { x: 0, y: 0 },
   }));
 }
-function _buildLayerUnionAlpha() { return _layerUnionAlphaImpl(state.imgWidth, state.imgHeight, _harmonizeLayerList()); }
-function _buildSeamMask(featherPx = 12) { return _seamMaskImpl(state.imgWidth, state.imgHeight, _harmonizeLayerList(), featherPx); }
-function _buildLayerBodyMask(featherPx = 12) { return _layerBodyMaskImpl(state.imgWidth, state.imgHeight, _harmonizeLayerList(), featherPx); }
+function _buildSeamMask(featherPx = 12) { return _seamMaskImpl(state.imgWidth, state.imgHeight, _layerAlphaSources(), featherPx); }
+function _buildLayerBodyMask(featherPx = 12) { return _layerBodyMaskImpl(state.imgWidth, state.imgHeight, _layerAlphaSources(), featherPx); }
 
 export function exportPNG() {
   return flatten().toDataURL('image/png');
@@ -6803,7 +6327,7 @@ export async function exportToGallery() {
     }
     const totalMs = Math.round(performance.now() - t0);
     window.dispatchEvent(new CustomEvent('gallery-refresh'));
-    if (uiModule) uiModule.showToast(`Saved copy to gallery (${(blob.size / 1024 / 1024).toFixed(1)}MB · ${(totalMs / 1000).toFixed(1)}s)`, 4000);
+    uiModule.showToast(`Saved copy to gallery (${(blob.size / 1024 / 1024).toFixed(1)}MB · ${(totalMs / 1000).toFixed(1)}s)`, 4000);
     savedOk = true;
     if (state.draftId) {
       _clearDraftServer(state.draftId);
@@ -6818,31 +6342,21 @@ export async function exportToGallery() {
     } else {
       msg += sizeMB;
     }
-    if (uiModule) uiModule.showToast('Save failed: ' + msg, 6000);
+    uiModule.showToast('Save failed: ' + msg, 6000);
   } finally {
     endBusy();
     if (savedOk) _flashSaveButtonOk();
   }
 }
 
-// Open the Cookbook modal scoped to img2img-capable models so the user
-// can serve one in a few clicks. Falls back to plain Cookbook if the
-// filter hook isn't available.
 // Open Cookbook on its Dependencies tab and highlight a specific
 // package row. Used for "rembg not installed" → install path.
 function _openCookbookForDependency(pkgName) {
-  // Use cookbookModule.open({ tab: 'Dependencies' }) so the intent is
-  // honored after Cookbook's async render. The old path clicked the
-  // sidebar button + polled for the modal, but Cookbook's _renderRecipes
-  // runs AFTER an awaited _syncFromServer, so depsTab.click() often
-  // raced and the user landed on Download.
   const cookbook = window.cookbookModule;
   if (!cookbook || typeof cookbook.open !== 'function') {
-    // Fall back to the old click-then-poll path if the module isn't
-    // on window for some reason.
     const btn = document.getElementById('tool-cookbook-btn');
     if (btn) btn.click();
-    else if (uiModule) uiModule.showToast(`Open Cookbook to install ${pkgName}`, 6000);
+    else uiModule.showToast(`Open Cookbook to install ${pkgName}`, 6000);
     return;
   }
   cookbook.open({ tab: 'Dependencies' });
@@ -6950,7 +6464,7 @@ function _openCookbookForImg2img() {
     tryServe();
     return;
   }
-  if (uiModule) uiModule.showToast('Open Cookbook from the sidebar to serve an img2img model', 6000);
+  uiModule.showToast('Open Cookbook from the sidebar to serve an img2img model', 6000);
 }
 
 export async function downloadPNG() {
@@ -6970,10 +6484,10 @@ export async function downloadPNG() {
     a.download = `${settings.filename}.${extension}`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    if (uiModule) uiModule.showToast(`Exported ${(blob.size / 1024 / 1024).toFixed(1)} MB`);
+    uiModule.showToast(`Exported ${(blob.size / 1024 / 1024).toFixed(1)} MB`);
   } catch (error) {
     console.error('[image-export] error:', error);
-    if (uiModule) uiModule.showToast('Export failed: ' + (error?.message || 'unknown error'), 5000);
+    uiModule.showToast('Export failed: ' + (error?.message || 'unknown error'), 5000);
   }
 }
 
@@ -6982,7 +6496,7 @@ export async function downloadPNG() {
 // survives the round-trip. Use Load Project to restore.
 function _saveProject() {
   if (!state.layers.length) {
-    if (uiModule) uiModule.showToast('Nothing to save');
+    uiModule.showToast('Nothing to save');
     return;
   }
   const project = _serializeEditorDocument(state, {
@@ -6990,7 +6504,7 @@ function _saveProject() {
   });
   const json = JSON.stringify(project);
   if (json.length > _EDITOR_PROJECT_MAX_BYTES) {
-    if (uiModule) uiModule.showToast('Project exceeds the 256 MB export safety limit. Flatten or remove layers first.', 8000);
+    uiModule.showToast('Project exceeds the 256 MB export safety limit. Flatten or remove layers first.', 8000);
     return;
   }
   const blob = new Blob([json], { type: 'application/json' });
@@ -7000,7 +6514,7 @@ function _saveProject() {
   a.download = 'project.geproj.json';
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  if (uiModule) uiModule.showToast('Project saved', 3000);
+  uiModule.showToast('Project saved', 3000);
 }
 
 // Open-file picker for Load Project. Restores layers + canvas size.
@@ -7020,7 +6534,7 @@ function _loadProjectPrompt() {
       const text = await file.text();
       const proj = JSON.parse(text);
       if (proj.type !== 'odysseus-gallery-editor-project') {
-        if (uiModule) uiModule.showToast('Not a project file', 5000);
+        uiModule.showToast('Not a project file', 5000);
         return;
       }
       previousSnapshot = _snapshotState();
@@ -7033,20 +6547,18 @@ function _loadProjectPrompt() {
       composite();
       _renderLayerPanel();
       _fitZoom();
-      if (uiModule) uiModule.showToast('Project loaded', 3000);
+      uiModule.showToast('Project loaded', 3000);
       _showDocumentRestoreReport(report);
     } catch (e) {
       if (previousSnapshot) {
         Object.assign(state, previousView);
         _restoreState(previousSnapshot);
       }
-      if (uiModule) uiModule.showToast('Load failed: ' + (e.message || e), 6000);
+      uiModule.showToast('Load failed: ' + (e.message || e), 6000);
     }
   });
   inp.click();
 }
-
-// ── Public API ──
 
 // Styled in-app prompt for canvas size — replaces the browser's
 // native prompt() which doesn't follow the app theme. Returns a Promise
@@ -7289,8 +6801,8 @@ function _mountEditorLoading(label, dims) {
 function _unmountEditorLoading() {
   if (!state.editorLoadingEl) return;
   try { state.editorLoadingEl._spinner?.destroy(); } catch {}
-  try { state.editorLoadingEl._placeholder?.remove(); } catch {}
-  try { state.editorLoadingEl.remove(); } catch {}
+  state.editorLoadingEl._placeholder?.remove();
+  state.editorLoadingEl.remove();
   state.editorLoadingEl = null;
 }
 
@@ -7367,7 +6879,7 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId) 
   state.container = document.getElementById('gallery-editor-container');
   if (!state.container) {
     console.error('[openEditor] #gallery-editor-container not found in DOM — editor cannot open');
-    if (uiModule) uiModule.showError('Editor container missing');
+    uiModule.showError('Editor container missing');
     return;
   }
   state.container.style.display = 'flex';
@@ -7376,7 +6888,7 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId) 
     _buildEditor(state.container);
   } catch (e) {
     console.error('[openEditor] _buildEditor threw:', e);
-    if (uiModule) uiModule.showError('Editor failed to build: ' + (e?.message || 'unknown'));
+    uiModule.showError('Editor failed to build: ' + (e?.message || 'unknown'));
     return;
   }
 
@@ -7395,16 +6907,13 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId) 
     // Re-open a saved draft by its server-side id — covers the
     // "Resume" buttons on the Edit-tab landing.
     _mountEditorLoading('Loading draft…', presetSize || null);
-    // Bail if the user closes the editor while the async load is in
-    // flight — without this guard, the .then() callbacks fire after
-    // closeEditor and re-mount the spinner / draw into a dead canvas,
-    // leaving "stuck" preview artefacts on the next open.
+    // The user may close the editor while the load is in flight.
     return _loadDraftById(draftId)
       .then(d => {
         if (!state.editorOpen) return;
         if (!d) {
           _unmountEditorLoading();
-          if (uiModule) uiModule.showToast('Draft not found');
+          uiModule.showToast('Draft not found');
           closeEditor();
           return;
         }
@@ -7422,7 +6931,7 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId) 
           const sizeLabel = document.getElementById('ge-canvas-size');
           if (sizeLabel) sizeLabel.textContent = `${state.imgWidth}×${state.imgHeight}`;
           _unmountEditorLoading();
-          if (uiModule) uiModule.showToast('Resumed draft');
+          uiModule.showToast('Resumed draft');
           _showDocumentRestoreReport(report);
         });
       })
@@ -7430,7 +6939,7 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId) 
         if (!state.editorOpen) return;
         _unmountEditorLoading();
         console.warn('[ge] draft load failed', err);
-        if (uiModule) uiModule.showToast(`Failed to load draft: ${err?.message || 'invalid project data'}`, 7000);
+        uiModule.showToast(`Failed to load draft: ${err?.message || 'invalid project data'}`, 7000);
         closeEditor();
       });
   }
@@ -7507,7 +7016,7 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId) 
       const sizeLabel = document.getElementById('ge-canvas-size');
       if (sizeLabel) sizeLabel.textContent = `${state.imgWidth}×${state.imgHeight}`;
       _unmountEditorLoading();
-      if (uiModule) uiModule.showToast('Resumed previous edit');
+      uiModule.showToast('Resumed previous edit');
       _showDocumentRestoreReport(report);
       return 'restored';
     });
@@ -7555,7 +7064,7 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId) 
   img.onerror = (e) => {
     console.error('[_loadSourceImage] onerror — failed to load', imageUrl, e);
     _removeLoading();
-    if (uiModule) uiModule.showToast('Failed to load image');
+    uiModule.showToast('Failed to load image');
     closeEditor();
   };
   img.src = imageUrl;
@@ -7584,7 +7093,7 @@ export function closeEditor(options = {}) {
   const force = options === true || options.force === true;
   const editorMounted = _galleryEditMounted();
   if ((state.editorOpen || editorMounted) && !force && !window.__galleryAllowCloseEditor) {
-    try { uiModule.showToast('Close the edit tab first'); } catch {}
+    uiModule.showToast('Close the edit tab first');
     return false;
   }
   _activeFilterPrompt?.cancel();
@@ -7593,9 +7102,7 @@ export function closeEditor(options = {}) {
   // the editor mid-stroke doesn't lose work. The call is fire-and-forget;
   // the server commit lands shortly after the modal hides.
   if (state.persistTimer) { clearTimeout(state.persistTimer); state.persistTimer = null; }
-  if (state.layers.length) {
-    try { _persistDraft(); } catch {}
-  }
+  if (state.layers.length) _persistDraft();
   // Invalidate asynchronous encoding/network callbacks before tearing down
   // the document, so a late save cannot mutate the next editor session.
   state.editorSessionToken += 1;
@@ -7609,12 +7116,8 @@ export function closeEditor(options = {}) {
   _selectionNudgeTimer = null;
   _selectionNudgeHistorySaved = false;
   _precisionGuides = null;
-  // Drop every document-level click-away handler registered by this
-  // openEditor invocation. Without this, dropdown closers accumulated
-  // across reopens (six handlers × N opens).
   while (state.editorDocClickHandlers.length) {
-    const h = state.editorDocClickHandlers.pop();
-    try { document.removeEventListener('click', h); } catch {}
+    document.removeEventListener('click', state.editorDocClickHandlers.pop());
   }
   if (state.cursorEl) { state.cursorEl.remove(); state.cursorEl = null; }
   // Tear down all floating popups + the dock so closing the editor
@@ -7622,40 +7125,25 @@ export function closeEditor(options = {}) {
   try { _closeFxMenu(); } catch {}
   try { _closeAdjPopup(); } catch {}
   try { _closeHistoryPanel(); } catch {}
-  try {
-    const dock = document.getElementById('ge-fx-dock');
-    if (dock) dock.remove();
-  } catch {}
-  try {
-    document.querySelectorAll('.ge-inpaint-popup, .ge-fx-popup, .ge-adj-popup').forEach(el => {
-      if (el._escHandler) {
-        document.removeEventListener('keydown', el._escHandler, true);
-      }
-      // v2 review HIGH-2/3: unregister any modalManager entry left over
-      // from FX-popup / History-panel minimise so _state and _LABELS
-      // don't grow unboundedly across editor opens.
-      if (el._modalId) {
-        try { modalManager.unregister(el._modalId); } catch {}
-      }
-      el.remove();
-    });
-  } catch {}
-  try {
-    document.querySelectorAll('body > #ge-save-menu').forEach(el => el.remove());
-  } catch {}
-  // Belt-and-suspenders: scrub any minimized-dock chip + modalManager
-  // entry whose id matches our ephemeral popups (in case the DOM node
-  // was already removed when the user dragged the chip to trash).
-  try {
-    const dock = document.getElementById('minimized-dock');
-    if (dock) {
-      dock.querySelectorAll('[data-modal-id^="ge-fx-popup-"], [data-modal-id="ge-history-panel-min"]').forEach(c => {
-        const mid = c.dataset.modalId;
-        try { modalManager.unregister(mid); } catch {}
-        c.remove();
-      });
+  document.getElementById('ge-fx-dock')?.remove();
+  document.querySelectorAll('.ge-inpaint-popup, .ge-fx-popup, .ge-adj-popup').forEach(el => {
+    if (el._escHandler) {
+      document.removeEventListener('keydown', el._escHandler, true);
     }
-  } catch {}
+    // Minimised FX popups and the History panel leave modalManager entries behind.
+    if (el._modalId) {
+      try { modalManager.unregister(el._modalId); } catch {}
+    }
+    el.remove();
+  });
+  document.querySelectorAll('body > #ge-save-menu').forEach(el => el.remove());
+  // A chip can outlive its popup node when the user drags it to the trash.
+  document.getElementById('minimized-dock')
+    ?.querySelectorAll('[data-modal-id^="ge-fx-popup-"], [data-modal-id="ge-history-panel-min"]')
+    .forEach(c => {
+      try { modalManager.unregister(c.dataset.modalId); } catch {}
+      c.remove();
+    });
   if (state.container) {
     state.container.style.display = 'none';
     state.container.innerHTML = '';

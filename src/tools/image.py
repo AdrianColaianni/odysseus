@@ -1,11 +1,4 @@
-"""Image-domain tool implementations.
-
-Extracted from tool_implementations.py as part of slice 1 (#4082/#4071).
-Holds the edit_image (gallery) tool.
-``src.tool_implementations`` re-exports these for backward compatibility.
-``_INTERNAL_BASE`` still lives in tool_implementations.py and is pulled back
-function-locally here.
-"""
+"""The edit_image (gallery) agent tool."""
 import hashlib
 import io
 import uuid
@@ -13,15 +6,12 @@ import re
 from pathlib import Path
 from typing import Dict, Optional
 
-from src.tools._common import _parse_tool_args
+from src.tools._common import parsed_tool_args
 
 
-async def do_edit_image(content: str, owner: Optional[str] = None) -> Dict:
+@parsed_tool_args
+async def do_edit_image(args: dict, owner: Optional[str] = None) -> Dict:
     """Create an owner-scoped edited copy of a gallery image."""
-    try:
-        args = _parse_tool_args(content)
-    except ValueError:
-        return {"error": "Invalid JSON arguments", "exit_code": 1}
     image_id = args.get("image_id", "")
     action = args.get("action", "")
     if not image_id or not action:

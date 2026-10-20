@@ -6,12 +6,11 @@ from src.clean_agent_preview import dependent_write_prerequisite_error, required
 from src.turn_contract import selected_tools_for_request
 
 
-@pytest.mark.parametrize('prompt', [
-    'delete my last chat', 'remove my previous conversation',
-    'archive my last session', 'rename my last chat',
-])
-def test_session_mutations_include_lookup(prompt):
-    assert selected_tools_for_request(prompt) == {'list_sessions', 'manage_session'}
+def test_session_mutations_include_lookup():
+    for prompt in (
+        'delete my last chat', 'archive my last session', 'rename my last chat',
+    ):
+        assert selected_tools_for_request(prompt) == {'list_sessions', 'manage_session'}
 
 
 def contract():

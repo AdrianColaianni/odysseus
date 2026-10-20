@@ -1,63 +1,68 @@
-"""Issue #2754 — gallery owner-scoping.
+"""Issue #2754: gallery albums are owner-scoped.
 
-`patch_gallery_image` must validate that the *target album* belongs to the caller
-before moving an image into it (otherwise user B can file B's image into user A's
-album), and `list_albums` must owner-scope the per-album count + cover-fallback
-queries. The gallery route handlers are closures, so — matching the AST-assertion
-convention of test_gallery_image_privileges.py — we assert the guards are present
-in the source.
+A caller cannot file an image into another user's album, and an album's count
+covers only the caller's images.
 """
-import ast
-from pathlib import Path
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+import core.database as cdb
+from core.database import GalleryAlbum, GalleryImage
+import routes.gallery.gallery_routes as gallery_routes
+from tests.helpers.database import disposable_database
 
 
-def _function_sources():
-    source = Path("routes/gallery/gallery_routes.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    return {
-        node.name: ast.get_source_segment(source, node) or ""
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
+def _seed(factory):
+    db = factory()
+    db.add_all([
+        GalleryAlbum(id="album-alice", name="Alice album", owner="alice"),
+        GalleryAlbum(id="album-bob", name="Bob album", owner="bob"),
+        GalleryImage(id="img-alice", filename="a.png", owner="alice", album_id="album-alice", is_active=True),
+        # A stray row from before the guard: bob's image filed in alice's album.
+        GalleryImage(id="img-bob", filename="b.png", owner="bob", album_id="album-alice", is_active=True),
+    ])
+    db.commit()
+    db.close()
 
 
-def test_patch_validates_target_album_ownership():
-    fns = _function_sources()
-    body = fns["patch_gallery_image"]
-    assert "req.album_id" in body
-    # The target album must be ownership-validated (via the same helper the
-    # sibling mutators use) before the image is reassigned to it.
-    assert "_get_or_404_album(db, req.album_id, user)" in body
+def _client(monkeypatch, factory, user):
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setattr(cdb, "SessionLocal", factory)
+    monkeypatch.setattr(gallery_routes, "get_current_user", lambda request: user)
+    app = FastAPI()
+    app.include_router(gallery_routes.setup_gallery_routes())
+    return TestClient(app)
 
 
-def test_upload_validates_target_album_ownership():
-    fns = _function_sources()
-    body = fns["gallery_upload"]
-    assert "album_id" in body
-    assert "_get_or_404_album(db, album_id, user)" in body
+def _album_of(factory, image_id):
+    db = factory()
+    try:
+        return db.get(GalleryImage, image_id).album_id
+    finally:
+        db.close()
 
 
-def test_list_albums_count_and_cover_are_owner_scoped():
-    fns = _function_sources()
-    body = fns["list_albums"]
-    # The album list, per-album image count, explicit cover, and cover-fallback
-    # queries should all share the same gallery owner policy.
-    assert "q = _owner_filter(q, user, GalleryAlbum)" in body
-    assert "_count_q = _owner_filter(_count_q, user)" in body
-    assert "cover = _owner_filter(cover_q, user).first()" in body
-    assert "_cover_q = _owner_filter(_cover_q, user)" in body
+def test_cannot_move_or_upload_into_another_users_album(monkeypatch, tmp_path):
+    with disposable_database(tmp_path) as factory:
+        _seed(factory)
+        client = _client(monkeypatch, factory, "bob")
+
+        assert client.patch("/api/gallery/img-bob", json={"album_id": "album-bob"}).status_code == 200
+        assert client.patch("/api/gallery/img-bob", json={"album_id": "album-alice"}).status_code == 404
+        assert _album_of(factory, "img-bob") == "album-bob"
+
+        upload = client.post(
+            "/api/gallery/upload",
+            files={"file": ("x.png", b"not-a-png", "image/png")},
+            data={"album_id": "album-alice"},
+        )
+        assert upload.status_code == 404
 
 
-def test_delete_album_cleanup_is_owner_scoped():
-    fns = _function_sources()
-    body = fns["delete_album"]
-    assert "GalleryImage.album_id == album_id" in body
-    assert "GalleryImage.owner == user" in body
-    assert 'q.update({"album_id": None}' in body
+def test_album_count_covers_only_the_owners_images(monkeypatch, tmp_path):
+    with disposable_database(tmp_path) as factory:
+        _seed(factory)
+        client = _client(monkeypatch, factory, "alice")
 
-
-def test_get_or_404_album_enforces_owner():
-    # Guard the precedent we rely on: the helper rejects another user's album.
-    fns = _function_sources()
-    helper = fns["_get_or_404_album"]
-    assert "album.owner != user" in helper
+        albums = client.get("/api/gallery/albums").json()["albums"]
+        assert [(a["id"], a["count"]) for a in albums] == [("album-alice", 1)]

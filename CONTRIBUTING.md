@@ -44,9 +44,10 @@ Windows is not actively tested. Docker on Linux or a Linux/macOS manual install 
 
 ## Running Checks
 
-Run the smallest relevant checks for your change:
+Run the smallest relevant checks for your change. The test tools live in `requirements-dev.txt`:
 
 ```bash
+pip install -r requirements-dev.txt
 python -m pytest
 python -m py_compile app.py routes/*.py src/*.py
 node --check static/js/<file-you-changed>.js

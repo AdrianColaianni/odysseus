@@ -40,16 +40,16 @@ def test_parse_tolerates_surrounding_whitespace_from_a_shell_variable():
     assert parse_shard_spec("  3/4\n") == ShardSpec(index=3, count=4)
 
 
-@pytest.mark.parametrize("value", ["", "abc", "1", "1/", "/4", "1/4/4", "1-4", "1 / 4"])
-def test_parse_rejects_malformed_selectors(value):
-    with pytest.raises(ShardSpecError):
-        parse_shard_spec(value)
+def test_parse_rejects_malformed_selectors():
+    for value in ("", "abc", "1", "1/", "/4", "1/4/4", "1-4", "1 / 4"):
+        with pytest.raises(ShardSpecError):
+            parse_shard_spec(value)
 
 
-@pytest.mark.parametrize("value", ["0/4", "5/4", "-1/4", "1/0"])
-def test_parse_rejects_out_of_range_selectors(value):
-    with pytest.raises(ShardSpecError):
-        parse_shard_spec(value)
+def test_parse_rejects_out_of_range_selectors():
+    for value in ("0/4", "5/4", "-1/4", "1/0"):
+        with pytest.raises(ShardSpecError):
+            parse_shard_spec(value)
 
 
 def test_parse_error_names_the_offending_value():
@@ -92,15 +92,15 @@ def test_file_weights_of_an_empty_collection_are_empty():
 
 # --- plan_shards: the partition guarantees -----------------------------------
 
-@pytest.mark.parametrize("count", [1, 2, 3, 4, 5, 8])
-def test_every_file_lands_in_exactly_one_shard(count):
-    weights = even_weights(37)
-    plan = plan_shards(weights, count)
+def test_every_file_lands_in_exactly_one_shard():
+    for count in (1, 2, 3, 4, 5, 8):
+        weights = even_weights(37)
+        plan = plan_shards(weights, count)
 
-    assert len(plan) == count
-    placements = [key for bucket in plan for key in bucket]
-    assert sorted(placements) == sorted(weights)
-    assert len(placements) == len(set(placements))
+        assert len(plan) == count
+        placements = [key for bucket in plan for key in bucket]
+        assert sorted(placements) == sorted(weights)
+        assert len(placements) == len(set(placements))
 
 
 def test_a_single_shard_holds_the_whole_suite():
@@ -135,10 +135,10 @@ def test_an_empty_suite_still_yields_the_requested_number_of_shards():
     assert plan_shards({}, 3) == (frozenset(), frozenset(), frozenset())
 
 
-@pytest.mark.parametrize("count", [0, -1])
-def test_plan_rejects_a_nonsensical_shard_count(count):
-    with pytest.raises(ShardSpecError):
-        plan_shards(even_weights(4), count)
+def test_plan_rejects_a_nonsensical_shard_count():
+    for count in (0, -1):
+        with pytest.raises(ShardSpecError):
+            plan_shards(even_weights(4), count)
 
 
 # --- plan_shards: balance ----------------------------------------------------

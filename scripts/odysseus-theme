@@ -18,13 +18,12 @@ keeping your manual tweaks).
 """
 
 from __future__ import annotations
-import sys
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
 from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
 quiet_logs()
 
-import argparse, json, logging, os, shutil, subprocess, sys, tempfile
+import argparse, json, logging, shutil, subprocess, tempfile
 from pathlib import Path
 
 _USER_PREFS_PATH = _REPO_ROOT / "data" / "user_prefs.json"

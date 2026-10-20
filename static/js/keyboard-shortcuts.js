@@ -67,7 +67,7 @@ export function initKeyboardShortcuts(modules) {
         window._odysseusKeybinds.toggle_sidebar = _defaultKeybinds.toggle_sidebar;
       }
     })
-    .catch(() => {});
+    .catch((e) => console.warn('Keybind settings failed to load; using defaults:', e));
 
   // ── Esc cancels select mode (capture phase, before modal-close) ──
   // Every tool's bulk-select bar has a `*-bulk-cancel` button whose click
@@ -234,7 +234,7 @@ export function initKeyboardShortcuts(modules) {
       fd.append('model', cur ? cur.model || '' : '');
       if (cur && cur.endpoint_id) fd.append('endpoint_id', cur.endpoint_id);
       fd.append('skip_validation', 'true');
-      fetch(`${API_BASE}/api/session`, { method: 'POST', body: fd, credentials: 'same-origin' })
+      fetch(`${API_BASE}/api/session`, { method: 'POST', body: fd })
         .then(r => r.ok ? r.json() : null)
         .then(async data => {
           if (data) {

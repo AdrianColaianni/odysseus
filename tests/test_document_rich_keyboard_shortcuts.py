@@ -1,12 +1,7 @@
 """Browser coverage for standard Rich Text document shortcuts."""
 
-import json
-import subprocess
-from pathlib import Path
 from tests.helpers.stylesheets import stylesheet_link_tags
-
-
-ROOT = Path(__file__).resolve().parents[1]
+from tests.helpers.node import run_node_module
 
 
 def test_rich_document_shortcuts_work_at_desktop_and_mobile_widths():
@@ -96,15 +91,7 @@ def test_rich_document_shortcuts_work_at_desktop_and_mobile_widths():
       await browser.close();
     """
     script = script.replace("__ODY_STYLESHEETS__", stylesheet_link_tags())
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
+    data = run_node_module(script, timeout=120)
     for layout in (data["desktop"], data["mobile"]):
         assert layout["headingTag"] == "H6"
         assert layout["h6Current"] == "true"

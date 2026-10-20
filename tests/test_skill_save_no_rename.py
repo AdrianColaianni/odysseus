@@ -23,6 +23,7 @@ from fastapi.datastructures import State
 from services.memory.skills import SkillsManager
 from services.memory.skill_format import slugify
 from routes.skills_routes import setup_skills_routes
+from tests.helpers.routes import route_endpoint
 
 
 def _write_skill_md(skills_root: Path, category: str, name: str, owner: str) -> Path:
@@ -88,11 +89,6 @@ def _request(user: str, body: dict | None = None) -> Request:
     return Request(scope=scope, receive=_receive)
 
 
-def _handler(router, path: str, method: str):
-    return next(r.endpoint for r in router.routes
-               if r.path == path and method in r.methods)
-
-
 @pytest.mark.asyncio
 async def test_markdown_save_does_not_rename_then_delete_works(tmp_path):
     skills_root = tmp_path / "skills"
@@ -101,8 +97,8 @@ async def test_markdown_save_does_not_rename_then_delete_works(tmp_path):
 
     sm = SkillsManager(str(tmp_path))
     router = setup_skills_routes(sm)
-    save = _handler(router, "/api/skills/{skill_id}/markdown", "POST")
-    delete = _handler(router, "/api/skills/{skill_id}", "DELETE")
+    save = route_endpoint(router, "/api/skills/{skill_id}/markdown", "POST")
+    delete = route_endpoint(router, "/api/skills/{skill_id}", "DELETE")
 
     # Save markdown whose frontmatter renames the skill. The save must keep the
     # original name (no rename), so the returned name is unchanged.

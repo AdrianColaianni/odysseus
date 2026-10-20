@@ -23,12 +23,10 @@ unguarded patterns took 2-15s on these inputs, so the margin is ~100x.
 
 import time
 
-import pytest
 
 import src.agent_tools  # noqa: F401  (break agent_tools<->tool_parsing import cycle)
 from src.tool_parsing import (
     parse_tool_blocks,
-    strip_tool_blocks,
     _parse_tool_call_block,
     _parse_tool_code_block,
 )

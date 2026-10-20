@@ -445,6 +445,37 @@ export function normalizeThinkingMarkup(text) {
   return normalized;
 }
 
+// Phrases that open the reply after untagged reasoning ("Thinking: ... Sure, ...").
+const REPLY_STARTS = [
+  'Hey', 'Hi ', 'Hi!', 'Hello', 'Sure', 'Yes', 'No ', 'No,', 'Yo', 'OK',
+  'Here', 'Absolutely', 'Of course', 'Great', 'Alright', 'Thanks', 'Welcome',
+  'Good ', "I'm happy", "I'd be"
+];
+const _escapedReplyStarts = REPLY_STARTS.map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+const INLINE_REPLY_RES = _escapedReplyStarts.map((value) => new RegExp(`[.!?]\\s*(${value})`));
+const REPLY_BOUNDARY_RE = new RegExp(
+  `^([\\s\\S]*?)(\\n\\n(?=${_escapedReplyStarts.join('|')}|I |What|Let|This |As ))[\\s\\S]*$`,
+  'i'
+);
+
+/** Index of the first line at or after `from` that opens with a reply phrase, or -1. */
+export function replyLineIndex(lines, from = 1) {
+  for (let index = from; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (line && REPLY_STARTS.some((prefix) => line.startsWith(prefix))) return index;
+  }
+  return -1;
+}
+
+/** Offset where a reply phrase follows sentence punctuation past the first 20 chars, or -1. */
+export function inlineReplyOffset(text) {
+  for (const rx of INLINE_REPLY_RES) {
+    const match = rx.exec(text);
+    if (match && match.index > 20) return match.index + 1;
+  }
+  return -1;
+}
+
 function normalizePlainThinking(text) {
   if (!text) return text;
   text = normalizeThinkingMarkup(text);
@@ -453,18 +484,8 @@ function normalizePlainThinking(text) {
   const trimmed = text.trimStart();
   if (!startsWithReasoningPrefix(trimmed)) return text;
 
-  const replyStarts = [
-    'Hey', 'Hi ', 'Hi!', 'Hello', 'Sure', 'Yes', 'No ', 'No,', 'Yo', 'OK',
-    'Here', 'Absolutely', 'Of course', 'Great', 'Alright', 'Thanks', 'Welcome',
-    'Good ', "I'm happy", "I'd be"
-  ];
   const prefixRegex = /^(thinking(?:\s+process)?\s*:)\s*/i;
-  const escapedReplyStarts = replyStarts.map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  const boundaryRegex = new RegExp(
-    `^([\\s\\S]*?)(\\n\\n(?=${escapedReplyStarts.join('|')}|I |What|Let|This |As ))[\\s\\S]*$`,
-    'i'
-  );
-  const boundaryMatch = boundaryRegex.exec(trimmed);
+  const boundaryMatch = REPLY_BOUNDARY_RE.exec(trimmed);
 
   if (boundaryMatch) {
     const thinkBlock = boundaryMatch[1].replace(prefixRegex, '').trim();
@@ -473,25 +494,18 @@ function normalizePlainThinking(text) {
   }
 
   const lines = trimmed.split('\n');
-  for (let index = 1; index < lines.length; index += 1) {
-    const line = lines[index].trim();
-    if (!line) continue;
-    if (replyStarts.some((prefix) => line.startsWith(prefix))) {
-      const thinkBlock = lines.slice(0, index).join('\n').replace(prefixRegex, '').trim();
-      const reply = lines.slice(index).join('\n').trim();
-      if (thinkBlock && reply) return `<think>${thinkBlock}</think>\n${reply}`;
-    }
+  for (let index = replyLineIndex(lines); index !== -1; index = replyLineIndex(lines, index + 1)) {
+    const thinkBlock = lines.slice(0, index).join('\n').replace(prefixRegex, '').trim();
+    const reply = lines.slice(index).join('\n').trim();
+    if (thinkBlock && reply) return `<think>${thinkBlock}</think>\n${reply}`;
   }
 
   const withoutPrefix = trimmed.replace(prefixRegex, '');
-  for (const prefix of replyStarts) {
-    const rx = new RegExp(`[.!?]\\s*(${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`);
-    const match = rx.exec(withoutPrefix);
-    if (match && match.index > 20) {
-      const thinkBlock = withoutPrefix.slice(0, match.index + 1).trim();
-      const reply = withoutPrefix.slice(match.index + 1).trim();
-      if (thinkBlock && reply) return `<think>${thinkBlock}</think>\n${reply}`;
-    }
+  const inlineOffset = inlineReplyOffset(withoutPrefix);
+  if (inlineOffset !== -1) {
+    const thinkBlock = withoutPrefix.slice(0, inlineOffset).trim();
+    const reply = withoutPrefix.slice(inlineOffset).trim();
+    if (thinkBlock && reply) return `<think>${thinkBlock}</think>\n${reply}`;
   }
 
   if (/^\s*(?:thinking(?:\s+process)?\s*:|the user |user wants|we need |let me (?:think|look|see|check|read|review|analyze|parse|figure|draft|write)|i need to |i should |i will |i'll |i am going )/i.test(trimmed)) {
@@ -1309,6 +1323,8 @@ const markdownModule = {
   extractThinkingBlocks,
   normalizeThinkingMarkup,
   startsWithReasoningPrefix,
+  replyLineIndex,
+  inlineReplyOffset,
   renderMermaid,
   renderMath,
   ensureMermaid,

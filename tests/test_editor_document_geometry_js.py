@@ -1,7 +1,7 @@
 import json
-import subprocess
 import textwrap
 from pathlib import Path
+from tests.helpers.node import run_node_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,14 +52,7 @@ def run_node(body: str):
         {body}
         """
     )
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", source],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
+    return run_node_module(source)
 
 
 def test_crop_updates_layer_and_document_mask_coordinate_spaces():
@@ -414,15 +407,3 @@ def test_text_layer_stays_retained_through_crop_and_image_resize():
     assert result["transform"]["scaleX"] == 2
     assert result["transform"]["scaleY"] == 2
     assert result["size"][0] > result["afterCrop"]["size"][0]
-
-
-def test_image_menu_exposes_separate_canvas_and_image_size_commands():
-    topbar = (ROOT / "static/js/editor/build/topbar.js").read_text(encoding="utf-8")
-    wiring = (ROOT / "static/js/editor/wire-topbar-menus.js").read_text(encoding="utf-8")
-    editor = (ROOT / "static/js/galleryEditor.js").read_text(encoding="utf-8")
-
-    assert 'data-image-action="canvas-size"' in topbar
-    assert 'data-image-action="image-size"' in topbar
-    assert "resizeCanvasDocument(state, newW, newH, options)" in wiring
-    assert "resizeImageDocument(state, newW, newH, {" in wiring
-    assert "_cropDocument(state, state.cropRect)" in editor

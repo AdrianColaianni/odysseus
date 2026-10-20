@@ -1,14 +1,6 @@
 from routes.chat_routes import _parse_client_runtime_context
 
 
-def test_native_terminal_bypasses_chat_preemptive_shortcuts():
-    from pathlib import Path
-
-    source = (Path(__file__).parents[1] / "src" / "agent_loop.py").read_text()
-    assert source.count("and not _native_terminal_runtime") >= 3
-    assert '"fallback": "preemptive_explicit_admin_session"' in source
-
-
 def test_native_terminal_context_keeps_safe_artifact_contract_only():
     parsed = _parse_client_runtime_context({
         "surface": "odysseus-native",

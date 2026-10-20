@@ -1,26 +1,12 @@
 // static/js/appConfig.js
 //
-// One shared, invalidatable cache for the two config endpoints that every
-// module wants at startup.
-//
-// Before this, /api/auth/settings was fetched independently by six modules and
-// /api/tools by three, none of them aware of the others — 4 and 3 requests on a
-// single cold load. Worse than the requests: each caller could observe a
-// different snapshot of the same object, and chatRenderer.js is imported under
-// three different ?v= query strings, so it is three separate module instances
-// each issuing its own /api/tools fetch. Caching here fixes both, because the
-// cache lives in one module every instance imports by the same specifier.
-//
-// URLs are bare paths on purpose. The callers that used `${API_BASE}/api/...`
-// resolved to the identical URL — API_BASE is `window.location.origin`
-// (app.js) — so nothing about the request changes for them.
+// One shared, invalidatable cache for /api/auth/settings and /api/tools, so
+// every module (and every ?v= instance of a module) sees one snapshot.
 //
 // WRITERS MUST INVALIDATE. Anything that POSTs /api/auth/settings calls
 // invalidateSettings(); anything that POSTs /api/tools calls invalidateTools()
 // *and* invalidateSettings(), because that route persists `disabled_tools`
-// into the same settings store (routes/model_routes.py). Miss one and the UI
-// serves a stale settings object for the rest of the session, which is worse
-// than the duplicate fetches this replaces.
+// into the same settings store (routes/model_routes.py).
 //
 // The resolved object is shared by reference, so treat it as read-only: copy
 // before mutating (`{ ...await getSettings() }`).

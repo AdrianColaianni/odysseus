@@ -12,6 +12,7 @@ import pytest
 from fastapi import HTTPException
 
 from tests.helpers.import_state import clear_module
+from tests.helpers.routes import route_endpoint
 
 
 def _real_core_package():
@@ -84,10 +85,7 @@ def _policy_endpoint(auth_manager):
     from routes.auth_routes import setup_auth_routes
 
     router = setup_auth_routes(auth_manager)
-    for route in router.routes:
-        if getattr(route, "path", None) == "/api/auth/policy":
-            return route.endpoint
-    raise AssertionError("policy route not found")
+    return route_endpoint(router, "/api/auth/policy", "GET")
 
 
 def test_policy_endpoint_returns_dict(tmp_path):
@@ -117,10 +115,7 @@ def _setup_endpoint(auth_manager):
     from routes.auth_routes import SetupRequest, setup_auth_routes
 
     router = setup_auth_routes(auth_manager)
-    for route in router.routes:
-        if getattr(route, "path", None) == "/api/auth/setup":
-            return route.endpoint, SetupRequest
-    raise AssertionError("setup route not found")
+    return route_endpoint(router, "/api/auth/setup", "POST"), SetupRequest
 
 
 def _signup_endpoint(auth_manager):
@@ -129,10 +124,7 @@ def _signup_endpoint(auth_manager):
     from routes.auth_routes import SignupRequest, setup_auth_routes
 
     router = setup_auth_routes(auth_manager)
-    for route in router.routes:
-        if getattr(route, "path", None) == "/api/auth/signup":
-            return route.endpoint, SignupRequest
-    raise AssertionError("signup route not found")
+    return route_endpoint(router, "/api/auth/signup", "POST"), SignupRequest
 
 
 def _change_password_endpoint(auth_manager):
@@ -141,10 +133,7 @@ def _change_password_endpoint(auth_manager):
     from routes.auth_routes import ChangePasswordRequest, setup_auth_routes
 
     router = setup_auth_routes(auth_manager)
-    for route in router.routes:
-        if getattr(route, "path", None) == "/api/auth/change-password":
-            return route.endpoint, ChangePasswordRequest
-    raise AssertionError("change-password route not found")
+    return route_endpoint(router, "/api/auth/change-password", "POST"), ChangePasswordRequest
 
 
 def test_setup_rejects_short_password(tmp_path):
@@ -236,10 +225,7 @@ def _login_endpoint(auth_manager):
     from routes.auth_routes import LoginRequest, setup_auth_routes
 
     router = setup_auth_routes(auth_manager)
-    for route in router.routes:
-        if getattr(route, "path", None) == "/api/auth/login":
-            return route.endpoint, LoginRequest
-    raise AssertionError("login route not found")
+    return route_endpoint(router, "/api/auth/login", "POST"), LoginRequest
 
 
 def _login_request(scheme="http", forwarded_proto=None):

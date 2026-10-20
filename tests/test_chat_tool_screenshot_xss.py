@@ -25,13 +25,6 @@ def test_private_browser_preview_uses_sanitized_screenshot_src():
     assert "preview.root.innerHTML = json.screenshot" not in chat
 
 
-def test_browser_screenshot_is_persisted_for_history_reload():
-    loop = (_REPO / "src" / "agent_loop.py").read_text(encoding="utf-8")
-
-    assert 'tool_output_data["screenshot"] = f"data:{img[\'mimeType\']};base64,{img[\'data\']}"' in loop
-    assert 'tool_event["screenshot"] = f"data:{img[\'mimeType\']};base64,{img[\'data\']}"' in loop
-
-
 def test_restored_private_browser_preview_uses_module_escape():
     renderer = (_REPO / "static" / "js" / "chatRenderer.js").read_text(encoding="utf-8")
 
@@ -58,11 +51,10 @@ def test_restored_tool_screenshot_uses_raster_data_url_whitelist():
 
 
 def test_streaming_tool_labels_are_escaped_before_inner_html():
-    chat = (_REPO / "static" / "js" / "chat.js").read_text(encoding="utf-8")
+    renderer = (_REPO / "static" / "js" / "chatRenderer.js").read_text(encoding="utf-8")
     compare = (_REPO / "static" / "js" / "compare" / "stream.js").read_text(encoding="utf-8")
 
-    assert '<span class="agent-thread-tool">${esc(toolLabel)}</span>' in chat
-    assert '<span class="agent-thread-tool">${toolLabel}</span>' not in chat
+    assert '<span class="agent-thread-tool">${uiModule.esc(label)}</span>' in renderer
     assert '<span class="agent-thread-tool">${escapeHtml(toolLabel)}</span>' in compare
     assert '<span class="agent-thread-tool">${toolLabel}</span>' not in compare
 

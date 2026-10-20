@@ -1,19 +1,3 @@
-/* 02-compare - part of the former static/style.css.
- *
- * The stylesheet is split by area, but the split is mechanical: rules were
- * moved verbatim and NOT regrouped. The numeric prefix is the load order, and
- * that order is what preserves the cascade. A rule sits in the file its
- * original position fell into, so an area's rules are not all in its file and
- * a file is not only that area's rules.
- *
- * Do not reorder the <link> tags in static/index.html, and do not move a rule
- * between files: with 1,151 redeclarations and 1,886 !important in this
- * cascade, either can change which declaration wins.
- *
- * static/index.html and the PRECACHE list in static/sw.js must agree on this
- * order. tests/test_static_stylesheet_manifest.py and
- * tests/test_css_computed_style_snapshot.py fail if that drifts.
- */
     .harmony-generate-btn:hover { background: color-mix(in srgb, var(--red) 11%, transparent); }
     .harmony-preview {
       display: flex; height: 20px; border-radius: 6px; overflow: hidden;
@@ -223,12 +207,8 @@
       .settings-modal-content,
       #compare-model-overlay .modal-content {
         width: 100% !important;
-        /* 85dvh leaves comfortable headroom above the sheet so the user can
-           still see the chat behind it and the drag handle has breathing
-           room. Was 65vh (too short, content clipped) → 90vh (too tall, top
-           hugged the status bar). */
-        max-height: 85dvh !important;
-        max-height: 85vh !important; /* fallback for browsers without dvh */
+        /* Headroom above the sheet keeps the chat behind it and the drag handle in view. */
+        max-height: 85vh !important;
         height: auto !important;
         border-radius: 14px 14px 0 0;
         border: none;
@@ -250,7 +230,6 @@
       #settings-modal .settings-modal-content,
       #email-lib-modal .modal-content,
       #doclib-modal .doclib-modal-content {
-        max-height: 90vh !important;
         max-height: calc(var(--app-height) * 0.9) !important;
         height: auto !important;
         /* Reserve the iOS home-indicator / bottom-bar strip so an expanded
@@ -298,12 +277,6 @@
       #doclib-modal .modal-content,
       #gallery-modal .modal-content,
       #tasks-modal .modal-content {
-        /* vh-first as fallback for very old browsers, then dvh wins so
-           the modal shrinks/grows with the mobile URL bar. Wrong order
-           previously made the expanded chat preview extend below the
-           visible viewport on Chrome/Safari mobile (URL bar covered the
-           action buttons row). */
-        max-height: 90vh !important;
         max-height: calc(var(--app-height) * 0.9) !important;
         height: auto !important;
       }
@@ -320,10 +293,6 @@
         padding-bottom: 0 !important;
         align-items: stretch !important;
       }
-      /* Deep Research already gets the swipe grab-handle pill from the
-         shared `.modal-content::before` rule (the pane carries that class).
-         The previous header-level pill was redundant and rendered as a
-         SECOND pill stacked above the real one — removed. */
       /* The inner body must flex to fill the new full height, and the
          tasks list inside it must scroll independently — otherwise the
          list crops at whatever pre-mobile height the desktop layout had. */
@@ -435,13 +404,6 @@
 
     /* ── Model A/B Comparison ── */
 
-    /* -- Extracted inline-style classes -- */
-    .cmp-header-action-btn {
-      background: none; border: 1px solid var(--border); color: var(--fg);
-      cursor: pointer; padding: 3px 10px; font-size: 11px; font-weight: 600;
-      opacity: 0.7; transition: all 0.15s; line-height: 1; border-radius: 4px;
-      display: inline-flex; align-items: center; font-family: inherit;
-    }
     .cmp-form-control {
       padding: 8px; background: var(--bg); color: var(--fg);
       border: 1px solid var(--border); border-radius: 6px; font-size: 0.85em;
@@ -485,11 +447,11 @@
       margin-right: -4px;
       padding: 4px;
       border-radius: 6px;
-      background: color-mix(in srgb, var(--accent, var(--red)) 8%, transparent);
-      box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent, var(--red)) 42%, transparent);
+      background: color-mix(in srgb, var(--red) 8%, transparent);
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--red) 42%, transparent);
     }
     .cmp-model-row-swap-target .cmp-row-label {
-      color: var(--accent, var(--red));
+      color: var(--red);
       opacity: 1;
     }
     .cmp-row-label {
@@ -508,9 +470,7 @@
       font-size: 10px;
       line-height: 1.2;
     }
-    .cmp-model-meta-chip,
-    .cmp-model-meta-warning,
-    .cmp-model-meta-muted {
+    .cmp-model-meta-warning {
       display: inline-flex;
       align-items: center;
       max-width: 100%;
@@ -520,23 +480,13 @@
       border-radius: 999px;
       padding: 1px 6px;
       letter-spacing: 0;
-    }
-    .cmp-model-meta-chip {
-      color: color-mix(in srgb, var(--fg) 60%, transparent);
-      background: color-mix(in srgb, var(--fg) 5%, transparent);
-      border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-    }
-    .cmp-model-meta-warning {
       color: var(--color-error);
       background: color-mix(in srgb, var(--color-error) 10%, transparent);
       border: 1px solid color-mix(in srgb, var(--color-error) 24%, transparent);
       font-weight: 600;
     }
-    .cmp-model-meta-muted {
-      color: color-mix(in srgb, var(--fg) 36%, transparent);
-    }
     .cmp-rm-btn {
-      background: none; border: none; color: var(--accent, var(--red)); cursor: pointer;
+      background: none; border: none; color: var(--red); cursor: pointer;
       min-width: 20px; font-size: 16px; font-weight: 600; opacity: 0.3;
       transition: all 0.15s; padding: 0; line-height: 1; text-align: center;
       position: relative; top: -2px;
@@ -728,8 +678,8 @@
       opacity: 0.78; transition: opacity 0.15s, border-color 0.15s, background 0.15s; white-space: nowrap; flex-shrink: 0;
     }
     .compare-probe-action-btn svg,
-    .compare-probe-footer-btn svg { width: 12px; height: 12px; flex: 0 0 auto; color: var(--accent, var(--red)); }
-    .compare-probe-action-btn:hover { opacity: 1; border-color: var(--accent, var(--red)); background: color-mix(in srgb, var(--fg) 5%, transparent); }
+    .compare-probe-footer-btn svg { width: 12px; height: 12px; flex: 0 0 auto; color: var(--red); }
+    .compare-probe-action-btn:hover { opacity: 1; border-color: var(--red); background: color-mix(in srgb, var(--fg) 5%, transparent); }
     .compare-probe-feedback { display: flex; flex-direction: column; gap: 5px; }
     .compare-probe-feedback:empty { display: none; }
     .compare-probe-detail {
@@ -746,7 +696,7 @@
       flex: 0 0 14px;
       width: 14px;
       height: 14px;
-      color: var(--accent, var(--red));
+      color: var(--red);
       font-family: inherit;
       font-size: 11px;
       font-weight: 700;
@@ -760,8 +710,8 @@
     }
     .compare-probe-start-anyway,
     .compare-probe-start-anyway:hover:not(:disabled) {
-      background: var(--accent, var(--red));
-      border: 1px solid var(--accent, var(--red));
+      background: var(--red);
+      border: 1px solid var(--red);
       color: var(--bg);
     }
     .compare-probe-start-anyway svg { color: currentColor; }
@@ -851,24 +801,6 @@
       55% { transform: rotate(380deg) scale(1.08); }
       100% { transform: rotate(360deg) scale(1); }
     }
-    /* Sequential waterfall layout — stacked rows, staggered left, flush right */
-    .compare-grid.sequential-layout {
-      display: flex !important;
-      flex-direction: column !important;
-      grid-template-columns: none !important;
-      gap: 4px;
-      overflow-y: auto;
-    }
-    .compare-grid.sequential-layout .compare-pane {
-      flex-shrink: 0;
-      min-height: 200px;
-      transition: margin-left 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.3s ease;
-    }
-    /* Herringbone diagonal cut on left side of sequential pane headers */
-    .compare-grid.sequential-layout .compare-pane .pane-header {
-      clip-path: polygon(20px 0, 100% 0, 100% 100%, 0 100%);
-      padding-left: 26px;
-    }
     .compare-pane {
       display: flex;
       flex-direction: column;
@@ -893,11 +825,11 @@
       transform-origin: left center;
     }
     .compare-pane.is-streaming {
-      border-color: color-mix(in srgb, var(--accent, var(--red)) 34%, var(--border));
-      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);
+      border-color: color-mix(in srgb, var(--red) 34%, var(--border));
+      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--red) 12%, transparent);
     }
     .compare-pane.is-streaming::before {
-      background: linear-gradient(90deg, transparent 0%, var(--accent, var(--red)) 35%, var(--red) 50%, var(--accent, var(--red)) 65%, transparent 100%);
+      background: linear-gradient(90deg, transparent 0%, var(--red) 35%, var(--red) 50%, var(--red) 65%, transparent 100%);
       animation: compare-pane-progress 1.25s linear infinite;
     }
     .compare-pane.is-awaiting-input {
@@ -946,14 +878,14 @@
     .pane-stats { flex: 1 1 auto; overflow: hidden; }
     .compare-header-bar button:hover,
     .compare-header-bar button:focus-visible {
-      background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent) !important;
-      border-color: color-mix(in srgb, var(--accent, var(--red)) 55%, var(--border)) !important;
+      background: color-mix(in srgb, var(--red) 14%, transparent) !important;
+      border-color: color-mix(in srgb, var(--red) 55%, var(--border)) !important;
       color: var(--fg) !important;
       opacity: 1 !important;
       outline: none;
     }
     .compare-header-bar button:active {
-      background: color-mix(in srgb, var(--accent, var(--red)) 24%, transparent) !important;
+      background: color-mix(in srgb, var(--red) 24%, transparent) !important;
       transform: scale(0.96);
     }
     .compare-more-wrap { position: relative; display: inline-flex; }
@@ -1005,8 +937,8 @@
       box-sizing: border-box; justify-content: flex-start; gap: 7px;
       padding: 7px 9px !important;
       border: 1px solid transparent !important; border-radius: 6px;
-      background: transparent !important; color: var(--fg) !important;
-      font-size: 11px; font-weight: 500; opacity: .72;
+      background: transparent !important;
+      font-size: 11px;
       transition: background .12s ease, opacity .12s ease, color .12s ease;
     }
     .compare-more-menu #compare-export-btn:hover,
@@ -1023,7 +955,7 @@
     .compare-more-menu #compare-export-btn svg,
     .compare-more-menu #compare-shuffle-btn svg,
     .compare-more-menu #compare-check-btn svg,
-    .compare-more-menu #compare-add-menu-btn svg { flex: 0 0 auto; opacity: .65; }
+    .compare-more-menu #compare-add-menu-btn svg { flex: 0 0 auto; }
     .compare-more-menu #compare-export-btn span,
     .compare-more-menu #compare-shuffle-btn span,
     .compare-more-menu #compare-check-btn span,
@@ -1119,8 +1051,8 @@
       transition: background 0.15s, border-color 0.15s, opacity 0.15s;
     }
     .pane-vote-btn:hover:not(:disabled) {
-      background: color-mix(in srgb, var(--accent, var(--fg)) 12%, var(--bg));
-      border-color: var(--accent, var(--fg));
+      background: color-mix(in srgb, var(--fg) 12%, var(--bg));
+      border-color: var(--fg);
     }
     .pane-vote-btn:disabled { cursor: not-allowed; }
     .pane-vote-label {
@@ -1196,7 +1128,7 @@
       opacity: 1;
       color: var(--fg);
       background: color-mix(in srgb, var(--fg) 9%, var(--bg));
-      border-color: color-mix(in srgb, var(--accent, var(--fg)) 45%, var(--border));
+      border-color: color-mix(in srgb, var(--fg) 45%, var(--border));
       outline: none;
     }
     .pane-mode-icon,
@@ -1211,9 +1143,9 @@
       border-color: color-mix(in srgb, var(--border) 70%, transparent);
     }
     .pane-mode-search {
-      color: color-mix(in srgb, var(--accent, var(--red)) 82%, var(--fg));
-      background: color-mix(in srgb, var(--accent, var(--red)) 10%, var(--bg));
-      border-color: color-mix(in srgb, var(--accent, var(--red)) 28%, var(--border));
+      color: color-mix(in srgb, var(--red) 82%, var(--fg));
+      background: color-mix(in srgb, var(--red) 10%, var(--bg));
+      border-color: color-mix(in srgb, var(--red) 28%, var(--border));
     }
     .pane-mode-research {
       color: color-mix(in srgb, #36c48f 82%, var(--fg));
@@ -1373,7 +1305,7 @@
     .compare-mode-hint:empty { display: none; }
     .compare-type-tabs .compare-mode-tab > svg,
     .compare-type-current > svg {
-      color: var(--accent, var(--red));
+      color: var(--red);
     }
 
     .compare-mode-tabs {
@@ -1442,11 +1374,11 @@
     .compare-vote-tie { opacity: 0.7; }
     .compare-rematch-btn {
       display: flex; align-items: center; gap: 6px; margin-left: 8px;
-      border-color: color-mix(in srgb, var(--accent, var(--red)) 60%, var(--border));
-      background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);
+      border-color: color-mix(in srgb, var(--red) 60%, var(--border));
+      background: color-mix(in srgb, var(--red) 14%, transparent);
       color: var(--fg); opacity: 1; font-weight: 600;
     }
-    .compare-rematch-btn:hover { border-color: var(--accent, var(--red)); background: color-mix(in srgb, var(--accent, var(--red)) 24%, transparent); }
+    .compare-rematch-btn:hover { border-color: var(--red); background: color-mix(in srgb, var(--red) 24%, transparent); }
     /* Preview button accent in pane header */
     .pane-preview-btn.active { color: var(--red); }
     /* Full-pane iframe for HTML preview */
@@ -1457,9 +1389,6 @@
       border-radius: 0 0 8px 8px;
       background: #fff;
     }
-    /* ---- Add-pane "+" button in pane header (last pane only) ---- */
-    .pane-add-btn { display: none !important; font-size: 16px; font-weight: 600; }
-    .compare-pane:last-child .pane-add-btn { display: flex !important; }
     /* Dropdown for adding a pane */
     .add-pane-dropdown {
       position: absolute;
@@ -1518,11 +1447,11 @@
       opacity: 0.7; background: color-mix(in srgb, var(--fg) 6%, transparent);
     }
     .compare-blind-toggle.active {
-      opacity: 1; color: var(--accent, var(--red)); border-color: var(--accent, var(--red));
-      background: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent);
+      opacity: 1; color: var(--red); border-color: var(--red);
+      background: color-mix(in srgb, var(--red) 10%, transparent);
     }
     .compare-blind-toggle.active > svg {
-      color: var(--accent, var(--red));
+      color: var(--red);
     }
     .compare-save-toggle.active {
       opacity: 1; color: var(--color-save-green); border-color: var(--color-save-green);
@@ -1537,8 +1466,8 @@
       background: rgba(224, 160, 80, 0.1);
     }
     .compare-parallel-toggle.active {
-      color: var(--accent, var(--red)); border-color: var(--accent, var(--red));
-      background: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent);
+      color: var(--red); border-color: var(--red);
+      background: color-mix(in srgb, var(--red) 10%, transparent);
     }
     @media (max-width: 520px) {
       .compare-toggle-label { display: none; }
@@ -1593,8 +1522,8 @@
       #compare-add-btn {
         padding: 3px 6px;
       }
-      /* Save space so the header buttons fit on one row: tighter padding +
-         smaller labels (icons kept full size). (Score now lives in the vote bar.) */
+      /* Save space so the header buttons fit on one row: tighter padding,
+         smaller labels, icons kept full size. */
       .compare-header-bar button { padding: 3px 5px !important; }
       .compare-header-bar #compare-check-btn > span,
       .compare-header-bar #compare-add-btn > span {
@@ -1660,7 +1589,6 @@
          MUST cap its height to the viewport so the dropdown doesn't run
          past the bottom of the screen. */
       #compare-model-overlay .modal-content {
-        max-height: 85dvh !important;
         max-height: 85vh !important;
         overflow: hidden !important;
       }
@@ -1702,11 +1630,10 @@
     /* ── Print / PDF Export ── */
     @media print {
       body { background: #fff !important; color: #000 !important; }
-      #sidebar, .sidebar, #icon-rail, .hamburger-btn, #sidebar-backdrop, .chat-input-bar, .input-bar-wrapper,
+      #sidebar, .sidebar, #icon-rail, .hamburger-btn, #sidebar-backdrop, .chat-input-bar,
       #welcome-screen, .chat-top-bar, .chat-meta-overlay, .msg-footer,
       .modal, .toast, .overflow-wrapper, .mode-toggle, .incognito-btn,
-      button, .dropdown, .session-dropdown,
-      .agent-tool-spinner, .agent-thread-node.running { display: none !important; }
+      button, .dropdown, .session-dropdown, .agent-thread-node.running { display: none !important; }
       main.chat-container { width: 100% !important; margin: 0 !important; padding: 0 !important; max-height: none !important; overflow: visible !important; }
       #chat-history { max-height: none !important; overflow: visible !important; height: auto !important; padding: 0 !important; }
       .msg { break-inside: avoid; page-break-inside: avoid; border: none !important; box-shadow: none !important; }
@@ -1724,25 +1651,10 @@
     }
 
 
-/* ── Components (from style.css) ── */
-
-/* Self-hosted Fira Code font */
-@font-face { font-family: 'Fira Code'; font-weight: 300; font-style: normal; font-display: swap; src: url('/static/fonts/FiraCode-Light.woff2') format('woff2'); }
-@font-face { font-family: 'Fira Code'; font-weight: 400; font-style: normal; font-display: swap; src: url('/static/fonts/FiraCode-Regular.woff2') format('woff2'); }
-@font-face { font-family: 'Fira Code'; font-weight: 600; font-style: normal; font-display: swap; src: url('/static/fonts/FiraCode-SemiBold.woff2') format('woff2'); }
-
-/* Scrollbar styling */
-
 /* Code block styling */
 pre, code, .hljs {
   font-size: 11px;
   line-height: 1.5;
-}
-
-/* WebKit (Chrome, Edge, Safari) */
-/* Utility class for red text */
-.red-text {
-  color: var(--red);
 }
 
 /* Internal chat links (search results, session references) */
@@ -1760,17 +1672,17 @@ a.chat-link:hover {
 a.chat-link[href^="#email-"] {
   display: inline;
   padding: 1px 5px;
-  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 34%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 34%, transparent);
   border-radius: 5px;
-  background: color-mix(in srgb, var(--accent, var(--red)) 8%, transparent);
+  background: color-mix(in srgb, var(--red) 8%, transparent);
   color: var(--fg);
   font-weight: 600;
   border-bottom-style: solid;
 }
 a.chat-link[href^="#email-"]:hover {
   opacity: 1;
-  background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);
-  border-color: color-mix(in srgb, var(--accent, var(--red)) 55%, transparent);
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+  border-color: color-mix(in srgb, var(--red) 55%, transparent);
 }
 
 a.chat-link[href^="#notes-more-"],

@@ -12,6 +12,7 @@ import pytest
 from fastapi import HTTPException
 
 from tests.helpers.import_state import clear_module
+from tests.helpers.routes import route_endpoint
 
 
 def _real_core_package():
@@ -77,8 +78,7 @@ def test_admin_password_reset_route(admin, password, status):
     auth.get_username_for_token.return_value = 'admin'
     auth.is_admin.return_value = admin
     auth.reset_user_password.return_value = True
-    endpoint = next(route.endpoint for route in setup_auth_routes(auth).routes
-                    if route.path == '/api/auth/users/{username}/password')
+    endpoint = route_endpoint(setup_auth_routes(auth), '/api/auth/users/{username}/password', 'PUT')
     request = SimpleNamespace(cookies={'odysseus_session': 'token'})
     call = endpoint('alice', ResetUserPasswordRequest(new_password=password), request)
     if status:
@@ -141,10 +141,7 @@ def _change_password_endpoint(auth_manager):
     from routes.auth_routes import ChangePasswordRequest, setup_auth_routes
 
     router = setup_auth_routes(auth_manager)
-    for route in router.routes:
-        if getattr(route, "path", None) == "/api/auth/change-password":
-            return route.endpoint, ChangePasswordRequest
-    raise AssertionError("change-password route not found")
+    return route_endpoint(router, "/api/auth/change-password", "POST"), ChangePasswordRequest
 
 
 def _login_endpoint(auth_manager):
@@ -153,10 +150,7 @@ def _login_endpoint(auth_manager):
     from routes.auth_routes import LoginRequest, setup_auth_routes
 
     router = setup_auth_routes(auth_manager)
-    for route in router.routes:
-        if getattr(route, "path", None) == "/api/auth/login":
-            return route.endpoint, LoginRequest
-    raise AssertionError("login route not found")
+    return route_endpoint(router, "/api/auth/login", "POST"), LoginRequest
 
 
 def test_login_route_does_not_set_cookie_when_trusted_session_rejects_stale_user(monkeypatch):

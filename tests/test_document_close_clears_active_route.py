@@ -26,11 +26,13 @@ from tests.helpers.import_state import clear_fake_database_modules
 clear_fake_database_modules()
 
 import core.database as cdb
-import routes.document_routes as droutes
+import routes.document.document_routes as droutes
 from core.database import Document
 from core.database import Session as DbSession
-from routes.document_helpers import DocumentPatch
+from routes.document.document_helpers import DocumentPatch
 from src.agent_tools.document_tools import set_active_document, get_active_document
+from tests.helpers.route_call import with_db
+from tests.helpers.routes import route_endpoint
 
 _TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _ENGINE = create_engine(
@@ -48,11 +50,7 @@ def _req():
 
 
 def _endpoint(method, path):
-    router = droutes.setup_document_routes(MagicMock(), None)
-    for r in router.routes:
-        if getattr(r, "path", None) == path and method in getattr(r, "methods", set()):
-            return r.endpoint
-    raise RuntimeError(f"{method} {path} not found")
+    return with_db(route_endpoint(droutes.setup_document_routes(MagicMock(), None), path, method))
 
 
 def _make_doc():
@@ -76,7 +74,7 @@ async def test_patch_unlink_clears_active_document():
     patch_document = _endpoint("PATCH", "/api/document/{doc_id}")
     doc_id = _make_doc()
     set_active_document(doc_id)
-    await patch_document(_req(), doc_id, DocumentPatch(session_id=""))
+    patch_document(_req(), doc_id, DocumentPatch(session_id=""))
     assert get_active_document() is None
 
 
@@ -84,7 +82,7 @@ async def test_delete_clears_active_document():
     delete_document = _endpoint("DELETE", "/api/document/{doc_id}")
     doc_id = _make_doc()
     set_active_document(doc_id)
-    await delete_document(_req(), doc_id)
+    delete_document(_req(), doc_id)
     assert get_active_document() is None
 
 
@@ -93,5 +91,5 @@ async def test_unlinking_a_different_doc_leaves_pointer():
     active_id = _make_doc()
     other_id = _make_doc()
     set_active_document(active_id)
-    await patch_document(_req(), other_id, DocumentPatch(session_id=""))
+    patch_document(_req(), other_id, DocumentPatch(session_id=""))
     assert get_active_document() == active_id

@@ -1,16 +1,9 @@
 """Reasoning effort for utility-role LLM calls.
 
-One owner for the rule.  Precedence for a utility call:
-
-1. an explicit caller effort (never touched here);
-2. the ``utility_reasoning_effort`` setting, sent only to routes on the
-   utility chain (the Utility endpoint/model plus its fallbacks, matched by
-   ``(url, model)``);
-3. the chat session's own effort (``thinking_mode == "effort:<level>"``), when
-   the call is made for a chat session and its route is that session's route.
-
-Every level is validated against what the model advertises; a model without
-evidence gets nothing.  Calls with no session only ever use (2).
+Precedence: an explicit caller effort; then the ``utility_reasoning_effort``
+setting, for routes on the utility chain (matched by ``(url, model)``); then
+the chat session's own ``effort:<level>`` when the call uses that session's
+route. Each level must be one the model advertises.
 """
 from typing import Optional
 

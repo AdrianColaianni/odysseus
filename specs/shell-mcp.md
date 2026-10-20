@@ -182,7 +182,7 @@ Foreground startup retirement retains unreadable/malformed stores. With an exist
 
 ## Image MCP Ownership
 
-`mcp_servers/image_gen_server.py` reads the hidden trusted-dispatch `_odysseus_owner`, trims blank values to null, stamps `GalleryImage.owner`, and registers a fresh image after gallery commit when an owner exists. There is no image-owner environment fallback. `src/tool_execution.py` removes caller-reserved attribution fields before injecting server owner context for legacy and qualified image calls; direct fallbacks retain the trusted owner. Generated-file access uses the independent fail-closed policy in `gallery-editor-media.md`.
+`mcp_servers/image_gen_server.py` reads the hidden trusted-dispatch `_odysseus_owner`, trims blank values to null, and passes it to `src.ai_interaction.do_generate_image`, which stamps `GalleryImage.owner` and registers the image when an owner exists. There is no image-owner environment fallback. `src/tool_execution.py` removes caller-reserved attribution fields before injecting server owner context for legacy and qualified image calls; direct fallbacks retain the trusted owner. Generated-file access uses the independent fail-closed policy in `gallery-editor-media.md`.
 
 ## Current Gaps
 

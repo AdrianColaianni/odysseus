@@ -1,25 +1,8 @@
-/* 12-gallery - part of the former static/style.css.
- *
- * The stylesheet is split by area, but the split is mechanical: rules were
- * moved verbatim and NOT regrouped. The numeric prefix is the load order, and
- * that order is what preserves the cascade. A rule sits in the file its
- * original position fell into, so an area's rules are not all in its file and
- * a file is not only that area's rules.
- *
- * Do not reorder the <link> tags in static/index.html, and do not move a rule
- * between files: with 1,151 redeclarations and 1,886 !important in this
- * cascade, either can change which declaration wins.
- *
- * static/index.html and the PRECACHE list in static/sw.js must agree on this
- * order. tests/test_static_stylesheet_manifest.py and
- * tests/test_css_computed_style_snapshot.py fail if that drifts.
- */
 .research-synapse.rs-phase-reading .rs-phase-chip,
 .research-synapse.rs-phase-analyzing .rs-phase-chip { color: var(--gold, #d4a72c); }
 .research-synapse.rs-phase-writing .rs-phase-chip { color: var(--color-success, #4caf50); }
 
 @media (prefers-reduced-motion: reduce) {
-  .research-synapse .rs-live-dot,
   .research-synapse .rs-pulse,
   .research-synapse .rs-node-new,
   .research-synapse .rs-node-expanded,
@@ -124,9 +107,6 @@
   justify-content: center;
   white-space: nowrap;
   line-height: 1;
-}
-.gallery-tab {
-  gap: 6px;
 }
 
 @container (max-width: 360px) {
@@ -272,8 +252,8 @@
   transition: opacity 0.12s, background 0.12s;
   z-index: 2;
   backdrop-filter: blur(4px);
-  /* Plain "…" text — the previous SVG was rendering as a flat black
-     block on some themes when its currentColor didn't contrast. */
+  /* Plain "…" text: an SVG renders as a flat black block on themes where
+     currentColor does not contrast. */
   font-size: 16px;
   line-height: 1;
   font-weight: 600;
@@ -320,11 +300,6 @@
   font-size: 11px;
   opacity: 0.55;
 }
-.gallery-album-card-add {
-  border-style: dashed;
-  opacity: 0.7;
-}
-.gallery-album-card-add:hover { opacity: 1; }
 .gallery-album-action-tile {
   background: color-mix(in srgb, var(--fg) 3%, var(--bg));
 }
@@ -351,7 +326,7 @@
 .gallery-editor-heading > svg { opacity: 0.6; flex: 0 0 auto; }
 /* "vision model" link in the AI-tagging description → opens Settings. */
 .ge-vision-link {
-  color: var(--accent, var(--red));
+  color: var(--red);
   text-decoration: underline;
   text-underline-offset: 2px;
   cursor: pointer;
@@ -365,8 +340,8 @@
   vertical-align: middle;
   padding: 1px 5px;
   border-radius: 4px;
-  color: var(--accent, var(--red));
-  background: color-mix(in srgb, var(--accent, var(--red)) 15%, transparent);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 15%, transparent);
   position: relative;
   top: -1px;
 }
@@ -417,13 +392,13 @@
   cursor: pointer;
   overflow: hidden;
 }
-.gallery-editor-template-option svg { color: var(--accent, var(--red)); }
+.gallery-editor-template-option svg { color: var(--red); }
 .gallery-editor-template-option:hover,
 .gallery-editor-template-option:focus-visible {
   outline: none;
-  border-color: var(--accent, var(--red));
-  color: var(--accent, var(--red));
-  background: color-mix(in srgb, var(--accent, var(--red)) 7%, var(--panel));
+  border-color: var(--red);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 7%, var(--panel));
 }
 .gallery-editor-template-option span {
   width: 100%;
@@ -579,9 +554,9 @@
 }
 #gallery-editor-drafts-select { margin-left: auto; flex-shrink: 0; }
 #gallery-editor-drafts-select.active {
-  background: color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
-  border-color: var(--accent, var(--red));
-  color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+  border-color: var(--red);
+  color: var(--red);
 }
 /* Graceful exit when a project card is deleted — fade + shrink before re-render. */
 .gallery-editor-draft-card.gallery-draft-removing {
@@ -651,8 +626,8 @@
 .gallery-drafts-view-toggle button:hover { color: var(--fg); }
 .gallery-drafts-view-toggle button.active {
   height: 22px;
-  color: var(--accent, var(--red));
-  background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
 }
 .gallery-editor-drafts-grid.list-view .gallery-editor-draft-thumb {
   width: 44px;
@@ -692,7 +667,7 @@
   text-align: left;
 }
 .gallery-editor-draft-card:hover {
-  border-color: var(--accent, var(--red));
+  border-color: var(--red);
   background: color-mix(in srgb, var(--panel) 90%, transparent);
 }
 .gallery-editor-draft-thumb {

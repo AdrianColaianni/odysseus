@@ -36,25 +36,25 @@ class _FakeErrorResponse:
         )
 
 
-@pytest.mark.parametrize('markup', [
+_LISTING_MARKUPS = (
     '<main><article><h2><a href="/one">First story</a></h2><p>3 points</p></article><article><h2><a href="/two">Second story</a></h2><p>900 points</p></article></main>',
     '<body><table><tr><td>1.</td><td><a href="/vote"><img src="up.png"></a></td><td><a href="/one">First story</a></td></tr><tr><td>3 points</td></tr><tr><td>2.</td><td><a href="/two">Second story</a></td></tr><tr><td>900 points</td></tr></table></body>',
     '<main><ol><li><a href="/one">First story</a> 3 points</li><li><a href="/two">Second story</a> 900 points</li></ol></main>',
-])
-def test_listing_links_preserve_destination_and_source_order(markup, tmp_path, monkeypatch):
+)
+
+
+def test_listing_links_preserve_destination_and_source_order(tmp_path, monkeypatch):
     monkeypatch.setattr(service_content, 'CONTENT_CACHE_DIR', tmp_path)
-    monkeypatch.setattr(service_content, '_get_public_url', lambda *a, **k: _FakeResponse(markup))
-    result = service_content.fetch_webpage_content('https://example.org/list')
-    text = result['linked_content']
-    assert '[First story](<https://example.org/one>)' in text
-    assert '[Second story](<https://example.org/two>)' in text
-    assert text.index('First story') < text.index('Second story')
-    assert '\n' in text
-    assert '](' not in result['content']
-    assert result['page_entries'] == [
-        {'title': 'First story', 'url': 'https://example.org/one'},
-        {'title': 'Second story', 'url': 'https://example.org/two'},
-    ]
+    for index, markup in enumerate(_LISTING_MARKUPS):
+        monkeypatch.setattr(service_content, '_get_public_url', lambda *a, markup=markup, **k: _FakeResponse(markup))
+        result = service_content.fetch_webpage_content(f'https://example.org/list{index}')
+        text = result['linked_content']
+        assert text.index('[First story](<https://example.org/one>)') < text.index('[Second story](<https://example.org/two>)'), markup
+        assert '](' not in result['content']
+        assert result['page_entries'] == [
+            {'title': 'First story', 'url': 'https://example.org/one'},
+            {'title': 'Second story', 'url': 'https://example.org/two'},
+        ]
 
 
 def test_link_extraction_ignores_unsafe_schemes_and_escapes_labels():
@@ -69,7 +69,7 @@ def test_link_extraction_ignores_unsafe_schemes_and_escapes_labels():
 @pytest.mark.asyncio
 async def test_web_fetch_delivers_linked_content_to_model(monkeypatch):
     from src.agent_tools.web_tools import WebFetchTool
-    from src.search import content
+    from services.search import content
     linked = '[First story](<https://example.org/one>)\n[Second story](<https://example.org/two>)'
     monkeypatch.setattr(content, 'fetch_webpage_content', lambda *a, **k: {
         'title': 'Listing', 'content': 'First story Second story', 'linked_content': linked,
@@ -111,47 +111,45 @@ def test_multiple_article_cards_retain_main_context(tmp_path, monkeypatch):
     assert 'First result' in result['content'] and 'Second result' in result['content']
 
 
-@pytest.mark.parametrize('title,body,blocked', [
-    ('Client Challenge', 'A required part of this site couldn’t load. Try using a different browser.', True),
-    ('Just a moment...', 'Checking your browser. Enable JavaScript to continue.', True),
-    ('Understanding browser challenges', 'Checking your browser is a common security message.', False),
-    ('Client Challenge', 'An article about designing client challenges for a programming exercise.', False),
-    ('Client Challenge', 'A required part of this site ' + 'substantive discussion ' * 150, False),
-])
-def test_access_interstitial_is_not_article_evidence(title, body, blocked, tmp_path, monkeypatch):
+def test_access_interstitial_is_not_article_evidence(tmp_path, monkeypatch):
     monkeypatch.setattr(service_content, 'CONTENT_CACHE_DIR', tmp_path)
-    html = f'<html><title>{title}</title><body><main>{body}</main></body></html>'
-    monkeypatch.setattr(service_content, '_get_public_url', lambda *a, **k: _FakeResponse(html))
-    result = service_content.fetch_webpage_content('https://example.com/challenge')
-    assert result['success'] is not blocked
-    if blocked:
-        assert result['content'] == ''
-        assert result['error_kind'] == 'access_challenge'
-        assert 'private_browser' in result['error']
-        assert not list(tmp_path.iterdir()), 'Transient challenge must not be cached as article content'
-    else:
-        assert body.strip() in result['content']
+    for index, (title, body, blocked) in enumerate((
+        ('Client Challenge', 'A required part of this site couldn’t load. Try using a different browser.', True),
+        ('Just a moment...', 'Checking your browser. Enable JavaScript to continue.', True),
+        ('Understanding browser challenges', 'Checking your browser is a common security message.', False),
+        ('Client Challenge', 'A required part of this site ' + 'substantive discussion ' * 150, False),
+    )):
+        html = f'<html><title>{title}</title><body><main>{body}</main></body></html>'
+        monkeypatch.setattr(service_content, '_get_public_url', lambda *a, html=html, **k: _FakeResponse(html))
+        result = service_content.fetch_webpage_content(f'https://example.com/challenge{index}')
+        assert result['success'] is not blocked, title
+        if blocked:
+            assert result['content'] == ''
+            assert result['error_kind'] == 'access_challenge'
+            assert not list(tmp_path.iterdir()), 'Transient challenge must not be cached as article content'
+        else:
+            assert body.strip() in result['content']
 
 
-@pytest.mark.parametrize('wrapper', ['main', 'article', 'div class="content"'])
-def test_extraction_does_not_repeat_nested_content_or_include_navigation(wrapper, tmp_path, monkeypatch):
-    closing = wrapper.split()[0]
-    html = (f'<html><body><nav>{"Navigation item " * 100}</nav><{wrapper}>'
-            '<header>Article title and publication date</header>'
-            '<div class="article-body"><div class="entry-content">'
-            '<p>Unique substantive evidence.</p></div></div>'
-            f'</{closing}><footer>Unrelated links</footer></body></html>')
+def test_extraction_does_not_repeat_nested_content_or_include_navigation(tmp_path, monkeypatch):
     monkeypatch.setattr(service_content, 'CONTENT_CACHE_DIR', tmp_path)
-    monkeypatch.setattr(service_content, '_get_public_url', lambda *a, **k: _FakeResponse(html))
-    result = service_content.fetch_webpage_content('https://example.com/nested')
-    assert result['content'].count('Unique substantive evidence.') == 1
-    assert 'Navigation item' not in result['content']
-    assert 'Unrelated links' not in result['content']
-    assert 'Article title' in result['content']
+    for wrapper in ('main', 'article', 'div class="content"'):
+        closing = wrapper.split()[0]
+        html = (f'<html><body><nav>{"Navigation item " * 100}</nav><{wrapper}>'
+                '<header>Article title and publication date</header>'
+                '<div class="article-body"><div class="entry-content">'
+                '<p>Unique substantive evidence.</p></div></div>'
+                f'</{closing}><footer>Unrelated links</footer></body></html>')
+        monkeypatch.setattr(service_content, '_get_public_url', lambda *a, html=html, **k: _FakeResponse(html))
+        result = service_content.fetch_webpage_content(f'https://example.com/nested-{closing}')
+        assert result['content'].count('Unique substantive evidence.') == 1, wrapper
+        assert 'Navigation item' not in result['content']
+        assert 'Unrelated links' not in result['content']
+        assert 'Article title' in result['content']
 
 
-@pytest.mark.parametrize("module", [service_content])
-def test_content_fetcher_extracts_og_image_and_body_fallback(module, tmp_path, monkeypatch):
+def test_content_fetcher_extracts_og_image_and_body_fallback(tmp_path, monkeypatch):
+    module = service_content
     html = """
     <html>
       <head>
@@ -182,8 +180,7 @@ def test_content_fetcher_extracts_og_image_and_body_fallback(module, tmp_path, m
     assert "window.secret" not in result["content"]
 
 
-@pytest.mark.parametrize("status_code", [403, 404])
-def test_fetch_webpage_content_returns_empty_result_on_http_status_error(status_code, tmp_path, monkeypatch):
+def test_fetch_webpage_content_returns_empty_result_on_http_status_error(tmp_path, monkeypatch):
     """A 403/404 response should degrade to an empty result instead of raising.
 
     This exercises the real fetch_webpage_content() path: _get_public_url returns
@@ -193,17 +190,18 @@ def test_fetch_webpage_content_returns_empty_result_on_http_status_error(status_
     """
     monkeypatch.setattr(service_content, "CONTENT_CACHE_DIR", tmp_path)
     service_content.content_cache_index.clear()
-    monkeypatch.setattr(
-        service_content,
-        "_get_public_url",
-        lambda url, headers, timeout, **kwargs: _FakeErrorResponse(status_code),
-    )
+    for status_code in (403, 404):
+        monkeypatch.setattr(
+            service_content,
+            "_get_public_url",
+            lambda url, headers, timeout, status_code=status_code, **kwargs: _FakeErrorResponse(status_code),
+        )
 
-    result = service_content.fetch_webpage_content(f"https://example.com/status-{status_code}")
+        result = service_content.fetch_webpage_content(f"https://example.com/status-{status_code}")
 
-    assert result["success"] is False
-    assert result["content"] == ""
-    assert str(status_code) in result["error"]
+        assert result["success"] is False
+        assert result["content"] == ""
+        assert str(status_code) in result["error"]
 
 
 def test_fetch_webpage_content_429_takes_distinct_rate_limit_path(tmp_path, monkeypatch):

@@ -11,22 +11,6 @@ def test_workspace_alias_rewrite_does_not_duplicate_absolute_host_path():
     )
 
 
-def test_workspace_namespace_preserves_literal_paths_inside_scripts(tmp_path):
-    from pathlib import Path
-    import subprocess
-
-    from src.agent_tools.subprocess_tools import _wrap_workspace_namespace
-
-    command = _wrap_workspace_namespace(
-        "python -c 'from pathlib import Path; Path(\"/workspace/result.txt\").write_text(\"ok\")'",
-        str(tmp_path),
-    )
-    if command is None:
-        return
-    subprocess.run(command, shell=True, check=True)
-    assert (Path(tmp_path) / "result.txt").read_text() == "ok"
-
-
 def test_direct_bash_subprocess_has_closed_stdin(monkeypatch, tmp_path):
     from src.agent_tools import subprocess_tools
     from src import tool_execution

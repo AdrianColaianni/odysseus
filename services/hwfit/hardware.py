@@ -18,23 +18,19 @@ CACHE_TTL = 24 * 3600  # 24 h — hardware probes are user-initiated via the Res
                        # half-hour during a long session.
 
 
-_remote_host = None  # set by detect_system(host=...)
-_remote_port = None  # set by detect_system(ssh_port=...)
-_remote_platform = None  # set by detect_system(platform=...): "windows", "linux", "termux"
 _last_gpu_error = None  # set by _detect_nvidia() when nvidia-smi errors (driver mismatch, etc.)
 
 
-def _run(cmd):
+def _run(cmd, remote=None):
+    """Run cmd locally, or over SSH when remote is a (host, port) pair."""
     try:
-        if _remote_host:
-            # Run command on remote host via SSH
+        if remote:
             if isinstance(cmd, list):
                 cmd_str = shlex.join(str(c) for c in cmd)
             else:
                 cmd_str = cmd
             r = run_ssh_command(
-                _remote_host,
-                _remote_port,
+                *remote,
                 cmd_str,
                 timeout=15,
                 connect_timeout=5,
@@ -81,19 +77,20 @@ def _group_gpus(gpus):
     return out
 
 
-def _detect_nvidia():
+def _detect_nvidia(remote=None):
     global _last_gpu_error
     _last_gpu_error = None
-    out = _run(["nvidia-smi", "--query-gpu=memory.total,name", "--format=csv,noheader,nounits"])
+    out = _run(["nvidia-smi", "--query-gpu=memory.total,name", "--format=csv,noheader,nounits"], remote)
     # Fallback: a non-interactive shell (or WSL) often has a minimal PATH
     # that omits where nvidia-smi lives (/usr/bin, /usr/local/cuda/bin,
     # /usr/lib/wsl/lib), so the first call silently returns nothing →
     # "No GPU" on machines that DO have GPUs.
     # Retry through a login shell with the common CUDA bin dirs on PATH.
-    if not out and _remote_host:
+    if not out and remote:
         out = _run(
             f"bash -lc '{SSH_PATH_OVERRIDE}"
-            "nvidia-smi --query-gpu=memory.total,name --format=csv,noheader,nounits'"
+            "nvidia-smi --query-gpu=memory.total,name --format=csv,noheader,nounits'",
+            remote,
         )
     # Last resort: call nvidia-smi by absolute path. Some hosts have a login
     # shell that isn't bash (or a profile that errors), so the bash -lc retry
@@ -104,10 +101,10 @@ def _detect_nvidia():
         for _p in NVIDIA_PATH_CANDIDATES:
             # Use list form so subprocess.run (local) resolves the absolute path
             # correctly instead of treating the whole string as an executable name.
-            if _remote_host:
-                out = _run(f"{_p} --query-gpu=memory.total,name --format=csv,noheader,nounits")
+            if remote:
+                out = _run(f"{_p} --query-gpu=memory.total,name --format=csv,noheader,nounits", remote)
             else:
-                out = _run([_p, "--query-gpu=memory.total,name", "--format=csv,noheader,nounits"])
+                out = _run([_p, "--query-gpu=memory.total,name", "--format=csv,noheader,nounits"], remote)
             if out:
                 break
     if not out:
@@ -149,7 +146,7 @@ def _detect_nvidia():
             # Unified-memory CUDA box: report the GPU backed by system RAM so the
             # Cookbook recommends models and serving works. The pool is shared
             # (not per-GPU discrete VRAM), so report the RAM total once.
-            ram_gb = round(_get_ram_gb(), 1)
+            ram_gb = round(_get_ram_gb(remote), 1)
             gpus = [{"index": g["index"], "name": g["name"], "vram_gb": ram_gb} for g in unified]
             return {
                 "gpu_name": gpus[0]["name"],
@@ -202,23 +199,17 @@ def classify_amd_gfx(gfx):
     return gfx, "unknown"
 
 
-def _detect_amd():
+def _detect_amd(remote=None):
     """Detect AMD GPUs. Handles both discrete cards (with mem_info_vram_total)
     and APUs / unified-memory SoCs like Strix Halo (which expose
     mem_info_vis_vram_total instead, or only mem_info_gtt_total)."""
     def _read(path):
-        if _remote_host:
-            val = _run(["cat", path])
-            return val.strip() if val else None
-        try:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                return f.read().strip()
-        except Exception:
-            return None
+        val = _read_file(path, remote)
+        return val.strip() if val else None
 
     def _list_drm_cards():
-        if _remote_host:
-            out = _run(["ls", "/sys/class/drm"])
+        if remote:
+            out = _run(["ls", "/sys/class/drm"], remote)
             if not out:
                 return []
             return [e for e in out.split() if e.startswith("card") and "-" not in e]
@@ -234,7 +225,7 @@ def _detect_amd():
         line (CPU agents report a brand string, not a gfx target), so the first
         gfx match is the GPU ISA. Returns (gfx, family) — see classify_amd_gfx.
         """
-        info = _run(["rocminfo"]) or _run(["/opt/rocm/bin/rocminfo"]) or ""
+        info = _run(["rocminfo"], remote) or _run(["/opt/rocm/bin/rocminfo"], remote) or ""
         m = re.search(r"gfx\d+[a-f]?", info)
         return classify_amd_gfx(m.group(0) if m else "")
 
@@ -290,8 +281,8 @@ def _detect_amd():
             # host misleads downstream env-var pinning
             # (HIP_VISIBLE_DEVICES is a no-op there).
             "backend": (
-                "rocm" if (_run(["which", "rocminfo"]) or _run(["which", "hipconfig"]))
-                else ("vulkan" if _run(["which", "vulkaninfo"]) else "rocm")
+                "rocm" if (_run(["which", "rocminfo"], remote) or _run(["which", "hipconfig"], remote))
+                else ("vulkan" if _run(["which", "vulkaninfo"], remote) else "rocm")
             ),
             "unified_memory": is_apu,
             # AMD ISA/family so downstream can tell datacenter Instinct (CDNA,
@@ -306,7 +297,7 @@ def _detect_amd():
         return None
 
 
-def _detect_apple_silicon():
+def _detect_apple_silicon(remote=None):
     """Detect Apple Silicon (M-series) GPUs.
 
     Macs have no discrete VRAM — the GPU shares the system's unified memory.
@@ -319,10 +310,10 @@ def _detect_apple_silicon():
     (platform.system()=="Darwin") and over SSH (uname -s == Darwin).
     """
     # Gate to macOS — locally via platform, remotely via uname.
-    if _remote_host:
-        if "darwin" not in (_run(["uname", "-s"]) or "").lower():
+    if remote:
+        if "darwin" not in (_run(["uname", "-s"], remote) or "").lower():
             return None
-        arch = (_run(["uname", "-m"]) or "").lower()
+        arch = (_run(["uname", "-m"], remote) or "").lower()
     else:
         if platform.system() != "Darwin":
             return None
@@ -335,10 +326,10 @@ def _detect_apple_silicon():
 
     # Chip name, e.g. "Apple M4 Max" — carries the Pro/Max/Ultra variant that
     # the fit bandwidth table keys off of.
-    brand = (_run(["sysctl", "-n", "machdep.cpu.brand_string"]) or "Apple Silicon").strip()
+    brand = (_run(["sysctl", "-n", "machdep.cpu.brand_string"], remote) or "Apple Silicon").strip()
 
     # Total unified memory in bytes.
-    memsize = _run(["sysctl", "-n", "hw.memsize"])
+    memsize = _run(["sysctl", "-n", "hw.memsize"], remote)
     try:
         total_gb = int(memsize) / (1024**3) if memsize else 0.0
     except ValueError:
@@ -373,9 +364,9 @@ def _detect_apple_silicon():
                 return None
         return None
 
-    gpu_cores = _parse_apple_gpu_cores(_run(["system_profiler", "SPDisplaysDataType", "-json"]))
+    gpu_cores = _parse_apple_gpu_cores(_run(["system_profiler", "SPDisplaysDataType", "-json"], remote))
     if gpu_cores is None:
-        gpu_cores = _parse_apple_gpu_cores(_run(["system_profiler", "SPDisplaysDataType"]))
+        gpu_cores = _parse_apple_gpu_cores(_run(["system_profiler", "SPDisplaysDataType"], remote))
 
     # Usable GPU budget. macOS lets Metal use most of unified memory, but the
     # default working-set limit scales with RAM: small machines have to keep
@@ -390,7 +381,7 @@ def _detect_apple_silicon():
     else:
         frac = 0.80
     vram_gb = round(total_gb * frac, 1)
-    wired = _run(["sysctl", "-n", "iogpu.wired_limit_mb"])
+    wired = _run(["sysctl", "-n", "iogpu.wired_limit_mb"], remote)
     try:
         wired_mb = int(wired) if wired else 0
         if wired_mb > 0:
@@ -416,10 +407,10 @@ def _detect_apple_silicon():
     return info
 
 
-def _read_file(path):
+def _read_file(path, remote=None):
     """Read a file, locally or via SSH."""
-    if _remote_host:
-        return _run(["cat", path])
+    if remote:
+        return _run(["cat", path], remote)
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             return f.read()
@@ -427,9 +418,9 @@ def _read_file(path):
         return None
 
 
-def _parse_meminfo():
+def _parse_meminfo(remote=None):
     """Parse /proc/meminfo into a dict of key -> KB values."""
-    text = _read_file("/proc/meminfo")
+    text = _read_file("/proc/meminfo", remote)
     if not text:
         return {}
     result = {}
@@ -445,14 +436,14 @@ def _parse_meminfo():
     return result
 
 
-def _get_ram_gb():
-    meminfo = _parse_meminfo()
+def _get_ram_gb(remote=None):
+    meminfo = _parse_meminfo(remote)
     if "MemTotal" in meminfo:
         return meminfo["MemTotal"] / (1024**2)
 
     # os.sysconf only exists on Unix; on Windows it's absent (AttributeError)
     # and these constants aren't defined — guard so this never raises there.
-    if not _remote_host and hasattr(os, "sysconf") and "SC_PHYS_PAGES" in getattr(os, "sysconf_names", {}):
+    if not remote and hasattr(os, "sysconf") and "SC_PHYS_PAGES" in getattr(os, "sysconf_names", {}):
         try:
             pages = os.sysconf("SC_PHYS_PAGES")
             page_size = os.sysconf("SC_PAGE_SIZE")
@@ -463,7 +454,7 @@ def _get_ram_gb():
 
     # macOS has no /proc/meminfo — fall back to sysctl (works locally and over
     # SSH to a remote Mac, where the sysconf path above isn't taken).
-    memsize = _run(["sysctl", "-n", "hw.memsize"])
+    memsize = _run(["sysctl", "-n", "hw.memsize"], remote)
     if memsize:
         try:
             return int(memsize.strip()) / (1024**3)
@@ -472,15 +463,15 @@ def _get_ram_gb():
     return 0.0
 
 
-def _get_available_ram_gb():
-    meminfo = _parse_meminfo()
+def _get_available_ram_gb(remote=None):
+    meminfo = _parse_meminfo(remote)
     if "MemAvailable" in meminfo:
         return meminfo["MemAvailable"] / (1024**2)
-    return _get_ram_gb() * 0.7
+    return _get_ram_gb(remote) * 0.7
 
 
-def _get_cpu_name():
-    text = _read_file("/proc/cpuinfo")
+def _get_cpu_name(remote=None):
+    text = _read_file("/proc/cpuinfo", remote)
     if text:
         for line in text.split("\n"):
             if line.startswith("model name"):
@@ -488,26 +479,26 @@ def _get_cpu_name():
 
     # macOS has no /proc/cpuinfo — sysctl gives the chip name (e.g. "Apple M4").
     # Harmlessly returns nothing on Linux, so it's safe to try unconditionally.
-    brand = _run(["sysctl", "-n", "machdep.cpu.brand_string"])
+    brand = _run(["sysctl", "-n", "machdep.cpu.brand_string"], remote)
     if brand and brand.strip():
         return brand.strip()
 
-    if not _remote_host:
+    if not remote:
         return platform.processor() or "unknown"
     return "unknown"
 
 
-def _get_cpu_count():
-    if _remote_host:
+def _get_cpu_count(remote=None):
+    if remote:
         # nproc on Linux; hw.ncpu via sysctl on a remote Mac (no nproc there).
-        out = _run(["nproc"]) or _run(["sysctl", "-n", "hw.ncpu"])
+        out = _run(["nproc"], remote) or _run(["sysctl", "-n", "hw.ncpu"], remote)
         if out:
             try:
                 return int(out.strip())
             except ValueError:
                 pass
         # fallback: count "processor" lines in /proc/cpuinfo
-        text = _read_file("/proc/cpuinfo")
+        text = _read_file("/proc/cpuinfo", remote)
         if text:
             return sum(1 for line in text.split("\n") if line.startswith("processor"))
     return os.cpu_count() or 1
@@ -526,9 +517,9 @@ def _canonical_cpu_arch(value):
     return arch
 
 
-def _get_cpu_arch():
-    if _remote_host:
-        return _canonical_cpu_arch(_run(["uname", "-m"]) or "")
+def _get_cpu_arch(remote=None):
+    if remote:
+        return _canonical_cpu_arch(_run(["uname", "-m"], remote) or "")
     return _canonical_cpu_arch(platform.machine())
 
 
@@ -538,7 +529,7 @@ def _powershell_exe():
     path so we don't depend on a particular PATH ordering."""
     return shutil.which("pwsh") or shutil.which("powershell") or "powershell"
 
-def _powershell_encoded_for_ssh(script: str):
+def _powershell_encoded_for_ssh(script: str, remote=None):
     """Run a PowerShell script on a remote Windows host over SSH.
 
     Nested quotes in powershell -Command break when passed through Windows
@@ -546,26 +537,26 @@ def _powershell_encoded_for_ssh(script: str):
     """
     import base64
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-    return _run(f"powershell -NoProfile -EncodedCommand {encoded}")
+    return _run(f"powershell -NoProfile -EncodedCommand {encoded}", remote)
 
 
-def _probe_remote_platform():
+def _probe_remote_platform(remote=None):
     """Best-effort OS detection over SSH when the caller didn't pass platform."""
-    out = _run("echo %OS%")
+    out = _run("echo %OS%", remote)
     if out and "Windows_NT" in out:
         return "windows"
-    uname = (_run(["uname", "-s"]) or "").strip().lower()
+    uname = (_run(["uname", "-s"], remote) or "").strip().lower()
     if uname == "darwin":
         # Mac uses the linux detection path (_detect_apple_silicon over SSH).
         return "linux"
     if uname == "linux":
-        out = _run("test -d /data/data/com.termux && echo termux || echo linux")
+        out = _run("test -d /data/data/com.termux && echo termux || echo linux", remote)
         if out and "termux" in out:
             return "termux"
     return "linux"
 
 
-def _detect_windows():
+def _detect_windows(remote=None):
     """Detect Windows hardware via PowerShell/WMI.
 
     Works for BOTH local (host="") and remote (SSH) detection:
@@ -625,14 +616,14 @@ def _detect_windows():
         $r | ConvertTo-Json -Compress
     """
     )
-    if _remote_host:
+    if remote:
         # Remote: use -EncodedCommand so OpenSSH/cmd quoting does not break the script.
-        out = _powershell_encoded_for_ssh(ps_cmd.strip())
+        out = _powershell_encoded_for_ssh(ps_cmd.strip(), remote)
     else:
         # Local: pass a LIST argv straight to subprocess so the OS hands ps_cmd
         # to PowerShell verbatim — no fragile string-level quote escaping. Prefer
         # pwsh (PS7), else Windows PowerShell 5.1.
-        out = _run([_powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", ps_cmd])
+        out = _run([_powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", ps_cmd], remote)
     if not out:
         return None
     import json as _json
@@ -704,9 +695,6 @@ def _cache_key(host: str, ssh_port: str, platform_name: str):
 
 def _is_containerized():
     """Best-effort check for whether the local Odysseus process is running in a container."""
-    if _remote_host:
-        return False
-
     if os.path.exists("/.dockerenv"):
         return True
 
@@ -796,14 +784,9 @@ def detect_system(host="", ssh_port="", platform="", fresh=False):
     If host is set (e.g. 'user@server'), runs detection commands over SSH.
     platform: "windows", "linux", "termux", or "" (auto-detect).
     """
-    global _remote_host, _remote_port, _remote_platform
-
-    if host and not platform:
-        _remote_host = host
-        _remote_port = ssh_port or None
-        platform = _probe_remote_platform()
-        _remote_host = None
-        _remote_port = None
+    remote = (host, ssh_port or None) if host else None
+    if remote and not platform:
+        platform = _probe_remote_platform(remote)
 
     cache_key = _cache_key(host, ssh_port, platform)
     now = time.time()
@@ -812,23 +795,15 @@ def detect_system(host="", ssh_port="", platform="", fresh=False):
         if (now - ts) < CACHE_TTL:
             return cached
 
-    _remote_host = host or None
-    _remote_port = ssh_port or None
-    _remote_platform = platform or None
-
     # Windows: single PowerShell command for all hardware info
-    if _remote_platform == "windows" and _remote_host:
-        result = _detect_windows()
+    if platform == "windows" and remote:
+        result = _detect_windows(remote)
         if result:
             result = _attach_probe_context(result, host=host)
-            _remote_host = None
-            _remote_platform = None
             _cache_by_host[cache_key] = (now, result)
             return result
         # SSH may work while the PowerShell hardware probe still fails.
         result = {"error": f"Windows hardware probe failed for {host}", "host": host}
-        _remote_host = None
-        _remote_platform = None
         _cache_by_host[cache_key] = (now, result)
         return result
 
@@ -836,8 +811,8 @@ def detect_system(host="", ssh_port="", platform="", fresh=False):
     # "unknown" CPU and no GPU on Windows (and os.sysconf doesn't even exist),
     # so detect locally via PowerShell/WMI instead. _detect_windows() runs the
     # same probe used for remote Windows, but _run() executes it locally.
-    if not _remote_host and os.name == "nt":
-        result = _detect_windows()
+    if not remote and os.name == "nt":
+        result = _detect_windows(remote)
         if result:
             result = _attach_probe_context(result, host=host)
             _cache_by_host[cache_key] = (now, result)
@@ -846,20 +821,18 @@ def detect_system(host="", ssh_port="", platform="", fresh=False):
         # below so we at least return a well-shaped dict rather than crashing.
 
     # Linux/Termux: existing multi-command detection
-    total_ram = round(_get_ram_gb(), 1)
+    total_ram = round(_get_ram_gb(remote), 1)
     # If remote host returns 0 RAM, connection likely failed
-    if _remote_host and total_ram <= 0:
+    if remote and total_ram <= 0:
         result = {"error": f"Cannot connect to {host}", "host": host}
         _cache_by_host[cache_key] = (now, result)
-        _remote_host = None
-        _remote_platform = None
         return result
-    available_ram = round(_get_available_ram_gb(), 1)
-    cpu_cores = _get_cpu_count()
-    cpu_name = _get_cpu_name()
-    cpu_arch = _get_cpu_arch()
+    available_ram = round(_get_available_ram_gb(remote), 1)
+    cpu_cores = _get_cpu_count(remote)
+    cpu_name = _get_cpu_name(remote)
+    cpu_arch = _get_cpu_arch(remote)
 
-    gpu_info = _detect_apple_silicon() or _detect_nvidia() or _detect_amd()
+    gpu_info = _detect_apple_silicon(remote) or _detect_nvidia(remote) or _detect_amd(remote)
 
     if gpu_info:
         result = {
@@ -901,7 +874,5 @@ def detect_system(host="", ssh_port="", platform="", fresh=False):
         }
 
     result = _attach_probe_context(result, host=host)
-    _remote_host = None
-    _remote_platform = None
     _cache_by_host[cache_key] = (now, result)
     return result

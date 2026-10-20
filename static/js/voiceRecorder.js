@@ -28,7 +28,7 @@ let _sttProvider = 'disabled';
  */
 async function refreshSttProvider() {
   try {
-    const res = await fetch('/api/stt/stats', { credentials: 'same-origin' });
+    const res = await fetch('/api/stt/stats');
     if (res.ok) {
       const stats = await res.json();
       _sttProvider = stats.provider || 'disabled';
@@ -114,7 +114,6 @@ async function transcribeOnServer(audioBlob) {
 
   const res = await fetch('/api/stt/transcribe', {
     method: 'POST',
-    credentials: 'same-origin',
     body: formData,
   });
 

@@ -28,19 +28,27 @@ export function nextToolWindowZ(options = {}) {
   return top + 1;
 }
 
+// One counter for every bring-to-front path. Its 1000 floor keeps a raised
+// window above the static .modal z-indexes (250, 260).
+let _raisedZ = 1000;
+
+// Raise `win` above every other open tool window unless it already is.
+export function raiseToolWindow(win) {
+  const current = getComputedStyle(win).zIndex;
+  if (nextToolWindowZ({ exclude: win, current }) === parseInt(current, 10)) return;
+  _raisedZ = nextToolWindowZ({ exclude: win, floor: _raisedZ });
+  win.style.setProperty('z-index', String(_raisedZ), 'important');
+}
+
 // Dock chips pinned by the minimized-dock drag interactions reach z 10030
 // (free-drag) / 10020 (mobile rest) — see modalManager.js. A body-portaled
 // dropdown has to clear those too, not just the open tool-window stack, so this
 // floor keeps it above a chip even when no modal is currently raised.
 const DOCK_OVERLAY_FLOOR = 10030;
 
-// The z a body-portaled dropdown/menu needs so it always sits just above every
-// open tool window (and the dock chips) right now. Tool modals get a
-// monotonically increasing z from the bring-to-front counter (modalManager),
-// which climbs unbounded over a long session — so the hardcoded `z-index: 10001`
-// these dropdowns historically used eventually rendered them BEHIND their own
-// modal (#4720). Derive the value from the live stack instead, sharing the same
-// single source of truth as nextToolWindowZ().
+// The z a body-portaled dropdown/menu needs to sit just above every open tool
+// window and dock chip. The bring-to-front counter climbs without bound, so
+// a fixed z falls behind its own modal over a long session (#4720).
 export function topPortalZ(options = {}) {
   return Math.max(topToolWindowZ(options), DOCK_OVERLAY_FLOOR) + 1;
 }

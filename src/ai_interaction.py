@@ -4,7 +4,7 @@ ai_interaction.py
 AI-to-AI interaction tools: pipeline and manage_memory, plus shared model
 resolution (_resolve_model), the session-manager singleton, and dispatch_ai_tool.
 
-As part of the tool -> registry migration (#3629), chat_with_model, ask_teacher
+As part of the tool -> registry migration, chat_with_model, ask_teacher
 and list_models moved to src/agent_tools/model_interaction_tools.py, and
 create_session, list_sessions, send_to_session and manage_session moved to
 src/agent_tools/session_tools.py. Those modules reuse get_session_manager /
@@ -31,7 +31,6 @@ AI_CHAT_TIMEOUT = 120  # seconds for a single LLM call
 MAX_DEBATE_ROUNDS = 5
 MAX_PIPELINE_STEPS = 10
 
-# ---------------------------------------------------------------------------
 # Global managers (set from app.py, same pattern as _mcp_manager)
 # _session_manager is kept as a local cache for performance (avoiding
 # repeated get_session_manager_instance() calls). It's synced with
@@ -67,10 +66,6 @@ def set_rag_manager(rag_mgr, personal_docs_mgr=None):
     _rag_manager = rag_mgr
     _personal_docs_manager = personal_docs_mgr
 
-
-# ---------------------------------------------------------------------------
-# Model resolution
-# ---------------------------------------------------------------------------
 
 from src.endpoint_resolver import build_chat_url, build_headers, build_models_url, resolve_endpoint_runtime
 from src.image_model_ids import looks_like_image_generation_model, model_id_leaf
@@ -206,19 +201,6 @@ def _resolve_model(spec: str, owner: Optional[str] = None, model_type: Optional[
         db.close()
 
 
-# ---------------------------------------------------------------------------
-# Tool implementations
-# ---------------------------------------------------------------------------
-
-
-
-async def stream_ai_tool(tool: str, content: str, session_id: Optional[str] = None, owner: Optional[str] = None):
-    """Dispatcher for streaming AI tools. Yields events as async generator."""
-    # Fallback: run non-streaming and yield final result
-    desc, result = await dispatch_ai_tool(tool, content, session_id, owner=owner)
-    yield {"_final": True, "desc": desc, "result": result}
-
-
 async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """Execute a multi-step pipeline where each model's output feeds the next.
 
@@ -331,14 +313,6 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
         }
 
 
-# ---------------------------------------------------------------------------
-# Session management tool
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Memory management tool
-# ---------------------------------------------------------------------------
-
 def _manage_memory_lines(content: str) -> list[str]:
     """Normalize the public JSON contract to the legacy line protocol."""
     raw_content = content.strip()
@@ -435,7 +409,7 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
         # Strict load: this is a read-modify-write, and it is the path an
         # ordinary "remember that I prefer X" takes. Degrading to [] here would
         # save just this one entry over a store we only failed to read,
-        # atomically destroying every memory in it (issue #5673).
+        # atomically destroying every memory in it.
         try:
             memories = _memory_manager.load_all_for_update()
         except MemoryStoreUnreadable as e:
@@ -598,10 +572,6 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
         return {"error": f"Unknown action '{action}'. Use: list, add, edit, delete, search"}
 
 
-# ---------------------------------------------------------------------------
-# RAG management tool
-# ---------------------------------------------------------------------------
-
 async def do_manage_rag(content: str, session_id: Optional[str] = None) -> Dict:
     """Manage RAG indexed documents: list, add_directory, remove_directory.
 
@@ -675,10 +645,7 @@ async def do_manage_rag(content: str, session_id: Optional[str] = None) -> Dict:
 
         try:
             if hasattr(_personal_docs_manager, 'remove_directory'):
-                # Performs a targeted per-directory delete (#1660). The previous
-                # unconditional _rag_manager.rebuild_index() here wiped the whole
-                # collection on every remove (even for untracked dirs) and has
-                # been removed.
+                # Delete this directory only; a full rebuild_index() wipes the collection.
                 _personal_docs_manager.remove_directory(directory)
             return {"action": "remove_directory", "directory": directory,
                     "results": f"Directory '{directory}' removed from RAG index"}
@@ -688,10 +655,6 @@ async def do_manage_rag(content: str, session_id: Optional[str] = None) -> Dict:
     else:
         return {"error": f"Unknown action '{action}'. Use: list, add_directory, remove_directory"}
 
-
-# ---------------------------------------------------------------------------
-# UI control tool (returns events for frontend to apply)
-# ---------------------------------------------------------------------------
 
 async def do_ui_control(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """Control frontend UI: toggle settings, switch model, change theme.
@@ -1151,9 +1114,35 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
         return {"error": f"Unknown action '{action}'. Use: toggle, set_mode, switch_model, set_theme, create_theme, get_theme, highlight, clear_highlight, get_toggles"}
 
 
-# ---------------------------------------------------------------------------
-# Image generation
-# ---------------------------------------------------------------------------
+def _first_registered_image_model(owner: Optional[str]) -> str:
+    """First model id served by an enabled image-type endpoint, or ""."""
+    import httpx
+    from src.database import SessionLocal, ModelEndpoint
+    from src.auth_helpers import owner_filter
+    with SessionLocal() as db:
+        query = db.query(ModelEndpoint).filter(
+            ModelEndpoint.is_enabled == True,
+            ModelEndpoint.model_type == "image",
+        )
+        if owner:
+            query = owner_filter(query, ModelEndpoint, owner)
+        base_urls = [ep.base_url.rstrip("/") for ep in query.all()]
+    for base in base_urls:
+        if not base.endswith("/v1"):
+            base += "/v1"
+        try:
+            r = httpx.get(base + "/models", timeout=3)
+            r.raise_for_status()
+            data = r.json()
+        except (httpx.HTTPError, ValueError) as e:
+            logger.warning("Image model probe failed for %s: %s", base, e)
+            continue
+        items = data if isinstance(data, list) else (data.get("data") or []) if isinstance(data, dict) else []
+        ids = [m.get("id") for m in items if isinstance(m, dict) and m.get("id")]
+        if ids:
+            return ids[0]
+    return ""
+
 
 async def do_generate_image(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """Generate an image using an image-capable model (e.g. gpt-image-1).
@@ -1216,57 +1205,17 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
                 break
             except ValueError:
                 continue
-        # Fallback: find any locally registered image-type endpoint
         if not model_spec:
-            try:
-                from src.database import SessionLocal, ModelEndpoint
-                from src.auth_helpers import owner_filter
-                import httpx as _req
-                _idb = SessionLocal()
-                try:
-                    _img_q = _idb.query(ModelEndpoint).filter(
-                        ModelEndpoint.is_enabled == True,
-                        ModelEndpoint.model_type == "image",
-                    )
-                    if owner:
-                        _img_q = owner_filter(_img_q, ModelEndpoint, owner)
-                    _img_eps = _img_q.all()
-                    for _iep in _img_eps:
-                        _ibase = _iep.base_url.rstrip("/")
-                        if not _ibase.endswith("/v1"):
-                            _ibase += "/v1"
-                        try:
-                            _r = _req.get(_ibase + "/models", timeout=3)
-                            _r.raise_for_status()
-                            _data = _r.json()
-                            _ditems = _data if isinstance(_data, list) else (_data.get("data") or [])
-                            _mids = [m.get("id") for m in _ditems if isinstance(m, dict) and m.get("id")]
-                            if _mids:
-                                model_spec = _mids[0]
-                                break
-                        except Exception:
-                            continue
-                finally:
-                    _idb.close()
-            except Exception:
-                pass
+            model_spec = await asyncio.to_thread(_first_registered_image_model, owner)
         if not model_spec:
             return {"error": "No image model found. Configure one in Admin → Image Generation."}
-
-    async def _resolve_image_model(model_name: str):
-        def _call():
-            try:
-                return _resolve_model(model_name, owner=owner, model_type="image")
-            except TypeError as exc:
-                if "model_type" not in str(exc):
-                    raise
-                return _resolve_model(model_name, owner=owner)
-        return await asyncio.to_thread(_call)
 
     # Resolve the model to find the right endpoint
     try:
         try:
-            url, model_id, headers = await _resolve_image_model(model_spec)
+            url, model_id, headers = await asyncio.to_thread(
+                _resolve_model, model_spec, owner=owner, model_type="image",
+            )
         except ValueError:
             _lower_model_spec = model_spec.lower()
             if not (
@@ -1288,8 +1237,8 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
     # Build the images endpoint URL from the chat completions URL
     base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
     images_url = base_url + "/images/generations"
-    from src.model_capability_readers.base import detect_vendor
-    if detect_vendor(url) == "openrouter":
+    from src.llm_core import _host_match
+    if _host_match(url, "openrouter.ai"):
         images_url = base_url + "/images"
 
     # Validate size for cloud image models (local diffusion accepts any WxH)
@@ -1467,14 +1416,9 @@ async def do_edit_image(
 
     try:
         try:
-            def _call():
-                try:
-                    return _resolve_model(model_spec, owner=owner, model_type="image")
-                except TypeError as exc:
-                    if "model_type" not in str(exc):
-                        raise
-                    return _resolve_model(model_spec, owner=owner)
-            url, model_id, headers = await asyncio.to_thread(_call)
+            url, model_id, headers = await asyncio.to_thread(
+                _resolve_model, model_spec, owner=owner, model_type="image",
+            )
         except ValueError:
             url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
     except ValueError:
@@ -1495,8 +1439,8 @@ async def do_edit_image(
 
     base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
     edits_url = base_url + "/images/edits"
-    from src.model_capability_readers.base import detect_vendor
-    is_openrouter = detect_vendor(url) == "openrouter"
+    from src.llm_core import _host_match
+    is_openrouter = _host_match(url, "openrouter.ai")
     mime = mimetypes.guess_type(str(path))[0] or "image/png"
     payload = {
         "model": model_id,
@@ -1737,10 +1681,6 @@ async def do_edit_image(
             "untrusted_content": True,
         }
 
-
-# ---------------------------------------------------------------------------
-# Dispatcher (called from agent_tools.execute_tool_block)
-# ---------------------------------------------------------------------------
 
 async def dispatch_ai_tool(
     tool: str, content: str, session_id: Optional[str] = None, owner: Optional[str] = None
